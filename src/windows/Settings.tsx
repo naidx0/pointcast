@@ -3,6 +3,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Mark, PRODUCT } from "@/components/brand/Mark";
 import {
   downloadModel,
   onSpeechDone,
@@ -12,7 +13,7 @@ import {
   settingsGet,
   settingsSet,
 } from "@/lib/api";
-import { Mic, Monitor, Keyboard, FolderOpen, Shield } from "lucide-react";
+import { setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
 type SpeechView = {
   runtime?: { id: string; installed: boolean; lib: string };
@@ -24,6 +25,7 @@ export function Settings() {
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>("");
   const [err, setErr] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemePref>(() => themePref());
 
   async function refresh() {
     try {
@@ -31,7 +33,7 @@ export function Settings() {
       try {
         s.start_at_login = await isEnabled();
       } catch {
-        /* plugin may be unavailable in browser preview */
+        /* preview */
       }
       setCfg({ ...s });
       setErr(null);
@@ -74,61 +76,98 @@ export function Settings() {
 
   if (!cfg) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-ink-950 text-ink-300">
-        Opening settings…
+      <div className="page" style={{ display: "grid", placeItems: "center" }}>
+        <span style={{ color: "var(--text3)" }}>Opening settings…</span>
       </div>
     );
   }
 
   const preview = Boolean(cfg.__preview);
-
   const speech = (cfg.speech as SpeechView) ?? {};
   const devices = (cfg.devices as string[]) ?? [];
   const perms = cfg.permissions as { microphone: boolean; screen: boolean; note: string };
 
   return (
-    <div className="min-h-screen bg-ink-950 text-ink-100">
-      <header className="border-b border-ink-700 px-6 py-5">
-        <div className="flex items-end justify-between gap-4">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.22em] text-ember-400">Tray app</p>
-            <h1 className="font-display text-3xl font-medium tracking-tight">Pointcast</h1>
-            <p className="mt-1 max-w-xl text-sm text-ink-300">
-              Speak, mark the screen, paste one prompt into any AI tool. Speech never leaves this machine.
-            </p>
+    <div className="page">
+      <header className="title-drag" style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 18px" }}>
+        <div className="row-between" style={{ alignItems: "flex-start" }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+            <div className="traffic" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </div>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Mark size="lg" />
+                <div>
+                  <p className="kicker">Tray app</p>
+                  <h1 className="title">{PRODUCT}</h1>
+                </div>
+              </div>
+              <p className="sub">
+                Speak, mark the screen, paste one prompt into any AI tool. Speech never leaves this machine.
+              </p>
             {preview ? (
-              <p className="mt-2 text-xs text-ember-400">
-                Browser preview of Settings — live capture needs the desktop app (`npm run tauri
-                dev`).{err ? ` (${err})` : ""}
+              <p style={{ marginTop: 8, fontSize: "var(--fs-sm)", color: "var(--orange-ink)" }}>
+                Browser preview — live capture needs the desktop app (`npm run tauri dev`).
               </p>
             ) : null}
+            </div>
           </div>
-          <Button onClick={() => sessionToggle().catch(() => undefined)}>Start recording</Button>
+          <div className="no-drag" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div className="seg" aria-label="Theme">
+              {(["system", "light", "dark"] as ThemePref[]).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={theme === t ? "on" : ""}
+                  onClick={() => {
+                    setTheme(t);
+                    setThemePref(t);
+                  }}
+                >
+                  {t === "system" ? "Auto" : t[0].toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+            <Button onClick={() => sessionToggle().catch(() => undefined)}>Start recording</Button>
+          </div>
         </div>
       </header>
 
-      <main className="grid gap-8 px-6 py-6 lg:grid-cols-2">
-        <Section icon={<Keyboard size={16} />} title="Hotkeys">
+      <main style={{ padding: "20px 24px 40px" }} className="grid-2">
+        <Card title="Permissions">
+          <p className="sub" style={{ marginTop: 0, marginBottom: 14, fontSize: "var(--fs-sm)" }}>
+            {perms?.note || "Grant microphone and screen recording so Pointcast can listen and capture."}
+          </p>
+          <div style={{ display: "grid", gap: 8 }}>
+            <Perm ok={!!perms?.microphone} name="Microphone" detail="Local speech-to-text only" />
+            <Perm ok={!!perms?.screen} name="Screen Recording" detail="Annotated screenshots for the prompt" />
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <Button variant="secondary" size="sm" onClick={() => requestPermissions().then(refresh)}>
+              Request permissions
+            </Button>
+          </div>
+        </Card>
+
+        <Card title="Hotkeys">
           <Hotkey row="Session start / stop" value={String(cfg.session_hotkey)} field="session_hotkey" onSave={patch} />
           <Hotkey row="Full screenshot" value={String(cfg.full_hotkey)} field="full_hotkey" onSave={patch} />
           <Hotkey row="Region / annotate" value={String(cfg.region_hotkey)} field="region_hotkey" onSave={patch} />
           <Hotkey row="Zoom crop" value={String(cfg.zoom_hotkey)} field="zoom_hotkey" onSave={patch} />
-          <label className="mt-3 block text-sm text-ink-300">
+          <label className="label-stack" style={{ marginTop: 10 }}>
             Zoom size (px)
-            <Input
-              type="number"
-              className="mt-1"
-              value={Number(cfg.zoom_px)}
-              onChange={(e) => patch({ zoom_px: Number(e.target.value) })}
-            />
+            <Input type="number" value={Number(cfg.zoom_px)} onChange={(e) => patch({ zoom_px: Number(e.target.value) })} />
           </label>
-        </Section>
+        </Card>
 
-        <Section icon={<Mic size={16} />} title="Microphone & speech">
-          <label className="block text-sm text-ink-300">
+        <Card title="Microphone & speech">
+          <label className="label-stack">
             Microphone
             <select
-              className="mt-1 h-9 w-full rounded-md border border-ink-500/30 bg-ink-950 px-2 text-sm"
+              className="field"
               value={String(cfg.device ?? "")}
               onChange={(e) => patch({ device: e.target.value || null })}
             >
@@ -140,13 +179,9 @@ export function Settings() {
               ))}
             </select>
           </label>
-          <label className="mt-3 block text-sm text-ink-300">
+          <label className="label-stack" style={{ marginTop: 10 }}>
             STT model
-            <select
-              className="mt-1 h-9 w-full rounded-md border border-ink-500/30 bg-ink-950 px-2 text-sm"
-              value={String(cfg.model)}
-              onChange={(e) => patch({ model: e.target.value })}
-            >
+            <select className="field" value={String(cfg.model)} onChange={(e) => patch({ model: e.target.value })}>
               <option value="auto">Auto (recommended: {String(cfg.recommended)})</option>
               {(speech.models ?? []).map((m) => (
                 <option key={m.id} value={m.id}>
@@ -156,7 +191,7 @@ export function Settings() {
               ))}
             </select>
           </label>
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
             <Button
               size="sm"
               variant="secondary"
@@ -183,49 +218,40 @@ export function Settings() {
               </Button>
             ))}
           </div>
-          {progress ? <p className="mt-2 font-mono text-xs text-ember-400">{progress}</p> : null}
-          <p className="mt-2 text-xs text-ink-500">
+          {progress ? (
+            <p className="mono" style={{ marginTop: 8, color: "var(--accent-ink)", fontSize: "var(--fs-xs)" }}>
+              {progress}
+            </p>
+          ) : null}
+          <p style={{ marginTop: 8, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
             Moonshine v2 via sherpa-onnx, loaded locally. MIT. Nothing is uploaded.
           </p>
-        </Section>
+        </Card>
 
-        <Section icon={<FolderOpen size={16} />} title="Output">
-          <div className="flex flex-wrap gap-2">
+        <Card title="Output">
+          <div className="seg" role="group" aria-label="Output mode">
             {(
               [
-                ["clipboard", "Clipboard (HTML + plain)"],
-                ["auto_paste", "Auto-paste into focused app"],
-                ["folder", "Folder export (prompt.md + PNGs)"],
+                ["clipboard", "Clipboard"],
+                ["auto_paste", "Auto-paste"],
+                ["folder", "Folder"],
               ] as const
             ).map(([id, label]) => (
-              <Button
-                key={id}
-                size="sm"
-                variant={cfg.output === id ? "default" : "outline"}
-                onClick={() => patch({ output: id })}
-              >
+              <button key={id} type="button" className={cfg.output === id ? "on" : ""} onClick={() => patch({ output: id })}>
                 {label}
-              </Button>
+              </button>
             ))}
           </div>
-          <div className="mt-3">
-            <Switch
-              checked={Boolean(cfg.also_clipboard)}
-              onChange={(v) => patch({ also_clipboard: v })}
-              label="Also copy to clipboard"
-            />
+          <div style={{ marginTop: 12 }}>
+            <Switch checked={Boolean(cfg.also_clipboard)} onChange={(v) => patch({ also_clipboard: v })} label="Also copy to clipboard" />
           </div>
-          <label className="mt-3 block text-sm text-ink-300">
+          <label className="label-stack" style={{ marginTop: 12 }}>
             Export folder (blank = Documents/Pointcast/…)
-            <Input
-              className="mt-1"
-              value={String(cfg.export_dir ?? "")}
-              onChange={(e) => patch({ export_dir: e.target.value || null })}
-            />
+            <Input value={String(cfg.export_dir ?? "")} onChange={(e) => patch({ export_dir: e.target.value || null })} />
           </label>
-        </Section>
+        </Card>
 
-        <Section icon={<Shield size={16} />} title="Privacy & startup">
+        <Card title="Privacy & startup">
           <Switch
             checked={Boolean(cfg.start_at_login)}
             onChange={async (v) => {
@@ -239,17 +265,17 @@ export function Settings() {
             }}
             label="Start at login"
           />
-          <div className="mt-3">
+          <div style={{ marginTop: 12 }}>
             <Switch
               checked={Boolean(cfg.include_app)}
               onChange={(v) => patch({ include_app: v })}
               label="Include Pointcast windows in captures"
             />
           </div>
-          <label className="mt-3 block text-sm text-ink-300">
+          <label className="label-stack" style={{ marginTop: 12 }}>
             Never capture windows matching (one per line)
             <textarea
-              className="mt-1 h-28 w-full rounded-md border border-ink-500/30 bg-ink-950 p-2 font-mono text-xs"
+              className="field"
               value={((cfg.hidden as string[]) ?? []).join("\n")}
               onChange={(e) =>
                 patch({
@@ -261,41 +287,34 @@ export function Settings() {
               }
             />
           </label>
-          <div className="mt-3 flex items-center gap-3 text-sm">
-            <Dot ok={perms?.microphone} label="Microphone" />
-            <Dot ok={perms?.screen} label="Screen" />
-            <Button size="sm" variant="outline" onClick={() => requestPermissions().then(refresh)}>
-              Request permissions
-            </Button>
-          </div>
-          <p className="mt-2 text-xs text-ink-500">{perms?.note}</p>
-          <p className="mt-3 flex items-center gap-2 text-xs text-ink-500">
-            <Monitor size={12} />
+          <p style={{ marginTop: 12, fontSize: "var(--fs-xs)", color: "var(--text3)", display: "flex", gap: 8, alignItems: "center" }}>
             Local MCP: {String(cfg.mcp_bind)} — GET /v1/session and POST /mcp
           </p>
-        </Section>
+        </Card>
       </main>
     </div>
   );
 }
 
-function Section({
-  icon,
-  title,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  children: ReactNode;
-}) {
+function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="rounded-xl border border-ink-700 bg-ink-900 p-5">
-      <h2 className="mb-3 flex items-center gap-2 text-sm font-medium uppercase tracking-wider text-ink-300">
-        {icon}
-        {title}
-      </h2>
+    <section className="card">
+      <h2 className="section-label">{title}</h2>
       {children}
     </section>
+  );
+}
+
+function Perm({ ok, name, detail }: { ok: boolean; name: string; detail: string }) {
+  return (
+    <div className={`perm-row ${ok ? "ok" : ""}`}>
+      <span className={`dot ${ok ? "on" : ""}`} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 600, fontSize: "var(--fs-ui)" }}>{name}</div>
+        <div style={{ fontSize: "var(--fs-sm)", color: "var(--text3)" }}>{detail}</div>
+      </div>
+      <span className={`badge ${ok ? "ok" : "warn"}`}>{ok ? "Ready" : "Needed"}</span>
+    </div>
   );
 }
 
@@ -313,24 +332,16 @@ function Hotkey({
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   return (
-    <label className="mb-2 flex items-center justify-between gap-3 text-sm">
-      <span className="text-ink-300">{row}</span>
+    <label className="row-between" style={{ marginBottom: 8, fontSize: "var(--fs-sm)" }}>
+      <span style={{ color: "var(--text2)" }}>{row}</span>
       <Input
-        className="max-w-[220px] font-mono"
+        className="mono"
+        style={{ maxWidth: 220 }}
         value={v}
         onChange={(e) => setV(e.target.value)}
         onBlur={() => onSave({ [field]: v })}
       />
     </label>
-  );
-}
-
-function Dot({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={`h-2 w-2 rounded-full ${ok ? "bg-emerald-400" : "bg-ink-500"}`} />
-      {label}
-    </span>
   );
 }
 

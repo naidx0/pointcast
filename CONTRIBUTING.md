@@ -4,7 +4,7 @@ Thanks for helping. Pointcast is MIT-licensed. By opening a pull request you agr
 
 ## Setup
 
-You need Rust 1.90+, Node 20+, and the [Tauri 2 Linux/macOS/Windows prerequisites](https://v2.tauri.app/start/prerequisites/).
+You need Rust 1.90+, Node 20+, and the [Tauri 2 Linux/macOS/Windows prerequisites](https://v2.tauri.app/start/prerequisites/). Full OS notes: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
 
 ```bash
 npm install

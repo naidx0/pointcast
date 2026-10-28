@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { Mark } from "@/components/brand/Mark";
 import {
   captureFull,
   captureZoom,
@@ -28,7 +29,22 @@ export function Indicator() {
   const [s, setS] = useState<UiState>(idle);
 
   useEffect(() => {
-    sessionState().then(setS).catch(() => undefined);
+    sessionState()
+      .then(setS)
+      .catch(() => {
+        if (typeof location !== "undefined" && location.search.includes("preview=1")) {
+          setS({
+            ...idle,
+            phase: "recording",
+            mic: true,
+            screen: true,
+            partial: "The Place order button is sitting on top of the total…",
+            duration_ms: 16_000,
+            image_count: 1,
+            level: 0.45,
+          });
+        }
+      });
     const u = onState(setS);
     return () => {
       u.then((fn) => fn());
@@ -39,47 +55,92 @@ export function Indicator() {
   const rec = s.phase === "recording" || s.phase === "loading";
 
   return (
-    <div className="h-screen w-screen bg-transparent p-2" data-tauri-drag-region>
-      <div className="flex h-full flex-col rounded-2xl border border-ember-400/30 bg-ink-950/92 p-3 shadow-tray backdrop-blur-md">
-        <div className="flex items-center justify-between gap-2" data-tauri-drag-region>
-          <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full bg-ember-400 ${rec ? "rec-dot" : ""}`} />
-            <span className="font-mono text-xs uppercase tracking-widest text-ember-400">
+    <div
+      style={{ height: "100vh", width: "100vw", background: "transparent", padding: 12, boxSizing: "border-box" }}
+      data-tauri-drag-region
+    >
+      <div
+        className="panel"
+        style={{ height: "100%", display: "flex", flexDirection: "column", padding: 14, borderRadius: 20, boxSizing: "border-box" }}
+      >
+        <div className="row-between" data-tauri-drag-region>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Mark />
+            <span className={`dot ${rec ? "rec" : ""}`} />
+            <span
+              className="mono"
+              style={{
+                fontSize: "var(--fs-xs)",
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                color: rec ? "var(--red-ink)" : "var(--text3)",
+              }}
+            >
               {s.phase === "transcribing" ? "Transcribing" : rec ? "Recording" : s.phase}
             </span>
-            <span className="font-mono text-xs text-ink-300">{stamp(s.duration_ms)}</span>
+            <span className="mono" style={{ fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
+              {stamp(s.duration_ms)}
+            </span>
           </div>
-          <div className="flex items-center gap-2 text-[11px]">
-            <span className={`inline-flex items-center gap-1 ${s.mic ? "text-ember-400" : "text-ink-500"}`}>
-              <i className="h-1.5 w-1.5 rounded-full bg-current" />
+          <div style={{ display: "flex", gap: 10, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: s.mic ? "var(--red-ink)" : undefined }}>
+              <i className={`dot ${s.mic ? "mic" : ""}`} style={{ width: 6, height: 6 }} />
               mic
             </span>
-            <span className={`inline-flex items-center gap-1 ${s.screen ? "text-ice-400" : "text-ink-500"}`}>
-              <i className="h-1.5 w-1.5 rounded-full bg-current" />
+            <span
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, color: s.screen ? "var(--accent-ink)" : undefined }}
+            >
+              <i className={`dot ${s.screen ? "screen" : ""}`} style={{ width: 6, height: 6 }} />
               screen
             </span>
           </div>
         </div>
-        <div className="mt-2 h-1 overflow-hidden rounded-full bg-ink-800">
-          <div
-            className="h-full bg-ember-400 transition-[width]"
-            style={{ width: `${Math.round(Math.min(1, s.level) * 100)}%` }}
-          />
+
+        <div className="level" style={{ marginTop: 10 }}>
+          <i style={{ width: `${Math.round(Math.min(1, s.level) * 100)}%` }} />
         </div>
-        <p className="mt-2 min-h-0 flex-1 overflow-hidden font-mono text-[12px] leading-5 text-ink-100">
+
+        <p
+          style={{
+            margin: "10px 0 0",
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+            font: "400 var(--fs-sm) / 1.45 var(--mono)",
+            color: "var(--text)",
+          }}
+        >
           {live}
           {s.image_count ? (
-            <span className="ml-2 text-ice-400">
+            <span className="photo-chip" style={{ marginLeft: 8 }}>
               {s.image_count} image{s.image_count === 1 ? "" : "s"}
             </span>
           ) : null}
         </p>
-        {s.error ? <p className="truncate text-[11px] text-ember-400">{s.error}</p> : null}
-        <div className="mt-2 flex gap-1.5">
+
+        {s.error ? (
+          <p
+            style={{
+              margin: "4px 0 0",
+              fontSize: "var(--fs-xs)",
+              color: "var(--orange-ink)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {s.error}
+          </p>
+        ) : null}
+
+        <div className="glassbar no-drag" style={{ marginTop: 10, width: "100%", justifyContent: "space-between" }}>
           <Mini onClick={() => captureFull()}>Full</Mini>
           <Mini onClick={() => regionBegin()}>Region</Mini>
           <Mini onClick={() => captureZoom()}>Zoom</Mini>
-          <Mini onClick={() => sessionToggle()}>Stop</Mini>
+          <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 2px" }} />
+          <Mini onClick={() => sessionToggle()} primary>
+            Stop
+          </Mini>
           <Mini onClick={() => sessionCancel()}>Esc</Mini>
         </div>
       </div>
@@ -87,12 +148,17 @@ export function Indicator() {
   );
 }
 
-function Mini({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+function Mini({
+  children,
+  onClick,
+  primary,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  primary?: boolean;
+}) {
   return (
-    <button
-      onClick={onClick}
-      className="rounded-md bg-ink-800 px-2 py-1 text-[11px] uppercase tracking-wide text-ink-100 hover:bg-ink-700"
-    >
+    <button type="button" className={`pill sm ${primary ? "pri" : "ghost"}`} onClick={onClick}>
       {children}
     </button>
   );

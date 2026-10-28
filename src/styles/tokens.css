@@ -1,0 +1,162 @@
+/* Sequence Nova tokens — values from the prototype CSS */
+:root{
+  --font:"Seq Geist",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"SF Mono","Geist Mono",ui-monospace,Menlo,monospace;
+  --bg:#FFFFFF; --bg-side:#F7F7F8; --surface:#FFFFFF; --surface2:#F2F2F4;
+  --line:#E8E8EB; --line2:#D8D8DD;
+  --text:#111113; --text2:#4E4E56; --text3:#65656D;
+  --accent:#0A84FF; --accent-wash:#E8F2FF;
+  /* --green is the kit's #30D158 brightened a little (owner, wave 4: luminance .47 to .51, same hue). */
+  --green:#3AD962; --orange:#FF9F0A; --red:#FF453A; --purple:#8E4EC6;
+  /* Text-safe shades (4.5:1 on white and on the grey panels); the bright ones stay for dots, rings and fills. */
+  --accent-ink:#0060C7; --green-ink:#12722E; --orange-ink:#A35A00; --red-ink:#C4271B;
+  /* Dither charts: the ink, the warning fill from 80 percent and the limit fill. */
+  --dither-ink:var(--text); --dither-warn:#C26A00; --dither-full:var(--red-ink);
+  --material:rgba(255,255,255,.7);
+  --mem-fg:var(--purple);
+  --mem-bg:color-mix(in srgb,var(--purple) 9%,transparent);
+  --mem-line:color-mix(in srgb,var(--purple) 22%,transparent);
+  --wash-hover:color-mix(in srgb,var(--text) 4%,transparent);
+  --wash-on:color-mix(in srgb,var(--text) 7%,transparent);
+  --toast-bg:#111; --toast-fg:#fff;
+  --scrim:rgba(0,0,0,.22);
+  --c-claude:#D97757; --c-gemini:#3186FF; --c-codex:var(--text);
+  /* Grok's grey in the usage charts: the kit's #A1A1AA is 2.6:1 on white, under the 3:1 a chart series needs; dark keeps it. */
+  --c-grok:#8E8E96;
+  /* Mascot states (mascot.tsx): the one table every agent mark reads. Idle grey, working orange, done a soft blue (no heavy blue
+     on white), error red; the eyes are white on every state. */
+  --mascot-idle:#8E8E96; --mascot-work:var(--orange); --mascot-done:#6AA6EC; --mascot-error:var(--red); --mascot-eye:#FFFFFF;
+  /* Waiting for a delegated thread (wave 6): the idle grey, in both themes; the pose says it, not a new colour. */
+  --mascot-wait:var(--mascot-idle);
+
+  --e1:0 1px 2px rgba(0,0,0,.06);
+  --e2:0 4px 14px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.06);
+  --e3:0 18px 48px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08);
+  --e-composer:0 8px 28px rgba(0,0,0,.06);
+
+  --s-0_5:2px; --s-1:4px; --s-1_5:6px; --s-2:8px; --s-2_5:10px; --s-3:12px; --s-3_5:14px;
+  --s-4:16px; --s-4_5:18px; --s-5:20px; --s-6:24px; --s-7:28px; --s-8:32px;
+  /* Icons: one size per context (DESIGN-ADDENDUM rule 3), from this scale only; one gap between an icon and its label; and the
+     least room between a button and the inner edge of the card, popover or sheet that holds it. */
+  --icon-xs:12px; --icon-sm:14px; --icon:16px; --icon-lg:18px; --gap-icon:6px; --edge-min:8px;
+  /* The sidebar list's marks (status, a thread's agent): the kit's 15 px status icon, so every row of the list has one size. */
+  --icon-status:15px;
+
+  --fs-micro:9.5px; --fs-xxs:10px; --fs-xs:10.5px; --fs-meta:11px; --fs-meta-plus:11.5px;
+  --fs-sm:12px; --fs-sm-plus:12.5px; --fs-ui:13px; --fs-ui-plus:13.5px; --fs-chat:14.5px;
+  --fs-sheet:18px; --fs-page:20px; --fs-stat:22px; --fs-price:26px;
+  --lh-ui:1.5; --lh-prose:1.62;
+
+  --r-5:5px; --r-7:7px; --r-9:9px; --r-10:10px; --r-12:12px; --r-14:14px; --r-16:16px;
+  --r-18:18px; --r-20:20px; --r-22:22px; --r-24:24px; --r-pill:999px;
+
+  /* Motion (DESIGN-INTERACTIONS 1, DESIGN-ADDENDUM measured values). One set for both themes; never over 400ms.
+     instant: press, tick. fast: hover, focus, tooltip. base: popover, menu, state swap. step: a step enters.
+     slow: sheet, side panel, screen. panel: popover with a bar fill. spring: drag release, pin, reorder. */
+  --dur-instant:80ms; --dur-fast:120ms; --dur-base:200ms; --dur-step:260ms; --dur-slow:300ms; --dur-panel:360ms; --dur-spring:400ms;
+  /* Exits run at --exit-k of the entrance: calc(var(--dur-base) * var(--exit-k)). */
+  --exit-k:.7;
+  --ease:cubic-bezier(.2,.9,.25,1); --io:cubic-bezier(.4,0,.2,1);
+  --ease-out:cubic-bezier(.2,.9,.25,1); --ease-in:cubic-bezier(.55,0,1,.45); --ease-in-out:cubic-bezier(.65,0,.35,1);
+  /* Stiffness 400, damping 32, mass 1 (zeta .8) sampled over --dur-spring: a 1.5 percent overshoot, then rest. */
+  --spring:linear(0, .095, .291, .498, .676, .81, .903, .961, .993, 1.009, 1.015, 1.015, 1.012, 1.009, 1.006, 1.004, 1);
+  --dur-shimmer:1.5s; --dur-spin:.8s; --dur-sqspin:1.6s; --dur-dots:1.2s; --dur-pulse:1.4s;
+
+  --z-raise:1; --z-badge:3; --z-popover:30; --z-pp-bubble:31; --z-pp-cursor:32;
+  --z-sheet:40; --z-capture:50; --z-toast:60;
+
+  --w-side:268px; --h-bar:50px; --w-col:680px; --w-col-empty:600px; --w-pane:560px;
+}
+[data-theme=dark]{
+  --bg:#111113; --bg-side:#18181B; --surface:#1C1C1F; --surface2:#242428;
+  --line:#2A2A2F; --line2:#37373D;
+  --text:#F4F4F5; --text2:#B0B0B8; --text3:#95959E;
+  --accent-ink:#4DA3FF; --green-ink:var(--green); --orange-ink:var(--orange); --red-ink:#FF6B61;
+  --dither-ink:var(--text2); --dither-warn:var(--orange); --dither-full:var(--red);
+  --c-grok:#A1A1AA;
+  --mascot-idle:#8A8A93; --mascot-done:#5AA8FF;
+  --accent-wash:#0F2238; --material:rgba(28,28,31,.7);
+  --mem-fg:#C9B6F2; --mem-bg:rgba(160,130,230,.12); --mem-line:rgba(160,130,230,.24);
+  --toast-bg:#F4F4F5; --toast-fg:#111;
+  --scrim:rgba(0,0,0,.55);
+  --e2:0 4px 14px rgba(0,0,0,.4),0 0 0 .5px rgba(255,255,255,.06);
+  --e3:0 18px 48px rgba(0,0,0,.55),0 0 0 .5px rgba(255,255,255,.08);
+  --e-composer:0 8px 28px rgba(0,0,0,.35);
+}
+body{margin:0;font:400 14px/1.5 var(--font);color:var(--text);background:var(--bg);
+  letter-spacing:-.003em;-webkit-font-smoothing:antialiased}
+code,.mono{font-family:var(--mono);font-size:12px;letter-spacing:0}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+/* Metrics of the app's UI face (--fmu-*), as fractions of the font size: ascent and descent (what the engine lays a line out
+   with), cap height and x-height. The face is Geist, bundled (polish.css @font-face "Seq Geist", the same file on every platform),
+   so one set serves win, mac and linux. Read from the font file itself (fontTools on src/fonts/geist-latin-wght-normal.woff2,
+   @fontsource-variable/geist 5.3.0): 1000 units per em, hhea ascent 1005, descent 295, line gap 0 (USE_TYPO_METRICS is set and the
+   typo values are the same), OS/2 cap height 710, x-height 530. The layout audit measures the ink of capitals against these.
+   The mono face (--fmm-*) is still the platform's own: on Windows Consolas, what Chrome and WebView2 draw for the mono stack (consola.ttf: win ascent 1884,
+   descent 514, OS/2 cap height 1307, x-height 1004 per 2048); on Linux DejaVu Sans Mono, the fontconfig monospace of most
+   desktops (hhea ascent 1901, descent 483, line gap 0, H 1493 and x 1120 tall per 2048, read from DejaVuSansMono.ttf;
+   tests/fixtures/fonts holds a subset). macOS draws SF Mono (ui-monospace), which cannot be measured on this machine: it takes
+   Consolas' numbers until it is. The platform class on <html> (platform.ts, set once at startup) now picks only the mono set.
+   --fm-* are the metrics in force: the UI face's, the mono face's on every element the app sets in --mono (each rule that names
+   var(--mono); a unit test keeps the two lists equal), and the UI face's again where a rule sets --font inside one of those. */
+html{--fmu-asc:1.005;--fmu-desc:.295;--fmu-cap:.71;--fmu-x:.53;--fmm-asc:.91992;--fmm-desc:.25098;--fmm-cap:.63818;--fmm-x:.49023;
+  --fm-asc:var(--fmu-asc);--fm-desc:var(--fmu-desc);--fm-cap:var(--fmu-cap);--fm-x:var(--fmu-x)}
+html.linux{--fmm-asc:.92822;--fmm-desc:.23584;--fmm-cap:.729;--fmm-x:.54688}
+:is(code,.mono,.kbd,.tgt,.dif,.mini-dif,.url,.pp-tag,.mt button,.xi,.fname,.hunk,.sr-cmd,.cx-out,.term,.fix-line,.fx-term,.codev,
+  .elapsed,.slash-row .sn,.ppl-code,.ppl-code-in,.sb-search kbd,.tc-err,.tc-tail,.apv-in,.rb-edit,.files .fr .p,.cap .size,
+  .sharepop .lk,.gr5 em,.context-menu strong,.mo-y,.mo-axis,.onb-code-t,.onb-pv-code,.md .md-code pre,.u-err pre,.tr-hash,.to-pre,.cu-typed,.vb-clock,.rp-time,.vbtn-t)
+  {--fm-asc:var(--fmm-asc);--fm-desc:var(--fmm-desc);--fm-cap:var(--fmm-cap);--fm-x:var(--fmm-x)}
+:is(.xi em,.sharepop .lk .pill,.slash-pal .slash-row .sn,html.live .wkblock .wk .dif){--fm-asc:var(--fmu-asc);--fm-desc:var(--fmu-desc);--fm-cap:var(--fmu-cap);--fm-x:var(--fmu-x)}
+/* An icon inside running text (a logo in a title or a sentence) is on the x-height middle with vertical-align middle; it rises
+   by half the cap height less half the x-height, onto the text's cap middle (the same tokens; the em is the text's). */
+.ic-inl,.bar>.t>svg,.handoff>span>svg,.sheet .sub>svg,.redact-note>svg,.fk
+  {vertical-align:middle;translate:0 calc((var(--fm-x) - var(--fm-cap)) * .5em)}
+/* A label beside an icon is centred on the middle of its CAP HEIGHT (owner, wave 6 brief, CENTRING CONTRACT: wave 9's x-height
+   middle left labels that start with a capital or a digit, "Local", "Opus 5.5", 1.3 px high). Flex centring puts the label's
+   line box on the icon's middle; the translate is the distance from that middle to the cap middle, computed from the tokens the
+   way the engine places the text (ascent and descent rounded to whole px, the half-leading floored to a whole px; measured in
+   Chrome and WebView2), and the label moves by it. One mechanism in every engine: no text-box trim, the line box and the row keep
+   their height. A shifted label must be an atomic box (a flex item, a block, an inline-block): an inline box ignores translate,
+   and scripts/layout-audit.mjs checks it ("shift"). */
+.xh,
+  /* Labels that already had their own element, by area. Every text in a row of icons takes it, so the row shares one middle. */
+  .srow2>:is(.t,.tm,.dif),.grp>.gname,.sb-top>.sb-project,.sb-more>.cnt,.bar>.t,
+  .trow>:is(b,.l),.th>span,.sum>span,.fh>:is(b,.dif),.edit-line>:is(.stx,.dif,.ok-t),
+  .liveline>span,.fo-note>span,.gtype>span,.approval .h>span,.dry>span,.autorep>span,.ech>u,.handoff>span,
+  .ctxitem>.ctxl,.tray-menu-row>span,.artsw>:is(.atl,.v),.cap-lbl,.pp-bubble>.pp-in,
+  .tl-row>.tl-t,.wb-tab>:is(.wb-lbl,b),.wb-plan li>:is(.pt,.sr),.wn-agent>span,.mop>:is(.mtx,.msrc),.nmeta>.msrc,.wb-mfoot>span,
+  .ckr>:is(.ckt,.ckx),.aud>:is(span:not(:has(em)),.d),.kv>b,.rl>:is(span,.d),.rb-rules .f>span,.foot4>span,.srch5>span,
+  .agr>span:not(.nm,.acct-cell),.ag>span,.ch>.lnk,.uc-h>.uc-ex,.pfoot>span,.model-copy>*,.pp-row>.pp-name,.banner>.grow,
+  .turnbar>.tb-meta,.worked>span:not(.dif),.worked .dif>*,.wkblock .wk .wk-t,.wkblock .wk .dif>*,.fchip2>:is(b,.v),.tl-meta>*,.seg2 .mini-dif,
+  .src>b,
+  /* Wave 23: the trace page's claim titles beside their verdict icon. */
+  .trc-t>b,.trc>.trc-tier,
+  .col.live .g4 .hd>:is(.gn,.tm),.gthread .gt-n>.gn,.roster .rn>.gn,
+  /* Wave 15: text-only labels in a row of icons (a count, a hint, a status), measured by the audit's row check. */
+  .bar>.ov-sum,.ov-key>.kk,.mf>span,.mh>.ckn,.hoc>.hos,.row4>.hintt,.gtab>.gcount,.ptitle>.rec,.ag-h>h3,.xi>:is(.mono,em),.ucard .t>.d,.kv.cx-rule>b>code,
+  .onb-code>.onb-code-t,.tr5>span:not(.dots5,:has(.src)),
+  /* the app shell's project switcher (Tauri only: the browser views draw the workspace header instead) */
+  .space>div>.n:only-child
+  {translate:0 calc(.5lh - round(var(--fm-asc) * 1em, 1px) - round(down, (1lh - round(var(--fm-asc) * 1em, 1px) - round(var(--fm-desc) * 1em, 1px)) / 2, 1px) + var(--fm-cap) * .5em)}
+/* A table cell that holds a source badge centres the badge (an inline badge stands on its digit's baseline instead). */
+.tr5>span:has(>.src){display:flex;align-items:center}
+/* A permission rule is all code: the code is the label (the mono face's own metrics), centred in its b, which holds it in the row. */
+.kv.cx-rule>b{display:flex;align-items:center;translate:none}.kv.cx-rule>b>code{min-width:0}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Pointer cursor on everything clickable, app-wide (the flows shadow root reads this file too). :where() has no specificity, so a
+   control that must show another cursor (disabled, the native Windows caption buttons) still wins with any plain rule. */
+:where(button,a[href],summary,select,label[for],input[type=checkbox],input[type=radio],input[type=range],input[type=file],
+  [role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=option],[role=tab],[role=radio],
+  [role=checkbox],[role=switch],[role=treeitem],[draggable=true],
+  .srow2,.space,.mpill,.ctxi,.model-row,.slash-row,.tray-menu-row,.ctxitem,.ov-card,.toggle,.seg>span,.lnk,.m4){cursor:pointer}
+:where(button:disabled,[aria-disabled=true],[disabled]){cursor:default}
+/* Logos stand alone: no disc, tile, border or ring behind a vendor mark in the live app (the flows pages read this sheet in their
+   shadow root, so the rule names their tiles through :host-context; the kit flow scenes, which show the tiles, are not live). */
+:host-context(html.live) .logo.l-claude,:host-context(html.live) .logo.l-codex,:host-context(html.live) .logo.l-gh{background:none}
+/* Logo option A (logos.ts): Codex as the blue cloud with a white prompt, in the app and the scenes after the kit (html.nova). */
+html.nova .lg-codex .cdx-c{fill:url(#seq-cdx-g)}html.nova .lg-codex .cdx-p{fill:#fff}
+@media (prefers-reduced-motion:reduce){*{animation-duration:1ms!important;transition-duration:1ms!important}}
+@media (prefers-reduced-motion:reduce){:root{--dur-instant:1ms;--dur-fast:1ms;--dur-base:1ms;--dur-step:1ms;--dur-slow:1ms;--dur-panel:1ms;--dur-spring:1ms}}
+html.still *{animation:none!important;transition:none!important}
+/* still=1: every animation is at its end state, so a parity screenshot never catches a move. */
+html.still{--dur-instant:0ms;--dur-fast:0ms;--dur-base:0ms;--dur-step:0ms;--dur-slow:0ms;--dur-panel:0ms;--dur-spring:0ms}

@@ -18,6 +18,8 @@ Pointcast fills that gap. Record a walkthrough of a buggy checkout page in Chrom
 
 ## Install
 
+Step-by-step prerequisites (macOS / Windows / Linux), model download, permissions, and demo tips: **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**.
+
 ### From source
 
 ```bash
@@ -84,7 +86,7 @@ src-tauri/src/
   settings.rs     hotkeys, mic, model, output, start-at-login
 ```
 
-The frontend is four Tauri windows (Vite + React + Tailwind): **settings**, **indicator**, **overlay**, **result**.
+The frontend is four Tauri windows (Vite + React): **settings**, **indicator**, **overlay**, **result**. Visual language follows Sequence Nova tokens (SF system fonts, vibrancy panels, pill controls, system light/dark) with the Sequence four-square mark as the app/tray icon.
 
 Privacy: the hide-list defaults to 1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass, RoboForm, Proton Pass, Credential Manager, Windows Security, Keychain Access. Those windows are painted a flat charcoal before the PNG is kept. Audio stays in memory and is dropped after transcription.
 

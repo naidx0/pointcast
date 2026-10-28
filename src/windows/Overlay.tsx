@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { onOverlayFrame, regionCancel, regionCommit, type Label } from "@/lib/api";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -48,6 +55,17 @@ export function Overlay() {
       setStrokes([]);
     };
     const u = onOverlayFrame(load);
+    if (typeof location !== "undefined" && location.search.includes("preview=1")) {
+      const img = new Image();
+      img.onload = () => {
+        setSrc("/freeze.png");
+        setNatural({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
+        setLayer("annotating");
+        setBox({ x: 420, y: 280, w: 360, h: 220 });
+        setPins([{ n: 1, x: 560, y: 360, text: "Place order — 28px too far left" }]);
+      };
+      img.src = "/freeze.png";
+    }
     return () => {
       u.then((fn) => fn());
     };
@@ -147,7 +165,14 @@ export function Overlay() {
 
   return (
     <div
-      className="relative h-screen w-screen cursor-crosshair overflow-hidden bg-black/40"
+      style={{
+        position: "relative",
+        height: "100vh",
+        width: "100vw",
+        cursor: "crosshair",
+        overflow: "hidden",
+        background: "rgba(0,0,0,0.35)",
+      }}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}
@@ -157,13 +182,15 @@ export function Overlay() {
           ref={imgRef}
           src={src}
           alt=""
-          className="pointer-events-none h-full w-full object-contain"
+          style={{ pointerEvents: "none", height: "100%", width: "100%", objectFit: "contain" }}
           draggable={false}
         />
       ) : (
-        <div className="flex h-full items-center justify-center text-ink-300">Capturing freeze-frame…</div>
+        <div style={{ display: "grid", placeItems: "center", height: "100%", color: "#fff", font: "500 13px var(--font)" }}>
+          Capturing freeze-frame…
+        </div>
       )}
-      <canvas ref={canvasRef} className="hidden" />
+      <canvas ref={canvasRef} style={{ display: "none" }} />
       {box ? <BoxOverlay img={imgRef.current} box={box} natural={natural} dim={layer !== "selecting"} /> : null}
       {pins.map((p) => (
         <PinMark
@@ -176,11 +203,13 @@ export function Overlay() {
         />
       ))}
       <SvgStrokes img={imgRef.current} natural={natural} strokes={allStrokes} />
-      <div className="hint-bar pointer-events-none absolute bottom-6 left-1/2 z-20 -translate-x-1/2 rounded-full border border-ink-500/30 bg-ink-950/80 px-4 py-2 font-mono text-xs text-ink-100">
-        {hint(layer, tool)}
-      </div>
+      <div className="hint-bar">{hint(layer, tool)}</div>
       {layer === "annotating" ? (
-        <div className="absolute left-1/2 top-5 z-20 flex -translate-x-1/2 gap-2">
+        <div
+          className="glassbar no-drag"
+          style={{ position: "absolute", left: "50%", top: 20, transform: "translateX(-50%)", zIndex: 20 }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <ToolBtn active={tool === "pin"} onClick={() => setTool("pin")}>
             Pin
           </ToolBtn>
@@ -190,9 +219,10 @@ export function Overlay() {
           <ToolBtn active={tool === "highlight"} onClick={() => setTool("highlight")}>
             Highlight
           </ToolBtn>
-          <ToolBtn active={false} onClick={() => void commit()}>
+          <span style={{ width: 1, height: 20, background: "rgba(0,0,0,0.12)", margin: "0 4px" }} />
+          <button type="button" className="pill pri" onClick={() => void commit()}>
             Capture ↵
-          </ToolBtn>
+          </button>
         </div>
       ) : null}
     </div>
@@ -210,11 +240,12 @@ function ToolBtn({
 }) {
   return (
     <button
+      type="button"
+      className={`pill ${active ? "on" : ""}`}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
-      className={`rounded-full px-3 py-1 text-xs ${active ? "bg-ember-400 text-ink-950" : "bg-ink-900/90 text-ink-100"}`}
     >
       {children}
     </button>
@@ -236,21 +267,19 @@ function BoxOverlay({
   const r = img.getBoundingClientRect();
   const sx = r.width / natural.w;
   const sy = r.height / natural.h;
-  const style = {
+  const style: CSSProperties = {
+    position: "absolute",
     left: r.left + box.x * sx,
     top: r.top + box.y * sy,
     width: box.w * sx,
     height: box.h * sy,
+    borderRadius: 10,
+    outline: "2px solid #fff",
+    boxShadow: dim ? "0 0 0 9999px rgba(0,0,0,0.35)" : undefined,
+    zIndex: 10,
+    pointerEvents: "none",
   };
-  return (
-    <>
-      {dim ? <div className="pointer-events-none absolute inset-0 bg-black/35" /> : null}
-      <div
-        className="pointer-events-none absolute z-10 box-border border-2 border-ember-400"
-        style={style}
-      />
-    </>
-  );
+  return <div style={style} />;
 }
 
 function PinMark({
@@ -271,8 +300,20 @@ function PinMark({
   const left = r.left + (pin.x / natural.w) * r.width;
   const top = r.top + (pin.y / natural.h) * r.height;
   return (
-    <div className="absolute z-20 -translate-x-1/2 -translate-y-1/2" style={{ left, top }}>
-      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-ember-400 text-xs font-semibold text-ink-950">
+    <div style={{ position: "absolute", zIndex: 20, left, top, transform: "translate(-50%, -50%)" }}>
+      <div
+        style={{
+          display: "grid",
+          placeItems: "center",
+          width: 24,
+          height: 24,
+          borderRadius: 999,
+          background: "#FF453A",
+          color: "#fff",
+          font: "600 12px var(--font)",
+          boxShadow: "0 4px 12px rgba(255,69,58,0.35)",
+        }}
+      >
         {pin.n}
       </div>
       {editing || pin.text ? (
@@ -282,7 +323,8 @@ function PinMark({
           onChange={(e) => onText(e.target.value)}
           onPointerDown={(e) => e.stopPropagation()}
           placeholder="label"
-          className="mt-1 w-28 rounded bg-ink-950/90 px-1 py-0.5 font-mono text-[11px]"
+          className="field mono"
+          style={{ marginTop: 4, width: 120, height: 26, fontSize: 11 }}
         />
       ) : null}
     </div>
@@ -301,7 +343,11 @@ function SvgStrokes({
   if (!img || !natural.w) return null;
   const r = img.getBoundingClientRect();
   return (
-    <svg className="pointer-events-none absolute inset-0 z-10" width={window.innerWidth} height={window.innerHeight}>
+    <svg
+      style={{ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 10 }}
+      width={window.innerWidth}
+      height={window.innerHeight}
+    >
       {strokes.map((s, i) => {
         const d = s.points
           .map((p, idx) => {
@@ -315,7 +361,7 @@ function SvgStrokes({
             key={i}
             d={d}
             fill="none"
-            stroke={s.tool === "highlight" ? "rgba(245,165,36,0.35)" : "#f5a524"}
+            stroke={s.tool === "highlight" ? "rgba(255,159,10,0.35)" : "#FF453A"}
             strokeWidth={s.tool === "highlight" ? 18 : 3}
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -349,7 +395,7 @@ async function rasterize(
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
   for (const s of strokes) {
     ctx.beginPath();
-    ctx.strokeStyle = s.tool === "highlight" ? "rgba(245,165,36,0.35)" : "#f5a524";
+    ctx.strokeStyle = s.tool === "highlight" ? "rgba(255,159,10,0.35)" : "#FF453A";
     ctx.lineWidth = s.tool === "highlight" ? 18 : 3;
     ctx.lineCap = "round";
     s.points.forEach((p, i) => {
@@ -364,17 +410,17 @@ async function rasterize(
     const x = p.x - box.x;
     const y = p.y - box.y;
     ctx.beginPath();
-    ctx.fillStyle = "#f5a524";
+    ctx.fillStyle = "#FF453A";
     ctx.arc(x, y, 10, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = "#0e0d0b";
-    ctx.font = "bold 12px sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 12px -apple-system, system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String(p.n), x, y);
     if (p.text) {
-      ctx.fillStyle = "#f4efe6";
-      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#111";
+      ctx.font = "11px -apple-system, system-ui, sans-serif";
       ctx.textAlign = "left";
       ctx.fillText(p.text, x + 14, y);
     }
