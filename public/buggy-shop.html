@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Northwind Checkout — demo</title>
+    <style>
+      :root { font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif; }
+      body { margin: 0; background: #f6f1e8; color: #1c1915; }
+      header { background: #1c1915; color: #f6f1e8; padding: 16px 32px; display: flex; justify-content: space-between; }
+      main { display: grid; grid-template-columns: 1fr 320px; gap: 32px; padding: 32px; max-width: 1100px; margin: 0 auto; }
+      .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 8px 30px rgba(0,0,0,.08); }
+      .item { display: flex; gap: 16px; padding: 12px 0; border-bottom: 1px solid #eee; }
+      .item img { width: 72px; height: 72px; background: #ddd; border-radius: 8px; }
+      .price { margin-left: auto; font-variant-numeric: tabular-nums; }
+      /* Intentional bug: the primary action sits 28px too far left, colliding with the total. */
+      .pay {
+        position: relative;
+        left: -28px;
+        margin-top: 8px;
+        background: #2f6fed;
+        color: white;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px 18px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      .total { font-size: 22px; font-weight: 650; }
+      .hint { color: #8a7f6e; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Northwind Outfitters</strong>
+      <span>Checkout · guest</span>
+    </header>
+    <main>
+      <section class="card">
+        <h1>Your bag</h1>
+        <div class="item">
+          <div class="img"></div>
+          <div>
+            <div>Field notebook, ochre</div>
+            <div class="hint">Qty 1 · ships tomorrow</div>
+          </div>
+          <div class="price">$24.00</div>
+        </div>
+        <div class="item">
+          <div>
+            <div>Waxed canvas tote</div>
+            <div class="hint">Qty 1 · in stock</div>
+          </div>
+          <div class="price">$48.00</div>
+        </div>
+      </section>
+      <aside class="card" id="summary">
+        <h2>Summary</h2>
+        <p>Subtotal $72.00</p>
+        <p>Shipping $0.00</p>
+        <p class="total">Total $72.00</p>
+        <button class="pay" id="pay">Place order</button>
+        <p class="hint">The Place order button is shifted 28px left on purpose — a layout bug for the Pointcast demo.</p>
+      </aside>
+    </main>
+  </body>
+</html>

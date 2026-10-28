@@ -1,0 +1,30 @@
+# Dependencies and build
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.vite/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Speech models (downloaded on first use)
+.pointcast-speech/
+speech/
+
+# Agent / upload scratch (not part of the app)
+agent-tools/
+uploads/
+terminals/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env
+.env
+.env.local

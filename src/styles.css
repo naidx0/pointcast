@@ -1,0 +1,44 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+  color: #f4efe6;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.rec-dot {
+  box-shadow: 0 0 0 0 rgba(245, 165, 36, 0.7);
+  animation: pulse-rec 1.6s ease-out infinite;
+}
+
+@keyframes pulse-rec {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 165, 36, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(245, 165, 36, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 165, 36, 0);
+  }
+}
+
+.hint-bar {
+  backdrop-filter: blur(12px);
+}

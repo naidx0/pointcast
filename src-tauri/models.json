@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "reference": { "score": 900, "cpu": "reference" },
+  "models": [
+    {
+      "id": "moonshine-tiny-en",
+      "name": "Moonshine Tiny v2 (English)",
+      "family": "moonshine",
+      "license": "MIT",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2"
+      ],
+      "bytes": 29858559,
+      "root": "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27",
+      "files": [
+        { "name": "encoder_model.ort", "role": "encoder" },
+        { "name": "decoder_model_merged.ort", "role": "merged_decoder" },
+        { "name": "tokens.txt", "role": "tokens" }
+      ],
+      "bench": { "clip5_ms": 180 }
+    },
+    {
+      "id": "moonshine-base-en",
+      "name": "Moonshine Base v2 (English)",
+      "family": "moonshine",
+      "license": "MIT",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2"
+      ],
+      "bytes": 0,
+      "root": "sherpa-onnx-moonshine-base-en-quantized-2026-02-27",
+      "files": [
+        { "name": "encoder_model.ort", "role": "encoder" },
+        { "name": "decoder_model_merged.ort", "role": "merged_decoder" },
+        { "name": "tokens.txt", "role": "tokens" }
+      ],
+      "bench": { "clip5_ms": 420 }
+    }
+  ],
+  "runtimes": [
+    {
+      "id": "runtime-linux-x64",
+      "target": "x86_64-unknown-linux-gnu",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-linux-x64-shared-lib.tar.bz2"
+      ],
+      "bytes": 9690703,
+      "lib": "libsherpa-onnx-c-api.so"
+    },
+    {
+      "id": "runtime-macos-arm64",
+      "target": "aarch64-apple-darwin",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-osx-arm64-shared-lib.tar.bz2"
+      ],
+      "bytes": 0,
+      "lib": "libsherpa-onnx-c-api.dylib"
+    },
+    {
+      "id": "runtime-macos-x64",
+      "target": "x86_64-apple-darwin",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-osx-x64-shared-lib.tar.bz2"
+      ],
+      "bytes": 0,
+      "lib": "libsherpa-onnx-c-api.dylib"
+    },
+    {
+      "id": "runtime-windows-x64",
+      "target": "x86_64-pc-windows-msvc",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-lib.tar.bz2"
+      ],
+      "bytes": 0,
+      "lib": "sherpa-onnx-c-api.dll"
+    }
+  ]
+}

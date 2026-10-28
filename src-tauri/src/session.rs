@@ -1,0 +1,408 @@
+//! Recording session: live transcript, captures inserted at the moment they were taken,
+//! local STT, and export on stop.
+use crate::capture::{self, Shot};
+use crate::prompt::{self, Capture, CaptureKind, Item, Label, SessionExport};
+use crate::settings::{OutputMode, Settings};
+use crate::voice::audio::{self, Mic, Take};
+use crate::voice::machine;
+use crate::voice::models;
+use crate::voice::stt::Engine;
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    #[default]
+    Idle,
+    Loading,
+    Recording,
+    Transcribing,
+    Ready,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UiState {
+    pub phase: Phase,
+    pub mic: bool,
+    pub screen: bool,
+    pub partial: String,
+    pub text: String,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+    pub image_count: u32,
+    pub model_ready: bool,
+    pub level: f32,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        UiState {
+            phase: Phase::Idle,
+            mic: false,
+            screen: false,
+            partial: String::new(),
+            text: String::new(),
+            error: None,
+            duration_ms: 0,
+            image_count: 0,
+            model_ready: false,
+            level: 0.0,
+        }
+    }
+}
+
+pub struct App {
+    pub settings: Mutex<Settings>,
+    settings_path: std::path::PathBuf,
+    items: Mutex<Vec<Item>>,
+    t0: Mutex<Option<u64>>,
+    state: Mutex<UiState>,
+    take_no: AtomicU64,
+    stop: AtomicBool,
+    mic: Mutex<Option<Mic>>,
+    take: Mutex<Option<Arc<Take>>>,
+    engine: Mutex<Option<Engine>>,
+    freeze: Mutex<Option<Shot>>,
+    last_export: Mutex<Option<SessionExport>>,
+    last_dir: Mutex<Option<std::path::PathBuf>>,
+}
+
+impl App {
+    pub fn new(settings: Settings, settings_path: std::path::PathBuf) -> Arc<Self> {
+        let model_ready = {
+            let root = models::speech_dir();
+            let cat = models::catalog();
+            cat.runtime_for_host()
+                .map(|r| models::runtime_installed(&root, r))
+                .unwrap_or(false)
+                && cat
+                    .models
+                    .iter()
+                    .any(|m| models::model_installed(&root, m))
+        };
+        Arc::new(App {
+            settings: Mutex::new(settings),
+            settings_path,
+            items: Mutex::default(),
+            t0: Mutex::default(),
+            state: Mutex::new(UiState {
+                model_ready,
+                ..UiState::default()
+            }),
+            take_no: AtomicU64::new(0),
+            stop: AtomicBool::new(true),
+            mic: Mutex::default(),
+            take: Mutex::default(),
+            engine: Mutex::default(),
+            freeze: Mutex::default(),
+            last_export: Mutex::default(),
+            last_dir: Mutex::default(),
+        })
+    }
+
+    pub fn ui(&self) -> UiState {
+        let mut s = self.state.lock().unwrap().clone();
+        if let Some(t) = self.take.lock().unwrap().as_ref() {
+            s.level = t.level();
+        }
+        if let Some(t0) = *self.t0.lock().unwrap() {
+            s.duration_ms = now_ms().saturating_sub(t0);
+        }
+        s.text = prompt::compose(&self.items.lock().unwrap()).0;
+        s.image_count = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| matches!(i, Item::Image { .. }))
+            .count() as u32;
+        s
+    }
+
+    pub fn last_export(&self) -> Option<SessionExport> {
+        self.last_export.lock().unwrap().clone()
+    }
+
+    pub fn last_dir(&self) -> Option<std::path::PathBuf> {
+        self.last_dir.lock().unwrap().clone()
+    }
+
+    pub fn save_settings(&self, s: Settings) -> Result<(), String> {
+        s.save(&self.settings_path)?;
+        *self.settings.lock().unwrap() = s;
+        Ok(())
+    }
+
+    pub fn ensure_engine(&self) -> Result<(), String> {
+        if self.engine.lock().unwrap().is_some() {
+            self.state.lock().unwrap().model_ready = true;
+            return Ok(());
+        }
+        let root = models::speech_dir();
+        let cat = models::catalog();
+        let rt = cat
+            .runtime_for_host()
+            .ok_or("no speech runtime for this OS")?;
+        if !models::runtime_installed(&root, rt) {
+            return Err("Download the speech runtime in Settings".into());
+        }
+        let rec = machine::recommend(&machine::measure());
+        let installed: Vec<&str> = cat
+            .models
+            .iter()
+            .filter(|m| models::model_installed(&root, m))
+            .map(|m| m.id.as_str())
+            .collect();
+        let chosen = self.settings.lock().unwrap().model.clone();
+        let id = machine::route(&chosen, rec, &installed).ok_or("Download a speech model in Settings")?;
+        let model = cat.model(id).ok_or("unknown model")?;
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(4) as i32)
+            .unwrap_or(2);
+        let eng = crate::voice::stt::load(&root, rt, model, threads)?;
+        *self.engine.lock().unwrap() = Some(eng);
+        self.state.lock().unwrap().model_ready = true;
+        Ok(())
+    }
+
+    pub fn start(self: &Arc<Self>) -> Result<(), String> {
+        if matches!(
+            self.state.lock().unwrap().phase,
+            Phase::Recording | Phase::Loading | Phase::Transcribing
+        ) {
+            return Ok(());
+        }
+        self.stop.store(false, Ordering::SeqCst);
+        self.items.lock().unwrap().clear();
+        *self.t0.lock().unwrap() = Some(now_ms());
+        {
+            let mut st = self.state.lock().unwrap();
+            st.phase = Phase::Loading;
+            st.error = None;
+            st.partial.clear();
+            st.text.clear();
+            st.mic = false;
+            st.screen = true;
+        }
+        match self.ensure_engine() {
+            Ok(()) => {}
+            Err(e) => {
+                // Screenshots still work; transcript will be empty unless we inject speech.
+                self.state.lock().unwrap().error = Some(e);
+            }
+        }
+        let settings = self.settings.lock().unwrap().clone();
+        let take = Arc::new(Take::default());
+        match Mic::open(settings.device.clone(), take.clone()) {
+            Ok(mic) => {
+                *self.mic.lock().unwrap() = Some(mic);
+                *self.take.lock().unwrap() = Some(take.clone());
+                self.state.lock().unwrap().mic = true;
+            }
+            Err(e) => {
+                let mut st = self.state.lock().unwrap();
+                st.error = Some(format!("Microphone: {e}"));
+            }
+        }
+        self.state.lock().unwrap().phase = Phase::Recording;
+        let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        let me = Arc::clone(self);
+        std::thread::spawn(move || me.worker(no, take));
+        Ok(())
+    }
+
+    pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(mic) = self.mic.lock().unwrap().take() {
+            drop(mic);
+        }
+        // Give the worker a beat to flush the last segment.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        *self.take.lock().unwrap() = None;
+        {
+            let mut st = self.state.lock().unwrap();
+            st.mic = false;
+            st.screen = false;
+            st.phase = if cancel { Phase::Idle } else { Phase::Transcribing };
+        }
+        if cancel {
+            self.items.lock().unwrap().clear();
+            *self.t0.lock().unwrap() = None;
+            self.state.lock().unwrap().phase = Phase::Idle;
+            return Ok(None);
+        }
+        let items = prompt::ordered(self.items.lock().unwrap().clone());
+        let exp = prompt::assemble_export(&items);
+        *self.last_export.lock().unwrap() = Some(exp.clone());
+        let settings = self.settings.lock().unwrap().clone();
+        if settings.output == OutputMode::Folder || settings.also_clipboard {
+            let dir = export_dir(&settings);
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(p) = prompt::export_folder(&items, &dir) {
+                *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
+            }
+        }
+        let _ = crate::clipboard::deliver(&items, settings.output, settings.also_clipboard);
+        self.state.lock().unwrap().phase = Phase::Ready;
+        Ok(Some(exp))
+    }
+
+    pub fn inject_speech(&self, text: &str) {
+        let Some(t0) = *self.t0.lock().unwrap() else {
+            return;
+        };
+        let t = now_ms().saturating_sub(t0);
+        self.push(Item::Speech {
+            t_ms: t.saturating_sub(400),
+            end_ms: t,
+            text: text.to_string(),
+        });
+    }
+
+    pub fn capture_full(&self) -> Result<Capture, String> {
+        self.capture_shot(|s, hide| capture::grab_full(s, hide))
+    }
+
+    pub fn capture_zoom(&self) -> Result<Capture, String> {
+        self.capture_shot(|s, hide| capture::grab_zoom(s, hide))
+    }
+
+    pub fn begin_region(&self) -> Result<Shot, String> {
+        let settings = self.settings.lock().unwrap().clone();
+        let shot = capture::grab_freeze(&settings, &["indicator", "overlay"])?;
+        *self.freeze.lock().unwrap() = Some(shot.clone());
+        Ok(shot)
+    }
+
+    pub fn freeze(&self) -> Option<Shot> {
+        self.freeze.lock().unwrap().clone()
+    }
+
+    /// Commit an annotated PNG (already cropped by the overlay) as the next image.
+    pub fn commit_region(&self, png: Vec<u8>, labels: Vec<Label>) -> Result<Capture, String> {
+        let (width, height) = crate::image_ops::png_size(&png).ok_or("that is not a PNG")?;
+        let t = self.t_ms();
+        let cap = Capture {
+            id: 0,
+            kind: CaptureKind::Region,
+            t_ms: t,
+            png,
+            width,
+            height,
+            labels,
+        };
+        self.push(Item::Image {
+            t_ms: t,
+            capture: cap.clone(),
+        });
+        *self.freeze.lock().unwrap() = None;
+        Ok(cap)
+    }
+
+    fn capture_shot(
+        &self,
+        grab: impl FnOnce(&Settings, &[&str]) -> Result<Shot, String>,
+    ) -> Result<Capture, String> {
+        let settings = self.settings.lock().unwrap().clone();
+        let shot = grab(&settings, &["indicator", "overlay"])?;
+        let t = self.t_ms();
+        let cap = Capture {
+            id: 0,
+            kind: shot.kind,
+            t_ms: t,
+            png: shot.png,
+            width: shot.width,
+            height: shot.height,
+            labels: vec![],
+        };
+        self.push(Item::Image {
+            t_ms: t,
+            capture: cap.clone(),
+        });
+        Ok(cap)
+    }
+
+    fn t_ms(&self) -> u64 {
+        let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        now_ms().saturating_sub(t0)
+    }
+
+    fn push(&self, item: Item) {
+        self.items.lock().unwrap().push(item);
+    }
+
+    fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
+        let mut seg = audio::Segmenter::new(900, 12_000);
+        let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        loop {
+            if self.stop.load(Ordering::SeqCst) || self.take_no.load(Ordering::SeqCst) != no {
+                break;
+            }
+            let all = take.all();
+            let ranges = seg.feed(&all);
+            self.decode_ranges(&take, &ranges, t0);
+            if let Some(start) = seg.open_start() {
+                let samples = take.copy(start..all.len());
+                if let Some(eng) = self.engine.lock().unwrap().as_ref() {
+                    let t = eng.transcribe(&samples);
+                    self.state.lock().unwrap().partial = t;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        let all = take.all();
+        let rest = {
+            let mut s = seg;
+            s.finish(&all)
+        };
+        self.decode_ranges(&take, &rest, t0);
+        self.state.lock().unwrap().partial.clear();
+    }
+
+    fn decode_ranges(&self, take: &Take, ranges: &[std::ops::Range<usize>], t0: u64) {
+        for r in ranges {
+            let samples = take.copy(r.clone());
+            let text = {
+                let g = self.engine.lock().unwrap();
+                match g.as_ref() {
+                    Some(eng) => eng.transcribe(&samples),
+                    None => String::new(),
+                }
+            };
+            if text.is_empty() {
+                continue;
+            }
+            let t_ms = (r.start as u64) * 1000 / audio::RATE as u64;
+            let end_ms = (r.end as u64) * 1000 / audio::RATE as u64;
+            let _ = t0;
+            self.push(Item::Speech {
+                t_ms,
+                end_ms,
+                text,
+            });
+        }
+    }
+}
+
+fn export_dir(s: &Settings) -> std::path::PathBuf {
+    if let Some(d) = &s.export_dir {
+        return std::path::PathBuf::from(d);
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Pointcast")
+        .join(stamp)
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}

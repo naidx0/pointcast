@@ -1,0 +1,98 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pointcast",
+  "version": "0.1.0",
+  "identifier": "dev.pointcast.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "settings",
+        "title": "Pointcast",
+        "url": "index.html",
+        "width": 760,
+        "height": 720,
+        "minWidth": 560,
+        "minHeight": 480,
+        "visible": false,
+        "resizable": true,
+        "decorations": true
+      },
+      {
+        "label": "indicator",
+        "title": "Pointcast recording",
+        "url": "indicator.html",
+        "width": 380,
+        "height": 168,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "transparent": true,
+        "shadow": false
+      },
+      {
+        "label": "overlay",
+        "title": "Pointcast annotate",
+        "url": "overlay.html",
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "transparent": true,
+        "fullscreen": true,
+        "shadow": false
+      },
+      {
+        "label": "result",
+        "title": "Pointcast — last prompt",
+        "url": "result.html",
+        "width": 720,
+        "height": 640,
+        "visible": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    },
+    "category": "Productivity",
+    "shortDescription": "Voice plus annotated screenshots into one AI prompt",
+    "longDescription": "Pointcast lives in the tray, records your voice locally, and lets you mark up the screen. On stop it copies one prompt — transcript with inline images — you can paste into any AI tool."
+  }
+}
