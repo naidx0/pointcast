@@ -9,6 +9,7 @@ mod privacy;
 mod prompt;
 mod session;
 mod settings;
+mod tools;
 mod tray;
 mod voice;
 
@@ -282,6 +283,86 @@ fn request_permissions() -> permissions::PermissionStatus {
     permissions::probe()
 }
 
+/// One-click setup: permissions, then runtime + recommended STT model.
+#[tauri::command]
+fn setup_run(app: AppHandle) -> Result<(), String> {
+    let _ = permissions::request_screen();
+    let _ = app.emit(
+        "setup://progress",
+        json!({ "step": "permissions", "label": "Checking microphone and screen…" }),
+    );
+    std::thread::spawn(move || {
+        let root = crate::voice::models::speech_dir();
+        let cat = crate::voice::models::catalog();
+        let emit_speech = |p| {
+            let _ = app.emit("speech://progress", p);
+        };
+        if let Some(rt) = cat.runtime_for_host() {
+            let _ = app.emit(
+                "setup://progress",
+                json!({ "step": "runtime", "label": "Downloading speech runtime…" }),
+            );
+            if let Err(e) = crate::voice::models::install_runtime(&root, rt, &emit_speech) {
+                let _ = app.emit(
+                    "setup://done",
+                    json!({ "ok": false, "error": e, "step": "runtime" }),
+                );
+                return;
+            }
+        }
+        let rec = crate::voice::machine::recommend(&crate::voice::machine::measure());
+        let model_id = if cat.model(rec).is_some() {
+            rec.to_string()
+        } else {
+            "moonshine-tiny-en".into()
+        };
+        if let Some(m) = cat.model(&model_id) {
+            let _ = app.emit(
+                "setup://progress",
+                json!({
+                    "step": "model",
+                    "label": format!("Downloading {}…", m.name),
+                    "id": m.id,
+                }),
+            );
+            if let Err(e) = crate::voice::models::install_model(&root, m, &emit_speech) {
+                let _ = app.emit(
+                    "setup://done",
+                    json!({ "ok": false, "error": e, "step": "model" }),
+                );
+                return;
+            }
+        }
+        let _ = app.emit(
+            "setup://done",
+            json!({ "ok": true, "recommended": model_id }),
+        );
+        let _ = app.emit("speech://done", json!({ "id": "setup", "ok": true }));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn detect_tools() -> Vec<tools::DetectedTool> {
+    tools::detect()
+}
+
+#[tauri::command]
+fn open_tool(id: String) -> Result<(), String> {
+    tools::open(&id)
+}
+
+#[tauri::command]
+fn send_to_tool(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    let items = svc.last_export().ok_or("no session yet")?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let _ = cb.set_html(&items.html, Some(&items.plain));
+    tools::open(&id)?;
+    // Brief pause then paste into the focused app.
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    crate::clipboard::paste_now()
+}
+
 #[tauri::command]
 fn overlay_esc(layer: overlay::OverlayLayer) -> overlay::OverlayLayer {
     overlay::esc(layer)
@@ -484,6 +565,10 @@ pub fn run() {
             paste_again,
             download_model,
             request_permissions,
+            setup_run,
+            detect_tools,
+            open_tool,
+            send_to_tool,
             overlay_esc,
             overlay_hint,
             inject_speech,

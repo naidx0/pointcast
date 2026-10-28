@@ -4,14 +4,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Mark, PRODUCT } from "@/components/brand/Mark";
+import { Icon } from "@/components/Icons";
 import {
-  downloadModel,
+  detectTools,
+  onSetupDone,
+  onSetupProgress,
   onSpeechDone,
   onSpeechProgress,
-  requestPermissions,
+  openTool,
   sessionToggle,
   settingsGet,
   settingsSet,
+  setupRun,
+  type DetectedTool,
 } from "@/lib/api";
 import { setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
@@ -22,9 +27,13 @@ type SpeechView = {
 
 export function Settings() {
   const [cfg, setCfg] = useState<Record<string, unknown> | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [progress, setProgress] = useState<string>("");
-  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [label, setLabel] = useState("");
+  const [pct, setPct] = useState<number | null>(null);
+  const [done, setDone] = useState(false);
+  const [failed, setFailed] = useState("");
+  const [advanced, setAdvanced] = useState(false);
+  const [tools, setTools] = useState<DetectedTool[]>([]);
   const [theme, setTheme] = useState<ThemePref>(() => themePref());
 
   async function refresh() {
@@ -36,285 +45,332 @@ export function Settings() {
         /* preview */
       }
       setCfg({ ...s });
-      setErr(null);
-    } catch (e) {
+      const speech = s.speech as SpeechView | undefined;
+      const ready =
+        !!speech?.runtime?.installed && (speech.models ?? []).some((m) => m.installed);
+      if (ready) setDone(true);
+    } catch {
       setCfg(BROWSER_PREVIEW);
-      setErr(String(e));
+    }
+    try {
+      setTools(await detectTools());
+    } catch {
+      setTools(
+        typeof location !== "undefined" && location.search.includes("preview=1")
+          ? [
+              {
+                id: "superwhisper",
+                name: "SuperWhisper",
+                path: "/Applications/Superwhisper.app",
+                kind: "stt",
+              },
+            ]
+          : [],
+      );
     }
   }
 
   useEffect(() => {
-    refresh().catch((e) => setErr(String(e)));
-    const u1 = onSpeechProgress((p) => {
-      const x = p as { state?: string; received?: number; total?: number };
-      if (x.state === "downloading") {
-        const t = x.total ? ` / ${Math.round((x.total as number) / 1e6)} MB` : "";
-        setProgress(`Downloading ${Math.round((x.received ?? 0) / 1e6)} MB${t}`);
-      } else if (x.state) setProgress(x.state);
-    });
-    const u2 = onSpeechDone(() => {
-      setBusy(null);
-      setProgress("");
-      refresh();
-    });
+    refresh();
+    const offs = [
+      onSetupProgress((p) => {
+        if (p.label) setLabel(p.label);
+      }),
+      onSpeechProgress((p) => {
+        const x = p as { state?: string; received?: number; total?: number; part?: string };
+        if (x.state === "downloading" && x.total) {
+          setPct(Math.min(99, Math.round(((x.received ?? 0) / x.total) * 100)));
+          setLabel(x.part === "runtime" ? "Downloading runtime…" : "Downloading model…");
+        } else if (x.state === "unpacking") {
+          setPct(null);
+          setLabel("Unpacking…");
+        } else if (x.state === "checking") {
+          setPct(null);
+          setLabel("Checking…");
+        }
+      }),
+      onSetupDone((p) => {
+        setBusy(false);
+        if (p.ok) {
+          setDone(true);
+          setLabel("Ready — press the hotkey and talk.");
+          setPct(100);
+          refresh();
+        } else {
+          setFailed(p.error || "Setup failed");
+        }
+      }),
+      onSpeechDone(() => refresh()),
+    ];
     return () => {
-      u1.then((u) => u());
-      u2.then((u) => u());
+      offs.forEach((u) => u.then((fn) => fn()));
     };
   }, []);
 
-  async function patch(partial: Record<string, unknown>) {
-    if (!cfg) return;
-    const next = { ...flatten(cfg), ...partial };
+  async function oneClick() {
+    setFailed("");
+    setBusy(true);
+    setLabel("Checking microphone and screen…");
+    setPct(null);
     try {
-      await settingsSet(next);
-      await refresh();
-    } catch {
-      setCfg({ ...cfg, ...partial });
+      await setupRun();
+    } catch (e) {
+      // Browser preview: simulate success.
+      setBusy(false);
+      setDone(true);
+      setLabel("Ready (preview).");
+      setFailed(String(e).includes("invoke") ? "" : String(e));
     }
   }
 
   if (!cfg) {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center" }}>
-        <span style={{ color: "var(--text3)" }}>Opening settings…</span>
+        <span style={{ color: "var(--text3)" }}>Opening…</span>
       </div>
     );
   }
 
-  const preview = Boolean(cfg.__preview);
   const speech = (cfg.speech as SpeechView) ?? {};
-  const devices = (cfg.devices as string[]) ?? [];
   const perms = cfg.permissions as { microphone: boolean; screen: boolean; note: string };
+  const superW = tools.find((t) => t.id === "superwhisper");
+  const preview = Boolean(cfg.__preview);
 
   return (
     <div className="page">
-      <header className="title-drag" style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 18px" }}>
-        <div className="row-between" style={{ alignItems: "flex-start" }}>
-          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+      <header className="title-drag" style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 16px" }}>
+        <div className="row-between">
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div className="traffic" aria-hidden="true">
               <i />
               <i />
               <i />
             </div>
+            <Mark size="lg" />
             <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <Mark size="lg" />
-                <div>
-                  <p className="kicker">Tray app</p>
-                  <h1 className="title">{PRODUCT}</h1>
-                </div>
-              </div>
-              <p className="sub">
-                Speak, mark the screen, paste one prompt into any AI tool. Speech never leaves this machine.
-              </p>
-            {preview ? (
-              <p style={{ marginTop: 8, fontSize: "var(--fs-sm)", color: "var(--orange-ink)" }}>
-                Browser preview — live capture needs the desktop app (`npm run tauri dev`).
-              </p>
-            ) : null}
+              <p className="kicker">Tray app</p>
+              <h1 className="title">{PRODUCT}</h1>
             </div>
           </div>
-          <div className="no-drag" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <div className="seg" aria-label="Theme">
-              {(["system", "light", "dark"] as ThemePref[]).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={theme === t ? "on" : ""}
-                  onClick={() => {
-                    setTheme(t);
-                    setThemePref(t);
-                  }}
-                >
-                  {t === "system" ? "Auto" : t[0].toUpperCase() + t.slice(1)}
-                </button>
-              ))}
-            </div>
-            <Button onClick={() => sessionToggle().catch(() => undefined)}>Start recording</Button>
+          <div className="no-drag seg" aria-label="Theme">
+            {(["system", "light", "dark"] as ThemePref[]).map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={theme === t ? "on" : ""}
+                onClick={() => {
+                  setTheme(t);
+                  setThemePref(t);
+                }}
+              >
+                {t === "system" ? "Auto" : t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
           </div>
         </div>
       </header>
 
-      <main style={{ padding: "20px 24px 40px" }} className="grid-2">
-        <Card title="Permissions">
-          <p className="sub" style={{ marginTop: 0, marginBottom: 14, fontSize: "var(--fs-sm)" }}>
-            {perms?.note || "Grant microphone and screen recording so Pointcast can listen and capture."}
+      <main style={{ maxWidth: 520, margin: "0 auto", padding: "28px 24px 48px" }}>
+        <p className="onb-eyebrow">Set up once</p>
+        <h2 className="onb-title">Talk, mark the screen, paste anywhere.</h2>
+        <p className="onb-sub">
+          One click installs local speech (Moonshine) and asks for mic + screen. Hotkeys stay on their stock chords.
+          Speech never leaves this machine.
+        </p>
+
+        <div className="mic-install card" style={{ width: "auto", position: "relative", marginBottom: 16 }} data-state={done ? "done" : busy ? "busy" : "ask"}>
+          {done ? (
+            <div className="mic-install-done" role="status">
+              <Icon name="check" />
+              <span style={{ flex: 1 }}>{label || "Installed. Press Ctrl/Cmd+Shift+Space and talk."}</span>
+              <Button onClick={() => sessionToggle().catch(() => undefined)}>Start</Button>
+            </div>
+          ) : (
+            <>
+              <div className="mic-install-t">Voice + capture on this computer</div>
+              {busy ? (
+                <>
+                  <div className="mic-install-s" aria-live="polite">
+                    <span>{label || "Working…"}</span>
+                    {pct != null ? <span className="mic-install-n">{pct}%</span> : null}
+                  </div>
+                  <div className={`mic-install-p ${pct == null ? "indet" : ""}`} role="progressbar">
+                    <i style={pct == null ? undefined : { width: `${pct}%` }} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="mic-install-d">
+                    Downloads the speech runtime and the recommended model, then requests microphone and screen
+                    recording. Defaults are fine for almost everyone.
+                  </div>
+                  <div className="mic-install-a">
+                    <Button onClick={() => void oneClick()}>
+                      <Icon name="spark" size={14} />
+                      Set up Pointcast
+                    </Button>
+                  </div>
+                </>
+              )}
+              {failed ? (
+                <div className="mic-install-f" role="alert">
+                  {failed}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+
+        {superW ? (
+          <button
+            type="button"
+            className="perm-row"
+            style={{ width: "100%", cursor: "pointer", marginBottom: 12, textAlign: "left" }}
+            onClick={() => openTool("superwhisper").catch(() => undefined)}
+          >
+            <Icon name="mic" />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600 }}>Use existing SuperWhisper</div>
+              <div style={{ fontSize: "var(--fs-sm)", color: "var(--text3)" }}>
+                Detected at {superW.path}. Opens SuperWhisper for dictation; Pointcast still handles captures.
+              </div>
+            </div>
+            <span className="badge ok">Found</span>
+          </button>
+        ) : null}
+
+        <div style={{ display: "grid", gap: 8, marginBottom: 16 }}>
+          <div className={`perm-row ${perms?.microphone ? "ok" : ""}`}>
+            <span className={`dot ${perms?.microphone ? "on" : ""}`} />
+            <div style={{ flex: 1 }}>
+              <b>Microphone</b>
+              <div style={{ fontSize: "var(--fs-sm)", color: "var(--text3)" }}>Local speech-to-text only</div>
+            </div>
+            <span className={`badge ${perms?.microphone ? "ok" : "warn"}`}>{perms?.microphone ? "Ready" : "Needed"}</span>
+          </div>
+          <div className={`perm-row ${perms?.screen ? "ok" : ""}`}>
+            <span className={`dot ${perms?.screen ? "on" : ""}`} />
+            <div style={{ flex: 1 }}>
+              <b>Screen Recording</b>
+              <div style={{ fontSize: "var(--fs-sm)", color: "var(--text3)" }}>Annotated screenshots for the prompt</div>
+            </div>
+            <span className={`badge ${perms?.screen ? "ok" : "warn"}`}>{perms?.screen ? "Ready" : "Needed"}</span>
+          </div>
+        </div>
+
+        {preview ? (
+          <p style={{ fontSize: "var(--fs-sm)", color: "var(--orange-ink)", marginBottom: 16 }}>
+            Browser preview — run `npm run tauri dev` for live capture.
           </p>
-          <div style={{ display: "grid", gap: 8 }}>
-            <Perm ok={!!perms?.microphone} name="Microphone" detail="Local speech-to-text only" />
-            <Perm ok={!!perms?.screen} name="Screen Recording" detail="Annotated screenshots for the prompt" />
-          </div>
-          <div style={{ marginTop: 12 }}>
-            <Button variant="secondary" size="sm" onClick={() => requestPermissions().then(refresh)}>
-              Request permissions
-            </Button>
-          </div>
-        </Card>
+        ) : null}
 
-        <Card title="Hotkeys">
-          <Hotkey row="Session start / stop" value={String(cfg.session_hotkey)} field="session_hotkey" onSave={patch} />
-          <Hotkey row="Full screenshot" value={String(cfg.full_hotkey)} field="full_hotkey" onSave={patch} />
-          <Hotkey row="Region / annotate" value={String(cfg.region_hotkey)} field="region_hotkey" onSave={patch} />
-          <Hotkey row="Zoom crop" value={String(cfg.zoom_hotkey)} field="zoom_hotkey" onSave={patch} />
-          <label className="label-stack" style={{ marginTop: 10 }}>
-            Zoom size (px)
-            <Input type="number" value={Number(cfg.zoom_px)} onChange={(e) => patch({ zoom_px: Number(e.target.value) })} />
-          </label>
-        </Card>
+        <button type="button" className="adv-toggle" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
+          <Icon name="chev" size={14} />
+          Advanced
+          <span style={{ marginLeft: "auto", color: "var(--text3)", fontWeight: 400 }}>
+            Hotkeys, model, export, privacy
+          </span>
+        </button>
 
-        <Card title="Microphone & speech">
-          <label className="label-stack">
-            Microphone
-            <select
-              className="field"
-              value={String(cfg.device ?? "")}
-              onChange={(e) => patch({ device: e.target.value || null })}
-            >
-              <option value="">System default</option>
-              {devices.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="label-stack" style={{ marginTop: 10 }}>
-            STT model
-            <select className="field" value={String(cfg.model)} onChange={(e) => patch({ model: e.target.value })}>
-              <option value="auto">Auto (recommended: {String(cfg.recommended)})</option>
-              {(speech.models ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                  {m.installed ? " — installed" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={!!busy}
-              onClick={() => {
-                setBusy("runtime");
-                downloadModel("runtime");
-              }}
-            >
-              {speech.runtime?.installed ? "Runtime ready" : "Download runtime"}
-            </Button>
-            {(speech.models ?? []).map((m) => (
-              <Button
-                key={m.id}
-                size="sm"
-                variant={m.installed ? "outline" : "secondary"}
-                disabled={!!busy}
-                onClick={() => {
-                  setBusy(m.id);
-                  downloadModel(m.id);
-                }}
+        {advanced ? (
+          <div className="adv-body">
+            <AdvCard title="Hotkeys">
+              <Hotkey row="Session" value={String(cfg.session_hotkey)} field="session_hotkey" onSave={(p) => patch(cfg, p, setCfg)} />
+              <Hotkey row="Full" value={String(cfg.full_hotkey)} field="full_hotkey" onSave={(p) => patch(cfg, p, setCfg)} />
+              <Hotkey row="Region" value={String(cfg.region_hotkey)} field="region_hotkey" onSave={(p) => patch(cfg, p, setCfg)} />
+              <Hotkey row="Zoom" value={String(cfg.zoom_hotkey)} field="zoom_hotkey" onSave={(p) => patch(cfg, p, setCfg)} />
+              <label className="label-stack" style={{ marginTop: 8 }}>
+                Zoom size (px)
+                <Input type="number" value={Number(cfg.zoom_px)} onChange={(e) => patch(cfg, { zoom_px: Number(e.target.value) }, setCfg)} />
+              </label>
+            </AdvCard>
+            <AdvCard title="Speech model">
+              <select
+                className="field"
+                value={String(cfg.model)}
+                onChange={(e) => patch(cfg, { model: e.target.value }, setCfg)}
               >
-                {m.installed ? m.name : `Get ${m.name}`}
-              </Button>
-            ))}
+                <option value="auto">Auto ({String(cfg.recommended)})</option>
+                {(speech.models ?? []).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.installed ? " — installed" : ""}
+                  </option>
+                ))}
+              </select>
+            </AdvCard>
+            <AdvCard title="Output">
+              <div className="seg">
+                {(
+                  [
+                    ["clipboard", "Clipboard"],
+                    ["auto_paste", "Auto-paste"],
+                    ["folder", "Folder"],
+                  ] as const
+                ).map(([id, name]) => (
+                  <button key={id} type="button" className={cfg.output === id ? "on" : ""} onClick={() => patch(cfg, { output: id }, setCfg)}>
+                    {name}
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <Switch checked={Boolean(cfg.also_clipboard)} onChange={(v) => patch(cfg, { also_clipboard: v }, setCfg)} label="Also copy to clipboard" />
+              </div>
+              <label className="label-stack" style={{ marginTop: 10 }}>
+                Export folder
+                <Input value={String(cfg.export_dir ?? "")} onChange={(e) => patch(cfg, { export_dir: e.target.value || null }, setCfg)} />
+              </label>
+            </AdvCard>
+            <AdvCard title="Privacy & startup">
+              <Switch
+                checked={Boolean(cfg.start_at_login)}
+                onChange={async (v) => {
+                  try {
+                    if (v) await enable();
+                    else await disable();
+                  } catch {
+                    /* preview */
+                  }
+                  patch(cfg, { start_at_login: v }, setCfg);
+                }}
+                label="Start at login"
+              />
+              <div style={{ marginTop: 10 }}>
+                <Switch checked={Boolean(cfg.include_app)} onChange={(v) => patch(cfg, { include_app: v }, setCfg)} label="Include Pointcast windows" />
+              </div>
+              <label className="label-stack" style={{ marginTop: 10 }}>
+                Never capture (one per line)
+                <textarea
+                  className="field"
+                  value={((cfg.hidden as string[]) ?? []).join("\n")}
+                  onChange={(e) =>
+                    patch(
+                      cfg,
+                      {
+                        hidden: e.target.value
+                          .split("\n")
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      },
+                      setCfg,
+                    )
+                  }
+                />
+              </label>
+            </AdvCard>
           </div>
-          {progress ? (
-            <p className="mono" style={{ marginTop: 8, color: "var(--accent-ink)", fontSize: "var(--fs-xs)" }}>
-              {progress}
-            </p>
-          ) : null}
-          <p style={{ marginTop: 8, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-            Moonshine v2 via sherpa-onnx, loaded locally. MIT. Nothing is uploaded.
-          </p>
-        </Card>
-
-        <Card title="Output">
-          <div className="seg" role="group" aria-label="Output mode">
-            {(
-              [
-                ["clipboard", "Clipboard"],
-                ["auto_paste", "Auto-paste"],
-                ["folder", "Folder"],
-              ] as const
-            ).map(([id, label]) => (
-              <button key={id} type="button" className={cfg.output === id ? "on" : ""} onClick={() => patch({ output: id })}>
-                {label}
-              </button>
-            ))}
-          </div>
-          <div style={{ marginTop: 12 }}>
-            <Switch checked={Boolean(cfg.also_clipboard)} onChange={(v) => patch({ also_clipboard: v })} label="Also copy to clipboard" />
-          </div>
-          <label className="label-stack" style={{ marginTop: 12 }}>
-            Export folder (blank = Documents/Pointcast/…)
-            <Input value={String(cfg.export_dir ?? "")} onChange={(e) => patch({ export_dir: e.target.value || null })} />
-          </label>
-        </Card>
-
-        <Card title="Privacy & startup">
-          <Switch
-            checked={Boolean(cfg.start_at_login)}
-            onChange={async (v) => {
-              try {
-                if (v) await enable();
-                else await disable();
-              } catch {
-                /* preview */
-              }
-              patch({ start_at_login: v });
-            }}
-            label="Start at login"
-          />
-          <div style={{ marginTop: 12 }}>
-            <Switch
-              checked={Boolean(cfg.include_app)}
-              onChange={(v) => patch({ include_app: v })}
-              label="Include Pointcast windows in captures"
-            />
-          </div>
-          <label className="label-stack" style={{ marginTop: 12 }}>
-            Never capture windows matching (one per line)
-            <textarea
-              className="field"
-              value={((cfg.hidden as string[]) ?? []).join("\n")}
-              onChange={(e) =>
-                patch({
-                  hidden: e.target.value
-                    .split("\n")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </label>
-          <p style={{ marginTop: 12, fontSize: "var(--fs-xs)", color: "var(--text3)", display: "flex", gap: 8, alignItems: "center" }}>
-            Local MCP: {String(cfg.mcp_bind)} — GET /v1/session and POST /mcp
-          </p>
-        </Card>
+        ) : null}
       </main>
     </div>
   );
 }
 
-function Card({ title, children }: { title: string; children: ReactNode }) {
+function AdvCard({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="card">
-      <h2 className="section-label">{title}</h2>
+    <section className="card" style={{ marginBottom: 12, padding: 16 }}>
+      <h3 className="section-label">{title}</h3>
       {children}
     </section>
-  );
-}
-
-function Perm({ ok, name, detail }: { ok: boolean; name: string; detail: string }) {
-  return (
-    <div className={`perm-row ${ok ? "ok" : ""}`}>
-      <span className={`dot ${ok ? "on" : ""}`} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: "var(--fs-ui)" }}>{name}</div>
-        <div style={{ fontSize: "var(--fs-sm)", color: "var(--text3)" }}>{detail}</div>
-      </div>
-      <span className={`badge ${ok ? "ok" : "warn"}`}>{ok ? "Ready" : "Needed"}</span>
-    </div>
   );
 }
 
@@ -332,17 +388,25 @@ function Hotkey({
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   return (
-    <label className="row-between" style={{ marginBottom: 8, fontSize: "var(--fs-sm)" }}>
+    <label className="row-between" style={{ marginBottom: 6, fontSize: "var(--fs-sm)" }}>
       <span style={{ color: "var(--text2)" }}>{row}</span>
-      <Input
-        className="mono"
-        style={{ maxWidth: 220 }}
-        value={v}
-        onChange={(e) => setV(e.target.value)}
-        onBlur={() => onSave({ [field]: v })}
-      />
+      <Input className="mono" style={{ maxWidth: 200 }} value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onSave({ [field]: v })} />
     </label>
   );
+}
+
+async function patch(
+  cfg: Record<string, unknown>,
+  partial: Record<string, unknown>,
+  setCfg: (c: Record<string, unknown>) => void,
+) {
+  const next = { ...flatten(cfg), ...partial };
+  try {
+    const s = await settingsSet(next);
+    setCfg({ ...s });
+  } catch {
+    setCfg({ ...cfg, ...partial });
+  }
 }
 
 const BROWSER_PREVIEW: Record<string, unknown> = {
@@ -360,21 +424,7 @@ const BROWSER_PREVIEW: Record<string, unknown> = {
   zoom_px: 400,
   start_at_login: false,
   include_app: false,
-  hidden: [
-    "1Password",
-    "Bitwarden",
-    "KeePass",
-    "Dashlane",
-    "LastPass",
-    "Keeper",
-    "NordPass",
-    "Enpass",
-    "RoboForm",
-    "Proton Pass",
-    "Credential Manager",
-    "Windows Security",
-    "Keychain Access",
-  ],
+  hidden: ["1Password", "Bitwarden", "KeePass", "Dashlane", "LastPass", "Keychain Access"],
   mcp_bind: "127.0.0.1:47821",
   mcp_enabled: true,
   recommended: "moonshine-tiny-en",
@@ -382,7 +432,7 @@ const BROWSER_PREVIEW: Record<string, unknown> = {
   permissions: {
     microphone: false,
     screen: false,
-    note: "Open the Tauri app for microphone and screen-recording permission prompts.",
+    note: "Open the Tauri app for permission prompts.",
   },
   speech: {
     runtime: { id: "linux", installed: false, lib: "libsherpa-onnx-c-api.so" },

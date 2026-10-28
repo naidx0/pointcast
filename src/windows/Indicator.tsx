@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Mark } from "@/components/brand/Mark";
+import { useEffect, useState } from "react";
+import { Icon } from "@/components/Icons";
 import {
   captureFull,
   captureZoom,
@@ -38,10 +38,10 @@ export function Indicator() {
             phase: "recording",
             mic: true,
             screen: true,
-            partial: "The Place order button is sitting on top of the total…",
+            partial: "The Place order button…",
             duration_ms: 16_000,
             image_count: 1,
-            level: 0.45,
+            level: 0.4,
           });
         }
       });
@@ -51,115 +51,49 @@ export function Indicator() {
     };
   }, []);
 
-  const live = s.partial || s.text || "Listening…";
   const rec = s.phase === "recording" || s.phase === "loading";
+  const tip = s.partial || s.text || (rec ? "Listening…" : "Idle");
 
   return (
     <div
-      style={{ height: "100vh", width: "100vw", background: "transparent", padding: 12, boxSizing: "border-box" }}
+      style={{
+        height: "100vh",
+        width: "100vw",
+        background: "transparent",
+        display: "grid",
+        placeItems: "center",
+        padding: 8,
+        boxSizing: "border-box",
+      }}
       data-tauri-drag-region
+      title={tip}
     >
-      <div
-        className="panel"
-        style={{ height: "100%", display: "flex", flexDirection: "column", padding: 14, borderRadius: 20, boxSizing: "border-box" }}
-      >
-        <div className="row-between" data-tauri-drag-region>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Mark />
-            <span className={`dot ${rec ? "rec" : ""}`} />
-            <span
-              className="mono"
-              style={{
-                fontSize: "var(--fs-xs)",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                color: rec ? "var(--red-ink)" : "var(--text3)",
-              }}
-            >
-              {s.phase === "transcribing" ? "Transcribing" : rec ? "Recording" : s.phase}
-            </span>
-            <span className="mono" style={{ fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-              {stamp(s.duration_ms)}
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 10, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: s.mic ? "var(--red-ink)" : undefined }}>
-              <i className={`dot ${s.mic ? "mic" : ""}`} style={{ width: 6, height: 6 }} />
-              mic
-            </span>
-            <span
-              style={{ display: "inline-flex", alignItems: "center", gap: 4, color: s.screen ? "var(--accent-ink)" : undefined }}
-            >
-              <i className={`dot ${s.screen ? "screen" : ""}`} style={{ width: 6, height: 6 }} />
-              screen
-            </span>
-          </div>
-        </div>
-
-        <div className="level" style={{ marginTop: 10 }}>
-          <i style={{ width: `${Math.round(Math.min(1, s.level) * 100)}%` }} />
-        </div>
-
-        <p
-          style={{
-            margin: "10px 0 0",
-            flex: 1,
-            minHeight: 0,
-            overflow: "hidden",
-            font: "400 var(--fs-sm) / 1.45 var(--mono)",
-            color: "var(--text)",
-          }}
-        >
-          {live}
-          {s.image_count ? (
-            <span className="photo-chip" style={{ marginLeft: 8 }}>
-              {s.image_count} image{s.image_count === 1 ? "" : "s"}
-            </span>
-          ) : null}
-        </p>
-
-        {s.error ? (
-          <p
-            style={{
-              margin: "4px 0 0",
-              fontSize: "var(--fs-xs)",
-              color: "var(--orange-ink)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {s.error}
-          </p>
-        ) : null}
-
-        <div className="glassbar no-drag" style={{ marginTop: 10, width: "100%", justifyContent: "space-between" }}>
-          <Mini onClick={() => captureFull()}>Full</Mini>
-          <Mini onClick={() => regionBegin()}>Region</Mini>
-          <Mini onClick={() => captureZoom()}>Zoom</Mini>
-          <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 2px" }} />
-          <Mini onClick={() => sessionToggle()} primary>
-            Stop
-          </Mini>
-          <Mini onClick={() => sessionCancel()}>Esc</Mini>
-        </div>
+      <div className="capbar glassbar ind-bar" data-tauri-drag-region>
+        <span className={`dot ${rec ? "rec" : ""}`} style={{ marginLeft: 6 }} />
+        <span className="mono ind-clock">{stamp(s.duration_ms)}</span>
+        <span className="sep" />
+        <button type="button" className="ib no-drag" title="Full screenshot" onClick={() => captureFull()}>
+          <Icon name="monitor" />
+        </button>
+        <button type="button" className="ib no-drag" title="Region / annotate" onClick={() => regionBegin()}>
+          <Icon name="crop" />
+        </button>
+        <button type="button" className="ib no-drag" title="Zoom crop" onClick={() => captureZoom()}>
+          <Icon name="zoom" />
+        </button>
+        <span className="sep" />
+        <button type="button" className="ib no-drag" title={s.mic ? "Mic on" : "Mic off"} aria-pressed={s.mic}>
+          <Icon name="mic" />
+        </button>
+        {s.image_count ? <span className="photo-chip">{s.image_count}</span> : null}
+        <span className="vb-sp" style={{ flex: 1 }} />
+        <button type="button" className="pill pri no-drag" title="Stop" onClick={() => sessionToggle()}>
+          <Icon name="stop" size={12} />
+        </button>
+        <button type="button" className="ib no-drag" title="Cancel" onClick={() => sessionCancel()}>
+          <Icon name="x" />
+        </button>
       </div>
     </div>
-  );
-}
-
-function Mini({
-  children,
-  onClick,
-  primary,
-}: {
-  children: ReactNode;
-  onClick: () => void;
-  primary?: boolean;
-}) {
-  return (
-    <button type="button" className={`pill sm ${primary ? "pri" : "ghost"}`} onClick={onClick}>
-      {children}
-    </button>
   );
 }

@@ -43,8 +43,8 @@ Speech models (Moonshine v2 via sherpa-onnx 2.0.0) download on first use. They s
 ## Usage
 
 1. Launch Pointcast. It sits in the tray / menu bar. Open **Settings** from the icon.
-2. Download the speech **runtime** and **Moonshine Tiny v2** (or Base, if this machine is comfortable).
-3. Press **Ctrl+Shift+Space** (Windows/Linux) or **Cmd+Shift+Space** (macOS) to start a session. A floating indicator shows the live transcript, a red mic bead, and a blue screen bead.
+2. Click **Set up Pointcast** (one click: runtime + recommended model + permissions). Advanced options stay collapsed. If SuperWhisper is installed, you can use that instead for dictation.
+3. Press **Ctrl+Shift+Space** (Windows/Linux) or **Cmd+Shift+Space** (macOS) to start a session. A compact glass indicator shows the timer and icon actions.
 4. While recording:
    - **Ctrl+Shift+1** — full screenshot of the monitor under the pointer
    - **Ctrl+Shift+2** — region mode: freeze-frame overlay, drag a box, click numbered pins, pen / highlight. **Esc** backs out one layer at a time

@@ -1,12 +1,24 @@
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
 import { Mark, PRODUCT } from "@/components/brand/Mark";
-import { copyAgain, lastPrompt, onResult, type SessionExport } from "@/lib/api";
+import { Icon } from "@/components/Icons";
+import {
+  copyAgain,
+  detectTools,
+  lastPrompt,
+  onResult,
+  openTool,
+  pasteAgain,
+  sendToTool,
+  type DetectedTool,
+  type SessionExport,
+} from "@/lib/api";
 import { invoke } from "@tauri-apps/api/core";
 
 export function Result() {
   const [exp, setExp] = useState<SessionExport | null>(null);
   const [copied, setCopied] = useState(false);
+  const [tools, setTools] = useState<DetectedTool[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     lastPrompt()
@@ -16,6 +28,9 @@ export function Result() {
           setExp(PREVIEW_EXPORT);
         }
       });
+    detectTools()
+      .then(setTools)
+      .catch(() => setTools(PREVIEW_TOOLS));
     const u = onResult(setExp);
     return () => {
       u.then((fn) => fn());
@@ -35,12 +50,12 @@ export function Result() {
     );
   }
 
+  const ai = tools.filter((t) => t.kind === "ai");
+  const superW = tools.find((t) => t.id === "superwhisper");
+
   return (
     <div className="page">
-      <header
-        className="title-drag"
-        style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 16px" }}
-      >
+      <header className="title-drag" style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 16px" }}>
         <div className="row-between" style={{ alignItems: "flex-start" }}>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div className="traffic" aria-hidden="true">
@@ -56,39 +71,99 @@ export function Result() {
               </h1>
             </div>
           </div>
-          <div className="no-drag" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Button
-              onClick={async () => {
-                await copyAgain();
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              }}
-            >
-              {copied ? "Copied" : "Copy again"}
-            </Button>
-            <Button variant="secondary" onClick={() => invoke("paste_again")}>
-              Paste
-            </Button>
-            <Button
-              variant="outline"
-              onClick={async () => {
-                const p = await invoke<string | null>("last_folder");
-                if (p) await invoke("open_folder", { path: p });
-              }}
-            >
-              Open folder
-            </Button>
-          </div>
         </div>
       </header>
 
-      <main style={{ padding: "20px 24px 40px", maxWidth: 820, margin: "0 auto" }}>
+      <main style={{ padding: "16px 24px 40px", maxWidth: 820, margin: "0 auto" }}>
+        <div className="capbar glassbar result-actions no-drag" style={{ position: "sticky", top: 12, zIndex: 5, marginBottom: 16, width: "100%", justifyContent: "flex-start" }}>
+          <button
+            type="button"
+            className="pill pri"
+            title="Copy HTML + plain"
+            onClick={async () => {
+              setBusy("copy");
+              try {
+                await copyAgain();
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1400);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            <Icon name="copy" size={14} />
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            type="button"
+            className="pill"
+            title="Paste into the focused app"
+            onClick={async () => {
+              setBusy("paste");
+              try {
+                await pasteAgain();
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            <Icon name="paste" size={14} />
+            Paste
+          </button>
+          <button
+            type="button"
+            className="ib"
+            title="Open export folder"
+            onClick={async () => {
+              const p = await invoke<string | null>("last_folder");
+              if (p) await invoke("open_folder", { path: p });
+            }}
+          >
+            <Icon name="folder" />
+          </button>
+          <span className="sep" />
+          {ai.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className="pill"
+              title={`Copy and open ${t.name}`}
+              disabled={busy === t.id}
+              onClick={async () => {
+                setBusy(t.id);
+                try {
+                  await sendToTool(t.id);
+                } catch {
+                  await copyAgain();
+                  await openTool(t.id);
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            >
+              <Icon name="send" size={14} />
+              {t.name}
+            </button>
+          ))}
+          {superW ? (
+            <button
+              type="button"
+              className="pill"
+              title="Open SuperWhisper"
+              onClick={() => openTool("superwhisper").catch(() => undefined)}
+            >
+              <Icon name="mic" size={14} />
+              SuperWhisper
+            </button>
+          ) : null}
+        </div>
+
         <article className="card" style={{ lineHeight: 1.62, fontSize: "var(--fs-chat)" }}>
           <PromptBody exp={exp} />
         </article>
         <p className="mono" style={{ marginTop: 12, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-          HTML clipboard carries inline images. Plain fallback: {exp.plain.slice(0, 120)}
-          {exp.plain.length > 120 ? "…" : ""}
+          HTML clipboard carries inline images. Plain fallback starts: {exp.plain.slice(0, 100)}
+          {exp.plain.length > 100 ? "…" : ""}
         </p>
       </main>
     </div>
@@ -103,7 +178,16 @@ function PromptBody({ exp }: { exp: SessionExport }) {
         p.kind === "text" ? (
           <span key={i}>{p.value}</span>
         ) : (
-          <span key={i} style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", margin: "8px 0", verticalAlign: "middle" }}>
+          <span
+            key={i}
+            style={{
+              display: "inline-flex",
+              flexDirection: "column",
+              alignItems: "flex-start",
+              margin: "8px 0",
+              verticalAlign: "middle",
+            }}
+          >
             <img
               src={exp.images[p.n - 1]?.data_url}
               alt={p.value}
@@ -123,6 +207,13 @@ function PromptBody({ exp }: { exp: SessionExport }) {
     </div>
   );
 }
+
+const PREVIEW_TOOLS: DetectedTool[] = [
+  { id: "chatgpt", name: "ChatGPT", path: "/preview", kind: "ai" },
+  { id: "claude", name: "Claude", path: "/preview", kind: "ai" },
+  { id: "cursor", name: "Cursor", path: "/preview", kind: "ai" },
+  { id: "superwhisper", name: "SuperWhisper", path: "/Applications/Superwhisper.app", kind: "stt" },
+];
 
 const PREVIEW_EXPORT: SessionExport = {
   plain:

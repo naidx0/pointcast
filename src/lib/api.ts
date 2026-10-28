@@ -32,6 +32,13 @@ export type SessionExport = {
   }[];
 };
 
+export type DetectedTool = {
+  id: string;
+  name: string;
+  path: string;
+  kind: string;
+};
+
 export async function settingsGet(): Promise<Record<string, unknown>> {
   return invoke("settings_get");
 }
@@ -80,12 +87,32 @@ export async function copyAgain(): Promise<void> {
   await invoke("copy_again");
 }
 
+export async function pasteAgain(): Promise<void> {
+  await invoke("paste_again");
+}
+
 export async function downloadModel(id: string): Promise<void> {
   await invoke("download_model", { id });
 }
 
 export async function requestPermissions(): Promise<unknown> {
   return invoke("request_permissions");
+}
+
+export async function setupRun(): Promise<void> {
+  await invoke("setup_run");
+}
+
+export async function detectTools(): Promise<DetectedTool[]> {
+  return invoke("detect_tools");
+}
+
+export async function openTool(id: string): Promise<void> {
+  await invoke("open_tool", { id });
+}
+
+export async function sendToTool(id: string): Promise<void> {
+  await invoke("send_to_tool", { id });
 }
 
 export function onState(fn: (s: UiState) => void): Promise<UnlistenFn> {
@@ -108,6 +135,14 @@ export function onSpeechProgress(fn: (p: unknown) => void): Promise<UnlistenFn> 
 
 export function onSpeechDone(fn: (p: unknown) => void): Promise<UnlistenFn> {
   return listen("speech://done", (e) => fn(e.payload));
+}
+
+export function onSetupProgress(fn: (p: { step?: string; label?: string; id?: string }) => void): Promise<UnlistenFn> {
+  return listen("setup://progress", (e) => fn(e.payload as { step?: string; label?: string; id?: string }));
+}
+
+export function onSetupDone(fn: (p: { ok: boolean; error?: string; recommended?: string }) => void): Promise<UnlistenFn> {
+  return listen("setup://done", (e) => fn(e.payload as { ok: boolean; error?: string; recommended?: string }));
 }
 
 export function stamp(ms: number): string {

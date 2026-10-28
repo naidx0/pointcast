@@ -4,8 +4,8 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type ReactNode,
 } from "react";
+import { Icon } from "@/components/Icons";
 import { onOverlayFrame, regionCancel, regionCommit, type Label } from "@/lib/api";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -206,49 +206,42 @@ export function Overlay() {
       <div className="hint-bar">{hint(layer, tool)}</div>
       {layer === "annotating" ? (
         <div
-          className="glassbar no-drag"
+          className="capbar glassbar no-drag"
           style={{ position: "absolute", left: "50%", top: 20, transform: "translateX(-50%)", zIndex: 20 }}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <ToolBtn active={tool === "pin"} onClick={() => setTool("pin")}>
-            Pin
-          </ToolBtn>
-          <ToolBtn active={tool === "pen"} onClick={() => setTool("pen")}>
-            Pen
-          </ToolBtn>
-          <ToolBtn active={tool === "highlight"} onClick={() => setTool("highlight")}>
-            Highlight
-          </ToolBtn>
-          <span style={{ width: 1, height: 20, background: "rgba(0,0,0,0.12)", margin: "0 4px" }} />
-          <button type="button" className="pill pri" onClick={() => void commit()}>
-            Capture ↵
+          <button
+            type="button"
+            className={`ib ${tool === "pin" ? "on" : ""}`}
+            title="Pin (P)"
+            onClick={() => setTool("pin")}
+          >
+            <Icon name="pin" />
+          </button>
+          <button
+            type="button"
+            className={`ib ${tool === "pen" ? "on" : ""}`}
+            title="Pen (D)"
+            onClick={() => setTool("pen")}
+          >
+            <Icon name="pen" />
+          </button>
+          <button
+            type="button"
+            className={`ib ${tool === "highlight" ? "on" : ""}`}
+            title="Highlight (H)"
+            onClick={() => setTool("highlight")}
+          >
+            <Icon name="hi" />
+          </button>
+          <span className="sep" />
+          <button type="button" className="pill pri" title="Capture (Enter)" onClick={() => void commit()}>
+            <Icon name="check" size={14} />
+            Capture
           </button>
         </div>
       ) : null}
     </div>
-  );
-}
-
-function ToolBtn({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className={`pill ${active ? "on" : ""}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
