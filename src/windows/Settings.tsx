@@ -172,10 +172,10 @@ export function Settings() {
 
       <main style={{ maxWidth: 520, margin: "0 auto", padding: "28px 24px 48px" }}>
         <p className="onb-eyebrow">Set up once</p>
-        <h2 className="onb-title">Talk, mark the screen, paste anywhere.</h2>
+        <h2 className="onb-title">Hotkey → talk → mark → paste.</h2>
         <p className="onb-sub">
-          One click installs local speech (Moonshine) and asks for mic + screen. Hotkeys stay on their stock chords.
-          Speech never leaves this machine.
+          One click installs local speech and asks for mic + screen. Then: tray or ⌃⇧Space, talk, box the bug, paste
+          into any AI input. Speech never leaves this machine.
         </p>
 
         <div className="mic-install card" style={{ width: "auto", position: "relative", marginBottom: 16 }} data-state={done ? "done" : busy ? "busy" : "ask"}>
@@ -418,7 +418,7 @@ const BROWSER_PREVIEW: Record<string, unknown> = {
   talk_mode: "tap",
   model: "auto",
   device: null,
-  output: "clipboard",
+  output: "auto_paste",
   also_clipboard: true,
   export_dir: null,
   zoom_px: 400,

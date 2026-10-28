@@ -8,6 +8,8 @@ pub enum Tool {
     Pin,
     Pen,
     Highlight,
+    Arrow,
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,13 +44,19 @@ pub fn hint(layer: OverlayLayer, tool: Tool) -> &'static str {
             "Drag a box · Esc cancel"
         }
         (OverlayLayer::Annotating, Tool::Pin) => {
-            "Click to pin · P pen · H highlight · Enter capture · Esc back"
+            "Click to pin · A arrow · Enter capture · Esc back"
         }
         (OverlayLayer::Annotating, Tool::Pen) => {
-            "Draw · P pin · H highlight · Enter capture · Esc back"
+            "Draw · P pin · A arrow · Enter capture · Esc back"
         }
         (OverlayLayer::Annotating, Tool::Highlight) => {
-            "Highlight · P pin · D pen · Enter capture · Esc back"
+            "Highlight · P pin · A arrow · Enter capture · Esc back"
+        }
+        (OverlayLayer::Annotating, Tool::Arrow) => {
+            "Drag an arrow · Enter capture · Esc back"
+        }
+        (OverlayLayer::Annotating, Tool::Text) => {
+            "Click to label · Enter capture · Esc back"
         }
         (OverlayLayer::Pinning, _) => "Click to drop pin · Esc cancel pin",
         (OverlayLayer::Drawing, _) => "Release to finish stroke · Esc cancel stroke",

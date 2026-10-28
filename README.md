@@ -8,7 +8,7 @@ Think SuperWhisper meeting Cursor’s design-mode Annotate, but desktop-wide and
 
 ![Pointcast demo placeholder](docs/demo/placeholder.gif)
 
-A 48-second Linux VM recording is at [`docs/demo/pointcast-demo.mp4`](docs/demo/pointcast-demo.mp4): the Northwind checkout sample, the floating recording indicator (mic + screen beads), Full / Region / Zoom / Stop, and the assembled prompt with an inline screenshot. Live speech-to-text and the freeze-frame overlay did not appear in that capture (no microphone on the VM; region overlay did not clearly show).
+A 48-second Linux VM recording is at [`docs/demo/pointcast-demo.mp4`](docs/demo/pointcast-demo.mp4). Core loop: **tray / hotkey → talk → region annotate (box, pin, arrow, text) → Paste into app**.
 
 ## Why
 
@@ -30,7 +30,7 @@ npm install
 npm run tauri build
 ```
 
-CI publishes **macOS universal** (`.dmg` / `.app`) and **Windows** (`.msi` / NSIS) artifacts. Linux is a nice-to-have: `deb` is produced on Ubuntu runners when WebKit is present.
+CI publishes **macOS universal** (`.dmg` / `.app`) and **Windows** (`.msi` / NSIS) artifacts. On Linux X11, `npm run tauri build` produces `.deb` and AppImage under `src-tauri/target/release/bundle/`.
 
 Speech models (Moonshine v2 via sherpa-onnx 2.0.0) download on first use. They stay on disk under the OS local-data directory (`Pointcast/speech`). Nothing is uploaded.
 
@@ -44,12 +44,12 @@ Speech models (Moonshine v2 via sherpa-onnx 2.0.0) download on first use. They s
 
 1. Launch Pointcast. It sits in the tray / menu bar. Open **Settings** from the icon.
 2. Click **Set up Pointcast** (one click: runtime + recommended model + permissions). Advanced options stay collapsed. If SuperWhisper is installed, you can use that instead for dictation.
-3. Press **Ctrl+Shift+Space** (Windows/Linux) or **Cmd+Shift+Space** (macOS) to start a session. A compact glass indicator shows the timer and icon actions.
+3. Press **Ctrl+Shift+Space** (Windows/Linux) or **Cmd+Shift+Space** (macOS), or tray → **Record**. A compact glass indicator shows the timer.
 4. While recording:
-   - **Ctrl+Shift+1** — full screenshot of the monitor under the pointer
-   - **Ctrl+Shift+2** — region mode: freeze-frame overlay, drag a box, click numbered pins, pen / highlight. **Esc** backs out one layer at a time
-   - **Ctrl+Shift+Z** — zoom crop of N×N pixels around the pointer (N is in Settings)
-5. Press the session hotkey again (or **Stop**). Pointcast copies an HTML clipboard with inline images, writes `Documents/Pointcast/<timestamp>/prompt.md` plus PNGs, and can auto-paste into the focused app.
+   - **Ctrl+Shift+1** — full screenshot
+   - **Ctrl+Shift+2** — region annotate: drag a box, then pin / arrow / text / pen. **Esc** backs out one layer
+   - Zoom crop stays on **Ctrl+Shift+Z** (Advanced) if you need it
+5. Stop. Default delivery is **auto-paste** into the focused app (clipboard kept too). Or tray → **Paste last prompt** / result window → **Paste into app**.
 
 A tiny local MCP server listens on `127.0.0.1:47821`:
 

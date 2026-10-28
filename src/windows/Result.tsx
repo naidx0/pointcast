@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 export function Result() {
   const [exp, setExp] = useState<SessionExport | null>(null);
   const [copied, setCopied] = useState(false);
+  const [pasted, setPasted] = useState(false);
   const [tools, setTools] = useState<DetectedTool[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -51,7 +52,6 @@ export function Result() {
   }
 
   const ai = tools.filter((t) => t.kind === "ai");
-  const superW = tools.find((t) => t.id === "superwhisper");
 
   return (
     <div className="page">
@@ -75,11 +75,34 @@ export function Result() {
       </header>
 
       <main style={{ padding: "16px 24px 40px", maxWidth: 820, margin: "0 auto" }}>
-        <div className="capbar glassbar result-actions no-drag" style={{ position: "sticky", top: 12, zIndex: 5, marginBottom: 16, width: "100%", justifyContent: "flex-start" }}>
+        <div
+          className="capbar glassbar result-actions no-drag"
+          style={{ position: "sticky", top: 12, zIndex: 5, marginBottom: 16, width: "100%", justifyContent: "flex-start" }}
+        >
           <button
             type="button"
-            className="pill pri"
+            className="pill pri lg"
+            title="Paste into the focused app (Ctrl/Cmd+V)"
+            disabled={busy === "paste"}
+            onClick={async () => {
+              setBusy("paste");
+              try {
+                await pasteAgain();
+                setPasted(true);
+                setTimeout(() => setPasted(false), 1400);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            <Icon name="paste" size={16} />
+            {pasted ? "Pasted" : "Paste into app"}
+          </button>
+          <button
+            type="button"
+            className="pill lg"
             title="Copy HTML + plain"
+            disabled={busy === "copy"}
             onClick={async () => {
               setBusy("copy");
               try {
@@ -91,24 +114,8 @@ export function Result() {
               }
             }}
           >
-            <Icon name="copy" size={14} />
+            <Icon name="copy" size={15} />
             {copied ? "Copied" : "Copy"}
-          </button>
-          <button
-            type="button"
-            className="pill"
-            title="Paste into the focused app"
-            onClick={async () => {
-              setBusy("paste");
-              try {
-                await pasteAgain();
-              } finally {
-                setBusy(null);
-              }
-            }}
-          >
-            <Icon name="paste" size={14} />
-            Paste
           </button>
           <button
             type="button"
@@ -119,9 +126,9 @@ export function Result() {
               if (p) await invoke("open_folder", { path: p });
             }}
           >
-            <Icon name="folder" />
+            <Icon name="folder" size={18} />
           </button>
-          <span className="sep" />
+          {ai.length ? <span className="sep" /> : null}
           {ai.map((t) => (
             <button
               key={t.id}
@@ -145,25 +152,13 @@ export function Result() {
               {t.name}
             </button>
           ))}
-          {superW ? (
-            <button
-              type="button"
-              className="pill"
-              title="Open SuperWhisper"
-              onClick={() => openTool("superwhisper").catch(() => undefined)}
-            >
-              <Icon name="mic" size={14} />
-              SuperWhisper
-            </button>
-          ) : null}
         </div>
 
         <article className="card" style={{ lineHeight: 1.62, fontSize: "var(--fs-chat)" }}>
           <PromptBody exp={exp} />
         </article>
         <p className="mono" style={{ marginTop: 12, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-          HTML clipboard carries inline images. Plain fallback starts: {exp.plain.slice(0, 100)}
-          {exp.plain.length > 100 ? "…" : ""}
+          Click Paste into app with your chat focused — or use the tray · Paste last prompt.
         </p>
       </main>
     </div>
@@ -212,7 +207,6 @@ const PREVIEW_TOOLS: DetectedTool[] = [
   { id: "chatgpt", name: "ChatGPT", path: "/preview", kind: "ai" },
   { id: "claude", name: "Claude", path: "/preview", kind: "ai" },
   { id: "cursor", name: "Cursor", path: "/preview", kind: "ai" },
-  { id: "superwhisper", name: "SuperWhisper", path: "/Applications/Superwhisper.app", kind: "stt" },
 ];
 
 const PREVIEW_EXPORT: SessionExport = {

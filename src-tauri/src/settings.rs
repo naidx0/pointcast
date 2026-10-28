@@ -76,7 +76,7 @@ impl Default for Settings {
             talk_mode: TalkMode::default(),
             model: default_model(),
             device: None,
-            output: OutputMode::Clipboard,
+            output: OutputMode::AutoPaste,
             also_clipboard: true,
             export_dir: None,
             zoom_px: default_zoom_px(),

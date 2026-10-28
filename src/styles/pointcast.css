@@ -1,9 +1,9 @@
-/* Pointcast chrome built on Sequence Nova tokens — SF system fonts, vibrancy, pills. */
+/* Pointcast chrome — Sequence Nova tokens + Geist (local @fontsource-variable), Lucide icons. */
 
 :root {
-  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI",
-    system-ui, sans-serif;
-  --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font: "Geist Variable", Geist, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  --mono: "Geist Mono Variable", "Geist Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
 
@@ -201,8 +201,8 @@ html.win .win-caption {
 }
 
 .ib {
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   padding: 0;
   border-radius: 50%;
   border: 0;
@@ -212,6 +212,11 @@ html.win .win-caption {
   place-items: center;
   cursor: pointer;
   transition: background var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
+}
+.ib .i {
+  display: block;
+  /* Optical center: Lucide glyphs sit slightly high in the viewBox on some faces. */
+  translate: 0 0.5px;
 }
 .ib:hover {
   background: var(--surface2);
@@ -591,7 +596,7 @@ textarea.field {
 [data-theme=dark] .capbar.glassbar,[data-theme=dark] .ind-bar{
   background:rgba(28,28,31,.78);color:var(--text);box-shadow:var(--e3),0 0 0 .5px rgba(255,255,255,.08);
 }
-.capbar .ib{width:32px;height:32px;color:#333;background:transparent}
+.capbar .ib{width:40px;height:40px;color:#333;background:transparent}
 [data-theme=dark] .capbar .ib{color:var(--text2)}
 .capbar .ib:hover{background:rgba(0,0,0,.06);color:#111}
 [data-theme=dark] .capbar .ib:hover{background:var(--wash-hover);color:var(--text)}

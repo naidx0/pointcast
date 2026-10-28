@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icons";
 import {
   captureFull,
-  captureZoom,
   onState,
   regionBegin,
   sessionCancel,
@@ -25,6 +24,7 @@ const idle: UiState = {
   level: 0,
 };
 
+/** Floating recording bar — core only: talk, full shot, region annotate, stop. */
 export function Indicator() {
   const [s, setS] = useState<UiState>(idle);
 
@@ -73,25 +73,22 @@ export function Indicator() {
         <span className="mono ind-clock">{stamp(s.duration_ms)}</span>
         <span className="sep" />
         <button type="button" className="ib no-drag" title="Full screenshot" onClick={() => captureFull()}>
-          <Icon name="monitor" />
+          <Icon name="monitor" size={18} />
         </button>
         <button type="button" className="ib no-drag" title="Region / annotate" onClick={() => regionBegin()}>
-          <Icon name="crop" />
+          <Icon name="crop" size={18} />
         </button>
-        <button type="button" className="ib no-drag" title="Zoom crop" onClick={() => captureZoom()}>
-          <Icon name="zoom" />
-        </button>
-        <span className="sep" />
-        <button type="button" className="ib no-drag" title={s.mic ? "Mic on" : "Mic off"} aria-pressed={s.mic}>
-          <Icon name="mic" />
+        <button type="button" className={`ib no-drag ${s.mic ? "on" : ""}`} title={s.mic ? "Mic on" : "Mic off"} aria-pressed={s.mic}>
+          <Icon name="mic" size={18} />
         </button>
         {s.image_count ? <span className="photo-chip">{s.image_count}</span> : null}
         <span className="vb-sp" style={{ flex: 1 }} />
         <button type="button" className="pill pri no-drag" title="Stop" onClick={() => sessionToggle()}>
           <Icon name="stop" size={12} />
+          Stop
         </button>
         <button type="button" className="ib no-drag" title="Cancel" onClick={() => sessionCancel()}>
-          <Icon name="x" />
+          <Icon name="x" size={18} />
         </button>
       </div>
     </div>

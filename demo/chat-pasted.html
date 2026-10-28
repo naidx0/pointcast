@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Chat — Compose</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.45 "Geist Variable",Geist,system-ui,sans-serif;background:#0f1115;color:#e8eaed;height:100vh;display:grid;grid-template-rows:48px 1fr auto}
+  header{display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid #2a2f3a;background:#161a22}
+  header b{font-weight:650;letter-spacing:-.02em}
+  .dot{width:8px;height:8px;border-radius:50%;background:#3dd68c}
+  main{padding:24px;overflow:auto}
+  .bubble{max-width:760px;background:#1c2230;border:1px solid #2a2f3a;border-radius:14px;padding:14px 16px;margin-bottom:12px;white-space:pre-wrap}
+  .bubble img{max-width:420px;border-radius:10px;margin-top:10px;border:1px solid #2a2f3a;display:block}
+  .chip{display:inline-block;margin-top:8px;padding:2px 8px;border-radius:999px;background:rgba(10,132,255,.15);color:#6cb6ff;font:500 12px Geist,system-ui}
+  footer{padding:14px 16px 18px;border-top:1px solid #2a2f3a;background:#161a22}
+  .composer{display:flex;gap:10px;align-items:flex-end;max-width:900px}
+  textarea{flex:1;min-height:120px;resize:vertical;border-radius:12px;border:1px solid #4c8dff;background:#0f1115;color:#e8eaed;padding:12px 14px;font:inherit;box-shadow:0 0 0 3px rgba(76,141,255,.25)}
+  button{height:40px;padding:0 16px;border:0;border-radius:999px;background:#e8eaed;color:#0f1115;font:600 14px Geist,system-ui}
+</style>
+</head>
+<body>
+<header><span class="dot"></span><b>Chat</b><span style="color:#8b93a7;font-size:13px">composer · Pointcast pasted</span></header>
+<main>
+  <div class="bubble" style="color:#8b93a7">Ask anything about the UI. Paste a Pointcast prompt below.</div>
+  <div class="bubble" id="pasted">The Place order button is sitting on top of the total. I boxed it and dropped a pin.
+
+<img src="/freeze.png" alt="annotated region"/>
+<span class="chip">[image 1: 1=Place order — 28px too far left]</span>
+
+Please shift the primary button so it no longer overlaps the total.</div>
+</main>
+<footer>
+  <div class="composer">
+    <textarea id="box" autofocus>The Place order button is sitting on top of the total. I boxed it and dropped a pin.
+
+[image 1: 1=Place order — 28px too far left]
+
+Please shift the primary button so it no longer overlaps the total.</textarea>
+    <button type="button">Send</button>
+  </div>
+</footer>
+</body>
+</html>
