@@ -579,7 +579,7 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ output: v })}
           />
         </Row>
-        {cfg.output !== "clipboard" ? (
+        {cfg.output === "folder" ? (
           <Row label="Also copy to the clipboard">
             <Toggle label="Also copy to the clipboard" on={cfg.also_clipboard} set={(v) => patch({ also_clipboard: v })} />
           </Row>
