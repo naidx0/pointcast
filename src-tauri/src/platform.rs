@@ -112,14 +112,18 @@ pub fn show_overlay(app: &AppHandle) {
     let Some(w) = ensure(app, "overlay") else {
         return;
     };
-    if let Some(m) = pointer_monitor(app) {
-        place(&w, &m);
+    let m = pointer_monitor(app);
+    if let Some(m) = &m {
+        place(&w, m);
     }
     if !cfg!(target_os = "macos") {
         let _ = w.set_always_on_top(true);
     }
     raise(&w, Level::Overlay);
     let _ = w.show();
+    if let Some(m) = m.as_ref().filter(|_| !cfg!(target_os = "macos")) {
+        place(&w, m);
+    }
     let _ = w.set_focus();
 }
 
@@ -132,8 +136,8 @@ fn place(w: &WebviewWindow, m: &Monitor) {
         let _ = w.set_size(size.to_logical::<f64>(s));
         let _ = w.set_position(pos.to_logical::<f64>(s));
     } else {
-        let _ = w.set_size(size);
         let _ = w.set_position(pos);
+        let _ = w.set_size(size);
     }
 }
 
