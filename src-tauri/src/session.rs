@@ -404,9 +404,10 @@ impl App {
             return Ok(Some(prompt::assemble_export(&items)));
         }
         // The checkpoint goes only once History has the prompt: a failed save leaves it for
-        // the next launch to recover.
+        // the next launch to recover. A recording that came back with no words keeps its audio there, to transcribe
+        // again; only one with neither is let go.
         let mut saved = None;
-        if items.is_empty() {
+        if items.is_empty() && !self.history.kept_audio() {
             self.history.clear_checkpoint();
         } else {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
@@ -1521,6 +1522,49 @@ mod tests {
         assert_eq!(a.again(&id, ok, start, |_, _| {}).unwrap_err(), INTERRUPTED);
         assert_eq!(a.history.items(&id).unwrap(), before, "every refusal left the entry as it was");
         assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
+    }
+
+    #[test]
+    fn a_recording_with_no_words_keeps_its_audio_in_history_to_transcribe_again() {
+        let out = std::env::temp_dir().join(format!("pc-session-no-words-out-{}", std::process::id()));
+        for keep in [true, false] {
+            let a = app(&format!("no-words-{keep}"));
+            a.practice.store(false, Ordering::SeqCst);
+            {
+                // Saved to a folder only: a stop in a test never touches the clipboard or pastes.
+                let mut s = a.settings.lock().unwrap();
+                (s.output, s.also_clipboard, s.export_dir, s.keep_audio) = (OutputMode::Folder, false, Some(out.to_string_lossy().into_owned()), keep);
+            }
+            *a.t0.lock().unwrap() = Some(now_ms());
+            a.state.lock().unwrap().phase = Phase::Recording;
+            a.stop.store(false, Ordering::SeqCst);
+            a.take_no.store(1, Ordering::SeqCst);
+            let take = Arc::new(Take::default());
+            *a.worker.lock().unwrap() = Some({
+                let (me, take) = (a.clone(), take.clone());
+                std::thread::spawn(move || me.worker(1, take))
+            });
+            // Two sentences, and no model here to hear them: no words come back.
+            let x = bursts(8.5, &SPANS);
+            take.samples.lock().unwrap().extend_from_slice(&x);
+            let exp = a.stop(false).unwrap().unwrap();
+            assert!(exp.plain.is_empty());
+            assert!(a.history.recover().is_none(), "nothing left behind to recover");
+            let l = a.history.list();
+            if !keep {
+                assert!(l.is_empty(), "no words and no audio: nothing to keep");
+                continue;
+            }
+            assert_eq!(l.len(), 1);
+            assert!(l[0].has_audio && l[0].preview == crate::history::NO_WORDS, "{:?}", l[0]);
+            assert_eq!(a.history.audio(&l[0].id).unwrap().len(), x.len());
+            assert_eq!(a.last_id.lock().unwrap().as_deref(), Some(l[0].id.as_str()));
+            // Transcribed again with a model that hears: the words arrive.
+            let hear = counting();
+            a.again(&l[0].id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+            assert_eq!(a.last_export().unwrap().plain, "piece 1 piece 2 piece 3");
+        }
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// Words of `s`, lower case, without punctuation.

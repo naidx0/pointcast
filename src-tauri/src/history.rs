@@ -20,6 +20,9 @@ const AUDIO_PCM: &str = "audio.pcm";
 
 pub const NO_AUDIO: &str = "This recording has no audio kept to transcribe again.";
 
+/// The list's preview for an entry that kept its audio and has no words.
+pub const NO_WORDS: &str = "No words were transcribed. Transcribe again to try.";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub id: String,
@@ -70,6 +73,7 @@ impl Store {
         let _ = std::fs::remove_dir_all(&tmp);
         // Audio that cannot be written leaves the entry without it, never without its words.
         meta.has_audio = audio.is_some_and(|a| std::fs::create_dir_all(&tmp).and_then(|_| std::fs::write(tmp.join(AUDIO), a)).is_ok());
+        no_words(&mut meta);
         write_entry(&tmp, items, &meta)?;
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&tmp, &dir).map_err(|e| e.to_string())?;
@@ -84,6 +88,7 @@ impl Store {
             let dir = self.history().join(&m.id);
             let _ = std::fs::remove_file(dir.join(AUDIO));
             m.has_audio = false;
+            no_words(&mut m);
             let _ = write_atomic(&dir.join("meta.json"), &serde_json::to_vec(&m).unwrap_or_default());
         }
     }
@@ -111,6 +116,11 @@ impl Store {
         std::fs::read(self.recovery().join(AUDIO_PCM)).ok().filter(|b| b.len() >= 2).map(|b| wav(&b))
     }
 
+    /// The recording in progress kept some audio.
+    pub fn kept_audio(&self) -> bool {
+        std::fs::metadata(self.recovery().join(AUDIO_PCM)).is_ok_and(|m| m.is_file() && m.len() >= 2)
+    }
+
     /// Put newly transcribed words in place of an entry's speech. Its pictures stay as they are, in their order and at
     /// their times, and the words fall between them by time. The session and its summary are written together.
     pub fn replace_speech(&self, id: &str, speech: &[Item]) -> Result<(), String> {
@@ -127,6 +137,7 @@ impl Store {
         let mut files = vec![(dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?)];
         if let Some(mut meta) = std::fs::read(dir.join("meta.json")).ok().and_then(|b| serde_json::from_slice::<Meta>(&b).ok()) {
             meta.preview = meta_for(&items, meta.created_ms, meta.duration_ms, false).preview;
+            no_words(&mut meta);
             files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
         }
         write_together(&files)
@@ -327,6 +338,15 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         images: items.iter().filter(|i| matches!(i, Item::Image { .. })).count() as u32,
         recovered,
         has_audio: false,
+    }
+}
+
+/// An entry without words whose audio is kept says how to get them; once its audio is gone it no longer offers to.
+fn no_words(m: &mut Meta) {
+    if m.has_audio && m.preview.is_empty() {
+        m.preview = NO_WORDS.into();
+    } else if !m.has_audio && m.preview == NO_WORDS {
+        m.preview.clear();
     }
 }
 
@@ -676,6 +696,28 @@ mod tests {
         for bad in ["", "..", "../settings", "nope"] {
             assert!(s.replace_speech(bad, &new).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_entry_with_audio_and_no_words_says_how_to_get_them_while_it_can() {
+        let s = store("no-words");
+        s.append_audio(&tone(32_000)).unwrap();
+        let m = s.save_recorded(&[], 1_793_000_000_000, 2_000).unwrap();
+        s.clear_checkpoint();
+        assert!(m.has_audio && m.preview == NO_WORDS && s.list()[0] == m);
+        s.replace_speech(&m.id, &[Item::Speech { t_ms: 400, end_ms: 1_600, text: "hello there".into() }]).unwrap();
+        assert_eq!(s.list()[0].preview, "hello there");
+        s.replace_speech(&m.id, &[]).unwrap();
+        assert_eq!(s.list()[0].preview, NO_WORDS, "still nothing: it can be tried again");
+        // Without its audio it no longer offers to.
+        assert_eq!(s.save(&[], 1_793_000_100_000, 10).unwrap().preview, "");
+        for i in 0..KEEP_AUDIO as u64 {
+            s.append_audio(&tone(1_600)).unwrap();
+            s.save_recorded(&items()[..1], 1_793_000_200_000 + i * 1000, 10).unwrap();
+            s.clear_checkpoint();
+        }
+        let old = s.list().into_iter().find(|e| e.id == m.id).unwrap();
+        assert!(!old.has_audio && old.preview.is_empty(), "{old:?}");
     }
 
     #[test]
