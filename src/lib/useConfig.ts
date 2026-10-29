@@ -75,6 +75,7 @@ function previewConfig(): Config {
     zoom_sharpen: true,
     outline_element: true,
     spoken_anchors: "ring",
+    key_frames: false,
     start_at_login: false,
     include_app: false,
     hidden: ["1Password", "Bitwarden", "KeePass", "Dashlane", "LastPass", "Keychain Access"],

@@ -76,6 +76,7 @@ export type Config = {
   zoom_sharpen: boolean;
   outline_element: boolean;
   spoken_anchors: SpokenAnchors;
+  key_frames: boolean;
   start_at_login: boolean;
   include_app: boolean;
   hidden: string[];
