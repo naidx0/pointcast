@@ -13,7 +13,7 @@ import {
   ZoomIn,
   type LucideIcon,
 } from "lucide-react";
-import { inTauri, onOverlayFrame, regionCancel, regionCommit, regionFrame, type Label } from "@/lib/api";
+import { inTauri, onOverlayFrame, regionCancel, regionCommit, regionFrame, type ElementMark, type Label } from "@/lib/api";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -29,7 +29,9 @@ type Shape =
   | { id: number; kind: "pen" | "highlight"; c: string; pts: Pt[] }
   | { id: number; kind: "magnify"; at: Pt }
   // Where the person pointed when the frame froze; placed for them, theirs to move or remove.
-  | { id: number; kind: "ring"; c: string; at: Pt };
+  | { id: number; kind: "ring"; c: string; at: Pt }
+  // The control under that spot, outlined for them; theirs to remove.
+  | { id: number; kind: "element"; c: string; r: Rect; role: string; name: string };
 
 // Drawing primitives. Shapes compile to these once; the SVG view and the canvas rasterizer both just interpret them.
 type Seg = ["M" | "L", number, number] | ["Q", number, number, number, number] | ["Z"];
@@ -48,16 +50,16 @@ type Ix =
   | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" }
   | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt };
 
-type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null };
+type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null };
 
-type Out = { url: string; w: number; h: number; labels: Label[] };
+type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null };
 
 const PREVIEW = typeof location !== "undefined" && location.search.includes("preview=1");
 const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
 const HL = "#FFCC00";
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 // Sizes in logical (on-screen) px. Everything drawn into the frame is multiplied by s = frame px per logical px.
-const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16, mark: 16, markW: 3, grip: 16 };
+const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16, mark: 16, markW: 3, grip: 16, out: 2, outGap: 3 };
 const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const HX = { nw: 0, n: 0.5, ne: 1, e: 1, se: 1, s: 0.5, sw: 0, w: 0 };
 const HY = { nw: 0, n: 0, ne: 0, e: 0.5, se: 1, s: 1, sw: 1, w: 0.5 };
@@ -90,9 +92,10 @@ const GESTURE: Record<Tool, string> = {
   magnify: "Click to drop a 2x loupe",
 };
 
-function hint(layer: Layer, tool: Tool, picked: boolean): string {
+function hint(layer: Layer, tool: Tool, picked?: Shape["kind"]): string {
   if (layer === "selecting") return "Drag to select · Click for full screen · Esc cancel";
-  if (picked && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
+  if (picked === "ring" && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
+  if (picked === "element" && layer === "annotating") return "Delete removes the outline · Enter capture";
   if (layer === "pinning") return "Type a label · Enter or Esc to finish";
   if (layer === "drawing") return "Release to finish · Esc discard";
   return `${GESTURE[tool]} · Enter capture · Esc back`;
@@ -106,7 +109,7 @@ type A =
   | { t: "drop"; id: number }
   | { t: "move"; id: number; at: Pt }
   | { t: "remove"; id: number }
-  | { t: "seed"; base: Shape[]; s: Shape }
+  | { t: "seed"; base: Shape[]; s: Shape[] }
   | { t: "undo" }
   | { t: "redo" }
   | { t: "reset"; now?: Shape[] };
@@ -127,9 +130,12 @@ function hist(h: H, a: A): H {
       return { past: [...h.past, h.now], now: h.now.map((x) => (x.id === a.id && "at" in x ? { ...x, at: a.at } : x)), future: [] };
     case "remove":
       return { past: [...h.past, h.now], now: h.now.filter((x) => x.id !== a.id), future: [] };
-    // A shape placed for the person counts as one step, so a single undo takes it away.
-    case "seed":
-      return { past: [a.base], now: [...a.base, a.s], future: [] };
+    // Each shape placed for the person counts as one step, so undo takes them away one at a time.
+    case "seed": {
+      const past = [a.base];
+      for (const x of a.s.slice(0, -1)) past.push([...past[past.length - 1], x]);
+      return { past, now: [...a.base, ...a.s], future: [] };
+    }
     case "undo":
       return h.past.length ? { past: h.past.slice(0, -1), now: h.past[h.past.length - 1], future: [h.now, ...h.future] } : h;
     case "redo":
@@ -144,8 +150,26 @@ const ink = (c: string) => (c === HL ? "#1c1c1e" : "#fff");
 const inside = (p: Pt, b: Rect) => p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h;
 const norm = (a: Pt, b: Pt): Rect => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-// Anchored shapes only count when their anchor is inside the box; strokes are just clipped by it.
-const seen = (sh: Shape, b: Rect) => !("at" in sh) || inside(sh.at, b);
+const mid = (r: Rect): Pt => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+// Anchored shapes only count when their anchor is inside the box, an outline when its middle is; strokes are just clipped by it.
+const seen = (sh: Shape, b: Rect) => (sh.kind === "element" ? inside(mid(sh.r), b) : !("at" in sh) || inside(sh.at, b));
+
+// The outlined control in the captured picture's pixels, clipped to it; null when none of it is in the box.
+function within(r: Rect, b: Rect): ElementMark["rect"] | null {
+  const [x0, y0, x1, y1] = [Math.round(b.x), Math.round(b.y), Math.round(b.x + b.w), Math.round(b.y + b.h)];
+  const l = clamp(Math.round(r.x), x0, x1);
+  const t = clamp(Math.round(r.y), y0, y1);
+  const rt = clamp(Math.round(r.x + r.w), x0, x1);
+  const bt = clamp(Math.round(r.y + r.h), y0, y1);
+  return rt > l && bt > t ? { x: l - x0, y: t - y0, w: rt - l, h: bt - t } : null;
+}
+
+// Around the control, a little outside it so its own edge stays visible. s = frame px per logical px.
+const ringed = (r: Rect, s: number): Rect => {
+  const g = M.outGap * s;
+  return { x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g };
+};
+const svgRect = (r: Rect) => ({ x: r.x, y: r.y, width: r.w, height: r.h });
 
 function numbering(list: Shape[]): Map<number, number> {
   const m = new Map<number, number>();
@@ -256,6 +280,13 @@ function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
       return [
         { k: "ell", x, y, r, stroke: "rgba(0,0,0,.5)", w: (M.markW + 2.5) * s },
         { k: "ell", x, y, r, stroke: sh.c, w: M.markW * s },
+      ];
+    }
+    case "element": {
+      const o = ringed(sh.r, s);
+      return [
+        { k: "box", ...o, r: 4 * s, stroke: "rgba(0,0,0,.5)", sw: (M.out + 2) * s },
+        { k: "box", ...o, r: 4 * s, stroke: sh.c, sw: M.out * s },
       ];
     }
   }
@@ -457,9 +488,9 @@ export function Overlay() {
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
   const colorRef = useRef(color);
   colorRef.current = color;
-  // The ring placed where the person pointed; starting over brings it back.
-  const seed = useRef<Shape | null>(null);
-  const restart = (base: Shape[] = []) => dispatch(seed.current ? { t: "seed", base, s: seed.current } : { t: "reset", now: base });
+  // The outline and the ring placed where the person pointed; starting over brings them back.
+  const seed = useRef<Shape[]>([]);
+  const restart = (base: Shape[] = []) => dispatch(seed.current.length ? { t: "seed", base, s: seed.current } : { t: "reset", now: base });
 
   useEffect(() => {
     const load = (f: Frame) => {
@@ -474,7 +505,7 @@ export function Overlay() {
       setNudge(null);
       editRef.current = null;
       ix.current = null;
-      seed.current = f.pointer ? { id: ++ids.current, kind: "ring", c: colorRef.current, at: f.pointer } : null;
+      seed.current = placed(f.element, f.pointer, colorRef.current);
       restart();
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
@@ -491,9 +522,9 @@ export function Overlay() {
         setSrc("/freeze.png");
         setNatural({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
         setLayer("annotating");
-        setBox({ x: 420, y: 280, w: 360, h: 220 });
-        seed.current = { id: ++ids.current, kind: "ring", c: COLORS[0], at: { x: 690, y: 420 } };
-        restart([{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 560, y: 360 }, text: "Place order — 28px too far left" }]);
+        setBox({ x: 975, y: 240, w: 380, h: 310 });
+        seed.current = placed({ role: "button", name: "Place order", rect: { x: 987, y: 435, w: 116, h: 41 } }, { x: 1060, y: 456 }, COLORS[0]);
+        restart([{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 1128, y: 456 }, text: "28px too far left" }]);
       };
       img.src = "/freeze.png";
     }
@@ -512,6 +543,13 @@ export function Overlay() {
     const el = barRef.current;
     if (el && (el.offsetWidth !== tb.w || el.offsetHeight !== tb.h)) setTb({ w: el.offsetWidth, h: el.offsetHeight });
   });
+
+  function placed(el: ElementMark | null | undefined, at: Pt | null | undefined, c: string): Shape[] {
+    const out: Shape[] = [];
+    if (el) out.push({ id: ++ids.current, kind: "element", c, r: el.rect, role: el.role, name: el.name });
+    if (at) out.push({ id: ++ids.current, kind: "ring", c, at });
+    return out;
+  }
 
   // Frame px <-> logical px. s = natural.w / displayed image width: every size drawn into the frame is multiplied by it.
   const fit = natural.w && vp.w && vp.h ? Math.min(vp.w / natural.w, vp.h / natural.h) : 1;
@@ -589,8 +627,11 @@ export function Overlay() {
         ...pins.map((p, i) => ({ n: i + 1, text: ("text" in p && p.text.trim()) || `pin ${i + 1}` })),
         ...notes.map((t, i) => ({ n: pins.length + i + 1, text: "text" in t ? t.text.trim() : "" })),
       ];
-      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels });
-      else await regionCommit(png, labels);
+      const el = list.find((x) => x.kind === "element");
+      const rect = el?.kind === "element" ? within(el.r, b) : null;
+      const element = el?.kind === "element" && rect ? { role: el.role, name: el.name, rect } : null;
+      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels, element });
+      else await regionCommit(png, labels, element);
     } catch (err) {
       console.error("pointcast overlay commit failed", err);
     } finally {
@@ -664,6 +705,11 @@ export function Overlay() {
     ix.current = { k: "shift", id: sh.id, a: toImg(e), o: sh.at, at: sh.at };
     setPicked(sh.id);
     grab(e);
+  }
+
+  function pick(e: PE<SVGRectElement>, id: number) {
+    e.stopPropagation();
+    if (e.button === 0) setPicked(id);
   }
 
   function startSize(e: PE<HTMLDivElement>, h: Handle) {
@@ -813,7 +859,30 @@ export function Overlay() {
           {layer === "annotating" ? (
             <svg className="ov-grips" style={{ left: ox, top: oy, width: dw, height: dh }} viewBox={`0 0 ${natural.w} ${natural.h}`}>
               {vis.map((sh) =>
-                sh.kind === "ring" ? (
+                sh.kind === "element" ? (
+                  <g key={sh.id}>
+                    {picked === sh.id ? (
+                      <rect
+                        {...svgRect(ringed(sh.r, s * 2.5))}
+                        rx={6 * s}
+                        fill="none"
+                        stroke="#fff"
+                        strokeWidth={1.5 * s}
+                        strokeDasharray={`${4 * s} ${3 * s}`}
+                      />
+                    ) : null}
+                    <rect
+                      className="ov-grip ov-pick"
+                      aria-label={`Outline of ${sh.role} ${sh.name}`.trim()}
+                      {...svgRect(ringed(sh.r, s))}
+                      rx={4 * s}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={M.grip * s}
+                      onPointerDown={(e) => pick(e, sh.id)}
+                    />
+                  </g>
+                ) : sh.kind === "ring" ? (
                   <g key={sh.id}>
                     {picked === sh.id ? (
                       <circle cx={sh.at.x} cy={sh.at.y} r={(M.mark + M.markW + 4) * s} fill="none" stroke="#fff" strokeWidth={1.5 * s} strokeDasharray={`${4 * s} ${3 * s}`} />
@@ -924,12 +993,14 @@ export function Overlay() {
           </button>
         </div>
       ) : null}
-      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, picked != null)}</div> : null}
+      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />
           <p>
-            Preview capture {out.w} × {out.h} px · {out.labels.map((l) => `${l.n}. ${l.text}`).join(" · ") || "no labels"}
+            Preview capture {out.w} × {out.h} px ·{" "}
+            {[out.element ? `${out.element.role} “${out.element.name}”` : "", ...out.labels.map((l) => `${l.n}. ${l.text}`)].filter(Boolean).join(" · ") ||
+              "no labels"}
           </p>
         </div>
       ) : null}

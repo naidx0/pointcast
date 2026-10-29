@@ -52,6 +52,12 @@
   cursor: grabbing;
 }
 
+/* An outline is picked to delete it, not moved. */
+.ov-root .ov-pick,
+.ov-root .ov-pick:active {
+  cursor: pointer;
+}
+
 .ov-root .ov-dim {
   position: absolute;
   inset: 0;

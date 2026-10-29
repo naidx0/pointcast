@@ -367,6 +367,9 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ mark_point: v })}
           />
         </Row>
+        <Row label="Outline the control I point at" sub="Names it in the prompt, like button “Place order”. Uses Accessibility on a Mac.">
+          <Toggle label="Outline the control I point at" on={cfg.outline_element} set={(v) => patch({ outline_element: v })} />
+        </Row>
         <Row label="Show Pointcast in captures" sub="Off keeps the recording bar and the annotate overlay out of every picture.">
           <Toggle label="Show Pointcast in captures" on={cfg.include_app} set={(v) => patch({ include_app: v })} />
         </Row>
