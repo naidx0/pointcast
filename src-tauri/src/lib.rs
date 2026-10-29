@@ -105,7 +105,7 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
 fn close_overlay(app: &AppHandle) {
     EDIT.cancel();
     hide_window(app, "overlay");
-    platform::restore_front();
+    platform::refocus_front();
     FRAME.lock().unwrap().take();
 }
 

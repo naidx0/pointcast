@@ -145,21 +145,45 @@ fn place(w: &WebviewWindow, m: &Monitor) {
 /// process on macOS), so focus goes back there afterwards and auto-paste lands in it.
 static FRONT: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 
-pub fn remember_front() {
-    *FRONT.lock().unwrap() = front();
+/// What to remember when `now` (target, process id) is in front: Pointcast's own windows never
+/// replace the app the person came from, and nothing in front keeps what was there.
+fn keep_front(old: Option<isize>, now: Option<(isize, u32)>, own_pid: u32) -> Option<isize> {
+    match now {
+        Some((t, pid)) if pid != own_pid => Some(t),
+        _ => old,
+    }
 }
 
+pub fn remember_front() {
+    let mut f = FRONT.lock().unwrap();
+    *f = keep_front(*f, front(), std::process::id());
+}
+
+/// Focus the remembered app and forget it: for the last delivery, so a later one never lands in a stale app.
 pub fn restore_front() {
     if let Some(t) = FRONT.lock().unwrap().take() {
         activate(t);
     }
 }
 
+/// Focus the remembered app and keep it, since another delivery (a stop after a region) may need it too.
+pub fn refocus_front() {
+    let t = *FRONT.lock().unwrap();
+    if let Some(t) = t {
+        activate(t);
+    }
+}
+
 #[cfg(windows)]
-fn front() -> Option<isize> {
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+fn front() -> Option<(isize, u32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     let h = unsafe { GetForegroundWindow() };
-    (!h.0.is_null()).then_some(h.0 as isize)
+    if h.0.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    Some((h.0 as isize, pid))
 }
 
 #[cfg(windows)]
@@ -172,7 +196,7 @@ fn activate(t: isize) {
 }
 
 #[cfg(target_os = "macos")]
-fn front() -> Option<isize> {
+fn front() -> Option<(isize, u32)> {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
     unsafe {
@@ -182,7 +206,7 @@ fn front() -> Option<isize> {
             return None;
         }
         let pid: i32 = msg_send![app, processIdentifier];
-        Some(pid as isize)
+        Some((pid as isize, pid as u32))
     }
 }
 
@@ -201,7 +225,7 @@ fn activate(t: isize) {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn front() -> Option<isize> {
+fn front() -> Option<(isize, u32)> {
     None
 }
 
@@ -324,6 +348,17 @@ pub fn chime(start: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointcast_in_front_keeps_the_app_it_came_from() {
+        const OURS: u32 = 4242;
+        assert_eq!(keep_front(Some(7), Some((99, OURS)), OURS), Some(7));
+        assert_eq!(keep_front(None, Some((99, OURS)), OURS), None);
+        assert_eq!(keep_front(Some(7), Some((99, 1000)), OURS), Some(99));
+        assert_eq!(keep_front(None, Some((99, 1000)), OURS), Some(99));
+        assert_eq!(keep_front(Some(7), None, OURS), Some(7));
+        assert_eq!(keep_front(None, None, OURS), None);
+    }
 
     #[test]
     fn the_hud_sits_bottom_centre_inside_the_work_area() {
