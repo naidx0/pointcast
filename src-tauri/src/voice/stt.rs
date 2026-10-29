@@ -217,6 +217,29 @@ pub struct Engine {
 
 pub const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// A piece with this much voice is never dropped for decoding to nothing.
+pub const SURE_VOICE_MS: u64 = 1_500;
+
+/// The text kept for a piece of clear voice the model could not make out, so the loss shows.
+pub const UNCLEAR: &str = "[unclear]";
+
+/// What a piece of a take says, through `hear`. A quiet piece is raised first. One with `SURE_VOICE_MS` of voice that
+/// comes back empty is heard once more at full level and, if still empty, kept as `UNCLEAR`; a shorter one is dropped.
+pub fn hear_piece(samples: &[f32], voiced_ms: u64, hear: impl Fn(&[f32]) -> Heard) -> Option<Heard> {
+    let h = hear(&super::audio::louder(samples, false));
+    if !h.text.is_empty() {
+        return Some(h);
+    }
+    if voiced_ms < SURE_VOICE_MS {
+        return None;
+    }
+    let h = hear(&super::audio::louder(samples, true));
+    if !h.text.is_empty() {
+        return Some(h);
+    }
+    Some(Heard { text: UNCLEAR.into(), tokens: None })
+}
+
 /// Families fast enough on a CPU to re-decode the open sentence for a live caption.
 pub fn live_captions(family: &str) -> bool {
     family != "whisper"
@@ -473,6 +496,25 @@ mod tests {
             Ok(_) => panic!("a library that changed was loaded"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_piece_of_clear_voice_is_never_dropped_for_decoding_to_nothing() {
+        let tries = std::cell::RefCell::new(vec![]);
+        let deaf = |s: &[f32]| {
+            tries.borrow_mut().push(s.iter().fold(0f32, |m, v| m.max(v.abs())));
+            Heard::default()
+        };
+        let quiet = vec![0.05f32; 16_000];
+        assert_eq!(hear_piece(&quiet, 1_000, &deaf), None, "a short sound that says nothing is dropped");
+        assert_eq!(tries.take(), vec![0.5], "heard once, raised");
+        assert_eq!(hear_piece(&quiet, SURE_VOICE_MS, &deaf).unwrap().text, UNCLEAR);
+        assert_eq!(tries.take().len(), 2, "heard twice before it is kept as unclear");
+        let loud = vec![0.4f32; 16_000];
+        let second = |s: &[f32]| Heard { text: if s[0] > 0.45 { "got it".into() } else { String::new() }, tokens: None };
+        assert_eq!(hear_piece(&loud, SURE_VOICE_MS, second).unwrap().text, "got it", "the retry is at full level");
+        let fine = |_: &[f32]| Heard { text: "hello".into(), tokens: None };
+        assert_eq!(hear_piece(&loud, 0, fine).unwrap().text, "hello");
     }
 
     #[test]

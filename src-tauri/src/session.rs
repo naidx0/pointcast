@@ -664,8 +664,8 @@ impl App {
                 st.phase = Phase::Recording;
             }
         }
-        let mut seg = audio::Segmenter::new(900, 12_000);
-        let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        // Pieces end at a 700 ms pause and stay under Whisper's 30 s window.
+        let mut seg = audio::Segmenter::new(700, 25_000);
         // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
         // look than a short one and the microphone never waits behind a copy of all of it.
         let mut pos = 0;
@@ -676,7 +676,7 @@ impl App {
             let new = take.read_from(pos);
             pos += new.len();
             let ranges = seg.feed_new(&new);
-            self.decode_ranges(&take, &ranges, t0);
+            self.decode_ranges(&take, &ranges, seg.floor());
             // A live caption only when one is due and nothing waits to be transcribed: the last few seconds of the open
             // sentence.
             let due = self.engine.lock().unwrap().as_ref().is_some_and(|e| e.wants_partial());
@@ -695,28 +695,24 @@ impl App {
         }
         let mut rest = seg.feed_new(&take.read_from(pos));
         rest.extend(seg.close());
-        self.decode_ranges(&take, &rest, t0);
+        self.decode_ranges(&take, &rest, seg.floor());
         self.state.lock().unwrap().partial.clear();
     }
 
-    fn decode_ranges(&self, take: &Take, ranges: &[std::ops::Range<usize>], t0: u64) {
+    /// Transcribe pieces of the take, heard against a room at `floor`.
+    fn decode_ranges(&self, take: &Take, ranges: &[std::ops::Range<usize>], floor: f32) {
         for r in ranges {
             let samples = take.copy(r.clone());
+            let voiced = audio::voiced_ms(&samples, floor);
             let heard = {
                 let g = self.engine.lock().unwrap();
-                match g.as_ref() {
-                    Some(eng) => eng.hear(&samples),
-                    None => Default::default(),
-                }
+                g.as_ref().and_then(|eng| crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s)))
             };
+            let Some(heard) = heard else { continue };
             let text = heard.text;
-            if text.is_empty() {
-                continue;
-            }
             let at = self.audio_at.load(Ordering::SeqCst);
             let t_ms = at + (r.start as u64) * 1000 / audio::RATE as u64;
             let end_ms = at + (r.end as u64) * 1000 / audio::RATE as u64;
-            let _ = t0;
             if let Some(tok) = heard.tokens {
                 self.tokens.lock().unwrap().push((t_ms, tok));
             }
