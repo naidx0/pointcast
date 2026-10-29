@@ -182,6 +182,17 @@ pub struct Engine {
     rec: *const Opaque,
     pub model: String,
     pub load_ms: u64,
+    /// Live captions while someone is still talking: only for models quick enough to redo the
+    /// sentence often (Whisper is not), and at most every `PARTIAL_EVERY`.
+    live: bool,
+    last_partial: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+pub const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Families fast enough on a CPU to re-decode the open sentence for a live caption.
+pub fn live_captions(family: &str) -> bool {
+    family != "whisper"
 }
 
 unsafe impl Send for Engine {}
@@ -268,6 +279,25 @@ pub fn load(
                 cfg.model_config.moonshine.merged_decoder = dec.as_ptr();
                 vec![dec]
             }
+            "whisper" => {
+                // An empty language lets Whisper detect it; "transcribe" keeps the speaker's language.
+                let (dec, lang, task) = (path("decoder")?, CString::new("").unwrap(), CString::new("transcribe").unwrap());
+                cfg.model_config.whisper.encoder = enc.as_ptr();
+                cfg.model_config.whisper.decoder = dec.as_ptr();
+                cfg.model_config.whisper.language = lang.as_ptr();
+                cfg.model_config.whisper.task = task.as_ptr();
+                cfg.model_config.whisper.tail_paddings = -1;
+                vec![dec, lang, task]
+            }
+            "transducer" => {
+                let (dec, join) = (path("decoder")?, path("joiner")?);
+                let kind = CString::new("nemo_transducer").unwrap();
+                cfg.model_config.transducer.encoder = enc.as_ptr();
+                cfg.model_config.transducer.decoder = dec.as_ptr();
+                cfg.model_config.transducer.joiner = join.as_ptr();
+                cfg.model_config.model_type = kind.as_ptr();
+                vec![dec, join, kind]
+            }
             other => return Err(format!("{other} models are not supported")),
         };
         cfg.model_config.tokens = tok.as_ptr();
@@ -284,11 +314,28 @@ pub fn load(
             rec,
             model: model.id.clone(),
             load_ms: t0.elapsed().as_millis() as u64,
+            live: live_captions(&model.family),
+            last_partial: std::sync::Mutex::new(None),
         })
     }
 }
 
 impl Engine {
+    /// A live caption for the sentence still being spoken, or None when it is not time yet or
+    /// this model is too slow to redo it while the person talks.
+    pub fn partial(&self, samples: &[f32]) -> Option<String> {
+        if !self.live {
+            return None;
+        }
+        let mut last = self.last_partial.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < PARTIAL_EVERY) {
+            return None;
+        }
+        *last = Some(std::time::Instant::now());
+        drop(last);
+        Some(self.transcribe(samples))
+    }
+
     pub fn transcribe(&self, samples: &[f32]) -> String {
         if samples.is_empty() {
             return String::new();

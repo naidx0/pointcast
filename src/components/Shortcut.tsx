@@ -113,7 +113,10 @@ export function ShortcutField({
             </span>
           )
         ) : (
-          <Keycaps label={label} />
+          <>
+            <Keycaps label={label} />
+            <span className="kc-change">Change</span>
+          </>
         )}
       </button>
       {err || taken ? (

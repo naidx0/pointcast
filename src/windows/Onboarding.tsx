@@ -49,7 +49,7 @@ export function Onboarding() {
   const next: Record<Step, { label: string; enabled?: boolean; skip?: string }> = {
     welcome: { label: "Get Started" },
     access: { label: "Continue" },
-    speech: { label: "Continue", enabled: speechReady(cfg) || !!speech.job, skip: "Skip for Now" },
+    speech: { label: "Continue", enabled: speechReady(cfg), skip: "Skip for Now" },
     keys: { label: "Continue" },
     practice: { label: "Continue", skip: "Skip" },
     done: { label: "Start Using Pointcast" },
@@ -180,7 +180,7 @@ function SpeechStep({
       </Glyph>
       <h1 className="t-title">Choose a speech model</h1>
       <p className="t-body">
-        Pointcast transcribes with Moonshine, right on this computer. No account, no upload. You can switch models later.
+        Speech turns into text right on this computer: no account, no upload. Pick a model; you can switch later.
       </p>
       <ModelPicker cfg={cfg} patch={patch} refresh={refresh} />
     </div>

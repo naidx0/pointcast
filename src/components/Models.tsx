@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import {
   inTauri,
-  MODEL_INFO,
   onSpeechDone,
   onSpeechProgress,
   speechCancel,
@@ -10,8 +9,37 @@ import {
   speechStatus,
   subscribe,
   type Config,
+  type SpeechModel,
   type SpeechProgress,
 } from "@/lib/api";
+
+/** How each model is offered: plain names, what it is best at, and what it costs. */
+const OFFER: Record<string, { name: string; tag: string; blurb: string; order: number }> = {
+  "moonshine-base-en": { name: "Moonshine Base", tag: "Recommended", blurb: "Fast and accurate. English.", order: 0 },
+  "moonshine-tiny-en": { name: "Moonshine Tiny", tag: "Fastest", blurb: "Smallest and quickest. English.", order: 1 },
+  "parakeet-tdt-v2-en": {
+    name: "Parakeet v2",
+    tag: "Most accurate",
+    blurb: "NVIDIA's best English model, with punctuation.",
+    order: 2,
+  },
+  "whisper-turbo": {
+    name: "Whisper Turbo",
+    tag: "Any language",
+    blurb: "OpenAI's large-v3-turbo. 99 languages. Slower on older computers.",
+    order: 3,
+  },
+  "parakeet-tdt-v3": {
+    name: "Parakeet v3",
+    tag: "European languages",
+    blurb: "25 languages, detected automatically. Fast.",
+    order: 4,
+  },
+};
+
+const offer = (m: SpeechModel) =>
+  OFFER[m.id] ?? { name: m.name.replace(/ v2.*$/, ""), tag: "", blurb: "", order: 9 };
+const mbText = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
 
 export function chosenModel(cfg: Config) {
   return cfg.model === "auto" ? cfg.recommended : cfg.model;
@@ -22,45 +50,42 @@ export function speechReady(cfg: Config) {
   return !!cfg.speech.runtime?.installed && !!cfg.speech.models?.some((m) => m.id === id && m.installed);
 }
 
-const shortName = (name: string) => name.replace(/ v2.*$/, "");
-const mbText = (b: number) => `${Math.round(b / 1_000_000)} MB`;
-
 /** The one setup job (engine + model) as every window sees it, including one started elsewhere. */
 export function useSpeechJob(refresh: () => void) {
-  const [job, setJob] = useState<SpeechProgress | null>(null);
-  const [error, setError] = useState("");
+  const [job, setJob] = useState<(SpeechProgress & { id?: string }) | null>(null);
+  const [error, setError] = useState<{ id: string; text: string } | null>(null);
 
   useEffect(() => {
     if (inTauri) speechStatus().then((p) => p && setJob(p)).catch(() => undefined);
     return subscribe(
       onSpeechProgress((p) => {
-        setError("");
-        setJob(p);
+        setError(null);
+        setJob((j) => ({ ...p, id: j?.id }));
       }),
       onSpeechDone((d) => {
         setJob(null);
-        if (!d.ok) setError(d.error || "Setup did not finish. Try again.");
+        if (!d.ok) setError({ id: d.id, text: d.error || "Setup did not finish. Try again." });
         refresh();
       }),
     );
   }, [refresh]);
 
   async function start(id: string, cfg: Config, patch: (p: Record<string, unknown>) => Promise<string | null>) {
-    setError("");
-    setJob({ phase: "download", received: 0, total: 0 });
+    setError(null);
+    setJob({ phase: "download", received: 0, total: 0, id });
     if (!inTauri) return simulate(id, cfg, patch, setJob);
     try {
       await speechSetup(id);
     } catch (e) {
       setJob(null);
-      setError(String(e));
+      setError({ id, text: String(e) });
     }
   }
 
   return { job, error, start, cancel: () => (inTauri ? speechCancel() : setJob(null)) };
 }
 
-/** Pick an on-device model and install it: one button, one progress bar, checked before "ready". */
+/** Pick an on-device model. Each card downloads its own model; the bar fills inside that card. */
 export function ModelPicker({
   cfg,
   patch,
@@ -72,98 +97,109 @@ export function ModelPicker({
 }) {
   const { job, error, start, cancel } = useSpeechJob(refresh);
   const chosen = chosenModel(cfg);
-  const models = [...(cfg.speech.models ?? [])].sort((a, b) =>
-    a.id === cfg.recommended ? -1 : b.id === cfg.recommended ? 1 : 0,
-  );
-  const ready = speechReady(cfg);
-  const pick = models.find((m) => m.id === chosen);
-  const pct = job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
-  const cancelled = error === "Cancelled.";
+  const engine = cfg.speech.runtime?.installed ?? false;
+  const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
+  const busyId = job ? (job.id ?? chosen) : null;
 
   return (
     <div className="cards">
       {models.map((m) => {
-        const info = MODEL_INFO[m.id];
+        const o = offer(m);
         const on = m.id === chosen;
+        const ready = m.installed && engine;
+        const mine = busyId === m.id;
+        const pct = mine && job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
+        const err = error?.id === m.id && error.text !== "Cancelled." ? error.text : "";
         return (
-          <button
+          <div
             key={m.id}
-            type="button"
-            className="card"
-            aria-pressed={on}
-            disabled={!!job}
-            onClick={() => patch({ model: m.id })}
+            className="card model"
+            role="radio"
+            aria-checked={on}
+            tabIndex={0}
+            onClick={() => !job && patch({ model: m.id })}
+            onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !job && patch({ model: m.id })}
           >
             <span className="radio" />
             <div className="grow">
               <div className="ttl">
-                {shortName(m.name)}
-                {m.id === cfg.recommended ? (
-                  <span className="badge" style={{ marginLeft: 8, height: 18, verticalAlign: 1 }}>
-                    Recommended
-                  </span>
-                ) : null}
+                {o.name}
+                {o.tag ? <span className={`badge ${o.tag === "Recommended" ? "rec" : ""}`}>{o.tag}</span> : null}
               </div>
               <div className="sub">
-                {info?.blurb ?? "English, on this computer."} {info ? `· ${info.size}` : ""}
+                {o.blurb} · {mbText(m.bytes)}
               </div>
+              {mine ? (
+                <div className="model-progress">
+                  <div className={`progress ${pct == null ? "indet" : ""}`} role="progressbar" aria-valuenow={pct ?? undefined}>
+                    <i style={pct == null ? undefined : { width: `${pct}%` }} />
+                  </div>
+                  <span className="t-small">
+                    {job?.phase === "check"
+                      ? "Checking it works…"
+                      : job?.phase === "unpack"
+                        ? "Unpacking…"
+                        : job?.total
+                          ? `${mbText(job.received ?? 0)} of ${mbText(job.total)}`
+                          : "Starting…"}
+                  </span>
+                </div>
+              ) : err ? (
+                <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginTop: 4 }}>
+                  {err.replace(/^Error:\s*/, "")} Download picks up where it stopped.
+                </div>
+              ) : null}
             </div>
-            {m.installed ? (
+            {mine ? (
+              job?.phase === "download" ? (
+                <button type="button" className="btn" onClick={(e) => (e.stopPropagation(), cancel())}>
+                  Cancel
+                </button>
+              ) : (
+                <span className="spinner" />
+              )
+            ) : ready ? (
               <span className="check on" aria-label="Downloaded">
                 <Check size={14} strokeWidth={3} />
               </span>
-            ) : null}
-          </button>
+            ) : (
+              <button
+                type="button"
+                className="btn primary"
+                disabled={!!job}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  patch({ model: m.id });
+                  start(m.id, cfg, patch);
+                }}
+              >
+                {err ? "Try Again" : "Download"}
+              </button>
+            )}
+          </div>
         );
       })}
-      <div style={{ minHeight: 52, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8 }}>
-        {job ? (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-              <span className="t-caption">
-                {job.phase === "check"
-                  ? "Checking it works on this computer…"
-                  : job.phase === "unpack"
-                    ? "Unpacking…"
-                    : job.total
-                      ? `Downloading ${pick ? shortName(pick.name) : "the model"} · ${mbText(job.received ?? 0)} of ${mbText(job.total)}`
-                      : "Starting…"}
-              </span>
-              {job.phase === "download" ? (
-                <button type="button" className="btn plain" onClick={() => cancel()}>
-                  Cancel
-                </button>
-              ) : null}
-            </div>
-            <div className={`progress ${pct == null ? "indet" : ""}`} role="progressbar" aria-valuenow={pct ?? undefined}>
-              <i style={pct == null ? undefined : { width: `${pct}%` }} />
-            </div>
-          </>
-        ) : ready ? (
-          <span className="t-caption" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span className="check on" style={{ width: 16, height: 16 }}>
-              <Check size={10} strokeWidth={3.5} />
-            </span>
-            Ready and tested on this computer. Nothing you say leaves it.
-          </span>
-        ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <button type="button" className="btn primary" onClick={() => start(chosen, cfg, patch)}>
-              {error && !cancelled ? "Try Again" : `Download ${pick ? shortName(pick.name) : "model"}`}
-            </button>
-            <span className="t-small">
-              {error && !cancelled ? "It picks up where it stopped." : "Downloads once. Works offline after that."}
-            </span>
-          </div>
-        )}
-        {error && !cancelled ? (
-          <span className="t-caption" role="alert" style={{ color: "var(--red-ink)" }}>
-            {error.replace(/^Error:\s*/, "")}
-          </span>
-        ) : null}
-      </div>
+      <p className="t-small" style={{ margin: "4px 2px 0" }}>
+        {speechReady(cfg)
+          ? "Ready and tested on this computer. Nothing you say leaves it."
+          : "Models download once and run offline on this computer. You can switch any time in Settings."}
+      </p>
     </div>
   );
+}
+
+/** The browser stand-in lists two models; show the whole lineup there too. */
+function withPreview(list: SpeechModel[]): SpeechModel[] {
+  if (inTauri) return [...list];
+  const sizes: Record<string, number> = {
+    "parakeet-tdt-v2-en": 482_468_385,
+    "whisper-turbo": 563_790_207,
+    "parakeet-tdt-v3": 487_170_055,
+  };
+  const extra = Object.keys(sizes)
+    .filter((id) => !list.some((m) => m.id === id))
+    .map((id) => ({ id, name: OFFER[id].name, installed: false, bytes: sizes[id] }));
+  return [...list.map((m) => (m.bytes ? m : { ...m, bytes: 111_266_225 })), ...extra];
 }
 
 /** Browser preview: walk the same states without a backend. */
@@ -171,22 +207,23 @@ function simulate(
   id: string,
   cfg: Config,
   patch: (p: Record<string, unknown>) => Promise<string | null>,
-  setJob: (p: SpeechProgress | null) => void,
+  setJob: (p: (SpeechProgress & { id?: string }) | null) => void,
 ) {
   const total = 120_000_000;
   let got = 0;
   const t = setInterval(() => {
     got += 9_000_000;
-    if (got < total) return setJob({ phase: "download", received: got, total });
+    if (got < total) return setJob({ phase: "download", received: got, total, id });
     clearInterval(t);
-    setJob({ phase: "check" });
+    setJob({ phase: "check", id });
     setTimeout(() => {
       setJob(null);
       patch({
+        model: id,
         speech: {
           ...cfg.speech,
           runtime: { ...(cfg.speech.runtime ?? { id: "runtime", lib: "" }), installed: true },
-          models: cfg.speech.models?.map((m) => (m.id === id ? { ...m, installed: true } : m)),
+          models: withPreview(cfg.speech.models ?? []).map((m) => (m.id === id ? { ...m, installed: true } : m)),
         },
       });
     }, 700);
