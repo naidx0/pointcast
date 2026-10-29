@@ -49,6 +49,10 @@ pub enum Action {
 
 pub fn show_window(app: &AppHandle, label: &str) {
     if let Some(w) = platform::ensure(app, label) {
+        // History's Paste into App goes back to the app that was in front when it opened.
+        if label == "result" && !w.is_visible().unwrap_or(false) {
+            platform::remember_front();
+        }
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -616,8 +620,24 @@ fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
     copy_export(&svc.set_last(&id)?)?;
     hide_window(&app, "result");
+    platform::restore_front();
     std::thread::sleep(std::time::Duration::from_millis(220));
-    clipboard::paste_now()
+    paste()
+}
+
+pub const PASTE_YOURSELF: &str = "Copied, paste it yourself.";
+
+/// Paste what was just copied, or say it is only on the clipboard: without permission to paste (macOS
+/// Accessibility), or when the app in front refuses it (an app run as administrator on Windows).
+fn paste_or_say(can_paste: bool, paste: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    if !can_paste {
+        return Err(PASTE_YOURSELF.into());
+    }
+    paste().map_err(|_| PASTE_YOURSELF.into())
+}
+
+fn paste() -> Result<(), String> {
+    paste_or_say(permissions::can_paste(), clipboard::paste_now)
 }
 
 /// Take a key frame Pointcast picked out of a past prompt, which becomes the last prompt and is copied again.
@@ -657,7 +677,7 @@ fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {
     copy_last(svc)?;
-    clipboard::paste_now()
+    paste()
 }
 
 #[tauri::command]
@@ -681,8 +701,9 @@ fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     copy_last(&svc)?;
     hide_window(&app, "result");
+    platform::restore_front();
     std::thread::sleep(std::time::Duration::from_millis(220));
-    clipboard::paste_now()
+    paste()
 }
 
 /// The latest setup progress, so a window opened mid-download picks it up.
@@ -830,7 +851,7 @@ fn send_to_tool(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
     copy_last(&svc)?;
     tools::open(&id)?;
     std::thread::sleep(std::time::Duration::from_millis(700));
-    clipboard::paste_now()
+    paste()
 }
 
 #[tauri::command]
@@ -1159,6 +1180,12 @@ pub fn run() {
                     if busy {
                         emit_state(&handle, &svc2);
                         busy_at = std::time::Instant::now();
+                        // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
+                        // click on the HUD's Stop can bring Pointcast forward on macOS.
+                        #[cfg(target_os = "macos")]
+                        if recording(&svc2) && !handle.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
+                            platform::remember_front();
+                        }
                     } else if busy_at.elapsed() >= IDLE && !SPEECH_BUSY.load(Ordering::SeqCst) {
                         platform::reap(&handle);
                         svc2.unload_engine();
@@ -1197,6 +1224,12 @@ pub fn run() {
         .run(|_app, event| match event {
             // The last window closing is not quitting: only Quit (an explicit exit code) ends it.
             tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            // Any way out (the app menu, logout, restart, the updater): what was said is kept for the next launch.
+            tauri::RunEvent::Exit => {
+                if let Some(svc) = _app.try_state::<Arc<App>>() {
+                    svc.flush_for_quit();
+                }
+            }
             // Clicking the Dock icon (shown while a window is open) brings Settings forward.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_window(_app, "settings"),
@@ -1370,6 +1403,19 @@ mod tests {
         assert!(!in_use("auto", "moonshine-base-en", &both, "moonshine-tiny-en"));
         // The chosen one is not downloaded: the engine falls back to what is there.
         assert!(in_use("whisper-turbo", "moonshine-base-en", &["moonshine-tiny-en"], "moonshine-tiny-en"));
+    }
+
+    #[test]
+    fn a_paste_that_cannot_happen_says_the_prompt_was_only_copied() {
+        let tried = std::cell::Cell::new(false);
+        let r = paste_or_say(false, || {
+            tried.set(true);
+            Ok(())
+        });
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert!(!tried.get(), "without permission no keys are sent");
+        assert_eq!(paste_or_say(true, || Err("refused".into())).unwrap_err(), PASTE_YOURSELF);
+        assert!(paste_or_say(true, || Ok(())).is_ok());
     }
 
     #[test]

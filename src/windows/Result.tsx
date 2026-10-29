@@ -33,6 +33,8 @@ export function Result() {
   const [tools, setTools] = useState<DetectedTool[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Why the last action did not do all it said, like a paste that could only copy.
+  const [note, setNote] = useState("");
   // Bumped when a picture is marked up again, so the selected prompt reloads in place.
   const [rev, setRev] = useState(0);
   const mac = platform() === "mac";
@@ -93,11 +95,12 @@ export function Result() {
   };
   const run = async (f: () => Promise<void>, k?: "copied" | "pasted") => {
     setBusy(true);
+    setNote("");
     try {
       if (inTauri) await f();
       if (k) flash(k);
-    } catch {
-      /* the button simply does not flash */
+    } catch (e) {
+      setNote(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
     }
@@ -113,8 +116,9 @@ export function Result() {
           <div className="t-head" style={{ fontSize: 14 }}>
             History
           </div>
-          <div className="t-small">
-            {entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " "}
+          <div className="t-small" role={note ? "alert" : undefined} style={note ? { color: "var(--orange-ink)" } : undefined}>
+            {note ||
+              (entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " ")}
           </div>
         </div>
         {sel && exp ? (
@@ -129,7 +133,11 @@ export function Result() {
                 onClick={() =>
                   run(async () => {
                     await historyCopy(sel);
-                    await sendToTool(t.id).catch(() => openTool(t.id));
+                    await sendToTool(t.id).catch((e) => {
+                      // Copied but not pasted: the tool is open, say so; anything else, just open the tool.
+                      if (String(e).startsWith("Copied")) throw e;
+                      return openTool(t.id);
+                    });
                   })
                 }
               >
