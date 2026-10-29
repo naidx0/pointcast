@@ -429,7 +429,19 @@ fn settings_view(svc: &App) -> Value {
     });
     // Set apart: one more key in the literal above passes json!'s recursion limit.
     v["update_checked"] = update::checked();
+    v["keep_audio"] = json!(s.keep_audio);
+    v["picture_paths"] = json!(s.picture_paths);
+    mark_slow(&mut v["speech"], &svc.slow_models());
     v
+}
+
+/// Each model this run has judged gets `slow_engine`: whether it transcribes slower than real time on this computer.
+fn mark_slow(speech: &mut Value, slow: &std::collections::HashMap<String, bool>) {
+    for m in speech["models"].as_array_mut().into_iter().flatten() {
+        if let Some(s) = m["id"].as_str().and_then(|id| slow.get(id)).copied() {
+            m["slow_engine"] = json!(s);
+        }
+    }
 }
 
 /// Async, like permissions_get: off the event loop, since it reads the registry and lists devices.
@@ -641,7 +653,7 @@ fn history_list(svc: tauri::State<'_, Arc<App>>) -> Value {
 
 #[tauri::command]
 fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExport, String> {
-    svc.history.export(&id)
+    svc.history.export_with(&id, svc.settings.lock().unwrap().picture_paths)
 }
 
 /// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.
@@ -707,6 +719,45 @@ fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n
     let _ = app.emit("history://changed", json!({ "id": id }));
     copy_export(&exp)?;
     Ok(exp)
+}
+
+/// Transcribe a past prompt again from its audio, on the model chosen now, off the event loop. `transcribe://progress`
+/// `{id, done_ms, total_ms}` comes at least every 2 s while it runs, and `history://changed` `{id}` when it is done. A
+/// refusal or failure comes back as a sentence, and the entry stays as it was.
+#[tauri::command]
+async fn history_retranscribe(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    let job = tauri::async_runtime::spawn_blocking(move || {
+        let tell = |(done, total): (u64, u64)| {
+            let _ = app.emit("transcribe://progress", json!({ "id": id, "done_ms": done, "total_ms": total }));
+        };
+        let last = std::sync::Mutex::new(None);
+        let over = std::sync::atomic::AtomicBool::new(false);
+        let r = std::thread::scope(|s| {
+            // One piece can take longer than a few seconds on a slow model: the last progress is said again meanwhile.
+            let beat = s.spawn(|| loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(2));
+                if over.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Some(p) = *last.lock().unwrap() {
+                    tell(p);
+                }
+            });
+            let r = svc.retranscribe(&id, |done, total| {
+                *last.lock().unwrap() = Some((done, total));
+                tell((done, total));
+            });
+            over.store(true, Ordering::SeqCst);
+            beat.thread().unpark();
+            r
+        });
+        if r.is_ok() {
+            let _ = app.emit("history://changed", json!({ "id": id }));
+        }
+        r
+    });
+    job.await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1207,6 +1258,7 @@ pub fn run() {
             history_get,
             history_edit,
             history_remove,
+            history_retranscribe,
             history_copy,
             history_paste,
             history_delete,
@@ -1456,6 +1508,17 @@ mod tests {
         assert!(old.element.is_none());
         let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
         assert!(gone.element.is_none());
+    }
+
+    #[test]
+    fn settings_say_which_models_are_slower_than_real_time_here_once_this_run_knows() {
+        let cat = voice::models::catalog();
+        let mut speech = voice::models::view(&std::env::temp_dir().join("pc-no-speech"), &cat);
+        let slow = [("whisper-turbo", true), ("moonshine-base-en", false), ("not-in-the-catalog", true)];
+        mark_slow(&mut speech, &slow.into_iter().map(|(m, s)| (m.to_string(), s)).collect());
+        let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["slow_engine"].clone();
+        assert_eq!((said("whisper-turbo"), said("moonshine-base-en")), (json!(true), json!(false)));
+        assert!(said("moonshine-tiny-en").is_null(), "a model not judged yet says nothing");
     }
 
     fn png(w: u32, v: u8) -> Vec<u8> {

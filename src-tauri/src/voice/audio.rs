@@ -1,7 +1,7 @@
 //! The microphone (cpal) and the signal work around it: downmix to mono, resample to 16 kHz,
 //! a level for the meter, and cutting a long take at its pauses so the model never sees more
 //! than a few seconds at once. Samples live in memory only.
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const RATE: u32 = 16_000;
@@ -71,15 +71,40 @@ pub fn meter(rms: f32) -> f32 {
     ((db + 60.0) / 50.0).clamp(0.0, 1.0)
 }
 
+/// A frame is voice only above this rms (about -54 dBFS), however quiet the room.
+pub const MIN_VOICE: f32 = 0.002;
+/// Voice starts this many times above the room's noise floor, and once started holds down to `HOLD` times it.
+const ON: f32 = 2.5;
+const HOLD: f32 = 1.8;
+/// Frames voice is held after the level drops (the end of a word trails off).
+const HANG: u32 = 4;
+/// The noise floor is this low share of the last `HISTORY` frames (30 s).
+const FLOOR_SHARE: f32 = 0.1;
+const HISTORY: usize = 1_000;
+/// Audio kept before a piece's first voice and after its last (400 ms).
+const PAD: usize = RATE as usize * 4 / 10;
+
+/// Cuts a take into pieces of speech for the model. A frame is voice when it stands out from the room: above `ON`
+/// times the noise floor (a low percentile of the recent frames, so a noisy room or a quiet microphone moves it) and
+/// above `MIN_VOICE`. A piece ends after `gap_ms` without voice, or at `max_ms`, cut at the quietest frame of its last
+/// seconds so no word is split, and carries `PAD` of audio on each side of its voice.
 #[derive(Debug, Clone)]
 pub struct Segmenter {
     pub gap_ms: u32,
     pub max_ms: u32,
     floor: f32,
-    start: usize,
-    last_voice: Option<usize>,
+    /// The last frames' rms, oldest first.
+    recent: std::collections::VecDeque<f32>,
+    /// Where the open piece starts; none while no voice is waiting.
+    open: Option<usize>,
+    /// The end of the last frame of voice.
+    last_voice: usize,
+    voiced: bool,
+    hang: u32,
     seen: usize,
     done: usize,
+    /// The samples after the last whole frame, waiting for the next feed.
+    pending: Vec<f32>,
 }
 
 pub const FRAME: usize = 480;
@@ -89,60 +114,143 @@ impl Segmenter {
         Segmenter {
             gap_ms,
             max_ms,
-            floor: 0.003,
-            start: 0,
-            last_voice: None,
+            floor: 0.0,
+            recent: Default::default(),
+            open: None,
+            last_voice: 0,
+            voiced: false,
+            hang: 0,
             seen: 0,
             done: 0,
+            pending: vec![],
         }
     }
-    fn ms(n: usize) -> u32 {
-        (n as u64 * 1000 / RATE as u64) as u32
+    fn samples(ms: u32) -> usize {
+        ms as usize * RATE as usize / 1000
     }
+    /// The room's level: the rms most frames of the last 30 s rise above.
+    pub fn floor(&self) -> f32 {
+        self.floor
+    }
+    /// The last frames' rms, oldest first.
+    pub fn recent(&self) -> Vec<f32> {
+        self.recent.iter().copied().collect()
+    }
+    /// Cut the whole take so far; only the part not seen before is read.
     pub fn feed(&mut self, all: &[f32]) -> Vec<std::ops::Range<usize>> {
+        let from = (self.seen + self.pending.len()).min(all.len());
+        self.feed_new(&all[from..])
+    }
+    /// Cut what arrived since the last feed.
+    pub fn feed_new(&mut self, new: &[f32]) -> Vec<std::ops::Range<usize>> {
+        self.pending.extend_from_slice(new);
         let mut out = vec![];
-        while self.seen + FRAME <= all.len() {
-            let f = &all[self.seen..self.seen + FRAME];
-            let r = rms(f);
-            let voice = r > (self.floor * 3.0).max(0.01);
-            if !voice {
-                self.floor = self.floor * 0.95 + r * 0.05;
-            }
-            self.seen += FRAME;
-            if voice {
-                self.last_voice = Some(self.seen);
-            }
-            match self.last_voice {
-                Some(v) => {
-                    let quiet = Self::ms(self.seen - v);
-                    let long = Self::ms(self.seen - self.start);
-                    if quiet >= self.gap_ms || long >= self.max_ms {
-                        out.push(self.start..self.seen);
-                        self.start = self.seen;
-                        self.done = self.seen;
-                        self.last_voice = None;
-                    }
-                }
-                None => {
-                    let keep = (RATE as usize * 3 / 10).min(self.seen);
-                    self.start = (self.seen - keep).max(self.done);
-                }
-            }
+        let mut at = 0;
+        while at + FRAME <= self.pending.len() {
+            let r = rms(&self.pending[at..at + FRAME]);
+            at += FRAME;
+            self.frame(r, &mut out);
         }
+        self.pending.drain(..at);
         out
     }
+    fn frame(&mut self, r: f32, out: &mut Vec<std::ops::Range<usize>>) {
+        self.recent.push_back(r);
+        if self.recent.len() > HISTORY {
+            self.recent.pop_front();
+        }
+        if (self.seen / FRAME) % 10 == 0 || self.recent.len() < HISTORY {
+            let mut v: Vec<f32> = self.recent.iter().copied().collect();
+            let k = ((v.len() as f32 * FLOOR_SHARE) as usize).min(v.len() - 1);
+            self.floor = *v.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1;
+        }
+        let at = self.seen;
+        self.seen += FRAME;
+        let over = |k: f32| r > (self.floor * k).max(MIN_VOICE);
+        if over(ON) || (self.voiced && over(HOLD)) {
+            self.voiced = true;
+            self.hang = HANG;
+        } else if self.hang > 0 {
+            self.hang -= 1;
+        } else {
+            self.voiced = false;
+        }
+        if self.voiced {
+            self.open.get_or_insert(at.saturating_sub(PAD).max(self.done));
+            self.last_voice = self.seen;
+        }
+        let Some(start) = self.open else { return };
+        if self.seen - self.last_voice >= Self::samples(self.gap_ms) {
+            let end = (self.last_voice + PAD).min(self.seen);
+            out.push(start..end);
+            (self.done, self.open) = (end, None);
+        } else if self.seen - start >= Self::samples(self.max_ms) {
+            // Cut at the quietest frame of the last few seconds (at most a third of the piece).
+            let look = (Self::samples(4_000).min(Self::samples(self.max_ms) / 3) / FRAME).max(1);
+            let cut = (0..look.min(self.recent.len()))
+                .map(|k| (self.seen - (k + 1) * FRAME + FRAME / 2, self.recent[self.recent.len() - 1 - k]))
+                .filter(|(c, _)| *c > start)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map_or(self.seen, |(c, _)| c);
+            out.push(start..cut);
+            self.done = cut;
+            self.open = (self.last_voice > cut).then_some(cut);
+        }
+    }
     pub fn open_start(&self) -> Option<usize> {
-        self.last_voice.map(|_| self.start)
+        self.open
     }
     pub fn finish(&mut self, all: &[f32]) -> Vec<std::ops::Range<usize>> {
         let mut out = self.feed(all);
-        if self.last_voice.is_some() {
-            out.push(self.start..all.len());
-        }
-        self.start = all.len();
-        self.last_voice = None;
+        out.extend(self.close());
         out
     }
+    /// The take ended: what is still open is a piece too.
+    pub fn close(&mut self) -> Vec<std::ops::Range<usize>> {
+        let end = self.seen + self.pending.len();
+        let out = self.open.take().map(|s| s..end).into_iter().collect();
+        self.done = end;
+        out
+    }
+}
+
+/// Below this rms (-80 dBFS) a frame has essentially no signal; voice below `QUIET` rms (-40 dBFS) is very low.
+const SILENT: f32 = 0.0001;
+const QUIET: f32 = 0.01;
+
+/// What the HUD says about the microphone, from the last frames' rms (oldest first) against a room at `floor`:
+/// "silent" when the last 5 s had essentially no signal, "quiet" when there was voice (half a second or more) but very
+/// low, else nothing.
+pub fn mic_note(recent: &[f32], floor: f32) -> Option<&'static str> {
+    let five = RATE as usize * 5 / FRAME;
+    if recent.len() >= five && recent[recent.len() - five..].iter().all(|r| *r < SILENT) {
+        return Some("silent");
+    }
+    let on = (floor * ON).max(MIN_VOICE);
+    let voice: Vec<f32> = recent.iter().copied().filter(|r| *r > on).collect();
+    (voice.len() >= RATE as usize / 2 / FRAME && rms(&voice) < QUIET).then_some("quiet")
+}
+
+/// How long `x` is voice, frame by frame, against a room at `floor`.
+pub fn voiced_ms(x: &[f32], floor: f32) -> u64 {
+    let on = (floor * ON).max(MIN_VOICE);
+    let n = x.chunks_exact(FRAME).filter(|f| rms(f) > on).count();
+    (n * FRAME) as u64 * 1000 / RATE as u64
+}
+
+/// A piece whose peak is below this is raised before decoding: to `PEAK`, by at most 30 dB.
+const LOW_PEAK: f32 = 0.25;
+const PEAK: f32 = 0.5;
+const MAX_GAIN: f32 = 31.6;
+
+/// `x` raised so its peak reaches `PEAK`: when its peak is low, or `always`.
+pub fn louder(x: &[f32], always: bool) -> Vec<f32> {
+    let peak = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let g = if peak > 0.0 && (always || peak < LOW_PEAK) { (PEAK / peak).min(MAX_GAIN) } else { 1.0 };
+    if g <= 1.0 {
+        return x.to_vec();
+    }
+    x.iter().map(|v| v * g).collect()
 }
 
 #[derive(Default)]
@@ -151,6 +259,8 @@ pub struct Take {
     pub level: AtomicU32,
     pub open: AtomicBool,
     pub error: Mutex<Option<String>>,
+    /// Bytes copied out of the take so far, so the cost of reading a long one stays in view.
+    pub copied: AtomicU64,
 }
 
 impl Take {
@@ -162,10 +272,21 @@ impl Take {
     }
     pub fn copy(&self, r: std::ops::Range<usize>) -> Vec<f32> {
         let s = self.samples.lock().unwrap();
-        s[r.start.min(s.len())..r.end.min(s.len())].to_vec()
+        let v = s[r.start.min(s.len())..r.end.min(s.len())].to_vec();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
     }
     pub fn all(&self) -> Vec<f32> {
-        self.samples.lock().unwrap().clone()
+        let v = self.samples.lock().unwrap().clone();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
+    }
+    /// The samples from `pos` on: what arrived since a reader last looked.
+    pub fn read_from(&self, pos: usize) -> Vec<f32> {
+        let s = self.samples.lock().unwrap();
+        let v = s[pos.min(s.len())..].to_vec();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
     }
 }
 
@@ -477,5 +598,160 @@ mod tests {
             pieces.iter().all(|r| r.len() <= 3 * 16_000 + FRAME + 4_800),
             "{pieces:?}"
         );
+    }
+
+    /// `n` words of `on` s each, `off` s apart, at amplitude `amp`, over a room at rms `room` (white noise), after 2 s of
+    /// room alone. Returns the take and where each word is.
+    fn spoken(n: usize, on: f32, off: f32, amp: f32, room: f32) -> (Vec<f32>, Vec<std::ops::Range<usize>>) {
+        let sec = |s: f32| (s * 16_000.0) as usize;
+        let mut v = vec![0.0; sec(2.0)];
+        let mut words = vec![];
+        for _ in 0..n {
+            let w = sine(16_000, 220.0, on, amp);
+            words.push(v.len()..v.len() + w.len());
+            v.extend(w);
+            v.extend(std::iter::repeat(0.0).take(sec(off)));
+        }
+        v.extend(std::iter::repeat(0.0).take(sec(2.0)));
+        let mut seed = 7u32;
+        for x in v.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *x += (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * room * 3f32.sqrt();
+        }
+        (v, words)
+    }
+
+    fn cut(x: &[f32], max_ms: u32) -> Vec<std::ops::Range<usize>> {
+        let mut s = Segmenter::new(700, max_ms);
+        let mut got = vec![];
+        for piece in x.chunks(1_600) {
+            got.extend(s.feed_new(piece));
+        }
+        got.extend(s.close());
+        got
+    }
+
+    /// Every sample of every word is in exactly one piece, and the pieces do not overlap.
+    fn each_word_once(got: &[std::ops::Range<usize>], words: &[std::ops::Range<usize>]) {
+        assert!(got.windows(2).all(|w| w[0].end <= w[1].start), "{got:?}");
+        for w in words {
+            for i in [w.start, w.start + w.len() / 2, w.end - 1] {
+                assert_eq!(got.iter().filter(|r| r.contains(&i)).count(), 1, "sample {i} of word {w:?} in {got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_quiet_microphone_or_a_noisy_room_loses_no_words() {
+        // Speech at 6% of full level (about -42 dBFS) in a quiet room.
+        let (x, words) = spoken(6, 0.6, 1.2, 0.012, 0.0003);
+        let got = cut(&x, 25_000);
+        assert_eq!(got.len(), 6, "{got:?}");
+        each_word_once(&got, &words);
+        // Speech over a noisy room (rms 0.01, about -40 dBFS).
+        let (x, words) = spoken(6, 0.6, 1.2, 0.1, 0.01);
+        let got = cut(&x, 25_000);
+        assert_eq!(got.len(), 6, "{got:?}");
+        each_word_once(&got, &words);
+        // The room alone, however loud, is no speech.
+        for room in [0.0003, 0.01, 0.05] {
+            let (x, _) = spoken(0, 0.0, 0.0, 0.0, room);
+            assert!(cut(&[x.clone(), x.clone(), x].concat(), 25_000).is_empty(), "{room}");
+        }
+        // A piece carries 400 ms before its first word and after its last.
+        let (x, words) = spoken(1, 1.0, 0.0, 0.2, 0.0003);
+        let got = cut(&x, 25_000);
+        assert!(got[0].start + PAD <= words[0].start + FRAME && got[0].end >= words[0].end + PAD - FRAME, "{got:?} {words:?}");
+    }
+
+    #[test]
+    fn long_speech_is_cut_at_its_quiet_moments_and_never_past_the_cap() {
+        // A minute of words with only 120 ms between them: no pause long enough to end a piece.
+        let (x, words) = spoken(140, 0.3, 0.12, 0.2, 0.0005);
+        let got = cut(&x, 25_000);
+        assert!(got.len() >= 3, "{got:?}");
+        assert!(got.iter().all(|r| r.len() <= 25 * 16_000 + FRAME), "{got:?}");
+        each_word_once(&got, &words);
+        // Each cut falls between words, never inside one.
+        for r in &got[..got.len() - 1] {
+            assert!(!words.iter().any(|w| w.start < r.end && r.end < w.end), "cut at {} inside a word", r.end);
+        }
+        let short = cut(&x, 3_000);
+        assert!(short.iter().all(|r| r.len() <= 3 * 16_000 + FRAME), "{short:?}");
+        each_word_once(&short, &words);
+    }
+
+    #[test]
+    fn voice_holds_through_a_softer_moment_but_a_soft_sound_alone_never_starts_it() {
+        let sec = |s: f32| (s * 16_000.0) as usize;
+        // A word, then 1.2 s at a level between the hold and start thresholds over a room at about 0.002.
+        let soft = 0.002 * 2.1 * 2f32.sqrt();
+        let mut x = vec![0.002 * 2f32.sqrt(); sec(3.0)].iter().enumerate().map(|(i, a)| a * (i as f32 * 0.9).sin()).collect::<Vec<_>>();
+        let word = x.len();
+        x.extend(sine(16_000, 220.0, 0.5, 0.2));
+        let tail = x.len();
+        x.extend(sine(16_000, 220.0, 1.2, soft));
+        x.extend(std::iter::repeat(0.0).take(sec(2.0)));
+        let got = cut(&x, 25_000);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].start < word && got[0].end >= tail + sec(1.2), "the softer part stays in: {got:?}");
+        // The same soft sound with no word before it is not voice.
+        let mut alone = x[..word].to_vec();
+        alone.extend(sine(16_000, 220.0, 1.2, soft));
+        alone.extend(std::iter::repeat(0.0).take(sec(2.0)));
+        assert!(cut(&alone, 25_000).is_empty());
+    }
+
+    #[test]
+    fn a_quiet_piece_is_raised_before_decoding_by_at_most_30_db() {
+        let peak = |x: &[f32]| x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!((peak(&louder(&sine(16_000, 220.0, 0.1, 0.05), false)) - 0.5).abs() < 0.01);
+        assert!((peak(&louder(&sine(16_000, 220.0, 0.1, 0.001), false)) - 0.0316).abs() < 0.001, "30 dB at most");
+        assert_eq!(louder(&[0.4, -0.3], false), vec![0.4, -0.3], "a loud piece is left alone");
+        assert!((peak(&louder(&[0.4, -0.3], true)) - 0.5).abs() < 1e-6);
+        assert_eq!(louder(&[0.0; 4], true), vec![0.0; 4]);
+        assert_eq!(voiced_ms(&sine(16_000, 220.0, 1.5, 0.2), 0.0), 1_500);
+        assert_eq!(voiced_ms(&vec![0.001; 16_000], 0.0), 0);
+    }
+
+    #[test]
+    fn the_hud_hears_a_silent_or_very_quiet_microphone_and_nothing_else() {
+        let frames = |x: &[f32]| {
+            let mut s = Segmenter::new(700, 25_000);
+            s.feed_new(x);
+            (s.recent(), s.floor())
+        };
+        let note = |x: &[f32]| {
+            let (r, f) = frames(x);
+            mic_note(&r, f)
+        };
+        assert_eq!(note(&vec![0.0; 16_000 * 6]), Some("silent"));
+        assert_eq!(note(&vec![0.0; 16_000 * 4]), None, "not five seconds yet");
+        // Words at about -44 dBFS: quiet. At -20 dBFS, or in a quiet room with no words: nothing to say.
+        assert_eq!(note(&spoken(4, 0.6, 0.6, 0.009, 0.0003).0), Some("quiet"));
+        assert_eq!(note(&spoken(4, 0.6, 0.6, 0.14, 0.0003).0), None);
+        assert_eq!(note(&spoken(0, 0.0, 0.0, 0.0, 0.0003).0), None);
+        // Words, then five seconds of nothing: the microphone went silent.
+        let mut x = spoken(4, 0.6, 0.6, 0.14, 0.0003).0;
+        x.extend(vec![0.0; 16_000 * 5 + FRAME]);
+        assert_eq!(note(&x), Some("silent"));
+    }
+
+    #[test]
+    fn new_samples_in_any_size_of_piece_are_cut_as_the_whole_take_is() {
+        let x = take(&[(1.0, 1.0), (2.0, 0.2), (1.0, 1.0), (0.5, 0.0)]);
+        let mut whole = Segmenter::new(700, 12_000);
+        let want = whole.finish(&x);
+        for size in [1usize, 37, 479, 480, 481, 1_600, 50_000] {
+            let mut s = Segmenter::new(700, 12_000);
+            let mut got = vec![];
+            for piece in x.chunks(size) {
+                got.extend(s.feed_new(piece));
+            }
+            got.extend(s.close());
+            assert_eq!(got, want, "pieces of {size}");
+        }
     }
 }

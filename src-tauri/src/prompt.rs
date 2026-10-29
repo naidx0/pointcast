@@ -102,8 +102,9 @@ pub const NAME_MAX: usize = 60;
 
 /// `[image n]`, naming the control the person pointed at and then the pins: `[image 2: button "Place order"; 1=too far
 /// left]`.
-fn marker(n: u32, c: &Capture) -> String {
-    let mut bits: Vec<String> = c.element.iter().map(named).filter(|b| !b.is_empty()).collect();
+fn marker(n: u32, c: &Capture, file: Option<&str>) -> String {
+    let mut bits: Vec<String> = file.into_iter().map(String::from).collect();
+    bits.extend(c.element.iter().map(named).filter(|b| !b.is_empty()));
     bits.extend(c.labels.iter().map(|l| {
         let t = l.text.trim();
         if t.is_empty() {
@@ -139,8 +140,14 @@ fn named(e: &crate::element::ElementMark) -> String {
 /// piece being spoken then, at the word that far through it, or between pieces. Images are
 /// numbered in time order. Returns the text and the pictures in that order (ids rewritten 1..n).
 pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
+    compose_files(items, &[])
+}
+
+/// `compose`, with each picture's marker naming its file first: `files[k]` is the k-th picture in `items` order, as
+/// History numbers its files. Pictures without one are marked as usual.
+pub fn compose_files(items: &[Item], files: &[String]) -> (String, Vec<Capture>) {
     let mut said: Vec<(u64, u64, Vec<String>)> = vec![];
-    let mut shots: Vec<(u64, Capture)> = vec![];
+    let mut shots: Vec<(u64, Capture, Option<&str>)> = vec![];
     for i in items {
         match i {
             Item::Speech { t_ms, end_ms, text } => said.push((
@@ -148,14 +155,14 @@ pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
                 (*end_ms).max(*t_ms),
                 text.split_whitespace().map(String::from).collect(),
             )),
-            Item::Image { t_ms, capture } => shots.push((*t_ms, capture.clone())),
+            Item::Image { t_ms, capture } => shots.push((*t_ms, capture.clone(), files.get(shots.len()).map(String::as_str))),
         }
     }
     said.sort_by_key(|x| x.0);
     shots.sort_by_key(|x| x.0);
 
     let mut at: Vec<(usize, usize)> = vec![];
-    for (t, _) in &shots {
+    for (t, _, _) in &shots {
         let place = match said.iter().position(|(a, b, _)| *t >= *a && *t < *b) {
             Some(k) => {
                 let (a, b, w) = &said[k];
@@ -176,7 +183,7 @@ pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
     let put = |k: usize, w: usize, n: &mut u32, next: &mut usize, out: &mut Vec<String>| {
         while *next < at.len() && at[*next] == (k, w) {
             *n += 1;
-            out.push(marker(*n, &shots[*next].1));
+            out.push(marker(*n, &shots[*next].1, shots[*next].2));
             *next += 1;
         }
     };
@@ -194,7 +201,7 @@ pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
     let captures: Vec<Capture> = shots
         .into_iter()
         .enumerate()
-        .map(|(i, (_, mut c))| {
+        .map(|(i, (_, mut c, _))| {
             c.id = (i as u32) + 1;
             c
         })
@@ -241,7 +248,7 @@ pub fn assemble_markdown(items: &[Item]) -> (String, Vec<Capture>) {
     }
     let mut md = plain;
     for c in &captures {
-        let needle = marker(c.id, c);
+        let needle = marker(c.id, c, None);
         let img = format!(
             "![{}](images/{})",
             escape_md_alt(&needle),
@@ -264,20 +271,26 @@ pub struct ClipboardPayload {
 }
 
 pub fn assemble_clipboard(items: &[Item]) -> ClipboardPayload {
-    let (plain, captures) = compose(items);
+    assemble_clipboard_files(items, &[])
+}
+
+/// The clipboard form whose plain text names each picture's file (`compose_files`); the HTML shows the pictures.
+pub fn assemble_clipboard_files(items: &[Item], files: &[String]) -> ClipboardPayload {
+    let (marked, captures) = compose(items);
+    let plain = compose_files(items, files).0;
     if plain.is_empty() {
         return ClipboardPayload {
             html: String::new(),
             plain: String::new(),
         };
     }
-    let mut html_body = escape_html(&plain);
+    let mut html_body = escape_html(&marked);
     for c in &captures {
-        let needle = escape_html(&marker(c.id, c));
+        let needle = escape_html(&marker(c.id, c, None));
         let img = format!(
             "<img src=\"{}\" alt=\"{}\" width=\"{}\" height=\"{}\" style=\"max-width:100%;height:auto;vertical-align:middle;border:1px solid #d4d4d8;border-radius:6px;\" />",
             png_data_url(&c.png),
-            escape_html(&escape_md_alt(&marker(c.id, c))),
+            escape_html(&escape_md_alt(&marker(c.id, c, None))),
             c.width.max(1),
             c.height.max(1)
         );
@@ -337,7 +350,12 @@ pub struct SessionImage {
 }
 
 pub fn assemble_export(items: &[Item]) -> SessionExport {
-    let clip = assemble_clipboard(items);
+    assemble_export_files(items, &[])
+}
+
+/// The export whose plain text names each picture's file (`compose_files`).
+pub fn assemble_export_files(items: &[Item], files: &[String]) -> SessionExport {
+    let clip = assemble_clipboard_files(items, files);
     let (markdown, captures) = assemble_markdown(items);
     SessionExport {
         plain: clip.plain,
@@ -525,6 +543,24 @@ mod tests {
         assert!(clip.html.contains(r#"alt="image 1: button &quot;Place order&quot;; 1=too far left""#), "{}", clip.html);
         assert!(!clip.html.contains("[image 1"), "the marker became the picture: {}", clip.html);
         assert_eq!(assemble_export(&items).plain, clip.plain);
+    }
+
+    #[test]
+    fn the_plain_prompt_names_each_pictures_file_first_and_the_html_shows_the_pictures() {
+        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        // Files are numbered in the order the pictures are in the session; the prompt numbers them in time order.
+        let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", pin), shot(200, CaptureKind::Zoom, vec![])];
+        let files = ["C:/data/history/e/image-0.png".to_string(), "C:/data/history/e/image-1.png".to_string()];
+        let clip = assemble_clipboard_files(&items, &files);
+        assert_eq!(clip.plain, r#"[image 1: C:/data/history/e/image-1.png] this [image 2: C:/data/history/e/image-0.png; button "Place order"; 1=too far left] one"#);
+        assert_eq!(clip.html, assemble_clipboard(&items).html, "the HTML keeps the pictures inline, without paths");
+        assert!(!clip.html.contains("history/e"));
+        let exp = assemble_export_files(&items, &files);
+        assert_eq!(exp.plain, clip.plain, "agents read the paths too");
+        assert_eq!(exp.markdown, assemble_markdown(&items).0);
+        // No files (the setting is off, or History could not keep the recording): markers as before.
+        assert_eq!(assemble_export_files(&items, &[]).plain, r#"[image 1] this [image 2: button "Place order"; 1=too far left] one"#);
+        assert_eq!(compose_files(&items, &files[..1]).0, r#"[image 1] this [image 2: C:/data/history/e/image-0.png; button "Place order"; 1=too far left] one"#);
     }
 
     #[test]
