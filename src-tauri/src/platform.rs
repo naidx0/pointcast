@@ -100,9 +100,11 @@ pub fn show_indicator(app: &AppHandle) {
             let _ = w.set_position(tauri::PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32));
         }
     }
-    let _ = w.set_always_on_top(true);
-    let _ = w.show();
+    if !cfg!(target_os = "macos") {
+        let _ = w.set_always_on_top(true);
+    }
     raise(&w, Level::Hud);
+    let _ = w.show();
 }
 
 /// Cover the screen the frame was taken from, above the menu bar and Dock, then take keys.
@@ -113,9 +115,11 @@ pub fn show_overlay(app: &AppHandle) {
     if let Some(m) = pointer_monitor(app) {
         place(&w, &m);
     }
-    let _ = w.set_always_on_top(true);
-    let _ = w.show();
+    if !cfg!(target_os = "macos") {
+        let _ = w.set_always_on_top(true);
+    }
     raise(&w, Level::Overlay);
+    let _ = w.show();
     let _ = w.set_focus();
 }
 
