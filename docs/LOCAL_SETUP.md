@@ -104,6 +104,17 @@ Artifacts land under `src-tauri/target/release/bundle/`:
 
 Copy a Linux release into a folder of your own when packaging demos.
 
+## Making a release
+
+1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json` (all three must match), commit, and create a draft GitHub release tagged `v<version>`.
+2. Run the script for each platform from a clone of the repo. Each one installs dependencies, builds, checks the result, uploads it to the draft with `--clobber`, and confirms GitHub's SHA-256 matches the local file. It needs the [GitHub CLI](https://cli.github.com) logged in (`gh auth login`).
+   - macOS (universal dmg, ad-hoc signed): `scripts/release-mac.sh`
+   - Windows (NSIS installer): `powershell -File scripts/release-windows.ps1`
+   - Add `--no-upload` (macOS) or `-NoUpload` (Windows) to build and verify without uploading.
+3. Publish the draft on GitHub once every platform's file is attached.
+
+If the Windows build fails with `os error 4395`, move `%LOCALAPPDATA%/tauri/NSIS` aside and run the script again (stale cache).
+
 ## Recording a demo (30–60s)
 
 1. Run `npm run dev` and open `http://127.0.0.1:1420/buggy-shop.html` (or any buggy UI).
