@@ -5,6 +5,7 @@ mod clipboard;
 mod element;
 mod history;
 mod image_ops;
+mod keyframes;
 mod mcp;
 mod overlay;
 mod permissions;
@@ -334,6 +335,7 @@ fn settings_view(svc: &App) -> Value {
         "zoom_sharpen": s.zoom_sharpen,
         "outline_element": s.outline_element,
         "spoken_anchors": s.spoken_anchors,
+        "key_frames": s.key_frames,
         "start_at_login": s.start_at_login,
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
@@ -565,6 +567,16 @@ fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) ->
     hide_window(&app, "result");
     std::thread::sleep(std::time::Duration::from_millis(220));
     clipboard::paste_now()
+}
+
+/// Take a key frame Pointcast picked out of a past prompt, which becomes the last prompt and is copied again.
+#[tauri::command]
+fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n: usize) -> Result<SessionExport, String> {
+    svc.history.remove(&id, n)?;
+    let exp = svc.set_last(&id)?;
+    let _ = app.emit("history://changed", json!({ "id": id }));
+    copy_export(&exp)?;
+    Ok(exp)
 }
 
 #[tauri::command]
@@ -936,6 +948,7 @@ pub fn run() {
             history_list,
             history_get,
             history_edit,
+            history_remove,
             history_copy,
             history_paste,
             history_delete,
@@ -1136,6 +1149,7 @@ mod tests {
             element: None,
             place: None,
             anchors: vec![],
+            auto: false,
         };
         let items = vec![
             prompt::Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() },

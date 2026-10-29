@@ -2,6 +2,7 @@
 //! local STT, and export on stop.
 use crate::capture::{self, Shot};
 use crate::element::ElementMark;
+use crate::keyframes::{Buffer, Still, EVERY_MS};
 use crate::pointer::Point;
 use crate::prompt::{self, Capture, CaptureKind, Item, Label, SessionExport};
 use crate::settings::{MarkPoint, OutputMode, Settings, SpokenAnchors};
@@ -79,6 +80,8 @@ pub struct App {
     trail: Mutex<crate::pointer::Trail>,
     /// When the model heard each token, by the start of its piece, for the pieces it gave times for.
     tokens: Mutex<Vec<(u64, Vec<crate::anchor::Token>)>>,
+    /// The screen once a second during this recording, in memory only; none unless key frames are on.
+    frames: Mutex<Option<Buffer>>,
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
     freeze: Mutex<Option<Shot>>,
@@ -134,6 +137,7 @@ impl App {
             history: crate::history::Store::new(&crate::settings::data_dir()),
             trail: Mutex::default(),
             tokens: Mutex::default(),
+            frames: Mutex::default(),
             last_id: Mutex::default(),
             practice: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
@@ -270,6 +274,7 @@ impl App {
         self.tokens.lock().unwrap().clear();
         let me = Arc::clone(self);
         std::thread::spawn(move || me.follow_pointer(no));
+        self.keep_frames(&settings, no, capture::grab_key);
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
@@ -277,6 +282,8 @@ impl App {
 
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
         self.stop.store(true, Ordering::SeqCst);
+        // The frames leave memory with this; only the ones picked below live on, as pictures.
+        let frames = self.frames.lock().unwrap().take();
         if let Some(mic) = self.mic.lock().unwrap().take() {
             drop(mic);
         }
@@ -300,9 +307,12 @@ impl App {
         }
         let settings = self.settings.lock().unwrap().clone();
         let mut items = prompt::ordered(self.items.lock().unwrap().clone());
+        let trail = self.trail.lock().unwrap().since(0);
+        let tokens = self.tokens.lock().unwrap().clone();
+        if let Some(frames) = frames {
+            crate::keyframes::add(&mut items, &frames, &trail, &tokens, settings.mark_point);
+        }
         if settings.spoken_anchors == SpokenAnchors::Ring {
-            let trail = self.trail.lock().unwrap().since(0);
-            let tokens = self.tokens.lock().unwrap().clone();
             crate::anchor::ring_spoken(&mut items, &trail, &tokens, settings.mark_point != MarkPoint::Off);
         }
         let exp = prompt::assemble_export(&items);
@@ -341,6 +351,7 @@ impl App {
             return;
         }
         self.stop.store(true, Ordering::SeqCst);
+        self.frames.lock().unwrap().take();
         self.mic.lock().unwrap().take();
         if let Some(w) = self.worker.lock().unwrap().take() {
             let _ = w.join();
@@ -419,6 +430,7 @@ impl App {
             element,
             place: None,
             anchors: vec![],
+            auto: false,
         };
         self.push(Item::Image {
             t_ms: t,
@@ -450,6 +462,7 @@ impl App {
             element: shot.element,
             place,
             anchors: vec![],
+            auto: false,
         };
         self.push(Item::Image {
             t_ms: t,
@@ -467,6 +480,30 @@ impl App {
             }
             std::thread::sleep(std::time::Duration::from_millis(33));
         }
+    }
+
+    /// With key frames on, keep the pointer's monitor once a second in memory for this recording, through `grab`. Off,
+    /// no buffer is made and no thread runs. Returns whether it started.
+    fn keep_frames(self: &Arc<Self>, settings: &Settings, no: u64, grab: fn(&Settings, u64) -> Result<Still, String>) -> bool {
+        *self.frames.lock().unwrap() = None;
+        if !settings.key_frames {
+            return false;
+        }
+        *self.frames.lock().unwrap() = Some(Buffer::default());
+        let (me, settings) = (Arc::clone(self), settings.clone());
+        let live = move |a: &App| !a.stop.load(Ordering::SeqCst) && a.take_no.load(Ordering::SeqCst) == no;
+        std::thread::spawn(move || {
+            while live(&me) {
+                let began = std::time::Instant::now();
+                if let Ok(s) = grab(&settings, me.t_ms()) {
+                    if let Some(b) = me.frames.lock().unwrap().as_mut().filter(|_| live(&me)) {
+                        b.push(s);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(EVERY_MS).saturating_sub(began.elapsed()));
+            }
+        });
+        true
     }
 
     /// The last few seconds of the pointer's path before `t`, in screen coordinates.
@@ -680,6 +717,7 @@ mod tests {
             element: None,
             place: Some(capture::Place { map, k: 1.0 }),
             anchors: vec![],
+            auto: false,
         };
         // "this" is said at about 1.6 s while the pointer sweeps right, passing (100, 80) then.
         a.push(Item::Speech { t_ms: 1_000, end_ms: 2_700, text: "click this button".into() });
@@ -696,6 +734,60 @@ mod tests {
         a.settings.lock().unwrap().spoken_anchors = SpokenAnchors::Off;
         let exp = a.stop(false).unwrap().unwrap();
         assert_eq!(pixel(&exp.images[0], on_ring, 80), [255; 3]);
+    }
+
+    static NEVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Stands in for the screen: a key frame must never come from the real one in a test.
+    fn never(_: &Settings, _: u64) -> Result<Still, String> {
+        NEVER.fetch_add(1, Ordering::SeqCst);
+        Err("grabbed with key frames off".into())
+    }
+
+    fn white(_: &Settings, t: u64) -> Result<Still, String> {
+        let map = capture::Mapping { origin: (0, 0), scale: 1.0, frame: (400, 300), crop: (0, 0), size: (400, 300) };
+        crate::keyframes::still(vec![255u8; 400 * 300 * 4], 400, 300, map, 1.0, t)
+    }
+
+    #[test]
+    fn with_key_frames_off_no_buffer_is_made_and_the_screen_is_never_grabbed() {
+        let a = app("frames-off");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.stop.store(false, Ordering::SeqCst);
+        a.take_no.store(1, Ordering::SeqCst);
+        assert!(!a.keep_frames(&Settings::default(), 1, never));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(a.frames.lock().unwrap().is_none());
+        assert_eq!(NEVER.load(Ordering::SeqCst), 0);
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
+        assert!(a.stop(false).unwrap().unwrap().images.is_empty());
+    }
+
+    #[test]
+    fn with_key_frames_on_the_screen_is_kept_while_recording_and_dropped_at_stop() {
+        let a = app("frames-on");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.stop.store(false, Ordering::SeqCst);
+        a.take_no.store(1, Ordering::SeqCst);
+        let on = Settings { key_frames: true, ..Settings::default() };
+        assert!(a.keep_frames(&on, 1, white));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while a.frames.lock().unwrap().as_ref().is_some_and(|b| b.frames().is_empty()) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(a.frames.lock().unwrap().as_ref().is_some_and(|b| !b.frames().is_empty()));
+        // "this" at 400 ms: the first frame stands for it.
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
+        let exp = a.stop(false).unwrap().unwrap();
+        assert!(a.frames.lock().unwrap().is_none(), "the buffer goes at stop");
+        assert_eq!((exp.images.len(), exp.images[0].auto, exp.images[0].width), (1, true, 400));
+        assert_eq!(exp.plain, "look at [image 1] this");
+        // A new recording starts with an empty buffer; one with the setting off has none at all.
+        a.stop.store(false, Ordering::SeqCst);
+        a.take_no.store(2, Ordering::SeqCst);
+        assert!(!a.keep_frames(&Settings::default(), 2, never));
+        assert!(a.frames.lock().unwrap().is_none());
+        a.stop.store(true, Ordering::SeqCst);
     }
 
     #[test]

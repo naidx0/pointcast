@@ -85,6 +85,9 @@ pub struct Settings {
     pub outline_element: bool,
     #[serde(default)]
     pub spoken_anchors: SpokenAnchors,
+    /// Keep the screen once a second in memory while recording and add the moments talked about.
+    #[serde(default)]
+    pub key_frames: bool,
     #[serde(default)]
     pub start_at_login: bool,
     #[serde(default)]
@@ -136,6 +139,7 @@ impl Default for Settings {
             zoom_sharpen: true,
             outline_element: true,
             spoken_anchors: SpokenAnchors::default(),
+            key_frames: false,
             start_at_login: false,
             include_app: false,
             hidden: None,
@@ -282,6 +286,23 @@ mod tests {
         mute.save(&path).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains(r#""spoken_anchors": "off""#));
         assert_eq!(Settings::load(&path), mute);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn key_frames_are_off_until_turned_on_and_round_trip() {
+        let dir = std::env::temp_dir().join(format!("pc-keyframes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        assert!(!Settings::default().key_frames);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"zoom_px":640,"onboarded":true}"#).unwrap();
+        let old = Settings::load(&path);
+        assert!(old.onboarded && !old.key_frames, "a file from before key frames keeps them off");
+        let on = Settings { key_frames: true, ..old };
+        on.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""key_frames": true"#));
+        assert_eq!(Settings::load(&path), on);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

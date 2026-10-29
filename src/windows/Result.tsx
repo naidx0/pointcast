@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ClipboardPaste, Copy, FolderOpen, Pencil, Send, Trash2 } from "lucide-react";
+import { ClipboardPaste, Copy, FolderOpen, Pencil, Send, Trash2, X } from "lucide-react";
 import {
   detectTools,
   historyCopy,
@@ -8,6 +8,7 @@ import {
   historyGet,
   historyList,
   historyPaste,
+  historyRemove,
   inTauri,
   lastFolder,
   onHistoryChanged,
@@ -210,7 +211,21 @@ export function Result() {
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
             ) : null}
-            {exp ? <PromptDoc exp={exp} onEdit={sel ? (n) => void run(() => historyEdit(sel, n)) : undefined} /> : null}
+            {exp ? (
+              <PromptDoc
+                exp={exp}
+                onEdit={sel ? (n) => void run(() => historyEdit(sel, n)) : undefined}
+                onRemove={
+                  sel
+                    ? (n) =>
+                        void run(async () => {
+                          setExp(await historyRemove(sel, n));
+                          await load(sel);
+                        }, "copied")
+                    : undefined
+                }
+              />
+            ) : null}
           </main>
         </div>
       ) : (
@@ -238,8 +253,17 @@ function when(ms: number) {
   return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
-/** With `onEdit`, clicking a picture reopens it in the annotate overlay. */
-export function PromptDoc({ exp, onEdit }: { exp: SessionExport; onEdit?: (n: number) => void }) {
+/** With `onEdit`, clicking a picture reopens it in the annotate overlay; with `onRemove`, a key frame Pointcast picked
+ * can be taken out. */
+export function PromptDoc({
+  exp,
+  onEdit,
+  onRemove,
+}: {
+  exp: SessionExport;
+  onEdit?: (n: number) => void;
+  onRemove?: (n: number) => void;
+}) {
   return (
     <div className="prompt-doc">
       {splitMarkers(exp.plain).map((p, i) => {
@@ -248,13 +272,32 @@ export function PromptDoc({ exp, onEdit }: { exp: SessionExport; onEdit?: (n: nu
         return (
           <figure key={i}>
             {onEdit && img ? (
-              <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${p.n}`} onClick={() => onEdit(p.n)}>
-                <img src={img.data_url} alt={p.value} />
-                <span className="pd-edit" aria-hidden="true">
-                  <Pencil size={12} strokeWidth={2} />
-                  Edit picture
-                </span>
-              </button>
+              <span className="pd-frame">
+                <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${p.n}`} onClick={() => onEdit(p.n)}>
+                  <img src={img.data_url} alt={p.value} />
+                  <span className="pd-edit" aria-hidden="true">
+                    <Pencil size={12} strokeWidth={2} />
+                    Edit picture
+                  </span>
+                </button>
+                {img.auto ? (
+                  <span className="pd-auto" title="Pointcast picked this moment from your recording">
+                    Auto
+                  </span>
+                ) : null}
+                {img.auto && onRemove ? (
+                  <button
+                    type="button"
+                    className="pd-remove"
+                    title="Take this picture out of the prompt"
+                    aria-label={`Remove picture ${p.n}`}
+                    onClick={() => onRemove(p.n)}
+                  >
+                    <X size={12} strokeWidth={2} />
+                    Remove
+                  </button>
+                ) : null}
+              </span>
             ) : (
               <img src={img?.data_url} alt={p.value} />
             )}
@@ -280,7 +323,7 @@ const PREVIEW_ENTRIES: HistoryMeta[] = [
     created_ms: Date.now() - 60_000,
     duration_ms: 16_000,
     preview: "The Place order button is sitting on top of the total. I boxed it and dropped a pin.",
-    images: 1,
+    images: 2,
     recovered: false,
   },
   {
@@ -303,17 +346,27 @@ const PREVIEW_ENTRIES: HistoryMeta[] = [
 
 const PREVIEW_EXPORT: SessionExport = {
   plain:
-    "The Place order button is sitting on top of the total. I boxed it and dropped a pin.\n\n[image 1: 1=Place order — 28px too far left]\n\nPlease shift the primary button so it no longer overlaps the total.",
+    "The Place order button is sitting on top of [image 1] the total. I boxed it and dropped a pin.\n\n[image 2: 1=Place order — 28px too far left]\n\nPlease shift the primary button so it no longer overlaps the total.",
   html: "",
   markdown: "",
   images: [
     {
       n: 1,
+      kind: "full",
+      width: 1600,
+      height: 1000,
+      labels: [],
+      data_url: "/freeze.png",
+      auto: true,
+    },
+    {
+      n: 2,
       kind: "region",
       width: 800,
       height: 500,
       labels: [{ n: 1, text: "Place order — 28px too far left" }],
       data_url: "/freeze.png",
+      auto: false,
     },
   ],
 };
