@@ -742,6 +742,13 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
     let svc = svc.inner().clone();
     std::thread::spawn(move || {
         let r = speech_job(&app, &svc, &id);
+        if r.as_ref().err().map(String::as_str) == Some(voice::models::CANCELLED) {
+            let root = voice::models::speech_dir();
+            let cat = voice::models::catalog();
+            for part in cat.runtime_for_host().map(|r| r.id.as_str()).into_iter().chain([id.as_str()]) {
+                voice::models::drop_partial(&root, part);
+            }
+        }
         *SPEECH.lock().unwrap() = None;
         SPEECH_BUSY.store(false, Ordering::SeqCst);
         let _ = app.emit("speech://done", json!({ "id": id, "ok": r.is_ok(), "error": r.err() }));
