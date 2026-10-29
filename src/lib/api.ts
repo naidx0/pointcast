@@ -54,6 +54,8 @@ export type SpeechView = {
 
 export type Output = "clipboard" | "auto_paste" | "folder";
 export type TalkMode = "tap" | "hold";
+export type MarkPoint = "off" | "ring" | "trail";
+export type ZoomTarget = "pointer" | "dwell" | "window";
 
 export type Config = {
   platform: string;
@@ -68,6 +70,9 @@ export type Config = {
   also_clipboard: boolean;
   export_dir: string | null;
   zoom_px: number;
+  mark_point: MarkPoint;
+  zoom_target: ZoomTarget;
+  zoom_sharpen: boolean;
   start_at_login: boolean;
   include_app: boolean;
   hidden: string[];

@@ -340,6 +340,33 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ zoom_px: v })}
           />
         </Row>
+        <Row label="Close-ups centre on" sub="Where I paused is the spot the pointer last rested on.">
+          <Seg
+            label="Close-ups centre on"
+            value={cfg.zoom_target}
+            options={[
+              ["pointer", "Pointer"],
+              ["dwell", "Where I paused"],
+              ["window", "Window"],
+            ]}
+            set={(v) => patch({ zoom_target: v })}
+          />
+        </Row>
+        <Row label="Sharpen close-ups" sub="Doubles small text so it stays readable.">
+          <Toggle label="Sharpen close-ups" on={cfg.zoom_sharpen} set={(v) => patch({ zoom_sharpen: v })} />
+        </Row>
+        <Row label="Mark where I point" sub="Rings the spot you paused on. In a region you can move or delete it.">
+          <Seg
+            label="Mark where I point"
+            value={cfg.mark_point}
+            options={[
+              ["off", "Off"],
+              ["ring", "Ring"],
+              ["trail", "Ring and trail"],
+            ]}
+            set={(v) => patch({ mark_point: v })}
+          />
+        </Row>
         <Row label="Show Pointcast in captures" sub="Off keeps the recording bar and the annotate overlay out of every picture.">
           <Toggle label="Show Pointcast in captures" on={cfg.include_app} set={(v) => patch({ include_app: v })} />
         </Row>
