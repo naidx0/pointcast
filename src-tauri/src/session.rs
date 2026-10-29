@@ -440,7 +440,7 @@ impl App {
         let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
         let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
         let mut st = self.state.lock().unwrap();
-        st.notice = Some(notice(&items, mode, delivered.is_ok()));
+        st.notice = Some(notice(&items, mode, delivered.is_ok(), saved.is_some()));
         st.phase = Phase::Ready;
         Ok(Some(exp))
     }
@@ -891,8 +891,9 @@ pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
 }
 
 /// What the HUD says after a stop.
-pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str {
+pub fn notice(items: &[Item], mode: OutputMode, delivered: bool, audio_kept: bool) -> &'static str {
     match (items.is_empty(), mode, delivered) {
+        (true, _, _) if audio_kept => "kept",
         (true, _, _) => "empty",
         (_, OutputMode::AutoPaste, true) => "pasted",
         (_, OutputMode::Folder, _) => "saved",
@@ -1324,11 +1325,12 @@ mod tests {
     #[test]
     fn the_hud_says_where_the_prompt_went() {
         let words = vec![Item::Speech { t_ms: 0, end_ms: 10, text: "hi".into() }];
-        assert_eq!(notice(&[], OutputMode::AutoPaste, true), "empty");
-        assert_eq!(notice(&words, OutputMode::AutoPaste, true), "pasted");
-        assert_eq!(notice(&words, OutputMode::AutoPaste, false), "copied");
-        assert_eq!(notice(&words, OutputMode::Clipboard, true), "copied");
-        assert_eq!(notice(&words, OutputMode::Folder, true), "saved");
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true, false), "empty");
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true, true), "kept", "no words, but the audio waits in History");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, true, true), "pasted");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, false, true), "copied");
+        assert_eq!(notice(&words, OutputMode::Clipboard, true, true), "copied");
+        assert_eq!(notice(&words, OutputMode::Folder, true, true), "saved");
     }
 
     #[test]

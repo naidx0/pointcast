@@ -18,7 +18,7 @@ export type UiState = {
   model_ready: boolean;
   level: number;
   /** After a stop: what happened to the prompt. */
-  notice: "pasted" | "copied" | "saved" | "empty" | null;
+  notice: "pasted" | "copied" | "saved" | "kept" | "empty" | null;
   /** Audio recorded but not yet turned into text, in milliseconds of speech. */
   behind_ms?: number;
   /** The microphone is giving nothing ("silent") or very little ("quiet"). */

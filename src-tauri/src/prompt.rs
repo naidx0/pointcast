@@ -277,7 +277,11 @@ pub fn assemble_clipboard(items: &[Item]) -> ClipboardPayload {
 /// The clipboard form whose plain text names each picture's file (`compose_files`); the HTML shows the pictures.
 pub fn assemble_clipboard_files(items: &[Item], files: &[String]) -> ClipboardPayload {
     let (marked, captures) = compose(items);
-    let plain = compose_files(items, files).0;
+    let mut plain = compose_files(items, files).0;
+    // The folder closes the prompt, so a terminal agent can open every picture at once.
+    if let Some(dir) = files.first().and_then(|f| std::path::Path::new(f).parent()) {
+        plain.push_str(&format!("\n\nPictures: {}", dir.to_string_lossy()));
+    }
     if plain.is_empty() {
         return ClipboardPayload {
             html: String::new(),
@@ -552,7 +556,14 @@ mod tests {
         let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", pin), shot(200, CaptureKind::Zoom, vec![])];
         let files = ["C:/data/history/e/image-0.png".to_string(), "C:/data/history/e/image-1.png".to_string()];
         let clip = assemble_clipboard_files(&items, &files);
-        assert_eq!(clip.plain, r#"[image 1: C:/data/history/e/image-1.png] this [image 2: C:/data/history/e/image-0.png; button "Place order"; 1=too far left] one"#);
+        assert_eq!(
+            clip.plain,
+            concat!(
+                r#"[image 1: C:/data/history/e/image-1.png] this [image 2: C:/data/history/e/image-0.png; button "Place order"; 1=too far left] one"#,
+                "\n\nPictures: C:/data/history/e"
+            ),
+            "the folder closes the prompt, so an agent can open all the pictures at once"
+        );
         assert_eq!(clip.html, assemble_clipboard(&items).html, "the HTML keeps the pictures inline, without paths");
         assert!(!clip.html.contains("history/e"));
         let exp = assemble_export_files(&items, &files);

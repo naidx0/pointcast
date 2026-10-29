@@ -210,14 +210,16 @@ function Done({ s }: { s: UiState }) {
           ? `Copied · ${paste} to paste`
           : s.notice === "saved"
             ? "Saved to your folder"
-            : s.error || "Nothing was recorded";
+            : s.notice === "kept"
+              ? "No words yet · audio kept in History"
+              : s.error || "Nothing was recorded";
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud done" role="status" aria-live="polite" data-tauri-drag-region>
         {s.phase === "transcribing" ? (
           <span className="spinner on-hud" />
         ) : (
-          <span className={`done-mark ${s.notice === "empty" ? "none" : ""}`}>
+          <span className={`done-mark ${s.notice === "empty" || s.notice === "kept" ? "none" : ""}`}>
             <Check size={13} strokeWidth={3} />
           </span>
         )}
