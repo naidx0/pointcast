@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ClipboardPaste, Copy, FolderOpen, Pencil, Send, Trash2, X } from "lucide-react";
+import { ClipboardPaste, Copy, FolderOpen, Mic, Pencil, RotateCw, Send, Trash2, X } from "lucide-react";
 import {
   detectTools,
   historyCopy,
@@ -9,14 +9,17 @@ import {
   historyList,
   historyPaste,
   historyRemove,
+  historyRetranscribe,
   inTauri,
   lastFolder,
   onHistoryChanged,
   onResult,
   openFolder,
+  onTranscribeProgress,
   openTool,
   preview,
   sendToTool,
+  stamp,
   subscribe,
   type DetectedTool,
   type HistoryMeta,
@@ -38,6 +41,10 @@ export function Result() {
   const noteAt = useRef(0);
   // Bumped when a picture is marked up again, so the selected prompt reloads in place.
   const [rev, setRev] = useState(0);
+  // A kept recording being transcribed again. `total_ms` is 0 until the first progress report.
+  const [job, setJob] = useState<{ id: string; done_ms: number; total_ms: number } | null>(null);
+  const [jobErr, setJobErr] = useState<{ id: string; text: string } | null>(null);
+  const progressAt = useRef(0);
   const mac = platform() === "mac";
 
   /** `latest`: a recording just finished, so its prompt is the one shown, whatever was picked before. */
@@ -73,9 +80,14 @@ export function Result() {
     window.addEventListener("focus", onFocus);
     const off = subscribe(
       onResult(() => load(null, true)),
-      onHistoryChanged(() => {
+      onHistoryChanged((c) => {
         setRev((r) => r + 1);
+        setJob((j) => (j && j.id === c.id ? null : j));
         load(null);
+      }),
+      onTranscribeProgress((p) => {
+        progressAt.current = Date.now();
+        setJob({ id: p.id, done_ms: p.done_ms, total_ms: p.total_ms });
       }),
     );
     return () => {
@@ -85,6 +97,7 @@ export function Result() {
   }, [load]);
 
   useEffect(() => {
+    if (preview && !inTauri) setExp(sel === "c" ? PREVIEW_UNCLEAR : PREVIEW_EXPORT);
     if (!sel || !inTauri) return;
     let live = true;
     historyGet(sel)
@@ -112,6 +125,21 @@ export function Result() {
       setNote(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const retranscribe = async (id: string) => {
+    setJobErr(null);
+    setJob({ id, done_ms: 0, total_ms: 0 });
+    try {
+      if (inTauri) await historyRetranscribe(id);
+      else await simulateRetranscribe(id, setJob);
+      // Done, unless it reports progress on its own and history://changed ends it.
+      if (Date.now() - progressAt.current > 2000) setJob((j) => (j && j.id === id ? null : j));
+      setRev((r) => r + 1);
+    } catch (e) {
+      setJob(null);
+      setJobErr({ id, text: String(e).replace(/^Error:\s*/, "") });
     }
   };
 
@@ -228,6 +256,16 @@ export function Result() {
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
             ) : null}
+            {cur ? (
+              <AudioBar
+                audio={!!cur.has_audio}
+                unclear={!!exp && exp.plain.includes("[unclear]")}
+                job={job && job.id === cur.id ? job : null}
+                other={!!job && job.id !== cur.id}
+                error={jobErr && jobErr.id === cur.id ? jobErr.text : ""}
+                onRun={() => void retranscribe(cur.id)}
+              />
+            ) : null}
             {exp ? (
               <PromptDoc
                 exp={exp}
@@ -257,6 +295,86 @@ export function Result() {
       )}
     </div>
   );
+}
+
+/** Above a prompt: its audio is still here and can be transcribed again, with how that is going. */
+function AudioBar({
+  audio,
+  unclear,
+  job,
+  other,
+  error,
+  onRun,
+}: {
+  audio: boolean;
+  unclear: boolean;
+  job: { done_ms: number; total_ms: number } | null;
+  other: boolean;
+  error: string;
+  onRun: () => void;
+}) {
+  if (!audio && !unclear) return null;
+  const pct = job && job.total_ms > 0 ? Math.min(100, (job.done_ms / job.total_ms) * 100) : null;
+  return (
+    <div className="audio-bar">
+      <div className="audio-row">
+        <div className="grow t-small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {audio ? (
+            <>
+              <Mic size={12} strokeWidth={2} aria-hidden="true" />
+              Audio kept on this computer
+            </>
+          ) : null}
+        </div>
+        {audio ? (
+          <button
+            type="button"
+            className="btn"
+            disabled={!!job || other}
+            title={other ? "Another recording is being transcribed" : "Write this recording down again from its audio"}
+            onClick={onRun}
+          >
+            {job ? <span className="spinner" /> : <RotateCw size={13} />}
+            {job
+              ? job.total_ms > 0
+                ? `Transcribing ${stamp(job.done_ms)} of ${stamp(job.total_ms)}`
+                : "Transcribing…"
+              : "Transcribe again"}
+          </button>
+        ) : null}
+      </div>
+      {job ? (
+        <div className="progress" style={{ marginTop: 8 }} role="progressbar" aria-valuenow={pct == null ? undefined : Math.round(pct)}>
+          <i style={pct == null ? undefined : { width: `${pct}%` }} />
+        </div>
+      ) : null}
+      {error ? (
+        <p className="t-small" role="alert" style={{ margin: "6px 0 0", color: "var(--red-ink)" }}>
+          {error}
+        </p>
+      ) : null}
+      {unclear && !job ? (
+        <p className="t-small" style={{ margin: "6px 0 0" }}>
+          {audio ? "Part of this was unclear. Transcribe again, or use a larger model." : "Part of this was unclear. A larger model may hear it better."}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Browser preview: walk a kept recording through the same progress reports without a backend. */
+function simulateRetranscribe(id: string, setJob: (j: { id: string; done_ms: number; total_ms: number }) => void) {
+  const total = 667_000;
+  return new Promise<void>((resolve) => {
+    let done = 0;
+    const t = setInterval(() => {
+      done += 55_000;
+      if (done >= total) {
+        clearInterval(t);
+        resolve();
+      } else setJob({ id, done_ms: done, total_ms: total });
+    }, 500);
+  });
 }
 
 function when(ms: number) {
@@ -342,6 +460,7 @@ const PREVIEW_ENTRIES: HistoryMeta[] = [
     preview: "The Place order button is sitting on top of the total. I boxed it and dropped a pin.",
     images: 2,
     recovered: false,
+    has_audio: true,
   },
   {
     id: "b",
@@ -355,9 +474,10 @@ const PREVIEW_ENTRIES: HistoryMeta[] = [
     id: "c",
     created_ms: Date.now() - 90_000_000,
     duration_ms: 31_000,
-    preview: "Why does this chart's y axis start at forty?",
+    preview: "Why does this chart's y axis start at forty? [unclear]",
     images: 2,
     recovered: false,
+    has_audio: true,
   },
 ];
 
@@ -386,6 +506,13 @@ const PREVIEW_EXPORT: SessionExport = {
       auto: false,
     },
   ],
+};
+
+const PREVIEW_UNCLEAR: SessionExport = {
+  ...PREVIEW_EXPORT,
+  plain: `Why does this chart's y axis start at forty? [unclear] I expected it to begin at zero.
+
+[image 1]`,
 };
 
 function splitMarkers(plain: string): { kind: "text" | "img"; value: string; n: number }[] {

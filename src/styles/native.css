@@ -1306,6 +1306,24 @@ html.win .hist-item {
   overflow: hidden;
 }
 
+.audio-bar {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--fill);
+}
+html.win .audio-bar {
+  border-radius: 4px;
+}
+.audio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.audio-row .btn:disabled {
+  opacity: 1;
+}
+
 /* —— HUD after stop: where the prompt went —— */
 .hud.done {
   gap: 9px;
