@@ -43,6 +43,12 @@ pub struct Capture {
     pub height: u32,
     #[serde(default)]
     pub labels: Vec<Label>,
+    /// Where the person pointed, in picture pixels: their last rest, else the pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<crate::pointer::Point>,
+    /// The pointer's path over the last few seconds, in picture pixels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trail: Vec<crate::pointer::Point>,
 }
 
 /// A session item: speech from `t_ms` to `end_ms`, or a picture taken at `t_ms`.
@@ -341,6 +347,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 labels,
+                pointer: None,
+                trail: vec![],
             },
         }
     }

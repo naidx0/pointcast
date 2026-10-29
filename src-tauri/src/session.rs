@@ -73,6 +73,8 @@ pub struct App {
     loading: Mutex<()>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub history: crate::history::Store,
+    /// Where the pointer went during this recording (positions only).
+    trail: Mutex<crate::pointer::Trail>,
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
     freeze: Mutex<Option<Shot>>,
@@ -126,6 +128,7 @@ impl App {
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
             history: crate::history::Store::new(&crate::settings::data_dir()),
+            trail: Mutex::default(),
             last_id: Mutex::default(),
             practice: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
@@ -248,6 +251,9 @@ impl App {
             self.state.lock().unwrap().phase = Phase::Recording;
         }
         let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        self.trail.lock().unwrap().clear();
+        let me = Arc::clone(self);
+        std::thread::spawn(move || me.follow_pointer(no));
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
@@ -386,6 +392,8 @@ impl App {
             width,
             height,
             labels,
+            pointer: None,
+            trail: vec![],
         };
         self.push(Item::Image {
             t_ms: t,
@@ -402,6 +410,7 @@ impl App {
         let settings = self.settings.lock().unwrap().clone();
         let shot = grab(&settings)?;
         let t = self.t_ms();
+        let (pointer, trail) = self.pointing(&shot, t);
         let cap = Capture {
             id: 0,
             kind: shot.kind,
@@ -410,12 +419,37 @@ impl App {
             width: shot.width,
             height: shot.height,
             labels: vec![],
+            pointer,
+            trail,
         };
         self.push(Item::Image {
             t_ms: t,
             capture: cap.clone(),
         });
         Ok(cap)
+    }
+
+    /// Sample the pointer about 30 times a second for as long as this recording runs.
+    fn follow_pointer(self: Arc<Self>, no: u64) {
+        while !self.stop.load(Ordering::SeqCst) && self.take_no.load(Ordering::SeqCst) == no {
+            if let Ok((x, y)) = capture::cursor_pos() {
+                let t_ms = self.t_ms();
+                self.trail.lock().unwrap().push(crate::pointer::Point { t_ms, x, y });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        }
+    }
+
+    /// Where the person was pointing in this picture: their last rest in the trail, else the
+    /// pointer, plus the last few seconds of the path; all in picture pixels.
+    fn pointing(&self, shot: &Shot, t: u64) -> (Option<crate::pointer::Point>, Vec<crate::pointer::Point>) {
+        use crate::pointer::{dwell, TRAIL_MS};
+        let recent = self.trail.lock().unwrap().since(t.saturating_sub(TRAIL_MS));
+        let trail: Vec<_> = recent.iter().filter_map(|p| shot.map.place(*p)).collect();
+        let pointer = dwell(&recent)
+            .and_then(|d| shot.map.place(d))
+            .or_else(|| recent.last().and_then(|p| shot.map.place(*p)));
+        (pointer, trail)
     }
 
     fn t_ms(&self) -> u64 {

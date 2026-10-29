@@ -4,6 +4,7 @@ use crate::image_ops::{self, crop, encode_png, ring};
 use crate::privacy::{self, Rect};
 use crate::prompt::CaptureKind;
 use crate::settings::Settings;
+use crate::pointer::{self, Point};
 use mouse_position::mouse_position::Mouse;
 use serde::Serialize;
 
@@ -14,6 +15,27 @@ pub struct Shot {
     pub height: u32,
     pub kind: CaptureKind,
     pub cursor: (i32, i32),
+    /// How screen positions land in this picture.
+    #[serde(skip)]
+    pub map: Mapping,
+}
+
+/// Screen coordinates to this picture's pixels: the monitor's origin and scale, then the crop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mapping {
+    pub origin: (i32, i32),
+    pub scale: f64,
+    pub frame: (u32, u32),
+    pub crop: (i32, i32),
+    pub size: (u32, u32),
+}
+
+impl Mapping {
+    pub fn place(&self, p: Point) -> Option<Point> {
+        let q = pointer::to_image(p, self.origin, self.scale, self.frame)?;
+        let (x, y) = (q.x - self.crop.0, q.y - self.crop.1);
+        (x >= 0 && y >= 0 && x < self.size.0 as i32 && y < self.size.1 as i32).then_some(Point { x, y, ..q })
+    }
 }
 
 struct Frame {
@@ -21,9 +43,10 @@ struct Frame {
     width: u32,
     height: u32,
     cursor: (i32, i32),
+    map: Mapping,
 }
 
-fn cursor_pos() -> Result<(i32, i32), String> {
+pub fn cursor_pos() -> Result<(i32, i32), String> {
     match Mouse::get_mouse_position() {
         Mouse::Position { x, y } => Ok((x, y)),
         Mouse::Error => Err("could not read the pointer".into()),
@@ -60,11 +83,17 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     for r in rects {
         privacy::mask(&mut buf, width, height, r);
     }
+    // macOS reports the pointer and the monitor in points but captures in pixels; Windows is
+    // physical pixels throughout (scale 1).
+    let scale = width as f64 / mon.width().unwrap_or(width).max(1) as f64;
+    let map = Mapping { origin: (mx, my), scale, frame: (width, height), crop: (0, 0), size: (width, height) };
+    let at = map.place(Point { t_ms: 0, x: cx, y: cy }).map(|p| (p.x, p.y)).unwrap_or((0, 0));
     Ok(Frame {
         buf,
         width,
         height,
-        cursor: (cx - mx, cy - my),
+        cursor: at,
+        map,
     })
 }
 
@@ -76,6 +105,7 @@ pub fn grab_full(settings: &Settings) -> Result<Shot, String> {
         height: f.height,
         kind: CaptureKind::Full,
         cursor: f.cursor,
+        map: f.map,
     })
 }
 
@@ -92,6 +122,7 @@ pub fn grab_zoom(settings: &Settings) -> Result<Shot, String> {
         height: ch,
         kind: CaptureKind::Zoom,
         cursor: (cx - ox as i32, cy - oy as i32),
+        map: Mapping { crop: (ox as i32, oy as i32), size: (cw, ch), ..f.map },
     })
 }
 
@@ -109,6 +140,7 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
         height: ch,
         kind: CaptureKind::Region,
         cursor: (0, 0),
+        map: Mapping::default(),
     })
 }
 

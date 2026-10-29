@@ -100,6 +100,8 @@ mod tests {
             width: 1,
             height: 1,
             labels: vec![],
+            pointer: None,
+            trail: vec![],
         });
     }
 }

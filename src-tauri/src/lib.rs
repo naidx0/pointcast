@@ -7,6 +7,7 @@ mod mcp;
 mod overlay;
 mod permissions;
 mod platform;
+mod pointer;
 mod privacy;
 mod prompt;
 mod session;
