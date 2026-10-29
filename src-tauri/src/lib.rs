@@ -1054,7 +1054,7 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    let mut errors = vec![];
+    let mut errors = refused(s);
     let chords = [
         (Action::Session, "session", s.session_chord()),
         (Action::Full, "full", s.full_chord()),
@@ -1071,10 +1071,30 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
                 .map_err(|_| format!("{} is taken by another app", chord.label()))
             });
         if let Err(e) = res {
+            errors.retain(|(n, _)| n != name);
             errors.push((name.to_string(), e));
         }
     }
     errors
+}
+
+/// Saved chords this version refuses (saved before the rule existed): they fall back to the default, and the
+/// person is told why rather than that another app took the key.
+fn refused(s: &Settings) -> Vec<(String, String)> {
+    let saved = [
+        ("session", &s.session_hotkey, s.session_chord()),
+        ("full", &s.full_hotkey, s.full_chord()),
+        ("region", &s.region_hotkey, s.region_chord()),
+        ("zoom", &s.zoom_hotkey, s.zoom_chord()),
+    ];
+    saved
+        .into_iter()
+        .filter_map(|(name, raw, used)| {
+            let c = chord::Chord::parse(raw.as_deref()?).ok()?;
+            let why = chord::refusal(&c)?;
+            Some((name.to_string(), format!("{}: {why}. Using {} instead.", c.label(), used.label())))
+        })
+        .collect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1474,6 +1494,16 @@ mod tests {
         assert!(cursor.starts_with(r#""pointcast": {"#) && cursor.contains(&token) && cursor.contains("http://127.0.0.1:47821/mcp"));
         assert!(!cursor.contains("mcpServers"), "{cursor}");
         assert!(agent_setup("vim", "127.0.0.1:47821", &token).is_err());
+    }
+
+    #[test]
+    fn a_saved_chord_this_version_refuses_says_why_not_taken() {
+        assert!(refused(&Settings::default()).is_empty());
+        let old = Settings { zoom_hotkey: Some("F5".into()), ..Settings::default() };
+        let r = refused(&old);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, "zoom");
+        assert!(r[0].1.contains("Add Ctrl, Alt or Shift") && r[0].1.contains(&old.zoom_chord().label()), "{}", r[0].1);
     }
 
     #[test]
