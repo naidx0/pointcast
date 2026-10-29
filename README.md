@@ -88,7 +88,18 @@ focus from the app you are talking about.
 | Text | T | |
 | Magnifier | M | a 2× loupe of what is under it |
 
-Five colours, undo (⌘Z / Ctrl+Z) and redo. **Return** captures, **Esc** steps back one layer.
+Five colors, undo (⌘Z / Ctrl+Z) and redo. **Return** captures, **Esc** steps back one layer.
+
+**Pointcast marks what you point at for you.** Pausing the pointer on something for half a second
+is enough:
+
+- the spot gets a ring, on full-screen pictures and as a movable shape in a marked-up region;
+- the control under it (a button, a link, a field) gets an outline, and the prompt names it, for
+  example `[image 2: button "Place order"; 1=too far left]` (Windows UI Automation; macOS
+  Accessibility);
+- close-ups center on that spot, or on the window under the pointer, and small text is sharpened 2×.
+
+Each of these has a switch in **Settings → Capture**.
 
 When you stop, the prompt is pasted into the app you were using (and kept on the clipboard), or
 copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output**. Rich HTML goes
