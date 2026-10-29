@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { enable as autostartOn, disable as autostartOff, isEnabled as autostartIs } from "@tauri-apps/plugin-autostart";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-react";
@@ -11,6 +10,8 @@ import {
   historyClear,
   historyList,
   inTauri,
+  loginGet,
+  loginSet,
   mcpCopySetup,
   onSettingsPane,
   onUpdateChecked,
@@ -20,6 +21,7 @@ import {
   updateInstall,
   windowOpen,
   type Config,
+  type Login,
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
@@ -168,25 +170,35 @@ function Seg<T extends string | number>({
 function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const mac = platform() === "mac";
   const [theme, setTheme] = useState<ThemePref>(themePref());
-  const [login, setLogin] = useState(cfg.start_at_login);
+  const [login, setLogin] = useState<Login>({ enabled: cfg.start_at_login, machine: false });
+  const [loginErr, setLoginErr] = useState<string | null>(null);
   const [perms, setPerms] = usePermissions(cfg.permissions);
   useEffect(() => {
-    if (inTauri) autostartIs().then(setLogin).catch(() => undefined);
+    if (inTauri) loginGet().then(setLogin).catch(() => undefined);
   }, []);
   return (
     <>
       <div className="group">
         <Row
           label="Open at login"
-          sub={`Pointcast starts quietly in the ${mac ? "menu bar" : "system tray"} when you sign in.`}
+          sub={
+            loginErr ??
+            (login.machine
+              ? "An entry for every user, left by an earlier version run as administrator, also opens Pointcast at sign-in. An administrator can remove it in Task Manager › Startup apps."
+              : `Pointcast starts quietly in the ${mac ? "menu bar" : "system tray"} when you sign in.`)
+          }
         >
           <Toggle
             label="Open at login"
-            on={login}
+            on={login.enabled}
             set={async (v) => {
-              setLogin(v);
-              if (inTauri) await (v ? autostartOn() : autostartOff()).catch(() => undefined);
-              patch({ start_at_login: v });
+              setLoginErr(null);
+              try {
+                setLogin(inTauri ? await loginSet(v) : { enabled: v, machine: false });
+                patch({ start_at_login: v });
+              } catch (e) {
+                setLoginErr(String(e));
+              }
             }}
           />
         </Row>

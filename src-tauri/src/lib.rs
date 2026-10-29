@@ -6,6 +6,7 @@ mod element;
 mod history;
 mod image_ops;
 mod keyframes;
+mod login;
 mod mcp;
 mod overlay;
 mod permissions;
@@ -936,12 +937,8 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
     // Open at login is on unless the person switched it off: register it now, so Pointcast is
     // back after a restart without anyone running the install command again.
     if s.start_at_login {
-        use tauri_plugin_autostart::ManagerExt;
-        let login = app.autolaunch();
-        if !login.is_enabled().unwrap_or(false) {
-            if let Err(e) = login.enable() {
-                eprintln!("Pointcast could not set itself to open at login: {e}");
-            }
+        if let Err(e) = login::set(&app, true) {
+            eprintln!("Pointcast could not set itself to open at login: {e}");
         }
     }
     s.onboarded = true;
@@ -951,6 +948,16 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
         let _ = w.close();
     }
     Ok(())
+}
+
+#[tauri::command]
+fn login_get(app: AppHandle) -> Result<login::Login, String> {
+    login::get(&app)
+}
+
+#[tauri::command]
+fn login_set(app: AppHandle, on: bool) -> Result<login::Login, String> {
+    login::set(&app, on)
 }
 
 /// Ask GitHub now. Returns the newer version, or null when up to date.
@@ -1028,7 +1035,11 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Started again at login (macOS session restore had already opened it): nothing to show.
+            if login::at_login(&args) {
+                return;
+            }
             let onboarded = app
                 .try_state::<Arc<App>>()
                 .is_some_and(|svc| svc.settings.lock().unwrap().onboarded);
@@ -1037,10 +1048,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
-        ))
         .manage(svc.clone())
         .manage(latest)
         .invoke_handler(tauri::generate_handler![
@@ -1089,6 +1096,8 @@ pub fn run() {
             practice,
             mic_monitor,
             onboarding_finish,
+            login_get,
+            login_set,
             update_check,
             update_install,
             window_open,
@@ -1114,6 +1123,15 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if settings.onboarded && permissions::probe().screen != permissions::Access::Granted {
                 show_window(&handle, "onboarding");
+            }
+            // An entry an earlier version made is written again in this one's form (with --login).
+            if settings.onboarded && settings.start_at_login {
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    if login::get(&handle).is_ok_and(|l| l.enabled && !l.machine) {
+                        let _ = login::set(&handle, true);
+                    }
+                });
             }
             // A minute after launch and then once a day, look for a newer release (if allowed).
             {

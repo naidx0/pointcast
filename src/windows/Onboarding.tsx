@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { enable as autostartOn, disable as autostartOff } from "@tauri-apps/plugin-autostart";
 import { AudioLines, Check, ClipboardPaste, Keyboard, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
@@ -7,6 +6,7 @@ import { ModelPicker, speechReady, useSpeechJob } from "@/components/Models";
 import {
   hotkeyTest,
   inTauri,
+  loginSet,
   onboardingFinish,
   onHotkey,
   onPracticeResult,
@@ -366,6 +366,7 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
   const mac = platform() === "mac";
   const canPaste = !mac || cfg.permissions.accessibility === "granted";
   const [login, setLogin] = useState(cfg.start_at_login);
+  const [loginErr, setLoginErr] = useState<string | null>(null);
   return (
     <div className="onb-step">
       <AppIcon />
@@ -402,8 +403,12 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
           <div className="grow">
             <div className="lbl">Open at login</div>
             <div className="sub">
-              Pointcast starts quietly in the {mac ? "menu bar" : "system tray"} whenever you sign in, so you never run
-              the install command again. Updates come from Settings.
+              {loginErr ?? (
+                <>
+                  Pointcast starts quietly in the {mac ? "menu bar" : "system tray"} whenever you sign in, so you never
+                  run the install command again. Updates come from Settings.
+                </>
+              )}
             </div>
           </div>
           <button
@@ -413,9 +418,14 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
             aria-checked={login}
             onClick={async () => {
               const v = !login;
-              setLogin(v);
-              if (inTauri) await (v ? autostartOn() : autostartOff()).catch(() => undefined);
-              patch({ start_at_login: v });
+              setLoginErr(null);
+              try {
+                if (inTauri) await loginSet(v);
+                setLogin(v);
+                patch({ start_at_login: v });
+              } catch (e) {
+                setLoginErr(String(e));
+              }
             }}
           />
         </div>

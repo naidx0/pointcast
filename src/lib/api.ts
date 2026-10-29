@@ -156,6 +156,10 @@ export const hotkeyTest = (on: boolean) => invoke<void>("hotkey_test", { on });
 export const practice = (on: boolean) => invoke<void>("practice", { on });
 export const micMonitor = (on: boolean) => invoke<void>("mic_monitor", { on });
 export const onboardingFinish = () => invoke<void>("onboarding_finish");
+/** Open at login for this user; `machine` is an older entry for every user that only an administrator can remove. */
+export type Login = { enabled: boolean; machine: boolean };
+export const loginGet = () => invoke<Login>("login_get");
+export const loginSet = (on: boolean) => invoke<Login>("login_set", { on });
 export const updateCheck = () => invoke<string | null>("update_check");
 export const updateInstall = () => invoke<void>("update_install");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
