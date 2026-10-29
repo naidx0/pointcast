@@ -746,9 +746,7 @@ fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), 
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
     let text = agent_setup(&agent, &bind, &token)?;
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text))
-        .map_err(|e| e.to_string())
+    clipboard::copy_secret(&text)
 }
 
 /// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets

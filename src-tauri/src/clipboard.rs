@@ -23,6 +23,24 @@ pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
     Ok((payload.html, payload.plain))
 }
 
+/// Copy text that holds a secret (the MCP key in an agent's setup): Windows keeps it out of clipboard history and
+/// cloud sync, and macOS marks it for clipboard managers to skip.
+pub fn copy_secret(text: &str) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let set = cb.set();
+    #[cfg(windows)]
+    let set = {
+        use arboard::SetExtWindows;
+        set.exclude_from_history().exclude_from_cloud()
+    };
+    #[cfg(target_os = "macos")]
+    let set = {
+        use arboard::SetExtApple;
+        set.exclude_from_history()
+    };
+    set.text(text).map_err(|e| e.to_string())
+}
+
 static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 /// Keep the app handle so a paste can be run on the main thread where the OS needs it.
