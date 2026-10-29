@@ -220,7 +220,7 @@ pub fn download(
     if let Some(d) = dest.parent() {
         std::fs::create_dir_all(d).map_err(|e| io_text(&e, d))?;
     }
-    let tmp = dest.with_extension("partial");
+    let tmp = partial(dest);
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("Pointcast/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
@@ -244,6 +244,16 @@ pub fn download(
         }
     }
     Err(last_err)
+}
+
+/// Where a download of `dest` collects its bytes until it is whole, so a later try can continue it.
+fn partial(dest: &Path) -> PathBuf {
+    dest.with_extension("partial")
+}
+
+/// A cancelled setup leaves nothing behind: the bytes a download for `id` had so far are deleted.
+pub fn drop_partial(root: &Path, id: &str) {
+    let _ = std::fs::remove_file(partial(&root.join(format!("{id}.tar.bz2"))));
 }
 
 /// A finished file is kept only if its size and hash are the pinned ones.
@@ -672,6 +682,20 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b);
         assert_eq!(*s.ranges.lock().unwrap(), vec![None, Some(100_000)]);
         assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[test]
+    fn a_cancelled_download_leaves_no_partial_file() {
+        let root = std::env::temp_dir().join(format!("pc-drop-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let left = partial(&root.join("moonshine-tiny-en.tar.bz2"));
+        std::fs::write(&left, b"half").unwrap();
+        std::fs::write(root.join("other.tar.partial"), b"half").unwrap();
+        drop_partial(&root, "moonshine-tiny-en");
+        assert!(!left.exists());
+        assert!(root.join("other.tar.partial").exists(), "only that model's");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

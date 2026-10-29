@@ -216,7 +216,7 @@ html.win :focus-visible {
   -webkit-app-region: drag;
   app-region: drag;
 }
-.drag :is(button, a, input, select, textarea, [role="switch"], .no-drag) {
+.drag :is(button, a, input, select, textarea, [role="switch"], [role="radio"], .no-drag) {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }

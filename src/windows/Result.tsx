@@ -33,11 +33,14 @@ export function Result() {
   const [tools, setTools] = useState<DetectedTool[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Why the last action did not do all it said, like a paste that could only copy.
+  const [note, setNote] = useState("");
   // Bumped when a picture is marked up again, so the selected prompt reloads in place.
   const [rev, setRev] = useState(0);
   const mac = platform() === "mac";
 
-  const load = useCallback(async (pick?: string | null) => {
+  /** `latest`: a recording just finished, so its prompt is the one shown, whatever was picked before. */
+  const load = useCallback(async (pick?: string | null, latest = false) => {
     if (!inTauri) {
       if (preview) {
         setEntries(PREVIEW_ENTRIES);
@@ -49,7 +52,7 @@ export function Result() {
     const h = await historyList().catch(() => ({ entries: [] as HistoryMeta[], last: null }));
     setEntries(h.entries);
     setSel((s) => {
-      const want = pick ?? s ?? h.last ?? h.entries[0]?.id ?? null;
+      const want = (latest ? h.last : pick) ?? s ?? h.last ?? h.entries[0]?.id ?? null;
       return h.entries.some((e) => e.id === want) ? want : (h.entries[0]?.id ?? null);
     });
     lastFolder()
@@ -64,7 +67,7 @@ export function Result() {
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     const off = subscribe(
-      onResult(() => load(null)),
+      onResult(() => load(null, true)),
       onHistoryChanged(() => {
         setRev((r) => r + 1);
         load(null);
@@ -93,11 +96,12 @@ export function Result() {
   };
   const run = async (f: () => Promise<void>, k?: "copied" | "pasted") => {
     setBusy(true);
+    setNote("");
     try {
       if (inTauri) await f();
       if (k) flash(k);
-    } catch {
-      /* the button simply does not flash */
+    } catch (e) {
+      setNote(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
     }
@@ -113,8 +117,9 @@ export function Result() {
           <div className="t-head" style={{ fontSize: 14 }}>
             History
           </div>
-          <div className="t-small">
-            {entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " "}
+          <div className="t-small" role={note ? "alert" : undefined} style={note ? { color: "var(--orange-ink)" } : undefined}>
+            {note ||
+              (entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " ")}
           </div>
         </div>
         {sel && exp ? (
@@ -129,7 +134,11 @@ export function Result() {
                 onClick={() =>
                   run(async () => {
                     await historyCopy(sel);
-                    await sendToTool(t.id).catch(() => openTool(t.id));
+                    await sendToTool(t.id).catch((e) => {
+                      // Copied but not pasted: the tool is open, say so; anything else, just open the tool.
+                      if (String(e).startsWith("Copied")) throw e;
+                      return openTool(t.id);
+                    });
                   })
                 }
               >

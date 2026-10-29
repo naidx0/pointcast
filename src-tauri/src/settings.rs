@@ -47,6 +47,31 @@ pub enum ZoomTarget {
     Window,
 }
 
+/// Permissions this computer has given Pointcast at some point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Granted {
+    #[serde(default)]
+    pub screen: bool,
+    #[serde(default)]
+    pub accessibility: bool,
+}
+
+impl Granted {
+    /// Add what is granted now. True when that is news.
+    pub fn note(&mut self, screen: bool, accessibility: bool) -> bool {
+        let was = *self;
+        self.screen |= screen;
+        self.accessibility |= accessibility;
+        *self != was
+    }
+
+    /// Launch reopens the assistant only for a permission given before and off now (a macOS update takes them
+    /// away), never for one that was never given. Accessibility counts only while the output is Paste.
+    pub fn lost(&self, screen: bool, accessibility: bool, paste: bool) -> bool {
+        (self.screen && !screen) || (paste && self.accessibility && !accessibility)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +134,8 @@ pub struct Settings {
     /// Soft start and stop sounds.
     #[serde(default = "yes")]
     pub sounds: bool,
+    #[serde(default)]
+    pub granted: Granted,
 }
 
 fn default_model() -> String {
@@ -152,6 +179,7 @@ impl Default for Settings {
             mcp_enabled: true,
             onboarded: false,
             sounds: true,
+            granted: Granted::default(),
         }
     }
 }
@@ -325,6 +353,24 @@ mod tests {
         // A choice already saved is kept.
         let off: Settings = serde_json::from_str(r#"{"start_at_login":false,"check_updates":false}"#).unwrap();
         assert!(!off.start_at_login && !off.check_updates);
+    }
+
+    #[test]
+    fn the_assistant_reopens_only_for_a_permission_that_was_given_and_is_gone() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert_eq!(old.granted, Granted::default(), "a file from before this remembers nothing granted");
+        let mut g = Granted::default();
+        // A dictation-only Mac that never allowed Screen Recording is not asked at every login.
+        assert!(!g.lost(false, false, true));
+        assert!(g.note(true, false) && !g.note(true, false), "noted once");
+        assert!(g.lost(false, false, false), "Screen Recording was given and an update took it");
+        assert!(!g.lost(true, false, true), "Accessibility was never given");
+        g.note(true, true);
+        assert!(g.lost(true, false, true), "Accessibility was given, and Paste needs it");
+        assert!(!g.lost(true, false, false), "with Copy or Save it does not matter");
+        let s = Settings { granted: g, ..Settings::default() };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.granted, g);
     }
 
     #[test]

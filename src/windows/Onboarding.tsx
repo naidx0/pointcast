@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { enable as autostartOn, disable as autostartOff } from "@tauri-apps/plugin-autostart";
 import { AudioLines, Check, ClipboardPaste, Keyboard, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
@@ -7,6 +6,7 @@ import { ModelPicker, speechReady, useSpeechJob } from "@/components/Models";
 import {
   hotkeyTest,
   inTauri,
+  loginSet,
   onboardingFinish,
   onHotkey,
   onPracticeResult,
@@ -297,6 +297,20 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
   const session = chordText(cfg.hotkeys.session.label);
   const region = chordText(cfg.hotkeys.region.label);
   const rec = st?.phase === "recording" || st?.phase === "loading";
+  // Discarded (or gone without a result): offer another run instead of "Finishing…" for ever.
+  const dropped = seen.started && !rec && !result && (st?.phase === "idle" || st?.phase === "error");
+  const empty = !!result && !words(result.plain) && !result.images.length;
+  // A practice run is one recording; another needs asking for again.
+  const again = () => {
+    setResult(null);
+    setSeen({ started: false, spoke: false, marked: false });
+    if (inTauri) practice(true).catch(() => undefined);
+  };
+  const tryAgain = (
+    <button type="button" className="link" onClick={again}>
+      Try again
+    </button>
+  );
   const steps = [
     { done: seen.started, text: <>Press <Keycaps label={cfg.hotkeys.session.label} /> to start</> },
     { done: seen.spoke, text: <>Say what you see, like “this button should be blue”</> },
@@ -331,10 +345,18 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
           </button>
         </p>
       ) : null}
-      {result ? (
-        <div className="stage" style={{ maxHeight: 260, overflowY: "auto" }}>
-          <PromptDoc exp={result} />
-        </div>
+      {empty ? (
+        <p className="t-caption" role="alert">
+          No speech was heard. Check that the microphone is not muted and is the one picked in Settings › Speech.{" "}
+          {tryAgain}
+        </p>
+      ) : result ? (
+        <>
+          <div className="stage" style={{ maxHeight: 260, overflowY: "auto" }}>
+            <PromptDoc exp={result} />
+          </div>
+          <p className="t-caption" style={{ marginTop: 8 }}>{tryAgain}</p>
+        </>
       ) : (
         <div className="cards">
           {steps.map((s, k) => (
@@ -352,9 +374,11 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
               ? words(st?.partial || st?.text || "")
                 ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
                 : "Listening…"
-              : seen.started
-                ? "Finishing…"
-                : `Try it now: ${session} to start, ${region} to mark.`}
+              : dropped
+                ? <>That run was discarded. {tryAgain}</>
+                : seen.started
+                  ? "Finishing…"
+                  : `Try it now: ${session} to start, ${region} to mark.`}
           </p>
         </div>
       )}
@@ -366,11 +390,7 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
   const mac = platform() === "mac";
   const canPaste = !mac || cfg.permissions.accessibility === "granted";
   const [login, setLogin] = useState(cfg.start_at_login);
-  useEffect(() => {
-    // Without Accessibility, macOS drops the synthetic paste: copy instead so nothing is lost.
-    if (!canPaste && cfg.output === "auto_paste") patch({ output: "clipboard" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const [loginErr, setLoginErr] = useState<string | null>(null);
   return (
     <div className="onb-step">
       <AppIcon />
@@ -407,8 +427,12 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
           <div className="grow">
             <div className="lbl">Open at login</div>
             <div className="sub">
-              Pointcast starts quietly in the {mac ? "menu bar" : "system tray"} whenever you sign in, so you never run
-              the install command again. Updates come from Settings.
+              {loginErr ?? (
+                <>
+                  Pointcast starts quietly in the {mac ? "menu bar" : "system tray"} whenever you sign in, so you never
+                  run the install command again. Updates come from Settings.
+                </>
+              )}
             </div>
           </div>
           <button
@@ -418,9 +442,14 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
             aria-checked={login}
             onClick={async () => {
               const v = !login;
-              setLogin(v);
-              if (inTauri) await (v ? autostartOn() : autostartOff()).catch(() => undefined);
-              patch({ start_at_login: v });
+              setLoginErr(null);
+              try {
+                if (inTauri) await loginSet(v);
+                setLogin(v);
+                patch({ start_at_login: v });
+              } catch (e) {
+                setLoginErr(String(e));
+              }
             }}
           />
         </div>

@@ -74,6 +74,8 @@ pub struct App {
     engine: Mutex<Option<Engine>>,
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
+    /// How the last attempt to load the model and run it went; none before the first.
+    checked: Mutex<Option<Result<(), String>>>,
     /// Held for the whole of a stop, so a second stop or a Quit waits for it instead of racing it.
     finishing: Mutex<()>,
     /// Set by Discard: the worker skips transcribing what is left.
@@ -95,8 +97,10 @@ pub struct App {
     freeze_t: Mutex<Option<u64>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
-    /// Onboarding practice run: keep the result in the app, deliver it nowhere.
+    /// This recording is onboarding's practice run: keep the result in the app, deliver it nowhere.
     pub practice: AtomicBool,
+    /// Onboarding is on its practice step: the next recording started is a practice run.
+    pub practice_next: AtomicBool,
     /// Onboarding shortcut test: hotkeys only report that they fired.
     pub hotkey_test: AtomicBool,
     /// When the session chord went down, for hold-to-talk.
@@ -135,6 +139,7 @@ impl App {
             take: Mutex::default(),
             engine: Mutex::default(),
             loading: Mutex::default(),
+            checked: Mutex::default(),
             finishing: Mutex::default(),
             cancel: AtomicBool::new(false),
             audio_at: AtomicU64::new(0),
@@ -149,6 +154,7 @@ impl App {
             frames: Mutex::default(),
             last_id: Mutex::default(),
             practice: AtomicBool::new(false),
+            practice_next: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
             hold_from: Mutex::default(),
             hotkey_errors: Mutex::default(),
@@ -189,8 +195,19 @@ impl App {
         Ok(())
     }
 
+    /// Whether the speech engine last loaded and ran here, or why not.
+    pub fn speech_check(&self) -> Option<Result<(), String>> {
+        self.checked.lock().unwrap().clone()
+    }
+
     /// Load the chosen model unless it is already the one in memory.
     pub fn ensure_engine(&self) -> Result<(), String> {
+        let r = self.load_engine();
+        *self.checked.lock().unwrap() = Some(r.clone());
+        r
+    }
+
+    fn load_engine(&self) -> Result<(), String> {
         let _one = self.loading.lock().unwrap();
         let root = models::speech_dir();
         let cat = models::catalog();
@@ -236,6 +253,7 @@ impl App {
         let g = self.engine.lock().unwrap();
         let eng = g.as_ref().ok_or(NO_MODEL)?;
         let _ = eng.transcribe(&vec![0.0f32; 8_000]);
+        *self.checked.lock().unwrap() = Some(Ok(()));
         Ok(())
     }
 
@@ -246,6 +264,7 @@ impl App {
             _ => {}
         }
         self.monitor_off();
+        self.bind_practice();
         // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
         if self.history.recover().is_none() {
             self.history.clear_checkpoint();
@@ -292,6 +311,25 @@ impl App {
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
+    }
+
+    /// Only the recording started while onboarding asked for practice is a practice run.
+    fn bind_practice(&self) {
+        self.practice.store(self.practice_next.swap(false, Ordering::SeqCst), Ordering::SeqCst);
+    }
+
+    /// Onboarding left its practice step. True when the practice run is still recording and must be
+    /// discarded; one already finishing stays practice until its result is shown.
+    pub fn practice_off(&self) -> bool {
+        self.practice_next.store(false, Ordering::SeqCst);
+        match self.state.lock().unwrap().phase {
+            Phase::Recording | Phase::Loading => self.practice.load(Ordering::SeqCst),
+            Phase::Transcribing => false,
+            _ => {
+                self.practice.store(false, Ordering::SeqCst);
+                false
+            }
+        }
     }
 
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
@@ -354,7 +392,7 @@ impl App {
         }
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
-            let dir = export_dir(&settings);
+            let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
             let _ = std::fs::create_dir_all(&dir);
             if let Ok(p) = prompt::export_folder(&items, &dir) {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
@@ -424,10 +462,18 @@ impl App {
         self.capture_shot(capture::grab_zoom)
     }
 
+    /// A capture the OS refused (Screen Recording off) is said on the HUD, not dropped.
+    fn said<T>(&self, r: Result<T, String>) -> Result<T, String> {
+        if let Err(e) = &r {
+            self.state.lock().unwrap().error = Some(e.clone());
+        }
+        r
+    }
+
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
         let t = self.t_ms();
-        let shot = capture::grab_freeze(&settings, &self.recent(t), t)?;
+        let shot = self.said(capture::grab_freeze(&settings, &self.recent(t), t))?;
         *self.freeze.lock().unwrap() = Some(shot.clone());
         *self.freeze_t.lock().unwrap() = Some(t);
         Ok(shot)
@@ -471,7 +517,7 @@ impl App {
     ) -> Result<Capture, String> {
         let settings = self.settings.lock().unwrap().clone();
         let asked = self.t_ms();
-        let shot = grab(&settings, &self.recent(asked), asked)?;
+        let shot = self.said(grab(&settings, &self.recent(asked), asked))?;
         let t = self.t_ms();
         let place = Some(shot.place());
         let cap = Capture {
@@ -559,6 +605,21 @@ impl App {
         Ok(exp)
     }
 
+    /// History lost entries (`gone`, or all of them when None). When the last prompt was one, the newest entry left
+    /// takes its place, or nothing does. True when the last prompt changed.
+    pub fn forget(&self, gone: Option<&str>) -> bool {
+        let hit = gone.is_none_or(|id| self.last_id.lock().unwrap().as_deref() == Some(id));
+        if !hit {
+            return false;
+        }
+        let next = self.history.list().into_iter().next();
+        if next.and_then(|m| self.set_last(&m.id).ok()).is_none() {
+            *self.last_export.lock().unwrap() = None;
+            *self.last_id.lock().unwrap() = None;
+        }
+        true
+    }
+
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
         if let Err(e) = self.ensure_engine() {
             // Screenshots still work; the transcript stays empty.
@@ -631,16 +692,19 @@ impl App {
     }
 }
 
-fn export_dir(s: &Settings) -> std::path::PathBuf {
-    if let Some(d) = &s.export_dir {
-        return std::path::PathBuf::from(d);
-    }
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Pointcast")
-        .join(stamp)
+/// One new folder per recording, named by when it was saved, in the chosen folder or Documents › Pointcast.
+fn export_dir(s: &Settings, stamp: &str) -> std::path::PathBuf {
+    let base = match &s.export_dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("Pointcast"),
+    };
+    std::iter::once(base.join(stamp))
+        .chain((2..).map(|n| base.join(format!("{stamp}-{n}"))))
+        .find(|p| !p.exists())
+        .unwrap_or_default()
 }
 
 /// Auto-paste needs the OS to accept synthetic keys; where it will not (macOS without
@@ -836,6 +900,87 @@ mod tests {
         assert!(!a.keep_frames(&Settings::default(), 2, never));
         assert!(a.frames.lock().unwrap().is_none());
         a.stop.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn the_last_engine_check_is_remembered_so_ready_is_not_claimed_after_a_failure() {
+        let a = app("check");
+        assert!(a.speech_check().is_none(), "nothing tried yet");
+        // The test's data folder has no model, so the engine cannot start.
+        let r = a.engine_check();
+        assert!(r.is_err());
+        assert_eq!(a.speech_check(), Some(r));
+    }
+
+    #[test]
+    fn practice_is_only_the_recording_started_while_onboarding_asked_for_it() {
+        let a = app("practice");
+        a.practice.store(false, Ordering::SeqCst);
+        a.practice_next.store(true, Ordering::SeqCst);
+        a.bind_practice();
+        assert!(a.practice.load(Ordering::SeqCst) && !a.practice_next.load(Ordering::SeqCst));
+        a.bind_practice();
+        assert!(!a.practice.load(Ordering::SeqCst), "after one practice run the next recording is a real one");
+        // Back or "Download one" mid-run: the run is discarded rather than delivered as a real one.
+        a.practice_next.store(true, Ordering::SeqCst);
+        a.bind_practice();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(a.practice_off());
+        // A run already finishing stays practice until its result is shown.
+        a.state.lock().unwrap().phase = Phase::Transcribing;
+        assert!(!a.practice_off() && a.practice.load(Ordering::SeqCst));
+        a.state.lock().unwrap().phase = Phase::Ready;
+        assert!(!a.practice_off() && !a.practice.load(Ordering::SeqCst));
+        // A real recording is never turned into one, nor discarded.
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(!a.practice_off());
+    }
+
+    #[test]
+    fn deleting_the_last_prompt_or_clearing_history_forgets_it() {
+        let a = app("forget");
+        let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
+        let old = a.history.save(&said("older"), 1_000, 9).unwrap();
+        let new = a.history.save(&said("newest"), 2_000, 9).unwrap();
+        a.set_last(&new.id).unwrap();
+        // Another entry goes: the last prompt stays.
+        a.history.delete(&old.id).unwrap();
+        assert!(!a.forget(Some(&old.id)));
+        assert_eq!(a.last_export().unwrap().plain, "newest");
+        let old = a.history.save(&said("older"), 1_000, 9).unwrap();
+        // The last one goes: the newest left takes its place.
+        a.history.delete(&new.id).unwrap();
+        assert!(a.forget(Some(&new.id)));
+        assert_eq!((a.last_export().unwrap().plain.as_str(), a.last_id.lock().unwrap().clone()), ("older", Some(old.id)));
+        // Clear: nothing is left to paste.
+        a.history.clear().unwrap();
+        assert!(a.forget(None));
+        assert!(a.last_export().is_none() && a.last_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn each_saved_recording_gets_its_own_folder_in_a_chosen_folder_too() {
+        let root = std::env::temp_dir().join(format!("pc-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mine = Settings { export_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
+        let first = export_dir(&mine, "20261029-101500");
+        assert_eq!(first, root.join("20261029-101500"));
+        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first).unwrap();
+        // A second recording in the same second never writes over the first one's prompt.md.
+        let second = export_dir(&mine, "20261029-101500");
+        assert_eq!(second, root.join("20261029-101500-2"));
+        assert!(export_dir(&Settings::default(), "20261029-101501").ends_with("Pointcast/20261029-101501"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_capture_the_os_refuses_is_said_on_the_hud() {
+        let a = app("refused");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        let off = |_: &Settings, _: &[Point], _: u64| -> Result<Shot, String> { Err("Screen Recording is off for Pointcast.".into()) };
+        assert!(a.capture_shot(off).is_err());
+        assert_eq!(a.ui().error.as_deref(), Some("Screen Recording is off for Pointcast."));
+        assert_eq!(a.ui().image_count, 0);
     }
 
     #[test]

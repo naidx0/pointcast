@@ -6,6 +6,7 @@ mod element;
 mod history;
 mod image_ops;
 mod keyframes;
+mod login;
 mod mcp;
 mod overlay;
 mod permissions;
@@ -48,6 +49,10 @@ pub enum Action {
 
 pub fn show_window(app: &AppHandle, label: &str) {
     if let Some(w) = platform::ensure(app, label) {
+        // History's Paste into App goes back to the app that was in front when it opened.
+        if label == "result" && !w.is_visible().unwrap_or(false) {
+            platform::remember_front();
+        }
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -111,8 +116,8 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
     }
     // The HUD reads "Finishing…" while the last words are transcribed, then where the prompt went.
     emit_state_now(app, svc);
-    let exp = svc.stop(false);
     let practice = svc.practice.load(Ordering::SeqCst);
+    let exp = svc.stop(false);
     if practice || exp.is_err() {
         hide_window(app, "indicator");
     } else {
@@ -125,9 +130,12 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
             }
         });
     }
+    if practice {
+        svc.practice.store(false, Ordering::SeqCst);
+    }
     let exp = exp?;
     if let Some(ref e) = exp {
-        if svc.practice.load(Ordering::SeqCst) {
+        if practice {
             let _ = app.emit("practice://result", e);
         } else {
             if let Some(latest) = app.try_state::<Latest>() {
@@ -178,13 +186,15 @@ fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
     })
 }
 
+fn overlay_open(app: &AppHandle) -> bool {
+    app.get_webview_window("overlay")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
 /// Show a frame in the overlay, remembering the app in front unless the overlay already is.
 fn show_frame(app: &AppHandle, payload: &Value) {
-    let already = app
-        .get_webview_window("overlay")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    if !already {
+    if !overlay_open(app) {
         platform::remember_front();
     }
     *FRAME.lock().unwrap() = Some(payload.clone());
@@ -263,6 +273,23 @@ fn release_stops(mode: TalkMode, held_from: Option<u64>, now: u64) -> bool {
     mode == TalkMode::Hold && held_from.is_some_and(|t| now.saturating_sub(t) >= HOLD_MS)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Press {
+    Start,
+    Stop,
+    /// The overlay is open: what is marked there goes in first, then the recording stops.
+    CommitThenStop,
+}
+
+/// What pressing the session chord does.
+fn session_press(rec: bool, overlay: bool) -> Press {
+    match (rec, overlay) {
+        (false, _) => Press::Start,
+        (true, false) => Press::Stop,
+        (true, true) => Press::CommitThenStop,
+    }
+}
+
 /// Every shortcut, from the keyboard or the tray. A capture chord with no session starts one.
 pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
     let _ = app.emit("hotkey://fired", json!({ "action": action, "pressed": pressed }));
@@ -270,23 +297,32 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         return;
     };
     let svc = svc.inner().clone();
-    if svc.hotkey_test.load(Ordering::SeqCst) {
+    let rec = recording(&svc);
+    // While a recording runs, its shortcuts still work: the test must not trap it.
+    if svc.hotkey_test.load(Ordering::SeqCst) && !rec {
         return;
     }
-    let rec = recording(&svc);
     match (action, pressed) {
-        (Action::Session, true) => {
-            if rec {
+        (Action::Session, true) => match session_press(rec, rec && overlay_open(app)) {
+            Press::CommitThenStop => {
+                *svc.hold_from.lock().unwrap() = None;
+                let _ = app.emit_to("overlay", "overlay://finish", ());
+            }
+            Press::Stop => {
                 *svc.hold_from.lock().unwrap() = None;
                 finish_soon(app, &svc);
-            } else if begin(app, &svc).is_ok() {
-                *svc.hold_from.lock().unwrap() = Some(now_ms());
             }
-        }
+            Press::Start => {
+                if begin(app, &svc).is_ok() {
+                    *svc.hold_from.lock().unwrap() = Some(now_ms());
+                }
+            }
+        },
         (Action::Session, false) => {
             let from = svc.hold_from.lock().unwrap().take();
             let mode = svc.settings.lock().unwrap().talk_mode;
-            if rec && release_stops(mode, from, now_ms()) {
+            // A release while the overlay is open keeps recording, so the box being drawn is not lost.
+            if rec && release_stops(mode, from, now_ms()) && !overlay_open(app) {
                 finish_soon(app, &svc);
             }
         }
@@ -305,8 +341,17 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
     }
 }
 
+fn installed_models<'a>(root: &std::path::Path, cat: &'a voice::models::Catalog) -> Vec<&'a str> {
+    cat.models
+        .iter()
+        .filter(|x| voice::models::model_installed(root, x))
+        .map(|x| x.id.as_str())
+        .collect()
+}
+
 fn settings_view(svc: &App) -> Value {
     let s = svc.settings.lock().unwrap().clone();
+    let speech = (voice::models::speech_dir(), voice::models::catalog());
     let errors: Vec<Value> = svc
         .hotkey_errors
         .lock()
@@ -348,14 +393,20 @@ fn settings_view(svc: &App) -> Value {
         "start_at_login": s.start_at_login,
         "check_updates": s.check_updates,
         "update": update::available(),
+        "update_installing": update::installing(),
+        "update_failure": update::last_failure(),
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
         "mcp_enabled": s.mcp_enabled,
+        "mcp_error": MCP_ERROR.get(),
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
-        "speech": voice::models::view(&voice::models::speech_dir(), &voice::models::catalog()),
+        "speech": voice::models::view(&speech.0, &speech.1),
+        "speech_check": svc.speech_check().map(|r| json!({ "ok": r.is_ok(), "error": r.err() })),
+        // The model a recording loads, which may not be the one picked (that one is not downloaded).
+        "speech_in_use": voice::machine::route(&s.model, voice::machine::recommended(), &installed_models(&speech.0, &speech.1)),
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
         "recommended": voice::machine::recommended(),
@@ -572,8 +623,24 @@ fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
     copy_export(&svc.set_last(&id)?)?;
     hide_window(&app, "result");
+    platform::restore_front();
     std::thread::sleep(std::time::Duration::from_millis(220));
-    clipboard::paste_now()
+    paste()
+}
+
+pub const PASTE_YOURSELF: &str = "Copied, paste it yourself.";
+
+/// Paste what was just copied, or say it is only on the clipboard: without permission to paste (macOS
+/// Accessibility), or when the app in front refuses it (an app run as administrator on Windows).
+fn paste_or_say(can_paste: bool, paste: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    if !can_paste {
+        return Err(PASTE_YOURSELF.into());
+    }
+    paste().map_err(|_| PASTE_YOURSELF.into())
+}
+
+fn paste() -> Result<(), String> {
+    paste_or_say(permissions::can_paste(), clipboard::paste_now)
 }
 
 /// Take a key frame Pointcast picked out of a past prompt, which becomes the last prompt and is copied again.
@@ -587,19 +654,33 @@ fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n
 }
 
 #[tauri::command]
-fn history_delete(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    svc.history.delete(&id)
+fn history_delete(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    svc.history.delete(&id)?;
+    forgot(&app, &svc, Some(&id));
+    Ok(())
 }
 
 #[tauri::command]
-fn history_clear(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
-    *svc.last_id.lock().unwrap() = None;
-    svc.history.clear()
+fn history_clear(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    let r = svc.history.clear();
+    forgot(&app, &svc, None);
+    r
+}
+
+/// A deleted prompt leaves Paste Last Prompt and what coding agents read too.
+fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
+    if !svc.forget(gone) {
+        return;
+    }
+    if let Some(latest) = app.try_state::<Latest>() {
+        latest.set(svc.last_export().unwrap_or_else(|| prompt::assemble_export(&[])));
+    }
+    emit_state(app, svc);
 }
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {
     copy_last(svc)?;
-    clipboard::paste_now()
+    paste()
 }
 
 #[tauri::command]
@@ -609,13 +690,27 @@ fn copy_again(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 
 /// Copy the MCP setup for coding agents, token included. The token never passes through a window.
 #[tauri::command]
-fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), String> {
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
-    let text = serde_json::to_string_pretty(&mcp::client_config(&bind, &token)).map_err(|e| e.to_string())?;
+    let text = agent_setup(&agent, &bind, &token)?;
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text))
         .map_err(|e| e.to_string())
+}
+
+/// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets
+/// its user-scope command, Cursor the one server entry for `~/.cursor/mcp.json`.
+fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
+    let all = mcp::client_config(bind, token);
+    let server = &all["mcpServers"]["pointcast"];
+    let url = server["url"].as_str().ok_or("no MCP address")?;
+    let auth = server["headers"]["Authorization"].as_str().ok_or("no MCP key")?;
+    match agent {
+        "claude" => Ok(format!("claude mcp add --transport http --scope user pointcast {url} --header {q}Authorization: {auth}{q}", q = '"')),
+        "cursor" => Ok(format!("{q}pointcast{q}: {}", serde_json::to_string_pretty(server).map_err(|e| e.to_string())?, q = '"')),
+        _ => Err("Unknown agent.".into()),
+    }
 }
 
 /// Hide our window first so the paste lands in the app underneath it.
@@ -623,9 +718,13 @@ fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     copy_last(&svc)?;
     hide_window(&app, "result");
+    platform::restore_front();
     std::thread::sleep(std::time::Duration::from_millis(220));
-    clipboard::paste_now()
+    paste()
 }
+
+/// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
+static MCP_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The latest setup progress, so a window opened mid-download picks it up.
 static SPEECH: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
@@ -647,6 +746,13 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
     let svc = svc.inner().clone();
     std::thread::spawn(move || {
         let r = speech_job(&app, &svc, &id);
+        if r.as_ref().err().map(String::as_str) == Some(voice::models::CANCELLED) {
+            let root = voice::models::speech_dir();
+            let cat = voice::models::catalog();
+            for part in cat.runtime_for_host().map(|r| r.id.as_str()).into_iter().chain([id.as_str()]) {
+                voice::models::drop_partial(&root, part);
+            }
+        }
         *SPEECH.lock().unwrap() = None;
         SPEECH_BUSY.store(false, Ordering::SeqCst);
         let _ = app.emit("speech://done", json!({ "id": id, "ok": r.is_ok(), "error": r.err() }));
@@ -725,12 +831,7 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
     let cat = voice::models::catalog();
     let m = cat.model(&id).ok_or("That model isn't in the catalog.")?;
     let root = voice::models::speech_dir();
-    let installed: Vec<&str> = cat
-        .models
-        .iter()
-        .filter(|x| voice::models::model_installed(&root, x))
-        .map(|x| x.id.as_str())
-        .collect();
+    let installed = installed_models(&root, &cat);
     let active = in_use(&svc.settings.lock().unwrap().model, voice::machine::recommended(), &installed, &m.id);
     if active || SPEECH_BUSY.load(Ordering::SeqCst) {
         return Err("That model is in use. Pick another one first.".into());
@@ -740,14 +841,23 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
 }
 
 #[tauri::command]
-fn permissions_get() -> permissions::PermissionStatus {
-    permissions::probe()
+fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> permissions::PermissionStatus {
+    noted(&svc, permissions::probe())
 }
 
 #[tauri::command]
-fn permission_request(kind: String) -> permissions::PermissionStatus {
+fn permission_request(svc: tauri::State<'_, Arc<App>>, kind: String) -> permissions::PermissionStatus {
     permissions::request(&kind);
-    permissions::probe()
+    noted(&svc, permissions::probe())
+}
+
+/// Remember what was ever granted, so launch can tell a permission an update took from one never given.
+fn noted(svc: &App, p: permissions::PermissionStatus) -> permissions::PermissionStatus {
+    let mut s = svc.settings.lock().unwrap().clone();
+    if s.granted.note(p.screen == permissions::Access::Granted, p.accessibility == permissions::Access::Granted) {
+        let _ = svc.save_settings(s);
+    }
+    p
 }
 
 #[tauri::command]
@@ -777,7 +887,7 @@ fn send_to_tool(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
     copy_last(&svc)?;
     tools::open(&id)?;
     std::thread::sleep(std::time::Duration::from_millis(700));
-    clipboard::paste_now()
+    paste()
 }
 
 #[tauri::command]
@@ -827,10 +937,26 @@ fn hotkey_test(svc: tauri::State<'_, Arc<App>>, on: bool) {
     svc.hotkey_test.store(on, Ordering::SeqCst);
 }
 
-/// Onboarding's practice run: a real session whose prompt stays in the onboarding window.
+/// Onboarding's practice run: the next session started is a real one whose prompt stays in the onboarding window.
+/// Off mid-run discards it (async: that waits for the speech worker).
 #[tauri::command]
-fn practice(svc: tauri::State<'_, Arc<App>>, on: bool) {
-    svc.practice.store(on, Ordering::SeqCst);
+async fn practice(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
+    if on {
+        svc.practice_next.store(true, Ordering::SeqCst);
+    } else {
+        end_practice(&app, &svc);
+    }
+    Ok(())
+}
+
+fn end_practice(app: &AppHandle, svc: &App) {
+    if svc.practice_off() {
+        let _ = svc.stop(true);
+        svc.practice.store(false, Ordering::SeqCst);
+        hide_window(app, "indicator");
+        close_overlay(app);
+        emit_state(app, svc);
+    }
 }
 
 /// Live input level outside a session, for the microphone check.
@@ -856,13 +982,7 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
 
 /// Whatever step the assistant was on, shortcuts and sessions go back to normal.
 fn leave_onboarding(app: &AppHandle, svc: &App) {
-    if svc.practice.load(Ordering::SeqCst) && recording(svc) {
-        let _ = svc.stop(true);
-        hide_window(app, "indicator");
-        hide_window(app, "overlay");
-        emit_state(app, svc);
-    }
-    svc.practice.store(false, Ordering::SeqCst);
+    end_practice(app, svc);
     svc.hotkey_test.store(false, Ordering::SeqCst);
     svc.monitor_off();
 }
@@ -874,18 +994,27 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
     // Open at login is on unless the person switched it off: register it now, so Pointcast is
     // back after a restart without anyone running the install command again.
     if s.start_at_login {
-        use tauri_plugin_autostart::ManagerExt;
-        let login = app.autolaunch();
-        if !login.is_enabled().unwrap_or(false) {
-            if let Err(e) = login.enable() {
-                eprintln!("Pointcast could not set itself to open at login: {e}");
-            }
+        if let Err(e) = login::set(&app, true) {
+            eprintln!("Pointcast could not set itself to open at login: {e}");
         }
     }
     s.onboarded = true;
     svc.save_settings(s)?;
-    hide_window(&app, "onboarding");
+    // Closed rather than hidden, so opening it again starts over at the first step that needs attention.
+    if let Some(w) = app.get_webview_window("onboarding") {
+        let _ = w.close();
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn login_get(app: AppHandle) -> Result<login::Login, String> {
+    login::get(&app)
+}
+
+#[tauri::command]
+fn login_set(app: AppHandle, on: bool) -> Result<login::Login, String> {
+    login::set(&app, on)
 }
 
 /// Ask GitHub now. Returns the newer version, or null when up to date.
@@ -925,7 +1054,7 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    let mut errors = vec![];
+    let mut errors = refused(s);
     let chords = [
         (Action::Session, "session", s.session_chord()),
         (Action::Full, "full", s.full_chord()),
@@ -942,10 +1071,30 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
                 .map_err(|_| format!("{} is taken by another app", chord.label()))
             });
         if let Err(e) = res {
+            errors.retain(|(n, _)| n != name);
             errors.push((name.to_string(), e));
         }
     }
     errors
+}
+
+/// Saved chords this version refuses (saved before the rule existed): they fall back to the default, and the
+/// person is told why rather than that another app took the key.
+fn refused(s: &Settings) -> Vec<(String, String)> {
+    let saved = [
+        ("session", &s.session_hotkey, s.session_chord()),
+        ("full", &s.full_hotkey, s.full_chord()),
+        ("region", &s.region_hotkey, s.region_chord()),
+        ("zoom", &s.zoom_hotkey, s.zoom_chord()),
+    ];
+    saved
+        .into_iter()
+        .filter_map(|(name, raw, used)| {
+            let c = chord::Chord::parse(raw.as_deref()?).ok()?;
+            let why = chord::refusal(&c)?;
+            Some((name.to_string(), format!("{}: {why}. Using {} instead.", c.label(), used.label())))
+        })
+        .collect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -958,12 +1107,19 @@ pub fn run() {
         // Errors name the problem, never the token.
         match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, latest.clone(), t)) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
-            Err(e) => eprintln!("Pointcast MCP did not start: {e}"),
+            Err(e) => {
+                eprintln!("Pointcast MCP did not start: {e}");
+                let _ = MCP_ERROR.set(e);
+            }
         }
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Started again at login (macOS session restore had already opened it): nothing to show.
+            if login::at_login(&args) {
+                return;
+            }
             let onboarded = app
                 .try_state::<Arc<App>>()
                 .is_some_and(|svc| svc.settings.lock().unwrap().onboarded);
@@ -972,10 +1128,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
-        ))
         .manage(svc.clone())
         .manage(latest)
         .invoke_handler(tauri::generate_handler![
@@ -1024,6 +1176,8 @@ pub fn run() {
             practice,
             mic_monitor,
             onboarding_finish,
+            login_get,
+            login_set,
             update_check,
             update_install,
             window_open,
@@ -1047,8 +1201,22 @@ pub fn run() {
                 show_window(&handle, "onboarding");
             }
             #[cfg(target_os = "macos")]
-            if settings.onboarded && permissions::probe().screen != permissions::Access::Granted {
-                show_window(&handle, "onboarding");
+            if settings.onboarded {
+                let p = noted(&svc, permissions::probe());
+                let paste = settings.output == settings::OutputMode::AutoPaste;
+                let on = |a: permissions::Access| a == permissions::Access::Granted;
+                if settings.granted.lost(on(p.screen), on(p.accessibility), paste) {
+                    show_window(&handle, "onboarding");
+                }
+            }
+            // An entry an earlier version made is written again in this one's form (with --login).
+            if settings.onboarded && settings.start_at_login {
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    if login::get(&handle).is_ok_and(|l| l.enabled && !l.machine) {
+                        let _ = login::set(&handle, true);
+                    }
+                });
             }
             // A minute after launch and then once a day, look for a newer release (if allowed).
             {
@@ -1076,6 +1244,12 @@ pub fn run() {
                     if busy {
                         emit_state(&handle, &svc2);
                         busy_at = std::time::Instant::now();
+                        // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
+                        // click on the HUD's Stop can bring Pointcast forward on macOS.
+                        #[cfg(target_os = "macos")]
+                        if recording(&svc2) && !handle.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
+                            platform::remember_front();
+                        }
                     } else if busy_at.elapsed() >= IDLE && !SPEECH_BUSY.load(Ordering::SeqCst) {
                         platform::reap(&handle);
                         svc2.unload_engine();
@@ -1114,6 +1288,12 @@ pub fn run() {
         .run(|_app, event| match event {
             // The last window closing is not quitting: only Quit (an explicit exit code) ends it.
             tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            // Any way out (the app menu, logout, restart, the updater): what was said is kept for the next launch.
+            tauri::RunEvent::Exit => {
+                if let Some(svc) = _app.try_state::<Arc<App>>() {
+                    svc.flush_for_quit();
+                }
+            }
             // Clicking the Dock icon (shown while a window is open) brings Settings forward.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_window(_app, "settings"),
@@ -1131,6 +1311,13 @@ mod tests {
         assert!(!release_stops(TalkMode::Hold, Some(1_000), 1_000 + HOLD_MS - 1));
         assert!(release_stops(TalkMode::Hold, Some(1_000), 1_000 + HOLD_MS));
         assert!(!release_stops(TalkMode::Hold, None, 9_000));
+    }
+
+    #[test]
+    fn the_session_chord_over_the_open_overlay_keeps_the_box_then_stops() {
+        assert_eq!(session_press(false, false), Press::Start);
+        assert_eq!(session_press(true, false), Press::Stop);
+        assert_eq!(session_press(true, true), Press::CommitThenStop);
     }
 
     #[test]
@@ -1280,6 +1467,43 @@ mod tests {
         assert!(!in_use("auto", "moonshine-base-en", &both, "moonshine-tiny-en"));
         // The chosen one is not downloaded: the engine falls back to what is there.
         assert!(in_use("whisper-turbo", "moonshine-base-en", &["moonshine-tiny-en"], "moonshine-tiny-en"));
+    }
+
+    #[test]
+    fn a_paste_that_cannot_happen_says_the_prompt_was_only_copied() {
+        let tried = std::cell::Cell::new(false);
+        let r = paste_or_say(false, || {
+            tried.set(true);
+            Ok(())
+        });
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert!(!tried.get(), "without permission no keys are sent");
+        assert_eq!(paste_or_say(true, || Err("refused".into())).unwrap_err(), PASTE_YOURSELF);
+        assert!(paste_or_say(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn agent_setup_is_the_one_server_for_user_settings_not_a_whole_project_file() {
+        let token = "ab".repeat(32);
+        let claude = agent_setup("claude", "127.0.0.1:47821", &token).unwrap();
+        assert_eq!(
+            claude,
+            format!("claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp --header {q}Authorization: Bearer {token}{q}", q = '"')
+        );
+        let cursor = agent_setup("cursor", "127.0.0.1:47821", &token).unwrap();
+        assert!(cursor.starts_with(r#""pointcast": {"#) && cursor.contains(&token) && cursor.contains("http://127.0.0.1:47821/mcp"));
+        assert!(!cursor.contains("mcpServers"), "{cursor}");
+        assert!(agent_setup("vim", "127.0.0.1:47821", &token).is_err());
+    }
+
+    #[test]
+    fn a_saved_chord_this_version_refuses_says_why_not_taken() {
+        assert!(refused(&Settings::default()).is_empty());
+        let old = Settings { zoom_hotkey: Some("F5".into()), ..Settings::default() };
+        let r = refused(&old);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, "zoom");
+        assert!(r[0].1.contains("Add Ctrl, Alt or Shift") && r[0].1.contains(&old.zoom_chord().label()), "{}", r[0].1);
     }
 
     #[test]

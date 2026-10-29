@@ -83,13 +83,23 @@ export type Config = {
   check_updates: boolean;
   /** A newer version the last check found. */
   update: string | null;
+  /** An update is downloading or installing now. */
+  update_installing?: boolean;
+  /** Why the last update did not finish, if it failed. */
+  update_failure?: string | null;
   include_app: boolean;
   hidden: string[];
   mcp_bind: string;
   mcp_enabled: boolean;
+  /** Why sharing with agents did not start at launch. */
+  mcp_error?: string | null;
   onboarded: boolean;
   sounds: boolean;
   speech: SpeechView;
+  /** How the last load-and-run of the speech engine went; null before the first. */
+  speech_check: { ok: boolean; error: string | null } | null;
+  /** The model a recording would load now (the picked one, or the installed one it falls back to). */
+  speech_in_use?: string | null;
   devices: string[];
   permissions: Permissions;
   recommended: string;
@@ -132,8 +142,8 @@ export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
 export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 export const copyAgain = () => invoke<void>("copy_again");
-/** Copies the MCP setup for coding agents, with this install's key, straight to the clipboard. */
-export const mcpCopySetup = () => invoke<void>("mcp_copy_setup");
+/** Copies the MCP setup for one coding agent, with this install's key, straight to the clipboard. */
+export const mcpCopySetup = (agent: "claude" | "cursor") => invoke<void>("mcp_copy_setup", { agent });
 export const pasteAgain = () => invoke<void>("paste_again");
 export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: string; received?: number; total?: number };
 export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
@@ -152,6 +162,10 @@ export const hotkeyTest = (on: boolean) => invoke<void>("hotkey_test", { on });
 export const practice = (on: boolean) => invoke<void>("practice", { on });
 export const micMonitor = (on: boolean) => invoke<void>("mic_monitor", { on });
 export const onboardingFinish = () => invoke<void>("onboarding_finish");
+/** Open at login for this user; `machine` is an older entry for every user that only an administrator can remove. */
+export type Login = { enabled: boolean; machine: boolean };
+export const loginGet = () => invoke<Login>("login_get");
+export const loginSet = (on: boolean) => invoke<Login>("login_set", { on });
 export const updateCheck = () => invoke<string | null>("update_check");
 export const updateInstall = () => invoke<void>("update_install");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
@@ -184,6 +198,8 @@ const on =
 export const onState = on<UiState>("session://state");
 export const onResult = on<SessionExport>("session://result");
 export const onPracticeResult = on<SessionExport>("practice://result");
+/** The session shortcut while the overlay is open: capture what is marked, then finish the recording. */
+export const onOverlayFinish = on<null>("overlay://finish");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
 export const onHistoryChanged = on<{ id: string }>("history://changed");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");

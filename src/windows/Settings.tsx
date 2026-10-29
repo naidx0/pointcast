@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { enable as autostartOn, disable as autostartOff, isEnabled as autostartIs } from "@tauri-apps/plugin-autostart";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-react";
@@ -11,6 +10,8 @@ import {
   historyClear,
   historyList,
   inTauri,
+  loginGet,
+  loginSet,
   mcpCopySetup,
   onSettingsPane,
   onUpdateChecked,
@@ -20,6 +21,7 @@ import {
   updateInstall,
   windowOpen,
   type Config,
+  type Login,
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
@@ -89,7 +91,7 @@ export function Settings() {
         </div>
         <div className="prefs-pane">
           {!cfg ? null : pane === "general" ? (
-            <General cfg={cfg} patch={patch} />
+            <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
             <Shortcuts cfg={cfg} patch={patch} setCfg={setCfg} />
           ) : pane === "speech" ? (
@@ -165,28 +167,38 @@ function Seg<T extends string | number>({
   );
 }
 
-function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const [theme, setTheme] = useState<ThemePref>(themePref());
-  const [login, setLogin] = useState(cfg.start_at_login);
+  const [login, setLogin] = useState<Login>({ enabled: cfg.start_at_login, machine: false });
+  const [loginErr, setLoginErr] = useState<string | null>(null);
   const [perms, setPerms] = usePermissions(cfg.permissions);
   useEffect(() => {
-    if (inTauri) autostartIs().then(setLogin).catch(() => undefined);
+    if (inTauri) loginGet().then(setLogin).catch(() => undefined);
   }, []);
   return (
     <>
       <div className="group">
         <Row
           label="Open at login"
-          sub={`Pointcast starts quietly in the ${mac ? "menu bar" : "system tray"} when you sign in.`}
+          sub={
+            loginErr ??
+            (login.machine
+              ? "An entry for every user, left by an earlier version run as administrator, also opens Pointcast at sign-in. An administrator can remove it in Task Manager › Startup apps."
+              : `Pointcast starts quietly in the ${mac ? "menu bar" : "system tray"} when you sign in.`)
+          }
         >
           <Toggle
             label="Open at login"
-            on={login}
+            on={login.enabled}
             set={async (v) => {
-              setLogin(v);
-              if (inTauri) await (v ? autostartOn() : autostartOff()).catch(() => undefined);
-              patch({ start_at_login: v });
+              setLoginErr(null);
+              try {
+                setLogin(inTauri ? await loginSet(v) : { enabled: v, machine: false });
+                patch({ start_at_login: v });
+              } catch (e) {
+                setLoginErr(String(e));
+              }
             }}
           />
         </Row>
@@ -212,7 +224,7 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Updates
       </h2>
-      <Updates cfg={cfg} patch={patch} />
+      <Updates cfg={cfg} patch={patch} refresh={refresh} />
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Permissions
       </h2>
@@ -227,22 +239,28 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
   );
 }
 
-function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const [found, setFound] = useState<string | null>(cfg.update);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
   const [error, setError] = useState<string | null>(null);
-  useEffect(
-    () =>
-      subscribe(
-        onUpdateChecked(setFound),
-        onUpdateFailed((why) => {
-          setError(why);
-          setState("idle");
-        }),
-      ),
-    [],
-  );
+  useEffect(() => {
+    // The pane may have been away while an update started or failed: ask again.
+    refresh();
+    return subscribe(
+      onUpdateChecked((v) => {
+        setFound(v);
+        setError(null);
+        setState(v ? "idle" : "latest");
+      }),
+      onUpdateFailed((why) => {
+        setError(why);
+        setState("idle");
+      }),
+    );
+  }, [refresh]);
+  useEffect(() => setFound((f) => cfg.update ?? f), [cfg.update]);
+  const installing = state === "installing" || !!cfg.update_installing;
   const check = async () => {
     setState("checking");
     setError(null);
@@ -267,7 +285,8 @@ function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
   };
   const sub =
     error ??
-    (state === "installing"
+    cfg.update_failure ??
+    (installing
       ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
       : found
         ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
@@ -280,8 +299,8 @@ function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
     <div className="group">
       <Row label={found ? `Pointcast ${found} is available` : "Pointcast"} sub={sub}>
         {found ? (
-          <button type="button" className="btn primary" disabled={state === "installing"} onClick={install}>
-            {state === "installing" ? "Updating…" : "Update"}
+          <button type="button" className="btn primary" disabled={installing} onClick={install}>
+            {installing ? "Updating…" : "Update"}
           </button>
         ) : (
           <button type="button" className="btn" disabled={state === "checking"} onClick={check}>
@@ -424,6 +443,30 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
 
 function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const [hidden, setHidden] = useState(cfg.hidden.join("\n"));
+  const unsaved = useRef<string | null>(null);
+  const saveHidden = (text: string) => {
+    unsaved.current = null;
+    patch({
+      hidden: text
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    });
+  };
+  // Saved a moment after typing stops, and on leaving the pane, not only when the field loses focus.
+  useEffect(() => {
+    if (unsaved.current == null) return;
+    const t = setTimeout(() => saveHidden(hidden), 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hidden]);
+  useEffect(
+    () => () => {
+      if (unsaved.current != null) saveHidden(unsaved.current);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
   return (
     <>
       <div className="group">
@@ -500,15 +543,11 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
           style={{ width: "100%", minHeight: 120 }}
           value={hidden}
           spellCheck={false}
-          onChange={(e) => setHidden(e.target.value)}
-          onBlur={() =>
-            patch({
-              hidden: hidden
-                .split("\n")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            })
-          }
+          onChange={(e) => {
+            unsaved.current = e.target.value;
+            setHidden(e.target.value);
+          }}
+          onBlur={() => unsaved.current != null && saveHidden(hidden)}
         />
       </div>
       <p className="group-note">
@@ -522,7 +561,18 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
 function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const mac = platform() === "mac";
   const needsAx = mac && cfg.permissions.accessibility !== "granted";
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"" | "claude" | "cursor">("");
+  const [copyErr, setCopyErr] = useState("");
+  const copy = (agent: "claude" | "cursor") => {
+    setCopyErr("");
+    if (!inTauri) return;
+    mcpCopySetup(agent)
+      .then(() => {
+        setCopied(agent);
+        setTimeout(() => setCopied(""), 1600);
+      })
+      .catch((e) => setCopyErr(String(e)));
+  };
   return (
     <>
       <div className="group">
@@ -549,7 +599,7 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ output: v })}
           />
         </Row>
-        {cfg.output !== "clipboard" ? (
+        {cfg.output === "folder" ? (
           <Row label="Also copy to the clipboard">
             <Toggle label="Also copy to the clipboard" on={cfg.also_clipboard} set={(v) => patch({ also_clipboard: v })} />
           </Row>
@@ -580,11 +630,18 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
         <Row
           label="Share the last prompt with coding agents"
           sub={
-            <>
-              Claude Code, Cursor and Codex can read it over MCP at{" "}
-              <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
-              Pointcast reopens.
-            </>
+            cfg.mcp_enabled && cfg.mcp_error ? (
+              <span style={{ color: "var(--red-ink)" }}>
+                Sharing did not start: {cfg.mcp_error}. Close whatever uses{" "}
+                <span className="mono">{cfg.mcp_bind}</span>, then reopen Pointcast.
+              </span>
+            ) : (
+              <>
+                Claude Code, Cursor and Codex can read it over MCP at{" "}
+                <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
+                Pointcast reopens.
+              </>
+            )
           }
         >
           <Toggle label="Share over MCP" on={cfg.mcp_enabled} set={(v) => patch({ mcp_enabled: v })} />
@@ -592,19 +649,16 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
         {cfg.mcp_enabled ? (
           <Row
             label="Agent setup"
-            sub="Paste it into .mcp.json (Claude Code) or mcp.json (Cursor). It holds this computer's key, so web pages cannot read your prompts."
+            sub={
+              copyErr ||
+              "For your user settings only: run the Claude Code command in a terminal, or paste the Cursor entry into mcpServers in ~/.cursor/mcp.json. It holds this computer's key, so never put it in a project file."
+            }
           >
-            <button
-              type="button"
-              className="btn"
-              onClick={() =>
-                inTauri &&
-                mcpCopySetup()
-                  .then(() => setCopied(true))
-                  .catch(() => undefined)
-              }
-            >
-              {copied ? "Copied" : "Copy setup"}
+            <button type="button" className="btn" onClick={() => copy("claude")}>
+              {copied === "claude" ? "Copied" : "Claude Code"}
+            </button>
+            <button type="button" className="btn" onClick={() => copy("cursor")}>
+              {copied === "cursor" ? "Copied" : "Cursor"}
             </button>
           </Row>
         ) : null}
