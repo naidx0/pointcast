@@ -1,7 +1,7 @@
 //! The microphone (cpal) and the signal work around it: downmix to mono, resample to 16 kHz,
 //! a level for the meter, and cutting a long take at its pauses so the model never sees more
 //! than a few seconds at once. Samples live in memory only.
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const RATE: u32 = 16_000;
@@ -80,6 +80,8 @@ pub struct Segmenter {
     last_voice: Option<usize>,
     seen: usize,
     done: usize,
+    /// The samples after the last whole frame, waiting for the next feed.
+    pending: Vec<f32>,
 }
 
 pub const FRAME: usize = 480;
@@ -94,52 +96,69 @@ impl Segmenter {
             last_voice: None,
             seen: 0,
             done: 0,
+            pending: vec![],
         }
     }
     fn ms(n: usize) -> u32 {
         (n as u64 * 1000 / RATE as u64) as u32
     }
+    /// Cut the whole take so far; only the part not seen before is read.
     pub fn feed(&mut self, all: &[f32]) -> Vec<std::ops::Range<usize>> {
+        let from = (self.seen + self.pending.len()).min(all.len());
+        self.feed_new(&all[from..])
+    }
+    /// Cut what arrived since the last feed.
+    pub fn feed_new(&mut self, new: &[f32]) -> Vec<std::ops::Range<usize>> {
+        self.pending.extend_from_slice(new);
         let mut out = vec![];
-        while self.seen + FRAME <= all.len() {
-            let f = &all[self.seen..self.seen + FRAME];
-            let r = rms(f);
-            let voice = r > (self.floor * 3.0).max(0.01);
-            if !voice {
-                self.floor = self.floor * 0.95 + r * 0.05;
-            }
-            self.seen += FRAME;
-            if voice {
-                self.last_voice = Some(self.seen);
-            }
-            match self.last_voice {
-                Some(v) => {
-                    let quiet = Self::ms(self.seen - v);
-                    let long = Self::ms(self.seen - self.start);
-                    if quiet >= self.gap_ms || long >= self.max_ms {
-                        out.push(self.start..self.seen);
-                        self.start = self.seen;
-                        self.done = self.seen;
-                        self.last_voice = None;
-                    }
+        let mut at = 0;
+        while at + FRAME <= self.pending.len() {
+            let r = rms(&self.pending[at..at + FRAME]);
+            at += FRAME;
+            self.frame(r, &mut out);
+        }
+        self.pending.drain(..at);
+        out
+    }
+    fn frame(&mut self, r: f32, out: &mut Vec<std::ops::Range<usize>>) {
+        let voice = r > (self.floor * 3.0).max(0.01);
+        if !voice {
+            self.floor = self.floor * 0.95 + r * 0.05;
+        }
+        self.seen += FRAME;
+        if voice {
+            self.last_voice = Some(self.seen);
+        }
+        match self.last_voice {
+            Some(v) => {
+                let quiet = Self::ms(self.seen - v);
+                let long = Self::ms(self.seen - self.start);
+                if quiet >= self.gap_ms || long >= self.max_ms {
+                    out.push(self.start..self.seen);
+                    self.start = self.seen;
+                    self.done = self.seen;
+                    self.last_voice = None;
                 }
-                None => {
-                    let keep = (RATE as usize * 3 / 10).min(self.seen);
-                    self.start = (self.seen - keep).max(self.done);
-                }
+            }
+            None => {
+                let keep = (RATE as usize * 3 / 10).min(self.seen);
+                self.start = (self.seen - keep).max(self.done);
             }
         }
-        out
     }
     pub fn open_start(&self) -> Option<usize> {
         self.last_voice.map(|_| self.start)
     }
     pub fn finish(&mut self, all: &[f32]) -> Vec<std::ops::Range<usize>> {
         let mut out = self.feed(all);
-        if self.last_voice.is_some() {
-            out.push(self.start..all.len());
-        }
-        self.start = all.len();
+        out.extend(self.close());
+        out
+    }
+    /// The take ended: what is still open is a piece too.
+    pub fn close(&mut self) -> Vec<std::ops::Range<usize>> {
+        let end = self.seen + self.pending.len();
+        let out = self.last_voice.map(|_| self.start..end).into_iter().collect();
+        self.start = end;
         self.last_voice = None;
         out
     }
@@ -151,6 +170,8 @@ pub struct Take {
     pub level: AtomicU32,
     pub open: AtomicBool,
     pub error: Mutex<Option<String>>,
+    /// Bytes copied out of the take so far, so the cost of reading a long one stays in view.
+    pub copied: AtomicU64,
 }
 
 impl Take {
@@ -162,10 +183,21 @@ impl Take {
     }
     pub fn copy(&self, r: std::ops::Range<usize>) -> Vec<f32> {
         let s = self.samples.lock().unwrap();
-        s[r.start.min(s.len())..r.end.min(s.len())].to_vec()
+        let v = s[r.start.min(s.len())..r.end.min(s.len())].to_vec();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
     }
     pub fn all(&self) -> Vec<f32> {
-        self.samples.lock().unwrap().clone()
+        let v = self.samples.lock().unwrap().clone();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
+    }
+    /// The samples from `pos` on: what arrived since a reader last looked.
+    pub fn read_from(&self, pos: usize) -> Vec<f32> {
+        let s = self.samples.lock().unwrap();
+        let v = s[pos.min(s.len())..].to_vec();
+        self.copied.fetch_add(v.len() as u64 * 4, Ordering::Relaxed);
+        v
     }
 }
 
@@ -477,5 +509,21 @@ mod tests {
             pieces.iter().all(|r| r.len() <= 3 * 16_000 + FRAME + 4_800),
             "{pieces:?}"
         );
+    }
+
+    #[test]
+    fn new_samples_in_any_size_of_piece_are_cut_as_the_whole_take_is() {
+        let x = take(&[(1.0, 1.0), (2.0, 0.2), (1.0, 1.0), (0.5, 0.0)]);
+        let mut whole = Segmenter::new(700, 12_000);
+        let want = whole.finish(&x);
+        for size in [1usize, 37, 479, 480, 481, 1_600, 50_000] {
+            let mut s = Segmenter::new(700, 12_000);
+            let mut got = vec![];
+            for piece in x.chunks(size) {
+                got.extend(s.feed_new(piece));
+            }
+            got.extend(s.close());
+            assert_eq!(got, want, "pieces of {size}");
+        }
     }
 }

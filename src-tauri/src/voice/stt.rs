@@ -351,7 +351,7 @@ impl Engine {
     /// A live caption for the sentence still being spoken, or None when it is not time yet or
     /// this model is too slow to redo it while the person talks.
     pub fn partial(&self, samples: &[f32]) -> Option<String> {
-        if !self.live {
+        if !self.wants_partial() {
             return None;
         }
         let mut last = self.last_partial.lock().unwrap();
@@ -361,6 +361,11 @@ impl Engine {
         *last = Some(std::time::Instant::now());
         drop(last);
         Some(self.transcribe(samples))
+    }
+
+    /// Whether a live caption is due, before the open sentence is copied out for one.
+    pub fn wants_partial(&self) -> bool {
+        self.live && !self.last_partial.lock().unwrap().is_some_and(|t| t.elapsed() < PARTIAL_EVERY)
     }
 
     pub fn transcribe(&self, samples: &[f32]) -> String {

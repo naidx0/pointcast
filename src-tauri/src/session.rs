@@ -666,15 +666,22 @@ impl App {
         }
         let mut seg = audio::Segmenter::new(900, 12_000);
         let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
+        // look than a short one and the microphone never waits behind a copy of all of it.
+        let mut pos = 0;
         loop {
             if self.stop.load(Ordering::SeqCst) || self.take_no.load(Ordering::SeqCst) != no {
                 break;
             }
-            let all = take.all();
-            let ranges = seg.feed(&all);
+            let new = take.read_from(pos);
+            pos += new.len();
+            let ranges = seg.feed_new(&new);
             self.decode_ranges(&take, &ranges, t0);
-            if let Some(start) = seg.open_start() {
-                let samples = take.copy(start..all.len());
+            // A live caption only when one is due and nothing waits to be transcribed: the last few seconds of the open
+            // sentence.
+            let due = self.engine.lock().unwrap().as_ref().is_some_and(|e| e.wants_partial());
+            if let Some(start) = seg.open_start().filter(|_| due && ranges.is_empty() && take.len() - pos < audio::RATE as usize / 2) {
+                let samples = take.copy(start.max(pos.saturating_sub(PARTIAL_SPAN))..pos);
                 let live = self.engine.lock().unwrap().as_ref().and_then(|e| e.partial(&samples));
                 if let Some(t) = live {
                     self.state.lock().unwrap().partial = t;
@@ -686,11 +693,8 @@ impl App {
             self.state.lock().unwrap().partial.clear();
             return;
         }
-        let all = take.all();
-        let rest = {
-            let mut s = seg;
-            s.finish(&all)
-        };
+        let mut rest = seg.feed_new(&take.read_from(pos));
+        rest.extend(seg.close());
         self.decode_ranges(&take, &rest, t0);
         self.state.lock().unwrap().partial.clear();
     }
@@ -763,6 +767,9 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str
         _ => "copied",
     }
 }
+
+/// A live caption covers at most this many samples (8 s) of the sentence being spoken.
+const PARTIAL_SPAN: usize = audio::RATE as usize * 8;
 
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
 
@@ -1140,5 +1147,168 @@ mod tests {
         assert_eq!(paste_or_copy(OutputMode::AutoPaste, false), OutputMode::Clipboard);
         assert_eq!(paste_or_copy(OutputMode::AutoPaste, true), OutputMode::AutoPaste);
         assert_eq!(paste_or_copy(OutputMode::Folder, false), OutputMode::Folder);
+    }
+
+    #[test]
+    fn a_long_recording_is_read_once_and_the_microphone_never_waits_behind_the_worker() {
+        let a = app("linear");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop.store(false, Ordering::SeqCst);
+        a.take_no.store(1, Ordering::SeqCst);
+        // Five minutes of 2 s sounds a second apart, fed about 100 times faster than real time in 10 ms pieces.
+        let n = audio::RATE as usize * 300;
+        let x: Vec<f32> = (0..n).map(|i| if i % 48_000 < 32_000 { 0.2 * (i as f32 * 0.1).sin() } else { 0.0005 }).collect();
+        let take = Arc::new(Take::default());
+        // Room for all of it from the start: only the worker can make the microphone wait.
+        take.samples.lock().unwrap().reserve(n);
+        let worker = {
+            let (me, take) = (a.clone(), take.clone());
+            std::thread::spawn(move || me.worker(1, take))
+        };
+        let mut blocked = std::time::Duration::ZERO;
+        for (i, piece) in x.chunks(160).enumerate() {
+            let t = std::time::Instant::now();
+            take.samples.lock().unwrap().extend_from_slice(piece);
+            blocked = blocked.max(t.elapsed());
+            if i % 10 == 9 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        a.stop.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+        let copied = take.copied.load(Ordering::Relaxed);
+        assert!(copied <= 3 * n as u64 * 4, "{} MB copied out of {} MB of audio", copied / 1_000_000, n * 4 / 1_000_000);
+        assert!(blocked < std::time::Duration::from_millis(20), "the microphone waited {blocked:?}");
+    }
+
+    /// Words of `s`, lower case, without punctuation.
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect::<String>().to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+
+    /// The share of `want`'s words found in `got`, each counted at most as often as `got` has it.
+    fn recall(want: &[String], got: &[String]) -> f64 {
+        let mut have: std::collections::HashMap<&str, i64> = Default::default();
+        for w in got {
+            *have.entry(w.as_str()).or_default() += 1;
+        }
+        let hit = want
+            .iter()
+            .filter(|w| {
+                have.get_mut(w.as_str()).is_some_and(|n| {
+                    *n -= 1;
+                    *n >= 0
+                })
+            })
+            .count();
+        hit as f64 / want.len().max(1) as f64
+    }
+
+    /// `voice` four times at `gain`, 6, 15 and 9 s apart, over a quiet room or one with noise at rms `noise`.
+    fn long_take(voice: &[f32], gain: f32, noise: f32) -> Vec<f32> {
+        let sec = |s: f32| (s * audio::RATE as f32) as usize;
+        let mut v = vec![0.0f32; sec(1.0)];
+        for gap in [6.0, 15.0, 9.0, 2.0] {
+            v.extend(voice.iter().map(|x| x * gain));
+            v.extend(std::iter::repeat(0.0).take(sec(gap)));
+        }
+        let mut seed = 0x9e37_79b9u32;
+        let amp = noise.max(0.0003) * 3f32.sqrt();
+        for x in v.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *x += (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * amp;
+        }
+        v
+    }
+
+    /// The real pipeline over real speech, fed 20 times faster than real time in 10 ms pieces while the worker runs.
+    /// Prints word recall against the script, the longest stretch with no text, the longest the microphone waited for
+    /// the take, the bytes copied out of it and the wall time. Reads the models only.
+    /// `POINTCAST_SPEECH_DIR=<speech dir> POINTCAST_MODEL=<id> POINTCAST_F32=<16 kHz mono f32le> POINTCAST_SCRIPT=<script.md>
+    /// [POINTCAST_CASES=1:0,0.25:0.01] cargo test --lib -- --ignored --nocapture real_audio_pipeline`
+    #[test]
+    #[ignore]
+    fn real_audio_pipeline() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        assert!(std::env::var_os("POINTCAST_SPEECH_DIR").is_some(), "set POINTCAST_SPEECH_DIR");
+        let raw = std::fs::read(var("POINTCAST_F32")).unwrap();
+        let voice: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let script = std::fs::read_to_string(var("POINTCAST_SCRIPT")).unwrap();
+        let lines: Vec<&str> = script
+            .lines()
+            .filter_map(|l| {
+                let c: Vec<&str> = l.split('|').collect();
+                let id = c.get(2).map(|s| s.trim()).unwrap_or("");
+                (c.len() >= 5 && id.len() == 2 && id.starts_with(['n', 's'])).then(|| c[3])
+            })
+            .collect();
+        let want: Vec<String> = (0..4).flat_map(|_| words(&lines.join(" "))).collect();
+        let a = app("real-audio");
+        let model = var("POINTCAST_MODEL");
+        a.settings.lock().unwrap().model = model.clone();
+        a.ensure_engine().unwrap();
+        let cases = std::env::var("POINTCAST_CASES").unwrap_or_else(|_| "1:0,0.25:0,0.06:0,1:0.01,0.25:0.01,0.06:0.01".into());
+        for case in cases.split(',') {
+            let (g, n) = case.split_once(':').unwrap();
+            let (gain, noise): (f32, f32) = (g.parse().unwrap(), n.parse().unwrap());
+            let rec = long_take(&voice, gain, noise);
+            // A recording as start() begins one, without a microphone.
+            a.items.lock().unwrap().clear();
+            *a.t0.lock().unwrap() = Some(now_ms());
+            a.state.lock().unwrap().phase = Phase::Recording;
+            a.stop.store(false, Ordering::SeqCst);
+            let no = a.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+            let take = Arc::new(Take::default());
+            let began = std::time::Instant::now();
+            let worker = {
+                let (me, take) = (a.clone(), take.clone());
+                std::thread::spawn(move || me.worker(no, take))
+            };
+            let mut blocked = std::time::Duration::ZERO;
+            for (i, piece) in rec.chunks(160).enumerate() {
+                let due = began + std::time::Duration::from_micros(i as u64 * 500);
+                while std::time::Instant::now() < due {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                let t = std::time::Instant::now();
+                take.samples.lock().unwrap().extend_from_slice(piece);
+                blocked = blocked.max(t.elapsed());
+            }
+            a.stop.store(true, Ordering::SeqCst);
+            a.state.lock().unwrap().phase = Phase::Transcribing;
+            worker.join().unwrap();
+            let wall = began.elapsed().as_secs_f64();
+            let said: Vec<(u64, u64, String)> = prompt::ordered(a.items.lock().unwrap().clone())
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Speech { t_ms, end_ms, text } => Some((t_ms, end_ms, text)),
+                    _ => None,
+                })
+                .collect();
+            let got = words(&said.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" "));
+            let total = rec.len() as u64 * 1000 / audio::RATE as u64;
+            let mut edges = vec![0u64];
+            for s in &said {
+                edges.extend([s.0, s.1]);
+            }
+            edges.push(total);
+            let gap = edges.chunks(2).map(|p| p[1].saturating_sub(p[0])).max().unwrap_or(total);
+            eprintln!(
+                "RESULT model={model} gain={gain} noise={noise} recall={:.3} gap_s={:.1} block_ms={:.2} copied_mb={:.1} wall_s={wall:.1} audio_s={:.1} items={}",
+                recall(&want, &got),
+                gap as f64 / 1000.0,
+                blocked.as_secs_f64() * 1000.0,
+                take.copied.load(Ordering::Relaxed) as f64 / 1e6,
+                total as f64 / 1000.0,
+                said.len()
+            );
+            eprintln!("TEXT {}", said.iter().map(|s| format!("{}-{} {}", s.0, s.1, s.2)).collect::<Vec<_>>().join(" | "));
+        }
     }
 }
