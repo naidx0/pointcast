@@ -84,6 +84,7 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
 
 fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
     hide_window(app, "overlay");
+    platform::restore_front();
     if svc.settings.lock().unwrap().sounds {
         platform::chime(false);
     }
@@ -152,6 +153,13 @@ fn frame_payload(shot: &capture::Shot) -> Value {
 }
 
 fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
+    let already = app
+        .get_webview_window("overlay")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if !already {
+        platform::remember_front();
+    }
     let shot = svc.begin_region()?;
     let payload = frame_payload(&shot);
     let _ = app.emit("overlay://frame", &payload);
@@ -386,6 +394,7 @@ fn region_commit(
         .map_err(|e| e.to_string())?;
     let cap = svc.commit_region(png, body.labels)?;
     hide_window(&app, "overlay");
+    platform::restore_front();
     emit_state(&app, &svc);
     Ok(json!({"kind": cap.kind, "width": cap.width, "height": cap.height, "labels": cap.labels}))
 }
@@ -393,6 +402,7 @@ fn region_commit(
 #[tauri::command]
 fn region_cancel(app: AppHandle) {
     hide_window(&app, "overlay");
+    platform::restore_front();
 }
 
 #[tauri::command]

@@ -267,6 +267,9 @@ function KeysStep({
   );
 }
 
+/** What was said, without the [image n] markers captures add to the running text. */
+const words = (t: string) => t.replace(/\[image[^\]]*\]/g, " ").replace(/\s+/g, " ").trim();
+
 function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: boolean; onBack: () => void }) {
   const [st, setSt] = useState<UiState | null>(null);
   const [result, setResult] = useState<SessionExport | null>(null);
@@ -278,7 +281,7 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
           setSt(s);
           setSeen((x) => ({
             started: x.started || s.phase === "recording",
-            spoke: x.spoke || !!(s.partial || s.text).trim(),
+            spoke: x.spoke || !!words(s.partial || s.text),
             marked: x.marked || s.image_count > 0,
           }));
         }),
@@ -341,8 +344,8 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
           ))}
           <p className="t-caption" style={{ minHeight: 18, textAlign: "center", marginTop: 4 }}>
             {rec
-              ? st?.partial || st?.text
-                ? `“${(st.partial || st.text).slice(-90)}”`
+              ? words(st?.partial || st?.text || "")
+                ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
                 : "Listening…"
               : seen.started
                 ? "Finishing…"

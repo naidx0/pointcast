@@ -886,6 +886,7 @@ html.win .onb-body {
   margin-bottom: 8px;
 }
 .onb-step > .t-body {
+  text-wrap: balance;
   max-width: 440px;
   margin-bottom: 24px;
 }

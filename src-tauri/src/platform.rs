@@ -67,6 +67,73 @@ fn place(w: &WebviewWindow, m: &Monitor) {
     }
 }
 
+/// The app the person was in before the overlay took the keyboard (a window on Windows, a
+/// process on macOS), so focus goes back there afterwards and auto-paste lands in it.
+static FRONT: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+pub fn remember_front() {
+    *FRONT.lock().unwrap() = front();
+}
+
+pub fn restore_front() {
+    if let Some(t) = FRONT.lock().unwrap().take() {
+        activate(t);
+    }
+}
+
+#[cfg(windows)]
+fn front() -> Option<isize> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let h = unsafe { GetForegroundWindow() };
+    (!h.0.is_null()).then_some(h.0 as isize)
+}
+
+#[cfg(windows)]
+fn activate(t: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    unsafe {
+        let _ = SetForegroundWindow(HWND(t as *mut std::ffi::c_void));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn front() -> Option<isize> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        Some(pid as isize)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate(t: isize) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: *mut AnyObject =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: t as i32];
+        if !app.is_null() {
+            // NSApplicationActivateIgnoringOtherApps
+            let _: bool = msg_send![app, activateWithOptions: 2usize];
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn front() -> Option<isize> {
+    None
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn activate(_: isize) {}
+
 /// Keep the recording HUD and the annotate overlay out of every screenshot (unless the user wants
 /// them in). Only those two: on Windows a protected window is also blank in the taskbar preview,
 /// Alt+Tab and screen sharing, which ordinary windows like Settings must not be.
