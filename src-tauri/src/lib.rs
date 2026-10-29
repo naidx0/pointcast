@@ -248,6 +248,9 @@ fn settings_view(svc: &App) -> Value {
         "also_clipboard": s.also_clipboard,
         "export_dir": s.export_dir,
         "zoom_px": s.zoom_px(),
+        "mark_point": s.mark_point,
+        "zoom_target": s.zoom_target,
+        "zoom_sharpen": s.zoom_sharpen,
         "start_at_login": s.start_at_login,
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
@@ -905,6 +908,16 @@ mod tests {
         let back = merge(&cur, p(json!({ "export_dir": "/tmp/x" }))).unwrap();
         let cleared = merge(&back, p(json!({ "export_dir": null }))).unwrap();
         assert_eq!(cleared.export_dir, None);
+    }
+
+    #[test]
+    fn a_patch_sets_the_capture_marks_and_refuses_unknown_ones() {
+        let p = |v: Value| v.as_object().unwrap().clone();
+        let next = merge(&Settings::default(), p(json!({ "mark_point": "trail", "zoom_target": "window", "zoom_sharpen": false }))).unwrap();
+        assert_eq!((next.mark_point, next.zoom_target, next.zoom_sharpen), (settings::MarkPoint::Trail, settings::ZoomTarget::Window, false));
+        assert!(merge(&next, p(json!({ "mark_point": "sparkles" }))).is_err());
+        let back = merge(&next, p(json!({ "mark_point": null }))).unwrap();
+        assert_eq!(back.mark_point, settings::MarkPoint::Ring);
     }
 
     #[test]

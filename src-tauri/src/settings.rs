@@ -14,6 +14,29 @@ pub enum OutputMode {
     Folder,
 }
 
+/// What a capture draws where the person pointed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkPoint {
+    Off,
+    #[default]
+    Ring,
+    /// The ring and the last few seconds of the path.
+    Trail,
+}
+
+/// What a close-up centres on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZoomTarget {
+    Pointer,
+    /// Where the pointer rested in the last moment, else the pointer.
+    #[default]
+    Dwell,
+    /// The window under the pointer.
+    Window,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +63,13 @@ pub struct Settings {
     /// Zoom crop size in pixels (square, N×N around the pointer).
     #[serde(default = "default_zoom_px")]
     pub zoom_px: u32,
+    #[serde(default)]
+    pub mark_point: MarkPoint,
+    #[serde(default)]
+    pub zoom_target: ZoomTarget,
+    /// Enlarge small close-ups 2x so small text reads.
+    #[serde(default = "yes")]
+    pub zoom_sharpen: bool,
     #[serde(default)]
     pub start_at_login: bool,
     #[serde(default)]
@@ -86,6 +116,9 @@ impl Default for Settings {
             also_clipboard: true,
             export_dir: None,
             zoom_px: default_zoom_px(),
+            mark_point: MarkPoint::default(),
+            zoom_target: ZoomTarget::default(),
+            zoom_sharpen: true,
             start_at_login: false,
             include_app: false,
             hidden: None,
@@ -199,6 +232,29 @@ mod tests {
         assert!(old.onboarded && !old.sounds);
         std::fs::write(&path, r#"{"session_hotkey":"A"}"#).unwrap();
         assert_eq!(Settings::load(&path).session_chord(), chord::default_session());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_marks_round_trip_and_an_old_file_gets_the_defaults() {
+        let dir = std::env::temp_dir().join(format!("pc-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let s = Settings::default();
+        assert_eq!((s.mark_point, s.zoom_target, s.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
+        let mine = Settings { mark_point: MarkPoint::Trail, zoom_target: ZoomTarget::Window, zoom_sharpen: false, ..s };
+        mine.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""mark_point": "trail""#) && raw.contains(r#""zoom_target": "window""#), "{raw}");
+        assert_eq!(Settings::load(&path), mine);
+        // A file from before these settings existed keeps what it has and gets the defaults.
+        std::fs::write(&path, r#"{"zoom_px":640,"onboarded":true}"#).unwrap();
+        let old = Settings::load(&path);
+        assert!(old.onboarded && old.zoom_px == 640);
+        assert_eq!((old.mark_point, old.zoom_target, old.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
+        std::fs::write(&path, r#"{"mark_point":"off","zoom_target":"pointer"}"#).unwrap();
+        let off = Settings::load(&path);
+        assert_eq!((off.mark_point, off.zoom_target), (MarkPoint::Off, ZoomTarget::Pointer));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
