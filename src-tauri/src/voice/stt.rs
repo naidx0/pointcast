@@ -255,11 +255,11 @@ pub fn load(
     threads: i32,
 ) -> Result<Engine, String> {
     let t0 = std::time::Instant::now();
-    let dll = models::find_lib(root, runtime).ok_or("speech runtime is not installed")?;
+    models::find_lib(root, runtime).ok_or("speech runtime is not installed")?;
     if !models::model_installed(root, model) {
         return Err("Not downloaded".into());
     }
-    let lib = open(&dll)?;
+    let lib = open(&models::verify_runtime(root, runtime)?)?;
     unsafe {
         let version: libloading::Symbol<unsafe extern "C" fn() -> P> = lib
             .get(b"SherpaOnnxGetVersionStr\0")
@@ -431,6 +431,43 @@ mod tests {
             (offset_of!(ResultHead, timestamps), offset_of!(ResultHead, count), offset_of!(ResultHead, tokens), offset_of!(ResultHead, tokens_arr)),
             (8, 16, 24, 32)
         );
+    }
+
+    #[test]
+    fn a_runtime_library_that_changed_since_setup_is_not_loaded() {
+        use sha2::{Digest, Sha256};
+        let root = std::env::temp_dir().join(format!("pc-stt-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let model: ModelEntry = serde_json::from_value(serde_json::json!({
+            "id": "m", "family": "moonshine", "urls": [],
+            "files": [
+                { "name": "e.ort", "role": "encoder", "bytes": 1 },
+                { "name": "d.ort", "role": "merged_decoder", "bytes": 1 },
+                { "name": "t.txt", "role": "tokens", "bytes": 1 }
+            ]
+        }))
+        .unwrap();
+        std::fs::create_dir_all(models::install_dir(&root, "m")).unwrap();
+        for f in &model.files {
+            std::fs::write(models::install_dir(&root, "m").join(&f.name), b"x").unwrap();
+        }
+        // The library as set up, then another program's of the same size in its place.
+        let pinned = b"the speech library as downloaded".to_vec();
+        let rt: RuntimeEntry = serde_json::from_value(serde_json::json!({
+            "id": "rt", "target": "any", "urls": [], "lib": "speech.lib",
+            "files": [{ "name": "pkg/lib/speech.lib", "bytes": pinned.len(), "sha256": format!("{:x}", Sha256::digest(&pinned)) }]
+        }))
+        .unwrap();
+        let dir = models::install_dir(&root, "rt").join("pkg").join("lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut swapped = pinned.clone();
+        swapped[3] ^= 1;
+        std::fs::write(dir.join("speech.lib"), &swapped).unwrap();
+        match load(&root, &rt, &model, 1) {
+            Err(e) => assert_eq!(e, models::CHANGED),
+            Ok(_) => panic!("a library that changed was loaded"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

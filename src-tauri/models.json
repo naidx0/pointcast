@@ -196,7 +196,19 @@
       ],
       "bytes": 9690703,
       "lib": "libsherpa-onnx-c-api.so",
-      "sha256": "e95f0bb7dbf838d45b0c2831be780b5236fa4c2f891e8bc95b1859dd3311d392"
+      "sha256": "e95f0bb7dbf838d45b0c2831be780b5236fa4c2f891e8bc95b1859dd3311d392",
+      "files": [
+        {
+          "name": "sherpa-onnx-v2.0.0-linux-x64-shared-lib/lib/libsherpa-onnx-c-api.so",
+          "bytes": 4838888,
+          "sha256": "c942b1b81a66ab9f247d8f28aac7dd373f81063f008b880136d32d011fa87f4e"
+        },
+        {
+          "name": "sherpa-onnx-v2.0.0-linux-x64-shared-lib/lib/libonnxruntime.so",
+          "bytes": 27026609,
+          "sha256": "4b3607aebd1784b26b6f9b20e4bd974c7ab8287043e4d095cb7d2cb40b5e566e"
+        }
+      ]
     },
     {
       "id": "runtime-macos-arm64",
@@ -206,7 +218,19 @@
       ],
       "bytes": 8704036,
       "lib": "libsherpa-onnx-c-api.dylib",
-      "sha256": "a28dfdbf62677f712f29116271880a2552c09b6f06b485e6dad64ea56ad9fffe"
+      "sha256": "a28dfdbf62677f712f29116271880a2552c09b6f06b485e6dad64ea56ad9fffe",
+      "files": [
+        {
+          "name": "sherpa-onnx-v2.0.0-osx-arm64-shared-lib/lib/libsherpa-onnx-c-api.dylib",
+          "bytes": 4095008,
+          "sha256": "2d4ff0698773133858aabc7aa6c396b6243db8385bb6da8f965ae235311f0d61"
+        },
+        {
+          "name": "sherpa-onnx-v2.0.0-osx-arm64-shared-lib/lib/libonnxruntime.dylib",
+          "bytes": 28775120,
+          "sha256": "3567d114f7299d559993e536d605a6f46d7bc9d2542004accc80ee9bf5457f0b"
+        }
+      ]
     },
     {
       "id": "runtime-macos-x64",
@@ -216,7 +240,19 @@
       ],
       "bytes": 9932845,
       "lib": "libsherpa-onnx-c-api.dylib",
-      "sha256": "80ca7a7896fe518716390cd2fff882fc5e06af4bf53474376115d47671e525a8"
+      "sha256": "80ca7a7896fe518716390cd2fff882fc5e06af4bf53474376115d47671e525a8",
+      "files": [
+        {
+          "name": "sherpa-onnx-v2.0.0-osx-x64-shared-lib/lib/libsherpa-onnx-c-api.dylib",
+          "bytes": 4440768,
+          "sha256": "7549b7e546fee868c336dbc4427034c75acdb59e7ac9b1f019a242c02f2f4a5f"
+        },
+        {
+          "name": "sherpa-onnx-v2.0.0-osx-x64-shared-lib/lib/libonnxruntime.dylib",
+          "bytes": 32315856,
+          "sha256": "2bf27180c09e6fd3f407c9ab25205ebf1ff95f2d53bfa35e35409b5849e0ac70"
+        }
+      ]
     },
     {
       "id": "runtime-windows-x64",
@@ -226,7 +262,24 @@
       ],
       "bytes": 7878613,
       "lib": "sherpa-onnx-c-api.dll",
-      "sha256": "7a83c48e6c07754028d99e8304da42e184b12223b9a4d15d0e0fd4b707d1cff5"
+      "sha256": "7a83c48e6c07754028d99e8304da42e184b12223b9a4d15d0e0fd4b707d1cff5",
+      "files": [
+        {
+          "name": "sherpa-onnx-v2.0.0-win-x64-shared-MT-Release-lib/lib/sherpa-onnx-c-api.dll",
+          "bytes": 4249088,
+          "sha256": "9b6dc14bfab0378fc4569d6b9785cd06036d36efd3a90f0842e42b9e12f0b1ce"
+        },
+        {
+          "name": "sherpa-onnx-v2.0.0-win-x64-shared-MT-Release-lib/lib/onnxruntime.dll",
+          "bytes": 17799168,
+          "sha256": "7f66f939a881baf4f46a2216496798edf4a1429878b646d12674aa62f27d8a25"
+        },
+        {
+          "name": "sherpa-onnx-v2.0.0-win-x64-shared-MT-Release-lib/lib/onnxruntime_providers_shared.dll",
+          "bytes": 104960,
+          "sha256": "551d0e1fe4c227d8542314ba718d52f4379e0c7bfe729a37c59833a884e27b4d"
+        }
+      ]
     }
   ]
 }

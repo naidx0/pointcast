@@ -53,6 +53,9 @@ pub struct RuntimeEntry {
     #[serde(default)]
     pub sha256: String,
     pub lib: String,
+    /// The libraries that get loaded, `lib` and the ones it pulls in, by their path in the install.
+    #[serde(default)]
+    pub files: Vec<FileEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,6 +147,34 @@ fn done_marker_ok(dir: &Path, sha: &str) -> bool {
     std::fs::read_to_string(dir.join(DONE)).is_ok_and(|s| s.trim() == sha)
 }
 
+/// A pinned file's place under `dir`, in this system's separators (Windows' loader asks for backslashes).
+fn pinned_path(dir: &Path, name: &str) -> PathBuf {
+    name.split('/').fold(dir.to_path_buf(), |p, part| p.join(part))
+}
+
+/// Whether every library the runtime loads is in `dir` with its pinned size and hash. An entry that pins none never is.
+fn libs_match(dir: &Path, e: &RuntimeEntry) -> bool {
+    !e.files.is_empty()
+        && e.files.iter().all(|f| {
+            let p = pinned_path(dir, &f.name);
+            std::fs::metadata(&p).is_ok_and(|m| m.len() == f.bytes) && sha256_file(&p).is_ok_and(|h| h == f.sha256)
+        })
+}
+
+/// The runtime library to open, checked right before it is: it and every library it pulls in must be the pinned ones,
+/// so no other program's code runs with Pointcast's permissions. A mismatch unmarks the install, so the next setup
+/// downloads it again.
+pub fn verify_runtime(root: &Path, e: &RuntimeEntry) -> Result<PathBuf, String> {
+    let dir = install_dir(root, &e.id);
+    match e.files.iter().find(|f| f.name.rsplit('/').next() == Some(e.lib.as_str())) {
+        Some(lib) if libs_match(&dir, e) => Ok(pinned_path(&dir, &lib.name)),
+        _ => {
+            let _ = std::fs::remove_file(dir.join(DONE));
+            Err(CHANGED.into())
+        }
+    }
+}
+
 pub fn find_lib(root: &Path, e: &RuntimeEntry) -> Option<PathBuf> {
     let d = install_dir(root, &e.id);
     let direct = d.join(&e.lib);
@@ -207,6 +238,7 @@ pub const CANCELLED: &str = "Cancelled.";
 pub const DAMAGED: &str = "The download arrived damaged, so it was thrown away. Try again; it starts over.";
 pub const OFFLINE: &str =
     "Pointcast can't reach GitHub to download the speech files. Check your internet connection, then try again.";
+pub const CHANGED: &str = "The speech engine files changed; set it up again in Settings > Speech.";
 
 /// Fetch `urls` (tried in order) into `dest`, resuming a `.partial` left by an earlier try.
 /// `bytes` and `sha256`, when known, must match or the file is discarded.
@@ -530,7 +562,9 @@ pub fn install_runtime(
     let _ = std::fs::remove_dir_all(&staging);
     let r = (|| {
         unpack_tar_bz2(&archive, &staging)?;
-        find_named(&staging, &e.lib).ok_or(DAMAGED)?;
+        if !libs_match(&staging, e) {
+            return Err(DAMAGED.into());
+        }
         // Written last: an install cut short never reads as finished.
         std::fs::write(staging.join(DONE), &e.sha256).map_err(|x| io_text(&x, &staging))?;
         swap_in(&staging, &install_dir(root, &e.id))
@@ -597,6 +631,13 @@ mod tests {
         }
         for r in &c.runtimes {
             assert!(pinned(r.bytes, &r.sha256), "{}", r.id);
+            // The library opened and the ONNX Runtime it pulls in, each by size and hash.
+            let names: Vec<&str> = r.files.iter().filter_map(|f| f.name.rsplit('/').next()).collect();
+            assert_eq!(names.iter().filter(|n| **n == r.lib).count(), 1, "{}", r.id);
+            assert!(names.iter().any(|n| n.trim_start_matches("lib").starts_with("onnxruntime.")), "{}", r.id);
+            for f in &r.files {
+                assert!(pinned(f.bytes, &f.sha256), "{} {}", r.id, f.name);
+            }
         }
         // The MD build needs the Visual C++ Redistributable, which a clean Windows lacks.
         let win = c.runtimes.iter().find(|r| r.target.contains("windows")).unwrap();
@@ -754,6 +795,72 @@ mod tests {
         assert!(runtime_installed(&d, rt));
         std::fs::write(install_dir(&d, &rt.id).join(DONE), "an older runtime").unwrap();
         assert!(!runtime_installed(&d, rt), "a different build is replaced");
+    }
+
+    fn pin(name: &str, body: &[u8]) -> FileEntry {
+        FileEntry { name: name.into(), role: None, bytes: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) }
+    }
+
+    #[test]
+    fn a_runtime_library_that_differs_from_its_pin_is_refused_and_unmarks_the_install() {
+        let d = scratch("pins");
+        let (main, dep) = (b"the speech library".to_vec(), b"the onnx runtime".to_vec());
+        let mut rt = catalog().runtime_for_host().unwrap().clone();
+        rt.files = vec![pin(&format!("pkg/lib/{}", rt.lib), &main), pin("pkg/lib/dep", &dep)];
+        let lib = install_dir(&d, &rt.id).join("pkg").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join(&rt.lib), &main).unwrap();
+        std::fs::write(lib.join("dep"), &dep).unwrap();
+        std::fs::write(install_dir(&d, &rt.id).join(DONE), &rt.sha256).unwrap();
+        let opened = verify_runtime(&d, &rt).unwrap();
+        assert_eq!(opened.as_os_str(), lib.join(&rt.lib).as_os_str(), "the file checked, in this system's separators");
+        assert!(runtime_installed(&d, &rt));
+        // Another program puts its own library of the same size in place of one the engine pulls in.
+        let mut swapped = dep.clone();
+        swapped[0] ^= 1;
+        std::fs::write(lib.join("dep"), &swapped).unwrap();
+        assert_eq!(verify_runtime(&d, &rt), Err(CHANGED.to_string()));
+        assert!(!runtime_installed(&d, &rt), "the next setup installs it again");
+        std::fs::write(lib.join("dep"), &dep).unwrap();
+        assert!(verify_runtime(&d, &rt).is_ok());
+        std::fs::write(lib.join("dep"), b"the onnx runtime, longer").unwrap();
+        assert_eq!(verify_runtime(&d, &rt), Err(CHANGED.to_string()));
+        std::fs::remove_file(lib.join("dep")).unwrap();
+        assert_eq!(verify_runtime(&d, &rt), Err(CHANGED.to_string()));
+        std::fs::write(lib.join("dep"), &dep).unwrap();
+        // An entry that pins nothing, or not the library it opens, is never loaded.
+        let none = RuntimeEntry { files: vec![], ..rt.clone() };
+        let other = RuntimeEntry { files: vec![pin("pkg/lib/dep", &dep)], ..rt.clone() };
+        let unhashed = RuntimeEntry { files: vec![FileEntry { sha256: String::new(), ..rt.files[0].clone() }], ..rt.clone() };
+        for e in [none, other, unhashed] {
+            assert_eq!(verify_runtime(&d, &e), Err(CHANGED.to_string()), "{:?}", e.files);
+        }
+    }
+
+    #[test]
+    fn a_runtime_is_set_up_only_when_its_libraries_are_the_pinned_ones() {
+        let d = scratch("rt-pins");
+        let mut rt = catalog().runtime_for_host().unwrap().clone();
+        let (main, dep) = (b"the speech library".to_vec(), b"the onnx runtime".to_vec());
+        let mut ar = tar::Builder::new(bzip2::write::BzEncoder::new(vec![], bzip2::Compression::fast()));
+        for (name, body) in [(format!("pkg/lib/{}", rt.lib), &main), ("pkg/lib/dep".into(), &dep)] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            ar.append_data(&mut h, name, body.as_slice()).unwrap();
+        }
+        let archive = ar.into_inner().unwrap().finish().unwrap();
+        let s = serve(archive.clone(), 200, None);
+        rt.urls = vec![s.url.clone()];
+        rt.bytes = archive.len() as u64;
+        rt.sha256 = format!("{:x}", Sha256::digest(&archive));
+        rt.files = vec![pin(&format!("pkg/lib/{}", rt.lib), &main), pin("pkg/lib/dep", b"what the catalog pinned")];
+        assert_eq!(install_runtime(&d, &rt, &|_| {}).unwrap_err(), DAMAGED);
+        assert!(!install_dir(&d, &rt.id).exists() && !runtime_installed(&d, &rt));
+        rt.files[1] = pin("pkg/lib/dep", &dep);
+        let lib = install_runtime(&d, &rt, &|_| {}).unwrap();
+        assert!(runtime_installed(&d, &rt));
+        assert_eq!(verify_runtime(&d, &rt).unwrap(), lib);
     }
 
     #[test]
