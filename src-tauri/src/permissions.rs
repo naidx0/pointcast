@@ -47,6 +47,12 @@ pub fn can_paste() -> bool {
     accessibility() == Access::Granted
 }
 
+/// Whether a capture shows other apps' windows: without Screen Recording macOS hands back only
+/// the wallpaper and the menu bar.
+pub fn can_capture() -> bool {
+    screen() == Access::Granted
+}
+
 /// Settings page for one permission (`microphone`, `screen`, `accessibility`).
 pub fn settings_url(kind: &str) -> Option<&'static str> {
     if cfg!(target_os = "macos") {
@@ -174,16 +180,22 @@ mod mac {
         }
     }
 
+    /// Left once Pointcast has asked for Screen Recording: macOS shows its prompt only the first time.
+    fn asked() -> std::path::PathBuf {
+        crate::settings::data_dir().join("screen-asked")
+    }
+
     pub fn screen() -> Access {
-        if unsafe { CGPreflightScreenCaptureAccess() } {
-            Access::Granted
-        } else {
-            Access::Unknown
-        }
+        super::screen_access(unsafe { CGPreflightScreenCaptureAccess() }, asked().exists())
     }
 
     pub fn request_screen() -> Access {
-        if unsafe { CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() } {
+        if unsafe { CGPreflightScreenCaptureAccess() } {
+            return Access::Granted;
+        }
+        let _ = std::fs::create_dir_all(crate::settings::data_dir());
+        let _ = std::fs::write(asked(), b"");
+        if unsafe { CGRequestScreenCaptureAccess() } {
             Access::Granted
         } else {
             Access::Unknown
@@ -248,6 +260,17 @@ mod win {
     }
 }
 
+/// Screen Recording: macOS says only yes or no, and shows its prompt once ever; after that only
+/// System Settings can turn it on, so a no after asking is a refusal.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn screen_access(allowed: bool, asked: bool) -> Access {
+    match (allowed, asked) {
+        (true, _) => Access::Granted,
+        (false, false) => Access::Unknown,
+        (false, true) => Access::Denied,
+    }
+}
+
 /// Any switch at "Deny" blocks a desktop app's microphone, and so does a policy that forces it off
 /// (LetAppsAccessMicrophone 2, a DWORD `reg` prints as 0x2).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -282,6 +305,17 @@ mod tests {
         assert_ne!(windows_mic(allow.0, allow.1, Some("Allow"), Some("0x0")), Access::Denied);
         assert_eq!(windows_mic(Some("Deny"), allow.1, None, Some("0x1")), Access::Denied, "Deny wins over a force allow");
         assert_ne!(windows_mic(allow.0, allow.1, None, Some("0x1")), Access::Denied);
+    }
+
+    #[test]
+    fn screen_recording_refused_after_asking_reads_as_denied() {
+        assert_eq!(screen_access(true, false), Access::Granted);
+        assert_eq!(screen_access(true, true), Access::Granted);
+        assert_eq!(screen_access(false, false), Access::Unknown, "never asked: asking shows the prompt");
+        assert_eq!(screen_access(false, true), Access::Denied, "asked before: only System Settings helps");
+        if !cfg!(target_os = "macos") {
+            assert!(can_capture(), "only macOS gates captures");
+        }
     }
 
     #[test]

@@ -208,7 +208,13 @@ pub fn cursor_pos() -> Result<(i32, i32), String> {
     }
 }
 
+/// Why there is no capture when macOS would hand back only the wallpaper and the menu bar.
+pub const SCREEN_OFF: &str = "Screen Recording is off for Pointcast.";
+
 fn grab_frame(settings: &Settings) -> Result<Frame, String> {
+    if !crate::permissions::can_capture() {
+        return Err(SCREEN_OFF.into());
+    }
     let (cx, cy) = cursor_pos()?;
     let mon = xcap::Monitor::from_point(cx, cy).map_err(|e| e.to_string())?;
     let mx = mon.x().unwrap_or(0);
