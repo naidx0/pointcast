@@ -429,9 +429,10 @@ fn settings_view(svc: &App) -> Value {
     })
 }
 
+/// Async, like permissions_get: off the event loop, since it reads the registry and lists devices.
 #[tauri::command]
-fn settings_get(svc: tauri::State<'_, Arc<App>>) -> Value {
-    settings_view(&svc)
+async fn settings_get(svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
+    Ok(settings_view(&svc))
 }
 
 /// Merge a partial change into the saved settings. Shortcuts are checked before anything is kept.
@@ -884,9 +885,10 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
     Ok(settings_view(&svc))
 }
 
+/// Async: the setup assistant asks every second and a half, and each probe reads the registry and lists devices.
 #[tauri::command]
-fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> permissions::PermissionStatus {
-    noted(&svc, permissions::probe())
+async fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> Result<permissions::PermissionStatus, String> {
+    Ok(noted(&svc, permissions::probe()))
 }
 
 #[tauri::command]

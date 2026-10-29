@@ -253,12 +253,19 @@ mod win {
     }
 
     /// Windows: the privacy switch for all apps, the one for desktop apps, the one for the whole
-    /// device, and an administrator's policy.
+    /// device, and an administrator's policy. Read again at most every few seconds: the setup
+    /// assistant asks often, and each read starts `reg`.
     pub fn microphone() -> Access {
-        let all = value(STORE, "Value");
-        let desktop = value(&format!(r"{STORE}\NonPackaged"), "Value");
-        let device = value(DEVICE, "Value");
-        let policy = value(POLICY, "LetAppsAccessMicrophone");
+        type Switches = [Option<String>; 4];
+        static READ: std::sync::Mutex<Option<(std::time::Instant, Switches)>> = std::sync::Mutex::new(None);
+        let [all, desktop, device, policy] = super::cached(&READ, std::time::Duration::from_secs(5), || {
+            [
+                value(STORE, "Value"),
+                value(&format!(r"{STORE}\NonPackaged"), "Value"),
+                value(DEVICE, "Value"),
+                value(POLICY, "LetAppsAccessMicrophone"),
+            ]
+        });
         super::windows_mic(all.as_deref(), desktop.as_deref(), device.as_deref(), policy.as_deref())
     }
 }
@@ -279,6 +286,18 @@ fn screen_access(allowed: bool, asked: bool) -> Access {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn asked_by(marker: Option<&str>, version: &str) -> bool {
     marker.is_some_and(|m| m.trim() == version)
+}
+
+/// What `read` gave, read again only once `ttl` has passed since the read kept in `last`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cached<T: Clone>(last: &std::sync::Mutex<Option<(std::time::Instant, T)>>, ttl: std::time::Duration, read: impl FnOnce() -> T) -> T {
+    let mut last = last.lock().unwrap();
+    if let Some((_, v)) = last.as_ref().filter(|(at, _)| at.elapsed() < ttl) {
+        return v.clone();
+    }
+    let v = read();
+    *last = Some((std::time::Instant::now(), v.clone()));
+    v
 }
 
 /// Any switch at "Deny" blocks a desktop app's microphone, and so does a policy that forces it off
@@ -337,6 +356,20 @@ mod tests {
         // Updated and reset by tccutil: the assistant offers the prompt again, not only System Settings.
         assert_eq!(screen_access(false, asked_by(Some("0.3.9"), "0.4.0")), Access::Unknown);
         assert_eq!(screen_access(false, asked_by(Some("0.4.0"), "0.4.0")), Access::Denied);
+    }
+
+    #[test]
+    fn a_read_is_kept_for_a_few_seconds_then_read_again() {
+        let last = std::sync::Mutex::new(None);
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            reads.get()
+        };
+        let long = std::time::Duration::from_secs(60);
+        assert_eq!((cached(&last, long, read), cached(&last, long, read)), (1, 1), "the second ask reads nothing");
+        assert_eq!(cached(&last, std::time::Duration::ZERO, read), 2, "once the time is up it reads again");
+        assert_eq!(cached(&last, long, read), 2);
     }
 
     #[test]
