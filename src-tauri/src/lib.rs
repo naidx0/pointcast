@@ -105,7 +105,7 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
 fn close_overlay(app: &AppHandle) {
     EDIT.cancel();
     hide_window(app, "overlay");
-    platform::restore_front();
+    platform::refocus_front();
     FRAME.lock().unwrap().take();
 }
 
@@ -673,7 +673,10 @@ fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
         return;
     }
     if let Some(latest) = app.try_state::<Latest>() {
-        latest.set(svc.last_export().unwrap_or_else(|| prompt::assemble_export(&[])));
+        match svc.last_export() {
+            Some(exp) => latest.set(exp),
+            None => latest.clear(),
+        }
     }
     emit_state(app, svc);
 }
