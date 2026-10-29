@@ -21,7 +21,6 @@ mod tray;
 mod update;
 mod voice;
 
-use mcp::Latest;
 use prompt::{Label, SessionExport};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -90,7 +89,21 @@ fn recording(svc: &App) -> bool {
     matches!(svc.ui().phase, Phase::Recording | Phase::Loading)
 }
 
+/// No recording runs or is finishing.
+fn idle(svc: &App) -> bool {
+    matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error)
+}
+
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
+    // The installer closes Pointcast: a recording started now would stop mid-sentence.
+    if update::installing() {
+        svc.refuse(session::UPDATING);
+        platform::show_indicator(app);
+        emit_state(app, svc);
+        hide_hud_soon(app, svc);
+        return Err(session::UPDATING.into());
+    }
+    platform::forget_front();
     svc.start()?;
     if svc.settings.lock().unwrap().sounds {
         platform::chime(true);
@@ -98,6 +111,17 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     platform::show_indicator(app);
     emit_state(app, svc);
     Ok(())
+}
+
+/// The HUD's last word stays a moment, then it goes unless a new recording took it.
+fn hide_hud_soon(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        if svc.ui().phase == Phase::Ready {
+            hide_window(&app, "indicator");
+        }
+    });
 }
 
 /// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
@@ -118,17 +142,12 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
     emit_state_now(app, svc);
     let practice = svc.practice.load(Ordering::SeqCst);
     let exp = svc.stop(false);
+    platform::forget_front();
     if practice || exp.is_err() {
         hide_window(app, "indicator");
     } else {
         emit_state_now(app, svc);
-        let (app, svc) = (app.clone(), svc.clone());
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1600));
-            if svc.ui().phase == Phase::Ready {
-                hide_window(&app, "indicator");
-            }
-        });
+        hide_hud_soon(app, svc);
     }
     if practice {
         svc.practice.store(false, Ordering::SeqCst);
@@ -138,9 +157,6 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
         if practice {
             let _ = app.emit("practice://result", e);
         } else {
-            if let Some(latest) = app.try_state::<Latest>() {
-                latest.set(e.clone());
-            }
             let _ = app.emit("session://result", e);
         }
     }
@@ -362,7 +378,7 @@ fn settings_view(svc: &App) -> Value {
     let chord = |c: chord::Chord, d: chord::Chord| {
         json!({ "label": c.label(), "keys": c.keys(), "default": d.label() })
     };
-    json!({
+    let mut v = json!({
         "platform": std::env::consts::OS,
         "materials": platform::materials(),
         "version": env!("CARGO_PKG_VERSION"),
@@ -410,12 +426,16 @@ fn settings_view(svc: &App) -> Value {
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
         "recommended": voice::machine::recommended(),
-    })
+    });
+    // Set apart: one more key in the literal above passes json!'s recursion limit.
+    v["update_checked"] = update::checked();
+    v
 }
 
+/// Async, like permissions_get: off the event loop, since it reads the registry and lists devices.
 #[tauri::command]
-fn settings_get(svc: tauri::State<'_, Arc<App>>) -> Value {
-    settings_view(&svc)
+async fn settings_get(svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
+    Ok(settings_view(&svc))
 }
 
 /// Merge a partial change into the saved settings. Shortcuts are checked before anything is kept.
@@ -455,16 +475,26 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
     }
     let next: Settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
     let chords = [
-        ("Start / stop", &next.session_hotkey),
-        ("Capture screen", &next.full_hotkey),
-        ("Capture region", &next.region_hotkey),
-        ("Capture around pointer", &next.zoom_hotkey),
+        ("Start / stop", &cur.session_hotkey, &next.session_hotkey),
+        ("Capture screen", &cur.full_hotkey, &next.full_hotkey),
+        ("Capture region", &cur.region_hotkey, &next.region_hotkey),
+        ("Capture around pointer", &cur.zoom_hotkey, &next.zoom_hotkey),
     ];
     let mut seen: Vec<(&str, chord::Chord)> = vec![];
-    for (name, raw) in chords {
+    for (name, was, raw) in chords {
         let Some(raw) = raw else { continue };
-        let c = chord::Chord::parse(raw)?;
+        // A saved chord this patch leaves alone and this version refuses is not in use (the default is), so it never
+        // blocks changing something else.
+        let changed = was.as_deref() != Some(raw.as_str());
+        let c = match chord::Chord::parse(raw) {
+            Ok(c) => c,
+            Err(e) if changed => return Err(e),
+            Err(_) => continue,
+        };
         if let Some(why) = chord::refusal(&c) {
+            if !changed {
+                continue;
+            }
             return Err(format!("{}: {why}", c.label()));
         }
         if let Some((other, _)) = seen.iter().find(|(_, x)| *x == c) {
@@ -503,6 +533,7 @@ async fn session_cancel(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Resu
     let _ = svc.stop(true)?;
     hide_window(&app, "indicator");
     close_overlay(&app);
+    platform::forget_front();
     emit_state(&app, &svc);
     Ok(())
 }
@@ -622,10 +653,35 @@ fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
 #[tauri::command]
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
     copy_export(&svc.set_last(&id)?)?;
-    hide_window(&app, "result");
-    platform::restore_front();
-    std::thread::sleep(std::time::Duration::from_millis(220));
-    paste()
+    paste_from_history(&app)
+}
+
+/// Hide History so the paste lands in the app underneath it.
+fn paste_from_history(app: &AppHandle) -> Result<(), String> {
+    paste_out_of(
+        permissions::can_paste(),
+        || {
+            hide_window(app, "result");
+            platform::restore_front();
+            std::thread::sleep(std::time::Duration::from_millis(220));
+        },
+        clipboard::paste_now,
+        || show_window(app, "result"),
+    )
+}
+
+/// Paste from a window that must get out of the way first. Without permission to paste it stays, and a paste that
+/// fails once it is hidden brings it back, so the person reads that the prompt was only copied.
+fn paste_out_of(can_paste: bool, hide: impl FnOnce(), paste: impl FnOnce() -> Result<(), String>, back: impl FnOnce()) -> Result<(), String> {
+    if !can_paste {
+        return Err(PASTE_YOURSELF.into());
+    }
+    hide();
+    let r = paste_or_say(true, paste);
+    if r.is_err() {
+        back();
+    }
+    r
 }
 
 pub const PASTE_YOURSELF: &str = "Copied, paste it yourself.";
@@ -669,16 +725,9 @@ fn history_clear(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), 
 
 /// A deleted prompt leaves Paste Last Prompt and what coding agents read too.
 fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
-    if !svc.forget(gone) {
-        return;
+    if svc.forget(gone) {
+        emit_state(app, svc);
     }
-    if let Some(latest) = app.try_state::<Latest>() {
-        match svc.last_export() {
-            Some(exp) => latest.set(exp),
-            None => latest.clear(),
-        }
-    }
-    emit_state(app, svc);
 }
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {
@@ -697,9 +746,7 @@ fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), 
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
     let text = agent_setup(&agent, &bind, &token)?;
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text))
-        .map_err(|e| e.to_string())
+    clipboard::copy_secret(&text)
 }
 
 /// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets
@@ -716,14 +763,10 @@ fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
     }
 }
 
-/// Hide our window first so the paste lands in the app underneath it.
 #[tauri::command]
 fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     copy_last(&svc)?;
-    hide_window(&app, "result");
-    platform::restore_front();
-    std::thread::sleep(std::time::Duration::from_millis(220));
-    paste()
+    paste_from_history(&app)
 }
 
 /// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
@@ -843,9 +886,10 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
     Ok(settings_view(&svc))
 }
 
+/// Async: the setup assistant asks every second and a half, and each probe reads the registry and lists devices.
 #[tauri::command]
-fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> permissions::PermissionStatus {
-    noted(&svc, permissions::probe())
+async fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> Result<permissions::PermissionStatus, String> {
+    Ok(noted(&svc, permissions::probe()))
 }
 
 #[tauri::command]
@@ -958,6 +1002,7 @@ fn end_practice(app: &AppHandle, svc: &App) {
         svc.practice.store(false, Ordering::SeqCst);
         hide_window(app, "indicator");
         close_overlay(app);
+        platform::forget_front();
         emit_state(app, svc);
     }
 }
@@ -983,11 +1028,15 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
     Ok(())
 }
 
-/// Whatever step the assistant was on, shortcuts and sessions go back to normal.
-fn leave_onboarding(app: &AppHandle, svc: &App) {
-    end_practice(app, svc);
-    svc.hotkey_test.store(false, Ordering::SeqCst);
-    svc.monitor_off();
+/// Whatever step the assistant was on, shortcuts and sessions go back to normal. On a thread of its own: discarding a
+/// practice run waits for the speech worker, which must not hold the event loop.
+fn leave_onboarding(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        end_practice(&app, &svc);
+        svc.hotkey_test.store(false, Ordering::SeqCst);
+        svc.monitor_off();
+    });
 }
 
 #[tauri::command]
@@ -1033,12 +1082,16 @@ async fn update_check(app: AppHandle) -> Result<Option<String>, String> {
 /// Run the installer: it closes Pointcast, installs the new version and opens it again.
 #[tauri::command]
 fn update_install(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
-    if !matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error) {
+    if !idle(&svc) {
         return Err("Finish the recording first, then update.".into());
     }
-    update::install(move |why| {
-        let _ = app.emit("update://failed", why);
-    })
+    let svc = svc.inner().clone();
+    update::install(
+        move || idle(&svc),
+        move |why| {
+            let _ = app.emit("update://failed", why);
+        },
+    )
 }
 
 #[tauri::command]
@@ -1105,10 +1158,9 @@ pub fn run() {
     let settings_path = settings::settings_path();
     let settings = Settings::load(&settings_path);
     let svc = App::new(settings.clone(), settings_path);
-    let latest = Latest::default();
     if settings.mcp_enabled {
         // Errors name the problem, never the token.
-        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, latest.clone(), t)) {
+        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, svc.latest.clone(), t)) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
             Err(e) => {
                 eprintln!("Pointcast MCP did not start: {e}");
@@ -1132,7 +1184,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(svc.clone())
-        .manage(latest)
         .invoke_handler(tauri::generate_handler![
             settings_get,
             settings_patch,
@@ -1273,6 +1324,10 @@ pub fn run() {
                 if window.label() == "overlay" {
                     close_overlay(window.app_handle());
                 }
+                // History closed without pasting: the app it opened over is not where a later paste goes.
+                if window.label() == "result" && !window.app_handle().try_state::<Arc<App>>().is_some_and(|svc| recording(&svc)) {
+                    platform::forget_front();
+                }
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
                         rebind(window.app_handle(), &svc);
@@ -1343,6 +1398,20 @@ mod tests {
         let back = merge(&cur, p(json!({ "export_dir": "/tmp/x" }))).unwrap();
         let cleared = merge(&back, p(json!({ "export_dir": null }))).unwrap();
         assert_eq!(cleared.export_dir, None);
+    }
+
+    #[test]
+    fn a_saved_chord_this_version_refuses_blocks_no_other_change() {
+        let p = |v: Value| v.as_object().unwrap().clone();
+        let old = Settings { zoom_hotkey: Some("F5".into()), ..Settings::default() };
+        let next = merge(&old, p(json!({ "sounds": false }))).unwrap();
+        assert!(!next.sounds && next.zoom_hotkey.as_deref() == Some("F5"), "kept as saved");
+        assert!(merge(&old, p(json!({ "full_hotkey": "Ctrl+Shift+F8" }))).is_ok());
+        let set = merge(&old, p(json!({ "zoom_hotkey": "F6" })));
+        assert!(set.unwrap_err().contains("Add Ctrl, Alt or Shift"), "a chord being set is still checked");
+        assert!(merge(&old, p(json!({ "zoom_hotkey": null }))).is_ok());
+        let garbled = Settings { region_hotkey: Some("Ctrl+Shift+Nope+Nope".into()), ..Settings::default() };
+        assert!(merge(&garbled, p(json!({ "model": "auto" }))).is_ok());
     }
 
     #[test]
@@ -1483,6 +1552,29 @@ mod tests {
         assert!(!tried.get(), "without permission no keys are sent");
         assert_eq!(paste_or_say(true, || Err("refused".into())).unwrap_err(), PASTE_YOURSELF);
         assert!(paste_or_say(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn history_stays_or_comes_back_to_say_a_paste_did_not_happen() {
+        let log = std::cell::RefCell::new(Vec::<&str>::new());
+        let step = |s| log.borrow_mut().push(s);
+        let pasted = || {
+            step("paste");
+            Ok(())
+        };
+        let refused = || {
+            step("paste");
+            Err("refused".to_string())
+        };
+        let r = paste_out_of(false, || step("hide"), pasted, || step("back"));
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert!(log.borrow().is_empty(), "without permission to paste History is not hidden");
+        let r = paste_out_of(true, || step("hide"), refused, || step("back"));
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert_eq!(*log.borrow(), ["hide", "paste", "back"], "a paste the app refused brings History back");
+        log.borrow_mut().clear();
+        assert!(paste_out_of(true, || step("hide"), pasted, || step("back")).is_ok());
+        assert_eq!(*log.borrow(), ["hide", "paste"]);
     }
 
     #[test]

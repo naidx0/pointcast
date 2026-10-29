@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const LATEST: &str = "https://api.github.com/repos/naidx0/pointcast/releases/latest";
@@ -36,10 +36,25 @@ pub fn installing() -> bool {
 }
 
 /// Why the last update did not finish, if it failed while Pointcast was closed. The first call
-/// reads and clears the record; later calls give the same answer.
+/// reads and clears the record; later calls give the same answer, until an update starts again.
 pub fn last_failure() -> Option<String> {
-    static LAST: OnceLock<Option<String>> = OnceLock::new();
-    LAST.get_or_init(|| failure(&crate::settings::data_dir(), env!("CARGO_PKG_VERSION"))).clone()
+    LAST.get(|| failure(&crate::settings::data_dir(), env!("CARGO_PKG_VERSION")))
+}
+
+static LAST: Kept = Kept(Mutex::new(None));
+
+/// An answer read once and kept, until it is dropped.
+struct Kept(Mutex<Option<Option<String>>>);
+
+impl Kept {
+    fn get(&self, read: impl FnOnce() -> Option<String>) -> Option<String> {
+        self.0.lock().unwrap().get_or_insert_with(read).clone()
+    }
+
+    /// A new update is starting: the old failure no longer says anything about it.
+    fn drop_answer(&self) {
+        *self.0.lock().unwrap() = Some(None);
+    }
 }
 
 #[derive(Deserialize)]
@@ -112,10 +127,31 @@ fn offer(body: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
 
 /// Ask GitHub once. `Ok(None)` means up to date, or nothing published for this system yet.
 pub fn check() -> Result<Option<String>, String> {
-    let found = check_at(LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS)?;
-    let version = found.as_ref().map(|o| o.version.clone());
-    *AVAILABLE.lock().unwrap() = found;
-    Ok(version)
+    keep(check_at(LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS))
+}
+
+/// The last check's answer, for a Settings window opened after it: the newer version (none when up to date), or why
+/// it failed.
+static CHECKED: Mutex<Option<Result<Option<String>, String>>> = Mutex::new(None);
+
+/// Remember what a check found: the offer to install (a failed check keeps the one it had) and its answer.
+fn keep(found: Result<Option<Offer>, String>) -> Result<Option<String>, String> {
+    let r = found.map(|found| {
+        let version = found.as_ref().map(|o| o.version.clone());
+        *AVAILABLE.lock().unwrap() = found;
+        version
+    });
+    *CHECKED.lock().unwrap() = Some(r.clone());
+    r
+}
+
+/// The last check's answer as Settings reads it, null before the first one.
+pub fn checked() -> serde_json::Value {
+    match &*CHECKED.lock().unwrap() {
+        None => serde_json::Value::Null,
+        Some(Ok(version)) => serde_json::json!({ "version": version, "error": null }),
+        Some(Err(why)) => serde_json::json!({ "version": null, "error": why }),
+    }
 }
 
 fn check_at(url: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
@@ -156,10 +192,10 @@ const SCRIPT: Option<Script> =
 const SCRIPT: Option<Script> = None;
 
 /// Download the update, check it and run the built-in installer, all in the background; the
-/// installer's output goes to `update.log` in the data folder. A good update closes Pointcast
-/// before the installer ends, so `failed` runs only when the update stopped and this copy is
-/// still running.
-pub fn install(failed: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
+/// installer's output goes to `update.log` in the data folder. The installer starts only once
+/// `idle` says no recording runs. A good update closes Pointcast before the installer ends, so
+/// `failed` runs only when the update stopped and this copy is still running.
+pub fn install(idle: impl Fn() -> bool + Send + 'static, failed: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
     let Some(script) = SCRIPT else {
         return Err("On Linux, update Pointcast from the releases page.".into());
     };
@@ -170,7 +206,9 @@ pub fn install(failed: impl FnOnce(String) + Send + 'static) -> Result<(), Strin
         tmp: std::env::temp_dir().join("pointcast-update"),
         data: crate::settings::data_dir(),
         run,
+        idle: Box::new(idle),
     };
+    LAST.drop_answer();
     start(job, &RUNNING, failed)
 }
 
@@ -184,6 +222,8 @@ struct Job {
     data: PathBuf,
     /// Start the script on the verified download with its output in the log; return when it ends.
     run: fn(script: &Path, package: &Path, log: &Path) -> Result<(), String>,
+    /// No recording runs: the installer closes Pointcast, so one that began during the download finishes first.
+    idle: Box<dyn Fn() -> bool + Send>,
 }
 
 /// Refuse a second update while one runs; otherwise do `job` on a thread of its own.
@@ -216,6 +256,9 @@ impl Job {
         verify(&package, &self.offer.sha256)?;
         let script = self.tmp.join(self.script.file);
         std::fs::write(&script, self.script.text).map_err(io)?;
+        while !(self.idle)() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
         std::fs::create_dir_all(&self.data).map_err(io)?;
         let record = serde_json::json!({ "from": env!("CARGO_PKG_VERSION"), "to": self.offer.version });
         std::fs::write(self.data.join(RECORD), record.to_string()).map_err(io)?;
@@ -456,6 +499,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_opened_after_a_check_reads_its_answer() {
+        // The only test that keeps a check's answer: CHECKED and AVAILABLE are the process's own.
+        assert_eq!(checked(), serde_json::Value::Null, "nothing checked yet");
+        let offer = Offer { version: "0.5.0".into(), url: "https://example.com/x64-setup.exe".into(), sha256: "0".repeat(64) };
+        assert_eq!(keep(Ok(Some(offer))), Ok(Some("0.5.0".into())));
+        assert_eq!(checked(), serde_json::json!({ "version": "0.5.0", "error": null }));
+        assert_eq!(keep(Err("Can't reach GitHub.".into())), Err("Can't reach GitHub.".into()));
+        assert_eq!(checked(), serde_json::json!({ "version": null, "error": "Can't reach GitHub." }));
+        assert_eq!(available().as_deref(), Some("0.5.0"), "a failed check keeps the offer it had");
+        assert_eq!(keep(Ok(None)), Ok(None));
+        assert_eq!(checked(), serde_json::json!({ "version": null, "error": null }), "up to date");
+        assert_eq!(available(), None);
+    }
+
+    #[test]
     fn the_check_reads_github_over_the_wire() {
         let url = serve(200, release("v0.5.0", &BOTH));
         let found = check_at(&url, "0.4.0", "windows").unwrap().unwrap();
@@ -514,6 +572,7 @@ mod tests {
             tmp: dir.join("tmp"),
             data: dir.join("data"),
             run,
+            idle: Box::new(|| true),
         }
     }
 
@@ -563,6 +622,31 @@ mod tests {
     }
 
     #[test]
+    fn the_installer_waits_for_a_recording_that_began_during_the_download() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        static RECORDING: AtomicBool = AtomicBool::new(true);
+        static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let sha = format!("{:x}", Sha256::digest(PACKAGE.as_bytes()));
+        let mut j = job("wait", serve(200, PACKAGE.into()), sha, fake_run);
+        j.idle = Box::new(|| {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+            !RECORDING.load(Ordering::SeqCst)
+        });
+        let data = j.data.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        start(j, &BUSY, move |why| tx.send(why).unwrap()).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while ASKED.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ASKED.load(Ordering::SeqCst) >= 2, "downloaded and verified, it asks whether a recording runs");
+        assert!(!data.join(LOG).exists() && !data.join(RECORD).exists(), "the installer has not run");
+        assert!(rx.try_recv().is_err());
+        RECORDING.store(false, Ordering::SeqCst);
+        assert!(rx.recv_timeout(Duration::from_secs(30)).unwrap().starts_with("ran install.ps1"));
+    }
+
+    #[test]
     fn a_second_update_is_refused_while_one_runs() {
         let sha = format!("{:x}", Sha256::digest(PACKAGE.as_bytes()));
         assert!(!installing());
@@ -574,6 +658,16 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(30)).unwrap().starts_with("ran install.ps1"));
         assert!(!installing(), "a failed update frees the way for the next");
         assert!(reported(job("busy3", serve(200, PACKAGE.into()), sha, fake_run), &RUNNING).starts_with("ran install.ps1"));
+    }
+
+    #[test]
+    fn a_new_update_drops_the_failure_an_old_one_left() {
+        let kept = Kept(Mutex::new(None));
+        let said = "the installer stopped with code 2.";
+        assert_eq!(kept.get(|| Some(said.into())).as_deref(), Some(said));
+        assert_eq!(kept.get(|| panic!("the record is read once")).as_deref(), Some(said), "later calls give the same answer");
+        kept.drop_answer();
+        assert_eq!(kept.get(|| panic!("the record was already read")), None, "a retry is not reported as the old failure");
     }
 
     #[test]

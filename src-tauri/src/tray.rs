@@ -80,15 +80,14 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
                 "last" => crate::show_window(app, "result"),
                 "settings" => crate::show_window(app, "settings"),
                 "setup" => crate::show_window(app, "onboarding"),
-                // Check now, then open Settings with the answer: it says what an update does before anything is
-                // replaced.
+                // Open Settings, then check: it says what an update does before anything is replaced, and reads the
+                // answer from settings_view if it arrives before the window listens.
                 "update" => {
+                    crate::show_window(app, "settings");
+                    let _ = app.emit_to("settings", "settings://pane", "general");
                     let app = app.clone();
                     std::thread::spawn(move || {
-                        let found = crate::update::check();
-                        crate::show_window(&app, "settings");
-                        let _ = app.emit_to("settings", "settings://pane", "general");
-                        match found {
+                        match crate::update::check() {
                             Ok(v) => {
                                 offer_update(&app, v.as_deref());
                                 let _ = app.emit("update://checked", &v);

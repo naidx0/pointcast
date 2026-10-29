@@ -16,20 +16,33 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// The prompt coding agents read, with the History entry it was saved as (none when History did not keep it).
 #[derive(Clone, Default)]
 pub struct Latest {
-    inner: Arc<Mutex<Option<SessionExport>>>,
+    inner: Arc<Mutex<Option<(Option<String>, SessionExport)>>>,
 }
 
 impl Latest {
-    pub fn set(&self, exp: SessionExport) {
-        *self.inner.lock().unwrap() = Some(exp);
-    }
-    pub fn clear(&self) {
-        *self.inner.lock().unwrap() = None;
+    pub fn set(&self, id: Option<String>, exp: SessionExport) {
+        *self.inner.lock().unwrap() = Some((id, exp));
     }
     pub fn get(&self) -> Option<SessionExport> {
-        self.inner.lock().unwrap().clone()
+        self.inner.lock().unwrap().as_ref().map(|(_, exp)| exp.clone())
+    }
+    /// History entry `id` now reads `exp` (a picture marked up or taken out): agents read that, if it is theirs.
+    pub fn changed(&self, id: &str, exp: &SessionExport) {
+        if let Some((Some(mine), served)) = self.inner.lock().unwrap().as_mut() {
+            if mine == id {
+                *served = exp.clone();
+            }
+        }
+    }
+    /// History lost `gone` (every entry when None): when it is the one agents read, they read nothing.
+    pub fn forget(&self, gone: Option<&str>) {
+        let mut g = self.inner.lock().unwrap();
+        if gone.is_none() || g.as_ref().is_some_and(|(id, _)| id.as_deref() == gone) {
+            *g = None;
+        }
     }
 }
 
@@ -366,7 +379,7 @@ mod tests {
     #[test]
     fn tools_call_returns_the_stored_session() {
         let latest = Latest::default();
-        latest.set(assemble_export(&[Item::Speech {
+        latest.set(None, assemble_export(&[Item::Speech {
             t_ms: 0,
             end_ms: 10,
             text: "hello there".into(),
@@ -386,7 +399,7 @@ mod tests {
 
     fn start() -> SocketAddr {
         let latest = Latest::default();
-        latest.set(assemble_export(&[Item::Speech {
+        latest.set(None, assemble_export(&[Item::Speech {
             t_ms: 0,
             end_ms: 10,
             text: SECRET.into(),
@@ -495,13 +508,13 @@ mod tests {
     #[test]
     fn a_cleared_session_answers_no_session_not_an_empty_prompt() {
         let latest = Latest::default();
-        latest.set(assemble_export(&[Item::Speech {
+        latest.set(None, assemble_export(&[Item::Speech {
             t_ms: 0,
             end_ms: 10,
             text: SECRET.into(),
         }]));
         let addr = spawn("127.0.0.1:0", latest.clone(), TOKEN.into()).unwrap();
-        latest.clear();
+        latest.forget(None);
         let (code, resp) = request(addr, "POST /mcp", &bearer(TOKEN), CALL);
         assert_eq!(code, 200, "{resp}");
         assert!(resp.contains("No Pointcast session yet."), "{resp}");

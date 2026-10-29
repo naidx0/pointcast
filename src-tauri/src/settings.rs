@@ -243,9 +243,24 @@ pub fn data_dir() -> PathBuf {
     }
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join(IDENTIFIER);
-    static MOVED: std::sync::Once = std::sync::Once::new();
-    MOVED.call_once(|| migrate(&base.join("Pointcast"), &dir));
+    static READY: std::sync::Once = std::sync::Once::new();
+    READY.call_once(|| {
+        private(&dir);
+        migrate(&base.join("Pointcast"), &dir);
+    });
     dir
+}
+
+/// History holds screenshots and transcripts: on macOS and Linux only this user may open the data folder, one an
+/// earlier version made included.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn private(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
 }
 
 /// Before 0.4 the data sat in `<local data>/Pointcast`, which on Windows is also where the
@@ -378,6 +393,23 @@ mod tests {
         if std::env::var_os("POINTCAST_DATA_DIR").is_none() {
             assert!(data_dir().starts_with(std::env::temp_dir()), "{}", data_dir().display());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_this_user_can_open_the_data_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pc-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(IDENTIFIER);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        private(&dir);
+        assert_eq!(mode(&dir), 0o700);
+        // One an earlier version made, open to everyone, is closed too.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private(&dir);
+        assert_eq!(mode(&dir), 0o700);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

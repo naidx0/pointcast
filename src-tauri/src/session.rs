@@ -92,6 +92,8 @@ pub struct App {
     frames: Mutex<Option<Buffer>>,
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
+    /// What coding agents read over MCP: the last recording's prompt, until its History entry goes.
+    pub latest: crate::mcp::Latest,
     freeze: Mutex<Option<Shot>>,
     /// When the region frame was frozen: the capture belongs there, not at the moment of Enter.
     freeze_t: Mutex<Option<u64>>,
@@ -153,6 +155,7 @@ impl App {
             tokens: Mutex::default(),
             frames: Mutex::default(),
             last_id: Mutex::default(),
+            latest: Default::default(),
             practice: AtomicBool::new(false),
             practice_next: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
@@ -381,15 +384,18 @@ impl App {
         *self.last_export.lock().unwrap() = Some(exp.clone());
         // The checkpoint goes only once History has the prompt: a failed save leaves it for
         // the next launch to recover.
+        let mut saved = None;
         if items.is_empty() {
             self.history.clear_checkpoint();
         } else {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
             if let Ok(m) = self.history.save(&items, t0, now_ms().saturating_sub(t0)) {
-                *self.last_id.lock().unwrap() = Some(m.id);
+                *self.last_id.lock().unwrap() = Some(m.id.clone());
+                saved = Some(m.id);
                 self.history.clear_checkpoint();
             }
         }
+        self.latest.set(saved, exp.clone());
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
@@ -447,7 +453,7 @@ impl App {
             return;
         };
         let t = now_ms().saturating_sub(t0);
-        self.push(Item::Speech {
+        let _ = self.push(Item::Speech {
             t_ms: t.saturating_sub(400),
             end_ms: t,
             text: text.to_string(),
@@ -468,6 +474,17 @@ impl App {
             self.state.lock().unwrap().error = Some(e.clone());
         }
         r
+    }
+
+    /// A recording that may not start says why on the HUD, as a stop that kept nothing does. One already running is
+    /// left alone.
+    pub fn refuse(&self, why: &str) {
+        let mut st = self.state.lock().unwrap();
+        if !matches!(st.phase, Phase::Recording | Phase::Loading | Phase::Transcribing) {
+            st.phase = Phase::Ready;
+            st.notice = Some("empty");
+            st.error = Some(why.to_string());
+        }
     }
 
     pub fn begin_region(&self) -> Result<Shot, String> {
@@ -506,7 +523,7 @@ impl App {
         self.push(Item::Image {
             t_ms: t,
             capture: cap.clone(),
-        });
+        })?;
         *self.freeze.lock().unwrap() = None;
         Ok(cap)
     }
@@ -538,7 +555,7 @@ impl App {
         self.push(Item::Image {
             t_ms: t,
             capture: cap.clone(),
-        });
+        })?;
         Ok(cap)
     }
 
@@ -587,27 +604,43 @@ impl App {
         now_ms().saturating_sub(t0)
     }
 
-    /// Add to the recording and checkpoint it, so a crash from here on loses nothing.
-    fn push(&self, item: Item) {
+    /// Add to the recording and checkpoint it, so a crash from here on loses nothing. Only while it records: a picture
+    /// that arrived after a stop copied the recording would be checkpointed into a session already saved, and come back
+    /// at the next launch as a second, "Recovered" entry.
+    fn push(&self, item: Item) -> Result<(), String> {
+        self.add(item, &[Phase::Recording, Phase::Loading])
+    }
+
+    /// Add to the recording while its phase is one of `live`. The phase is read under the items' lock, so an item is
+    /// either in the copy a stop takes or refused.
+    fn add(&self, item: Item, live: &[Phase]) -> Result<(), String> {
         let mut v = self.items.lock().unwrap();
+        if !live.contains(&self.state.lock().unwrap().phase) {
+            return Err(STOPPED.into());
+        }
         v.push(item);
         if !self.practice.load(Ordering::SeqCst) {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
             let _ = self.history.checkpoint(&v, t0);
         }
+        Ok(())
     }
 
-    /// Make a history entry the one "Paste Last Prompt" uses.
+    /// Make a history entry the one "Paste Last Prompt" uses. When coding agents read that entry, they read it as it
+    /// is now (after a picture in it was edited).
     pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
         let exp = self.history.export(id)?;
         *self.last_export.lock().unwrap() = Some(exp.clone());
         *self.last_id.lock().unwrap() = Some(id.to_string());
+        self.latest.changed(id, &exp);
         Ok(exp)
     }
 
     /// History lost entries (`gone`, or all of them when None). When the last prompt was one, the newest entry left
-    /// takes its place, or nothing does. True when the last prompt changed.
+    /// takes its place, or nothing does; coding agents read nothing rather than an older one. True when the last
+    /// prompt changed.
     pub fn forget(&self, gone: Option<&str>) -> bool {
+        self.latest.forget(gone);
         let hit = gone.is_none_or(|id| self.last_id.lock().unwrap().as_deref() == Some(id));
         if !hit {
             return false;
@@ -683,11 +716,15 @@ impl App {
             if let Some(tok) = heard.tokens {
                 self.tokens.lock().unwrap().push((t_ms, tok));
             }
-            self.push(Item::Speech {
-                t_ms,
-                end_ms,
-                text,
-            });
+            // The words still being transcribed for a stop go in too: the stop waits for them before it copies.
+            let _ = self.add(
+                Item::Speech {
+                    t_ms,
+                    end_ms,
+                    text,
+                },
+                &[Phase::Recording, Phase::Loading, Phase::Transcribing],
+            );
         }
     }
 }
@@ -729,6 +766,10 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str
 
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
 
+pub const UPDATING: &str = "Pointcast is updating; it reopens in a moment.";
+
+pub const STOPPED: &str = "That recording has already stopped.";
+
 pub const NO_MODEL: &str = "No speech model yet. Open Settings › Speech to download one.";
 
 pub fn now_ms() -> u64 {
@@ -763,6 +804,7 @@ mod tests {
         let a = app("freeze");
         // Recording started 20 s ago; the frame froze 12 s in; Enter comes 8 s later.
         *a.t0.lock().unwrap() = Some(now_ms() - 20_000);
+        a.state.lock().unwrap().phase = Phase::Recording;
         *a.freeze_t.lock().unwrap() = Some(12_000);
         let cap = a.commit_region(png(), vec![], None).unwrap();
         assert_eq!(cap.t_ms, 12_000);
@@ -775,6 +817,7 @@ mod tests {
     fn a_region_keeps_the_control_it_outlined_and_the_prompt_names_it() {
         let a = app("element");
         *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
         let rect = crate::element::Bounds { x: 4, y: 6, w: 116, h: 41 };
         let mark = ElementMark { role: "button".into(), name: "Place order".into(), rect };
         let pin = vec![Label { n: 1, text: "too far left".into() }];
@@ -816,13 +859,13 @@ mod tests {
             auto: false,
         };
         // "this" is said at about 1.6 s while the pointer sweeps right, passing (100, 80) then.
-        a.push(Item::Speech { t_ms: 1_000, end_ms: 2_700, text: "click this button".into() });
-        a.push(Item::Image { t_ms: 3_000, capture: shot });
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(Item::Speech { t_ms: 1_000, end_ms: 2_700, text: "click this button".into() }).unwrap();
+        a.push(Item::Image { t_ms: 3_000, capture: shot }).unwrap();
         for i in 0..15 {
             a.trail.lock().unwrap().push(Point { t_ms: 1_000 + i * 100, x: 40 + i as i32 * 10, y: 80 });
         }
         let on_ring = 100 + crate::image_ops::RING_R as u32;
-        a.state.lock().unwrap().phase = Phase::Recording;
         let exp = a.stop(false).unwrap().unwrap();
         assert_eq!(pixel(&exp.images[0], on_ring, 80), [245, 165, 36]);
         assert_eq!(pixel(&exp.images[0], 100, 80), [255; 3]);
@@ -835,10 +878,41 @@ mod tests {
     }
 
     #[test]
+    fn a_region_that_arrives_after_the_stop_is_refused_and_never_recovered_as_a_second_entry() {
+        let a = app("late");
+        // A real recording, so what goes into it is checkpointed.
+        a.practice.store(false, Ordering::SeqCst);
+        *a.t0.lock().unwrap() = Some(now_ms());
+        let words = || Item::Speech { t_ms: 0, end_ms: 9, text: "last words".into() };
+        let shot = |_: &Settings, _: &[Point], _: u64| -> Result<Shot, String> {
+            let map = Default::default();
+            Ok(Shot { png: png(), width: 1, height: 1, kind: CaptureKind::Full, cursor: (0, 0), pointer: None, trail: vec![], element: None, map, k: 1.0 })
+        };
+        for phase in [Phase::Transcribing, Phase::Ready, Phase::Idle] {
+            a.state.lock().unwrap().phase = phase;
+            assert_eq!(a.commit_region(png(), vec![], None).unwrap_err(), STOPPED, "{phase:?}");
+            assert_eq!(a.capture_shot(shot).unwrap_err(), STOPPED, "{phase:?}");
+            assert_eq!(a.push(words()).unwrap_err(), STOPPED, "{phase:?}");
+            a.inject_speech("late");
+            assert!(a.history.recover().is_none(), "{phase:?}: nothing was checkpointed");
+        }
+        assert_eq!(a.ui().image_count, 0);
+        // The words still being transcribed for the stop go in.
+        a.state.lock().unwrap().phase = Phase::Transcribing;
+        a.add(words(), &[Phase::Recording, Phase::Loading, Phase::Transcribing]).unwrap();
+        a.history.clear_checkpoint();
+        // While it records, a region goes in and is checkpointed.
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.commit_region(png(), vec![], None).unwrap();
+        assert!(a.history.recover().is_some());
+    }
+
+    #[test]
     fn a_stop_with_nothing_recording_saves_nothing() {
         let a = app("idle-stop");
         *a.t0.lock().unwrap() = Some(now_ms());
-        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "already saved".into() });
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "already saved".into() }).unwrap();
         a.state.lock().unwrap().phase = Phase::Ready;
         assert!(a.stop(false).unwrap().is_none(), "a second stop does nothing");
         assert!(a.history.list().is_empty(), "and saves nothing twice");
@@ -869,8 +943,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(a.frames.lock().unwrap().is_none());
         assert_eq!(NEVER.load(Ordering::SeqCst), 0);
-        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
         a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() }).unwrap();
         assert!(a.stop(false).unwrap().unwrap().images.is_empty());
     }
 
@@ -888,8 +962,8 @@ mod tests {
         }
         assert!(a.frames.lock().unwrap().as_ref().is_some_and(|b| !b.frames().is_empty()));
         // "this" at 400 ms: the first frame stands for it.
-        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
         a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() }).unwrap();
         let exp = a.stop(false).unwrap().unwrap();
         assert!(a.frames.lock().unwrap().is_none(), "the buffer goes at stop");
         assert_eq!((exp.images.len(), exp.images[0].auto, exp.images[0].width), (1, true, 400));
@@ -959,6 +1033,61 @@ mod tests {
     }
 
     #[test]
+    fn coding_agents_read_their_own_history_entry_until_it_is_deleted_or_edited() {
+        let a = app("agents");
+        let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
+        let served = |a: &App| a.latest.get().map(|e| e.plain);
+        let pic = Capture {
+            id: 0,
+            kind: CaptureKind::Region,
+            t_ms: 10,
+            png: png(),
+            width: 1,
+            height: 1,
+            labels: vec![],
+            pointer: None,
+            trail: vec![],
+            element: None,
+            place: None,
+            anchors: vec![],
+            auto: false,
+        };
+        // At launch the newest entry is the last prompt, and agents read nothing until a recording.
+        let older = a.history.save(&said("older"), 1_000, 9).unwrap();
+        let newest = a.history.save(&said("newest"), 2_000, 9).unwrap();
+        a.set_last(&newest.id).unwrap();
+        a.history.delete(&newest.id).unwrap();
+        assert!(a.forget(Some(&newest.id)));
+        assert_eq!((a.last_export().unwrap().plain.as_str(), served(&a)), ("older", None), "deleting it serves no older one");
+
+        // A recording: agents read it, as the stop saved it.
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() }, Item::Image { t_ms: 10, capture: pic }];
+        let rec = a.history.save(&items, 3_000, 9).unwrap();
+        a.latest.set(Some(rec.id.clone()), a.set_last(&rec.id).unwrap());
+        // A picture in it marked up again: agents read the new one.
+        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
+        a.set_last(&rec.id).unwrap();
+        assert_eq!(served(&a).as_deref(), Some("look [image 1: 1=this one]"));
+        // Copying the older prompt makes it the last one; agents still read the recording.
+        a.set_last(&older.id).unwrap();
+        assert_eq!(served(&a).as_deref(), Some("look [image 1: 1=this one]"));
+        // The recording deleted while it is not the last prompt: agents no longer read it.
+        a.history.delete(&rec.id).unwrap();
+        assert!(!a.forget(Some(&rec.id)));
+        assert_eq!(served(&a), None);
+
+        // Clearing History: nothing left to read.
+        let again = a.history.save(&said("again"), 4_000, 9).unwrap();
+        a.latest.set(Some(again.id.clone()), a.set_last(&again.id).unwrap());
+        a.history.delete(&older.id).unwrap();
+        a.forget(Some(&older.id));
+        assert_eq!(served(&a).as_deref(), Some("again"), "another entry going leaves it");
+        a.history.clear().unwrap();
+        a.forget(None);
+        assert_eq!(served(&a), None);
+    }
+
+    #[test]
     fn each_saved_recording_gets_its_own_folder_in_a_chosen_folder_too() {
         let root = std::env::temp_dir().join(format!("pc-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -981,6 +1110,19 @@ mod tests {
         assert!(a.capture_shot(off).is_err());
         assert_eq!(a.ui().error.as_deref(), Some("Screen Recording is off for Pointcast."));
         assert_eq!(a.ui().image_count, 0);
+    }
+
+    #[test]
+    fn a_recording_refused_while_updating_says_why_on_the_hud_and_a_running_one_is_left_alone() {
+        let a = app("refuse");
+        a.state.lock().unwrap().notice = Some("pasted");
+        a.refuse(UPDATING);
+        let st = a.ui();
+        assert_eq!((st.phase, st.notice, st.error.as_deref()), (Phase::Ready, Some("empty"), Some(UPDATING)));
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.state.lock().unwrap().error = None;
+        a.refuse(UPDATING);
+        assert_eq!((a.ui().phase, a.ui().error), (Phase::Recording, None));
     }
 
     #[test]
