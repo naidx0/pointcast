@@ -106,12 +106,12 @@ Copy a Linux release into `/opt/cursor/artifacts/` when packaging demos.
 
 ## Recording a demo (30–60s)
 
-1. Open `demo/buggy-shop.html` (or any buggy UI).
+1. Run `npm run dev` and open `http://127.0.0.1:1420/buggy-shop.html` (or any buggy UI).
 2. Start Pointcast and finish the setup assistant.
 3. Start/stop shortcut → talk → region shortcut (box, pin, arrow, magnifier) → Return → stop.
 4. The prompt pastes into the focused app, or use the menu → **Paste Last Prompt**.
-5. Capture with OBS, QuickTime, Game Bar, or `scripts/record-demo.sh` on Linux X11.
-6. Save to `docs/demo/pointcast-demo.mp4`.
+5. Capture with QuickTime, Screen Studio, OBS or Game Bar. Turn on Settings → Capture → Show
+   Pointcast in captures first, or the recording capsule and overlay stay out of the video.
 
 ## Troubleshooting
 

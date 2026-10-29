@@ -1,8 +1,14 @@
-# Pointcast
+<p align="center"><img src="public/icon-mac.png" width="96" alt=""></p>
 
-**Talk, point, paste.** Press one shortcut, say what you see, mark up the screen, and Pointcast
-hands you one prompt (your words with the annotated screenshots inline, where you took them) to
-paste into ChatGPT, Claude, Cursor, Claude Code, Codex, Slack or any chat box.
+<h1 align="center">Pointcast</h1>
+
+<p align="center"><b>Talk, point, paste.</b><br>Show an AI what you mean instead of describing it.</p>
+
+<p align="center"><img src="docs/demo/pointcast.gif" width="760" alt="Recording a bug: the capsule shows the timer, a region is boxed with a pin and a label, and the prompt with the annotated picture lands in a chat"></p>
+
+Press one shortcut, say what you see, mark up the screen, and Pointcast hands you one prompt (your
+words with the annotated screenshots inline, where you took them) to paste into ChatGPT, Claude,
+Cursor, Claude Code, Codex, Slack or any chat box.
 
 It is a small native app for **macOS** (menu bar) and **Windows 11** (system tray). Speech is
 transcribed on your computer. Nothing is uploaded. With no pictures it is simply dictation: your
@@ -25,8 +31,6 @@ irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 Either one downloads the latest release, installs it (no admin rights on Windows), and opens the
 setup assistant. Run it again to update. The builds are not notarised or code-signed; the scripts
 install them the same way a developer would, so no warning dialogs appear.
-
-![Pointcast demo placeholder](docs/demo/placeholder.gif)
 
 ## Why
 
