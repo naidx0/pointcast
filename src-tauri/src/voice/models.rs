@@ -53,6 +53,9 @@ pub struct RuntimeEntry {
     #[serde(default)]
     pub sha256: String,
     pub lib: String,
+    /// The libraries that get loaded, `lib` and the ones it pulls in, by their path in the install.
+    #[serde(default)]
+    pub files: Vec<FileEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +210,7 @@ pub const CANCELLED: &str = "Cancelled.";
 pub const DAMAGED: &str = "The download arrived damaged, so it was thrown away. Try again; it starts over.";
 pub const OFFLINE: &str =
     "Pointcast can't reach GitHub to download the speech files. Check your internet connection, then try again.";
+pub const CHANGED: &str = "The speech engine files changed; set it up again in Settings > Speech.";
 
 /// Fetch `urls` (tried in order) into `dest`, resuming a `.partial` left by an earlier try.
 /// `bytes` and `sha256`, when known, must match or the file is discarded.
@@ -597,6 +601,13 @@ mod tests {
         }
         for r in &c.runtimes {
             assert!(pinned(r.bytes, &r.sha256), "{}", r.id);
+            // The library opened and the ONNX Runtime it pulls in, each by size and hash.
+            let names: Vec<&str> = r.files.iter().filter_map(|f| f.name.rsplit('/').next()).collect();
+            assert_eq!(names.iter().filter(|n| **n == r.lib).count(), 1, "{}", r.id);
+            assert!(names.iter().any(|n| n.trim_start_matches("lib").starts_with("onnxruntime.")), "{}", r.id);
+            for f in &r.files {
+                assert!(pinned(f.bytes, &f.sha256), "{} {}", r.id, f.name);
+            }
         }
         // The MD build needs the Visual C++ Redistributable, which a clean Windows lacks.
         let win = c.runtimes.iter().find(|r| r.target.contains("windows")).unwrap();
