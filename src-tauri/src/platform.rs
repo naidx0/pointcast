@@ -67,9 +67,11 @@ fn place(w: &WebviewWindow, m: &Monitor) {
     }
 }
 
-/// Keep Pointcast's own windows out of every screenshot (unless the user wants them in).
+/// Keep the recording HUD and the annotate overlay out of every screenshot (unless the user wants
+/// them in). Only those two: on Windows a protected window is also blank in the taskbar preview,
+/// Alt+Tab and screen sharing, which ordinary windows like Settings must not be.
 pub fn protect(app: &AppHandle, on: bool) {
-    for label in ["settings", "indicator", "overlay", "result", "onboarding"] {
+    for label in ["indicator", "overlay"] {
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.set_content_protected(on);
         }

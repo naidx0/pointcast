@@ -63,6 +63,10 @@ fn emit_state(app: &AppHandle, svc: &App) {
     let _ = app.emit("session://state", &st);
 }
 
+fn emit_state_now(app: &AppHandle, svc: &App) {
+    let _ = app.emit("session://state", &svc.ui());
+}
+
 fn recording(svc: &App) -> bool {
     matches!(svc.ui().phase, Phase::Recording | Phase::Loading)
 }
@@ -78,12 +82,27 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
 }
 
 fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
-    hide_window(app, "indicator");
     hide_window(app, "overlay");
     if svc.settings.lock().unwrap().sounds {
         platform::chime(false);
     }
-    let exp = svc.stop(false)?;
+    // The HUD reads "Finishing…" while the last words are transcribed, then where the prompt went.
+    emit_state_now(app, svc);
+    let exp = svc.stop(false);
+    let practice = svc.practice.load(Ordering::SeqCst);
+    if practice || exp.is_err() {
+        hide_window(app, "indicator");
+    } else {
+        emit_state_now(app, svc);
+        let (app, svc) = (app.clone(), svc.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1600));
+            if svc.ui().phase == Phase::Ready {
+                hide_window(&app, "indicator");
+            }
+        });
+    }
+    let exp = exp?;
     if let Some(ref e) = exp {
         if svc.practice.load(Ordering::SeqCst) {
             let _ = app.emit("practice://result", e);

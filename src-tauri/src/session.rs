@@ -36,6 +36,8 @@ pub struct UiState {
     pub image_count: u32,
     pub model_ready: bool,
     pub level: f32,
+    /// After a stop, where the prompt went: pasted, copied, saved or empty.
+    pub notice: Option<&'static str>,
 }
 
 impl Default for UiState {
@@ -51,6 +53,7 @@ impl Default for UiState {
             image_count: 0,
             model_ready: false,
             level: 0.0,
+            notice: None,
         }
     }
 }
@@ -73,6 +76,8 @@ pub struct App {
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
     freeze: Mutex<Option<Shot>>,
+    /// When the region frame was frozen: the capture belongs there, not at the moment of Enter.
+    freeze_t: Mutex<Option<u64>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
     /// Onboarding practice run: keep the result in the app, deliver it nowhere.
@@ -117,6 +122,7 @@ impl App {
             loading: Mutex::default(),
             worker: Mutex::default(),
             freeze: Mutex::default(),
+            freeze_t: Mutex::default(),
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
             history: crate::history::Store::new(&crate::settings::data_dir()),
@@ -219,6 +225,7 @@ impl App {
             st.phase = Phase::Loading;
             st.error = None;
             st.partial.clear();
+            st.notice = None;
             st.text.clear();
             st.mic = false;
             st.screen = true;
@@ -251,17 +258,17 @@ impl App {
         if let Some(mic) = self.mic.lock().unwrap().take() {
             drop(mic);
         }
-        // The worker transcribes what was still being said when stop was pressed; wait for it.
-        if let Some(w) = self.worker.lock().unwrap().take() {
-            let _ = w.join();
-        }
-        *self.take.lock().unwrap() = None;
         {
             let mut st = self.state.lock().unwrap();
             st.mic = false;
             st.screen = false;
             st.phase = if cancel { Phase::Idle } else { Phase::Transcribing };
         }
+        // The worker transcribes what was still being said when stop was pressed; wait for it.
+        if let Some(w) = self.worker.lock().unwrap().take() {
+            let _ = w.join();
+        }
+        *self.take.lock().unwrap() = None;
         if cancel {
             self.items.lock().unwrap().clear();
             *self.t0.lock().unwrap() = None;
@@ -292,8 +299,11 @@ impl App {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
             }
         }
-        let _ = crate::clipboard::deliver(&items, settings.output, settings.also_clipboard);
-        self.state.lock().unwrap().phase = Phase::Ready;
+        let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
+        let delivered = crate::clipboard::deliver(&items, mode, settings.also_clipboard);
+        let mut st = self.state.lock().unwrap();
+        st.notice = Some(notice(&items, mode, delivered.is_ok()));
+        st.phase = Phase::Ready;
         Ok(Some(exp))
     }
 
@@ -353,8 +363,10 @@ impl App {
 
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
+        let t = self.t_ms();
         let shot = capture::grab_freeze(&settings)?;
         *self.freeze.lock().unwrap() = Some(shot.clone());
+        *self.freeze_t.lock().unwrap() = Some(t);
         Ok(shot)
     }
 
@@ -365,7 +377,7 @@ impl App {
     /// Commit an annotated PNG (already cropped by the overlay) as the next image.
     pub fn commit_region(&self, png: Vec<u8>, labels: Vec<Label>) -> Result<Capture, String> {
         let (width, height) = crate::image_ops::png_size(&png).ok_or("that is not a PNG")?;
-        let t = self.t_ms();
+        let t = self.freeze_t.lock().unwrap().take().unwrap_or_else(|| self.t_ms());
         let cap = Capture {
             id: 0,
             kind: CaptureKind::Region,
@@ -504,6 +516,26 @@ fn export_dir(s: &Settings) -> std::path::PathBuf {
         .join(stamp)
 }
 
+/// Auto-paste needs the OS to accept synthetic keys; where it will not (macOS without
+/// Accessibility), the prompt is copied instead of silently going nowhere.
+pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
+    if mode == OutputMode::AutoPaste && !can_paste {
+        OutputMode::Clipboard
+    } else {
+        mode
+    }
+}
+
+/// What the HUD says after a stop.
+pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str {
+    match (items.is_empty(), mode, delivered) {
+        (true, _, _) => "empty",
+        (_, OutputMode::AutoPaste, true) => "pasted",
+        (_, OutputMode::Folder, _) => "saved",
+        _ => "copied",
+    }
+}
+
 pub const NO_MODEL: &str = "No speech model yet. Open Settings › Speech to download one.";
 
 pub fn now_ms() -> u64 {
@@ -511,4 +543,50 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(name: &str) -> Arc<App> {
+        let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        App::new(Settings::default(), d.join("settings.json"))
+    }
+
+    fn png() -> Vec<u8> {
+        crate::image_ops::encode_png(&[9, 9, 9, 255], 1, 1).unwrap()
+    }
+
+    #[test]
+    fn a_region_belongs_to_the_moment_the_screen_froze_not_to_enter() {
+        let a = app("freeze");
+        // Recording started 20 s ago; the frame froze 12 s in; Enter comes 8 s later.
+        *a.t0.lock().unwrap() = Some(now_ms() - 20_000);
+        *a.freeze_t.lock().unwrap() = Some(12_000);
+        let cap = a.commit_region(png(), vec![]).unwrap();
+        assert_eq!(cap.t_ms, 12_000);
+        // The freeze time is used once; a commit without a freeze falls back to now.
+        let cap = a.commit_region(png(), vec![]).unwrap();
+        assert!(cap.t_ms >= 20_000, "{}", cap.t_ms);
+    }
+
+    #[test]
+    fn the_hud_says_where_the_prompt_went() {
+        let words = vec![Item::Speech { t_ms: 0, end_ms: 10, text: "hi".into() }];
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true), "empty");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, true), "pasted");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, false), "copied");
+        assert_eq!(notice(&words, OutputMode::Clipboard, true), "copied");
+        assert_eq!(notice(&words, OutputMode::Folder, true), "saved");
+    }
+
+    #[test]
+    fn without_permission_to_paste_the_prompt_is_copied() {
+        assert_eq!(paste_or_copy(OutputMode::AutoPaste, false), OutputMode::Clipboard);
+        assert_eq!(paste_or_copy(OutputMode::AutoPaste, true), OutputMode::AutoPaste);
+        assert_eq!(paste_or_copy(OutputMode::Folder, false), OutputMode::Folder);
+    }
 }

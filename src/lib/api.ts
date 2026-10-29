@@ -17,6 +17,8 @@ export type UiState = {
   image_count: number;
   model_ready: boolean;
   level: number;
+  /** After a stop: what happened to the prompt. */
+  notice: "pasted" | "copied" | "saved" | "empty" | null;
 };
 
 export type Label = { n: number; text: string };

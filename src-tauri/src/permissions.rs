@@ -42,6 +42,11 @@ pub fn probe() -> PermissionStatus {
     }
 }
 
+/// Whether a synthetic Cmd/Ctrl+V will reach other apps (macOS needs Accessibility for it).
+pub fn can_paste() -> bool {
+    accessibility() == Access::Granted
+}
+
 /// Settings page for one permission (`microphone`, `screen`, `accessibility`).
 pub fn settings_url(kind: &str) -> Option<&'static str> {
     if cfg!(target_os = "macos") {

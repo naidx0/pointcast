@@ -118,6 +118,26 @@ function Seg<T extends string | number>({
   set: (v: T) => void;
   label: string;
 }) {
+  // Windows 11 Settings picks from a dropdown; System Settings on a Mac uses a segmented control.
+  if (platform() === "win")
+    return (
+      <select
+        className="field"
+        aria-label={label}
+        style={{ minWidth: 150 }}
+        value={String(value)}
+        onChange={(e) => {
+          const hit = options.find(([id]) => String(id) === e.target.value);
+          if (hit) set(hit[0]);
+        }}
+      >
+        {options.map(([id, name]) => (
+          <option key={String(id)} value={String(id)}>
+            {name}
+          </option>
+        ))}
+      </select>
+    );
   return (
     <div className="seg" role="group" aria-label={label}>
       {options.map(([id, name]) => (
@@ -312,15 +332,15 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
             label="Close-up size"
             value={[256, 384, 512, 768].includes(cfg.zoom_px) ? cfg.zoom_px : 512}
             options={[
-              [256, "S"],
-              [384, "M"],
-              [512, "L"],
-              [768, "XL"],
+              [256, platform() === "win" ? "Small (256 px)" : "S"],
+              [384, platform() === "win" ? "Medium (384 px)" : "M"],
+              [512, platform() === "win" ? "Large (512 px)" : "L"],
+              [768, platform() === "win" ? "Extra large (768 px)" : "XL"],
             ]}
             set={(v) => patch({ zoom_px: v })}
           />
         </Row>
-        <Row label="Show Pointcast in captures" sub="Off keeps the recording bar and these windows out of every picture.">
+        <Row label="Show Pointcast in captures" sub="Off keeps the recording bar and the annotate overlay out of every picture.">
           <Toggle label="Show Pointcast in captures" on={cfg.include_app} set={(v) => patch({ include_app: v })} />
         </Row>
       </div>

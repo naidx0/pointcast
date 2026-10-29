@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Monitor, SquareDashedMousePointer, X, ZoomIn } from "lucide-react";
+import { Check, Monitor, SquareDashedMousePointer, X, ZoomIn } from "lucide-react";
 import {
   captureFull,
   captureZoom,
@@ -17,6 +17,7 @@ import {
   type UiState,
 } from "@/lib/api";
 import { chordText } from "@/lib/keys";
+import { platform } from "@/lib/theme";
 
 const idle: UiState = {
   phase: "idle",
@@ -29,6 +30,7 @@ const idle: UiState = {
   image_count: 0,
   model_ready: false,
   level: 0,
+  notice: null,
 };
 
 const BARS = 9;
@@ -69,6 +71,8 @@ export function Indicator() {
         .then((c) => setKeys(c.hotkeys))
         .catch(() => undefined);
   }, [s.phase === "recording"]);
+
+  if (s.phase === "transcribing" || (s.phase === "ready" && s.notice)) return <Done s={s} />;
 
   const waiting = s.phase === "loading";
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
@@ -140,6 +144,35 @@ export function Indicator() {
         >
           <i />
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** After stop: a short pill that says where the prompt went, then the window hides itself. */
+function Done({ s }: { s: UiState }) {
+  const paste = platform() === "mac" ? "⌘V" : "Ctrl+V";
+  const text =
+    s.phase === "transcribing"
+      ? "Finishing…"
+      : s.notice === "pasted"
+        ? "Pasted"
+        : s.notice === "copied"
+          ? `Copied · ${paste} to paste`
+          : s.notice === "saved"
+            ? "Saved to your folder"
+            : "Nothing was recorded";
+  return (
+    <div className="hud-wrap" data-tauri-drag-region>
+      <div className="hud done" role="status" aria-live="polite" data-tauri-drag-region>
+        {s.phase === "transcribing" ? (
+          <span className="spinner on-hud" />
+        ) : (
+          <span className={`done-mark ${s.notice === "empty" ? "none" : ""}`}>
+            <Check size={13} strokeWidth={3} />
+          </span>
+        )}
+        <span>{text}</span>
       </div>
     </div>
   );
