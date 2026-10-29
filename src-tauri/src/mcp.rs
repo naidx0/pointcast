@@ -9,11 +9,12 @@
 use crate::prompt::SessionExport;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Default)]
 pub struct Latest {
@@ -95,14 +96,24 @@ pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, St
     listener.set_nonblocking(false).ok();
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let token: Arc<str> = token.into();
+    let open = Arc::new(AtomicUsize::new(0));
     thread::Builder::new()
         .name("pointcast-mcp".into())
         .spawn(move || {
-            for stream in listener.incoming().flatten() {
+            for mut stream in listener.incoming().flatten() {
+                if open.fetch_add(1, Ordering::SeqCst) >= MAX_OPEN {
+                    open.fetch_sub(1, Ordering::SeqCst);
+                    busy(&mut stream);
+                    continue;
+                }
+                let slot = Slot(open.clone());
+                let deadline = Instant::now() + DEADLINE;
                 let latest = latest.clone();
                 let token = token.clone();
-                thread::spawn(move || {
-                    let _ = handle(stream, &latest, &token);
+                // When the OS refuses a thread, the connection and its slot are dropped instead.
+                let _ = thread::Builder::new().name("pointcast-mcp-conn".into()).spawn(move || {
+                    let _slot = slot;
+                    let _ = handle(stream, &latest, &token, deadline);
                 });
             }
         })
@@ -112,12 +123,66 @@ pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, St
 
 const MAX_REQUEST: usize = 1024 * 1024;
 
+/// One connection may take this long, from being accepted to the last byte of the answer, however
+/// slowly the client sends or reads.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+/// Connections served at once; more are refused until one finishes.
+const MAX_OPEN: usize = 16;
+
+/// A place among the connections being served, given back when dropped.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Too many connections at once: say so, read what the client already sent (closing with it unread
+/// would reset the connection before the answer is read) and close, all within a tenth of a second.
+fn busy(stream: &mut TcpStream) {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let reply = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let _ = write_by(stream, reply, deadline);
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut sink = [0u8; 4096];
+    while let Ok(wait) = left(deadline) {
+        stream.set_read_timeout(Some(wait)).ok();
+        if !matches!(stream.read(&mut sink), Ok(n) if n > 0) {
+            break;
+        }
+    }
+}
+
+/// The time left before `deadline`, or an error once it has passed.
+fn left(deadline: Instant) -> Result<Duration, String> {
+    let d = deadline.saturating_duration_since(Instant::now());
+    if d.is_zero() {
+        Err("the client took too long".into())
+    } else {
+        Ok(d)
+    }
+}
+
+fn write_by(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> Result<(), String> {
+    while !bytes.is_empty() {
+        stream.set_write_timeout(Some(left(deadline)?)).ok();
+        let n = stream.write(bytes).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("the connection closed".into());
+        }
+        bytes = &bytes[n..];
+    }
+    Ok(())
+}
+
 /// Read the head, then as much body as Content-Length says: the headers must be whole to check them.
-fn read_request(stream: &mut TcpStream) -> Result<String, String> {
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<String, String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
     loop {
+        stream.set_read_timeout(Some(left(deadline)?)).ok();
         let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
@@ -172,8 +237,8 @@ fn authorized(head: &str, token: &str) -> bool {
         && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn handle(mut stream: TcpStream, latest: &Latest, token: &str) -> Result<(), String> {
-    let req = read_request(&mut stream)?;
+fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant) -> Result<(), String> {
+    let req = read_request(&mut stream, deadline)?;
     let head = req.split("\r\n\r\n").next().unwrap_or("");
     let (method_line, body) = split_http(&req);
     let (code, ctype, body) = if header(head, "origin").is_some() || !local_host(head) {
@@ -224,8 +289,7 @@ fn handle(mut stream: TcpStream, latest: &Latest, token: &str) -> Result<(), Str
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{challenge}Connection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(resp.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(())
+    write_by(&mut stream, resp.as_bytes(), deadline)
 }
 
 fn split_http(req: &str) -> (&str, &str) {
@@ -467,6 +531,48 @@ mod tests {
             assert_eq!(mode, 0o600, "only this user may read the token");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_client_that_dribbles_its_request_is_cut_off_at_the_deadline() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        // A byte every 50 ms for 3 s: no single read waits long.
+        let slow = thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            for _ in 0..60 {
+                if c.write_all(b"X").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (mut s, _) = l.accept().unwrap();
+        let t = Instant::now();
+        let got = read_request(&mut s, Instant::now() + Duration::from_millis(300));
+        assert!(got.is_err(), "{got:?}");
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        drop(s);
+        slow.join().unwrap();
+    }
+
+    #[test]
+    fn connections_past_the_cap_are_refused_until_one_closes() {
+        let addr = start();
+        let idle: Vec<TcpStream> = (0..MAX_OPEN).map(|_| TcpStream::connect(addr).unwrap()).collect();
+        let (code, resp) = request(addr, "GET /health", &bearer(TOKEN), "");
+        assert_eq!(code, 503, "{resp}");
+        assert!(!resp.contains(SECRET), "{resp}");
+        drop(idle);
+        let t = Instant::now();
+        loop {
+            let (code, resp) = request(addr, "GET /health", &bearer(TOKEN), "");
+            if code == 200 {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(3), "still refused: {resp}");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
