@@ -26,6 +26,16 @@ pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
 /// Keep the app handle so a paste can be run on the main thread where the OS needs it.
 pub fn bind(_app: &tauri::AppHandle) {}
 
+/// The V key itself, wherever the keyboard layout puts the letter: looking 'v' up through the
+/// layout finds nothing on Russian or Greek layouts and another key on Dvorak.
+#[cfg(windows)]
+const PASTE: enigo::Key = enigo::Key::V;
+/// kVK_ANSI_V
+#[cfg(target_os = "macos")]
+const PASTE: enigo::Key = enigo::Key::Other(9);
+#[cfg(not(any(windows, target_os = "macos")))]
+const PASTE: enigo::Key = enigo::Key::Unicode('v');
+
 pub fn paste_now() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(80));
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -37,7 +47,7 @@ pub fn paste_now() -> Result<(), String> {
     };
     enigo.key(modifier, Direction::Press).map_err(|e| e.to_string())?;
     enigo
-        .key(Key::Unicode('v'), Direction::Click)
+        .key(PASTE, Direction::Click)
         .map_err(|e| e.to_string())?;
     enigo
         .key(modifier, Direction::Release)
@@ -110,5 +120,15 @@ mod tests {
             anchors: vec![],
             auto: false,
         });
+    }
+
+    #[test]
+    fn the_paste_key_is_the_physical_v_never_a_layout_lookup() {
+        #[cfg(windows)]
+        assert_eq!(PASTE, enigo::Key::V);
+        #[cfg(target_os = "macos")]
+        assert_eq!(PASTE, enigo::Key::Other(9));
+        #[cfg(any(windows, target_os = "macos"))]
+        assert!(!matches!(PASTE, enigo::Key::Unicode(_)));
     }
 }
