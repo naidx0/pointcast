@@ -19,6 +19,12 @@ export type UiState = {
   level: number;
   /** After a stop: what happened to the prompt. */
   notice: "pasted" | "copied" | "saved" | "empty" | null;
+  /** Audio recorded but not yet turned into text, in milliseconds of speech. */
+  behind_ms?: number;
+  /** The microphone is giving nothing ("silent") or very little ("quiet"). */
+  quiet_mic?: "silent" | "quiet" | null;
+  /** The speech model is slower than real time on this computer. */
+  slow_engine?: boolean;
 };
 
 export type Label = { n: number; text: string };
@@ -79,6 +85,10 @@ export type Config = {
   outline_element: boolean;
   spoken_anchors: SpokenAnchors;
   key_frames: boolean;
+  /** Keep the audio of the newest recordings so they can be transcribed again. Treated as on when absent. */
+  keep_audio?: boolean;
+  /** Put the file path of each picture in the text, for terminal agents. Treated as on when absent. */
+  picture_paths?: boolean;
   start_at_login: boolean;
   check_updates: boolean;
   /** A newer version the last check found. */
@@ -180,6 +190,8 @@ export type HistoryMeta = {
   preview: string;
   images: number;
   recovered: boolean;
+  /** The recording's audio is still on this computer, so it can be transcribed again. */
+  has_audio?: boolean;
 };
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
@@ -189,6 +201,8 @@ export const historyEdit = (id: string, n: number) => invoke<void>("history_edit
 export const historyRemove = (id: string, n: number) => invoke<SessionExport>("history_remove", { id, n });
 export const historyCopy = (id: string) => invoke<void>("history_copy", { id });
 export const historyPaste = (id: string) => invoke<void>("history_paste", { id });
+/** Transcribe a kept recording again; `history://changed` fires when the new text is saved. */
+export const historyRetranscribe = (id: string) => invoke<void>("history_retranscribe", { id });
 export const historyDelete = (id: string) => invoke<void>("history_delete", { id });
 export const historyClear = () => invoke<void>("history_clear");
 
@@ -204,6 +218,7 @@ export const onPracticeResult = on<SessionExport>("practice://result");
 export const onOverlayFinish = on<null>("overlay://finish");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
 export const onHistoryChanged = on<{ id: string }>("history://changed");
+export const onTranscribeProgress = on<{ id: string; done_ms: number; total_ms: number }>("transcribe://progress");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");

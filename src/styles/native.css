@@ -1188,6 +1188,24 @@ html.win .hud .hb {
   white-space: nowrap;
   margin: 0 6px;
 }
+.hud .note.warn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 136px;
+  max-width: 136px;
+  margin: 0 6px 0 10px;
+  font-size: 11px;
+  line-height: 13px;
+}
+.hud .note.warn > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud .note.warn b {
+  color: var(--hud-ink);
+  font-weight: 600;
+}
 
 /* —— Last prompt window —— */
 .result {
