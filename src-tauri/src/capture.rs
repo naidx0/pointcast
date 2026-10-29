@@ -191,6 +191,8 @@ struct Frame {
     /// Picture pixels per logical pixel: 1 on a plain display, 1.5 at 150 %, 2 on Retina.
     density: f32,
     map: Mapping,
+    /// The windows on screen when it was taken, for a close-up of the window under the pointer.
+    windows: Vec<Win>,
 }
 
 impl Frame {
@@ -211,25 +213,9 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let mon = xcap::Monitor::from_point(cx, cy).map_err(|e| e.to_string())?;
     let mx = mon.x().unwrap_or(0);
     let my = mon.y().unwrap_or(0);
-    let list = settings.hidden_list();
     // Pointcast's own windows are content-protected (see platform::protect), so the OS leaves
     // them out of the frame; only password managers and the hide-list are painted over here.
-    let mut rects = vec![];
-    for w in xcap::Window::all().unwrap_or_default() {
-        if w.is_minimized().unwrap_or(true) {
-            continue;
-        }
-        let app = w.app_name().unwrap_or_default();
-        let title = w.title().unwrap_or_default();
-        if privacy::hides(&app, &title, &list) {
-            rects.push(Rect {
-                x: w.x().unwrap_or(0),
-                y: w.y().unwrap_or(0),
-                w: w.width().unwrap_or(0) as i32,
-                h: w.height().unwrap_or(0) as i32,
-            });
-        }
-    }
+    let (rects, windows) = sort_out(&listed(), &settings.hidden_list(), std::process::id());
     let img = mon.capture_image().map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
     let mut buf = img.into_raw();
@@ -248,6 +234,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         screen: (cx, cy),
         density,
         map,
+        windows,
     })
 }
 
@@ -258,35 +245,112 @@ fn paint_out(buf: &mut [u8], map: &Mapping, rects: &[Rect]) {
     }
 }
 
+/// A window as one read of the window list saw it.
+struct Listed {
+    app: String,
+    title: String,
+    rect: Rect,
+    minimized: bool,
+    pid: Option<u32>,
+}
+
+/// From one read of the window list: what to paint over (visible windows the hide-list names) and the windows a
+/// close-up can centre on. `me` is this process.
+fn sort_out(seen: &[Listed], hidden: &[String], me: u32) -> (Vec<Rect>, Vec<Win>) {
+    let rects = seen
+        .iter()
+        .filter(|w| !w.minimized && privacy::hides(&w.app, &w.title, hidden))
+        .map(|w| w.rect)
+        .collect();
+    let windows = seen
+        .iter()
+        .filter(|w| !shell(&w.app))
+        .map(|w| Win { rect: w.rect, minimized: w.minimized, own: w.pid == Some(me) })
+        .collect();
+    (rects, windows)
+}
+
 /// Every window on screen, front to back (the order both xcap backends list them in).
-fn windows() -> Vec<Win> {
-    let me = std::process::id();
+#[cfg(not(target_os = "macos"))]
+fn listed() -> Vec<Listed> {
     xcap::Window::all()
         .unwrap_or_default()
         .iter()
-        .filter(|w| !shell(w))
-        .map(|w| Win {
-            rect: Rect {
-                x: w.x().unwrap_or(0),
-                y: w.y().unwrap_or(0),
-                w: w.width().unwrap_or(0) as i32,
-                h: w.height().unwrap_or(0) as i32,
-            },
-            minimized: w.is_minimized().unwrap_or(true),
-            own: w.pid().is_ok_and(|p| p == me),
+        .map(|w| {
+            let minimized = w.is_minimized().unwrap_or(true);
+            let (app, title) = if minimized {
+                Default::default()
+            } else {
+                (w.app_name().unwrap_or_default(), w.title().unwrap_or_default())
+            };
+            Listed {
+                app,
+                title,
+                rect: Rect {
+                    x: w.x().unwrap_or(0),
+                    y: w.y().unwrap_or(0),
+                    w: w.width().unwrap_or(0) as i32,
+                    h: w.height().unwrap_or(0) as i32,
+                },
+                minimized,
+                pid: w.pid().ok(),
+            }
+        })
+        .collect()
+}
+
+/// macOS: xcap copies the whole window list again for every property of every window, so the list is copied once
+/// here, keeping the windows xcap would list, in its order.
+#[cfg(target_os = "macos")]
+fn listed() -> Vec<Listed> {
+    use core_foundation::array::{CFArray, CFArrayRef};
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFArrayRef;
+    }
+    fn get(d: &CFDictionary, key: &str) -> Option<CFType> {
+        let key = CFString::new(key);
+        d.find(key.as_CFTypeRef()).map(|v| unsafe { CFType::wrap_under_get_rule(*v) })
+    }
+    let text = |d: &CFDictionary, k: &str| get(d, k).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string());
+    let number = |d: &CFDictionary, k: &str| get(d, k).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_f64());
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, relative to no window.
+    let raw = unsafe { CGWindowListCopyWindowInfo(1 | 16, 0) };
+    if raw.is_null() {
+        return vec![];
+    }
+    let list: CFArray = unsafe { CFArray::wrap_under_create_rule(raw) };
+    list.iter()
+        .filter_map(|item| {
+            let d: CFDictionary = unsafe { CFDictionary::wrap_under_get_rule((*item).cast()) };
+            let (app, title) = (text(&d, "kCGWindowOwnerName")?, text(&d, "kCGWindowName")?);
+            // Like xcap: not the menu bar's status indicator, nor windows that refuse to be captured.
+            if (title == "StatusIndicator" && app == "Window Server") || number(&d, "kCGWindowSharingState")? == 0.0 {
+                return None;
+            }
+            let bounds = get(&d, "kCGWindowBounds")?.downcast::<CFDictionary>()?;
+            let at = |k: &str| number(&bounds, k).unwrap_or(0.0);
+            let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).is_some_and(bool::from);
+            Some(Listed {
+                rect: Rect { x: at("X") as i32, y: at("Y") as i32, w: at("Width") as i32, h: at("Height") as i32 },
+                minimized: !shown,
+                pid: number(&d, "kCGWindowOwnerPID").map(|p| p as u32),
+                app,
+                title,
+            })
         })
         .collect()
 }
 
 /// The menu bar and the Dock are windows over everything on macOS, never what "the window" means.
-#[cfg(target_os = "macos")]
-fn shell(w: &xcap::Window) -> bool {
-    matches!(w.app_name().unwrap_or_default().as_str(), "Window Server" | "Dock")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn shell(_: &xcap::Window) -> bool {
-    false
+fn shell(app: &str) -> bool {
+    cfg!(target_os = "macos") && matches!(app, "Window Server" | "Dock")
 }
 
 /// What the pointer did lately: `recent` is the last few seconds of the trail in screen coordinates and `t_ms` the
@@ -313,10 +377,11 @@ pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
 }
 
 pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
-    let f = grab_frame(settings)?;
+    let mut f = grab_frame(settings)?;
     let now = f.now(t_ms);
     let n = settings.zoom_px();
-    let (cut_buf, ox, oy, cw, ch) = match cut(&f.map, focus(settings.zoom_target, now, recent, windows), f.cursor) {
+    let windows = std::mem::take(&mut f.windows);
+    let (cut_buf, ox, oy, cw, ch) = match cut(&f.map, focus(settings.zoom_target, now, recent, || windows), f.cursor) {
         Cut::Rect(r) => crop_rect(&f.buf, f.width, f.height, r),
         Cut::Around(x, y) => {
             let (cw, ch) = (n.min(f.width), n.min(f.height));
@@ -512,6 +577,26 @@ mod tests {
         // Off this screen: nothing.
         let px = paint(&screen((0, 0), 2.0, 100, 100), &[r(-300, 0, 200, 50)]);
         assert_eq!(px(0, 0), 255);
+    }
+
+    #[test]
+    fn one_read_of_the_window_list_gives_what_to_paint_over_and_what_to_zoom_to() {
+        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid };
+        let seen = [
+            w("Bitwarden", "Vault", r(0, 0, 400, 300), false, Some(7)),
+            w("1Password", "", r(10, 10, 50, 50), true, Some(8)),
+            w("Pointcast", "HUD", r(0, 900, 392, 64), false, Some(42)),
+            w("Notes", "Bitwarden Web Vault", r(500, 0, 300, 300), false, None),
+            w("Dock", "", r(0, 1000, 1920, 80), false, Some(9)),
+        ];
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42);
+        assert_eq!(rects, vec![r(0, 0, 400, 300), r(500, 0, 300, 300)], "a minimised password manager shows nothing");
+        // The Dock is never "the window" on macOS; elsewhere it is an ordinary name.
+        assert_eq!(wins.len(), if cfg!(target_os = "macos") { 4 } else { 5 });
+        let own: Vec<bool> = wins.iter().map(|w| w.own).collect();
+        assert_eq!(own[..4], [false, false, true, false]);
+        assert!(wins[1].minimized && !wins[0].minimized);
+        assert_eq!(wins[3].rect, r(500, 0, 300, 300));
     }
 
     #[test]
