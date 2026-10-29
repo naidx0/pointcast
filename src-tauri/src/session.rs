@@ -74,6 +74,12 @@ pub struct App {
     engine: Mutex<Option<Engine>>,
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
+    /// Held for the whole of a stop, so a second stop or a Quit waits for it instead of racing it.
+    finishing: Mutex<()>,
+    /// Set by Discard: the worker skips transcribing what is left.
+    cancel: AtomicBool,
+    /// Milliseconds from the session clock's start to the first audio, added to speech times.
+    audio_at: AtomicU64,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub history: crate::history::Store,
     /// Where the pointer went during this recording (positions only).
@@ -129,6 +135,9 @@ impl App {
             take: Mutex::default(),
             engine: Mutex::default(),
             loading: Mutex::default(),
+            finishing: Mutex::default(),
+            cancel: AtomicBool::new(false),
+            audio_at: AtomicU64::new(0),
             worker: Mutex::default(),
             freeze: Mutex::default(),
             freeze_t: Mutex::default(),
@@ -205,7 +214,6 @@ impl App {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().min(4) as i32)
             .unwrap_or(2);
-        *self.engine.lock().unwrap() = None;
         let eng = crate::voice::stt::load(&root, rt, model, threads)?;
         *self.engine.lock().unwrap() = Some(eng);
         self.state.lock().unwrap().model_ready = true;
@@ -232,13 +240,17 @@ impl App {
     }
 
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
-        if matches!(
-            self.state.lock().unwrap().phase,
-            Phase::Recording | Phase::Loading | Phase::Transcribing
-        ) {
-            return Ok(());
+        match self.state.lock().unwrap().phase {
+            Phase::Recording | Phase::Loading => return Ok(()),
+            Phase::Transcribing => return Err(BUSY.into()),
+            _ => {}
         }
         self.monitor_off();
+        // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
+        if self.history.recover().is_none() {
+            self.history.clear_checkpoint();
+        }
+        self.cancel.store(false, Ordering::SeqCst);
         self.stop.store(false, Ordering::SeqCst);
         self.items.lock().unwrap().clear();
         *self.t0.lock().unwrap() = Some(now_ms());
@@ -256,6 +268,8 @@ impl App {
         let take = Arc::new(Take::default());
         match Mic::open(settings.device.clone(), take.clone()) {
             Ok(mic) => {
+                let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+                self.audio_at.store(now_ms().saturating_sub(t0), Ordering::SeqCst);
                 *self.mic.lock().unwrap() = Some(mic);
                 *self.take.lock().unwrap() = Some(take.clone());
                 self.state.lock().unwrap().mic = true;
@@ -281,6 +295,11 @@ impl App {
     }
 
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
+        let _one = self.finishing.lock().unwrap();
+        if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
+            return Ok(None);
+        }
+        self.cancel.store(cancel, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         // The frames leave memory with this; only the ones picked below live on, as pictures.
         let frames = self.frames.lock().unwrap().take();
@@ -316,16 +335,21 @@ impl App {
             crate::anchor::ring_spoken(&mut items, &trail, &tokens, settings.mark_point != MarkPoint::Off);
         }
         let exp = prompt::assemble_export(&items);
-        self.history.clear_checkpoint();
         if self.practice.load(Ordering::SeqCst) {
+            self.history.clear_checkpoint();
             self.state.lock().unwrap().phase = Phase::Ready;
             return Ok(Some(exp));
         }
         *self.last_export.lock().unwrap() = Some(exp.clone());
-        if !items.is_empty() {
+        // The checkpoint goes only once History has the prompt: a failed save leaves it for
+        // the next launch to recover.
+        if items.is_empty() {
+            self.history.clear_checkpoint();
+        } else {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
             if let Ok(m) = self.history.save(&items, t0, now_ms().saturating_sub(t0)) {
                 *self.last_id.lock().unwrap() = Some(m.id);
+                self.history.clear_checkpoint();
             }
         }
         // History keeps every prompt; a folder in Documents only when the user chose Save.
@@ -347,6 +371,7 @@ impl App {
     /// Quitting mid-recording: finish transcribing into the checkpoint and leave it there; the
     /// next launch turns it into a history entry.
     pub fn flush_for_quit(&self) {
+        let _one = self.finishing.lock().unwrap();
         if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
             return;
         }
@@ -563,6 +588,10 @@ impl App {
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
+        if self.cancel.load(Ordering::SeqCst) {
+            self.state.lock().unwrap().partial.clear();
+            return;
+        }
         let all = take.all();
         let rest = {
             let mut s = seg;
@@ -586,8 +615,9 @@ impl App {
             if text.is_empty() {
                 continue;
             }
-            let t_ms = (r.start as u64) * 1000 / audio::RATE as u64;
-            let end_ms = (r.end as u64) * 1000 / audio::RATE as u64;
+            let at = self.audio_at.load(Ordering::SeqCst);
+            let t_ms = at + (r.start as u64) * 1000 / audio::RATE as u64;
+            let end_ms = at + (r.end as u64) * 1000 / audio::RATE as u64;
             let _ = t0;
             if let Some(tok) = heard.tokens {
                 self.tokens.lock().unwrap().push((t_ms, tok));
@@ -632,6 +662,8 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str
         _ => "copied",
     }
 }
+
+pub const BUSY: &str = "Pointcast is still finishing the last recording.";
 
 pub const NO_MODEL: &str = "No speech model yet. Open Settings › Speech to download one.";
 
@@ -726,14 +758,28 @@ mod tests {
             a.trail.lock().unwrap().push(Point { t_ms: 1_000 + i * 100, x: 40 + i as i32 * 10, y: 80 });
         }
         let on_ring = 100 + crate::image_ops::RING_R as u32;
+        a.state.lock().unwrap().phase = Phase::Recording;
         let exp = a.stop(false).unwrap().unwrap();
         assert_eq!(pixel(&exp.images[0], on_ring, 80), [245, 165, 36]);
         assert_eq!(pixel(&exp.images[0], 100, 80), [255; 3]);
         assert_eq!(exp.plain, "click this button [image 1]", "the words are untouched");
         // Turned off, the same recording comes out as it was taken.
         a.settings.lock().unwrap().spoken_anchors = SpokenAnchors::Off;
+        a.state.lock().unwrap().phase = Phase::Recording;
         let exp = a.stop(false).unwrap().unwrap();
         assert_eq!(pixel(&exp.images[0], on_ring, 80), [255; 3]);
+    }
+
+    #[test]
+    fn a_stop_with_nothing_recording_saves_nothing() {
+        let a = app("idle-stop");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "already saved".into() });
+        a.state.lock().unwrap().phase = Phase::Ready;
+        assert!(a.stop(false).unwrap().is_none(), "a second stop does nothing");
+        assert!(a.history.list().is_empty(), "and saves nothing twice");
+        a.state.lock().unwrap().phase = Phase::Transcribing;
+        assert_eq!(a.start().unwrap_err(), BUSY, "a start while finishing is refused");
     }
 
     static NEVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -760,6 +806,7 @@ mod tests {
         assert!(a.frames.lock().unwrap().is_none());
         assert_eq!(NEVER.load(Ordering::SeqCst), 0);
         a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
+        a.state.lock().unwrap().phase = Phase::Recording;
         assert!(a.stop(false).unwrap().unwrap().images.is_empty());
     }
 
@@ -778,6 +825,7 @@ mod tests {
         assert!(a.frames.lock().unwrap().as_ref().is_some_and(|b| !b.frames().is_empty()));
         // "this" at 400 ms: the first frame stands for it.
         a.push(Item::Speech { t_ms: 0, end_ms: 600, text: "look at this".into() });
+        a.state.lock().unwrap().phase = Phase::Recording;
         let exp = a.stop(false).unwrap().unwrap();
         assert!(a.frames.lock().unwrap().is_none(), "the buffer goes at stop");
         assert_eq!((exp.images.len(), exp.images[0].auto, exp.images[0].width), (1, true, 400));

@@ -44,6 +44,11 @@ export function Onboarding() {
     practice(step === "practice").catch(() => undefined);
   }, [step]);
 
+  // Reopened for an existing user (a macOS update dropped a permission): go straight to access.
+  useEffect(() => {
+    if (cfg?.onboarded) setStep((s) => (s === "welcome" ? "access" : s));
+  }, [cfg?.onboarded]);
+
   if (!cfg) return <div className="onb" />;
 
   const next: Record<Step, { label: string; enabled?: boolean; skip?: string }> = {

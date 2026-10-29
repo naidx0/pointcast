@@ -94,9 +94,17 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     Ok(())
 }
 
-fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
+/// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
+/// back to the app it was over, and forget its frame and any History edit.
+fn close_overlay(app: &AppHandle) {
+    EDIT.cancel();
     hide_window(app, "overlay");
     platform::restore_front();
+    FRAME.lock().unwrap().take();
+}
+
+fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
+    close_overlay(app);
     if svc.settings.lock().unwrap().sounds {
         platform::chime(false);
     }
@@ -435,11 +443,12 @@ async fn session_toggle(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Resu
     Ok(svc.ui())
 }
 
+/// Async: discarding waits for the speech worker, which must not hold the event loop.
 #[tauri::command]
-fn session_cancel(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+async fn session_cancel(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     let _ = svc.stop(true)?;
     hide_window(&app, "indicator");
-    hide_window(&app, "overlay");
+    close_overlay(&app);
     emit_state(&app, &svc);
     Ok(())
 }
@@ -491,9 +500,7 @@ fn region_commit(
         }
         None => (svc.commit_region(png, body.labels, body.element)?, None),
     };
-    hide_window(&app, "overlay");
-    platform::restore_front();
-    FRAME.lock().unwrap().take();
+    close_overlay(&app);
     let last = match edited {
         Some(id) => {
             let exp = svc.set_last(&id)?;
@@ -511,10 +518,7 @@ fn region_commit(
 
 #[tauri::command]
 fn region_cancel(app: AppHandle) {
-    EDIT.cancel();
-    hide_window(&app, "overlay");
-    platform::restore_front();
-    FRAME.lock().unwrap().take();
+    close_overlay(&app);
 }
 
 #[tauri::command]
@@ -991,22 +995,24 @@ pub fn run() {
             if !settings.onboarded {
                 show_window(&handle, "onboarding");
             }
+            #[cfg(target_os = "macos")]
+            if settings.onboarded && permissions::probe().screen != permissions::Access::Granted {
+                show_window(&handle, "onboarding");
+            }
             // Pulse live state to the HUD and the menu bar clock while a session runs. After
             // IDLE without one, the floating windows and the speech model are let go.
             let svc2 = svc.clone();
             std::thread::spawn(move || {
                 let mut busy_at = std::time::Instant::now();
-                let mut resting = false;
                 loop {
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
                         emit_state(&handle, &svc2);
                         busy_at = std::time::Instant::now();
-                        resting = false;
-                    } else if !resting && busy_at.elapsed() >= IDLE {
+                    } else if busy_at.elapsed() >= IDLE && !SPEECH_BUSY.load(Ordering::SeqCst) {
                         platform::reap(&handle);
                         svc2.unload_engine();
-                        resting = true;
+                        busy_at = std::time::Instant::now();
                     }
                     std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
                 }
@@ -1019,6 +1025,9 @@ pub fn run() {
                 let _ = api;
                 if platform::DESK.contains(&window.label()) {
                     platform::dock(window.app_handle(), Some(window.label()));
+                }
+                if window.label() == "overlay" {
+                    close_overlay(window.app_handle());
                 }
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {

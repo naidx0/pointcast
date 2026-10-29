@@ -204,6 +204,10 @@ pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("POINTCAST_DATA_DIR") {
         return d.into();
     }
+    // Tests never read, write or migrate the real app's data.
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("pointcast-test-data-{}", std::process::id()));
+    }
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join(IDENTIFIER);
     static MOVED: std::sync::Once = std::sync::Once::new();
@@ -304,6 +308,13 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains(r#""key_frames": true"#));
         assert_eq!(Settings::load(&path), on);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tests_never_use_the_real_data_folder() {
+        if std::env::var_os("POINTCAST_DATA_DIR").is_none() {
+            assert!(data_dir().starts_with(std::env::temp_dir()), "{}", data_dir().display());
+        }
     }
 
     #[test]
