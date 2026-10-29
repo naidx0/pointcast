@@ -429,6 +429,8 @@ fn settings_view(svc: &App) -> Value {
     });
     // Set apart: one more key in the literal above passes json!'s recursion limit.
     v["update_checked"] = update::checked();
+    v["keep_audio"] = json!(s.keep_audio);
+    v["picture_paths"] = json!(s.picture_paths);
     v
 }
 
@@ -641,7 +643,7 @@ fn history_list(svc: tauri::State<'_, Arc<App>>) -> Value {
 
 #[tauri::command]
 fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExport, String> {
-    svc.history.export(&id)
+    svc.history.export_with(&id, svc.settings.lock().unwrap().picture_paths)
 }
 
 /// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.

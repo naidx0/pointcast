@@ -214,6 +214,23 @@ impl Segmenter {
     }
 }
 
+/// Below this rms (-80 dBFS) a frame has essentially no signal; voice below `QUIET` rms (-40 dBFS) is very low.
+const SILENT: f32 = 0.0001;
+const QUIET: f32 = 0.01;
+
+/// What the HUD says about the microphone, from the last frames' rms (oldest first) against a room at `floor`:
+/// "silent" when the last 5 s had essentially no signal, "quiet" when there was voice (half a second or more) but very
+/// low, else nothing.
+pub fn mic_note(recent: &[f32], floor: f32) -> Option<&'static str> {
+    let five = RATE as usize * 5 / FRAME;
+    if recent.len() >= five && recent[recent.len() - five..].iter().all(|r| *r < SILENT) {
+        return Some("silent");
+    }
+    let on = (floor * ON).max(MIN_VOICE);
+    let voice: Vec<f32> = recent.iter().copied().filter(|r| *r > on).collect();
+    (voice.len() >= RATE as usize / 2 / FRAME && rms(&voice) < QUIET).then_some("quiet")
+}
+
 /// How long `x` is voice, frame by frame, against a room at `floor`.
 pub fn voiced_ms(x: &[f32], floor: f32) -> u64 {
     let on = (floor * ON).max(MIN_VOICE);
@@ -697,6 +714,29 @@ mod tests {
         assert_eq!(louder(&[0.0; 4], true), vec![0.0; 4]);
         assert_eq!(voiced_ms(&sine(16_000, 220.0, 1.5, 0.2), 0.0), 1_500);
         assert_eq!(voiced_ms(&vec![0.001; 16_000], 0.0), 0);
+    }
+
+    #[test]
+    fn the_hud_hears_a_silent_or_very_quiet_microphone_and_nothing_else() {
+        let frames = |x: &[f32]| {
+            let mut s = Segmenter::new(700, 25_000);
+            s.feed_new(x);
+            (s.recent(), s.floor())
+        };
+        let note = |x: &[f32]| {
+            let (r, f) = frames(x);
+            mic_note(&r, f)
+        };
+        assert_eq!(note(&vec![0.0; 16_000 * 6]), Some("silent"));
+        assert_eq!(note(&vec![0.0; 16_000 * 4]), None, "not five seconds yet");
+        // Words at about -44 dBFS: quiet. At -20 dBFS, or in a quiet room with no words: nothing to say.
+        assert_eq!(note(&spoken(4, 0.6, 0.6, 0.009, 0.0003).0), Some("quiet"));
+        assert_eq!(note(&spoken(4, 0.6, 0.6, 0.14, 0.0003).0), None);
+        assert_eq!(note(&spoken(0, 0.0, 0.0, 0.0, 0.0003).0), None);
+        // Words, then five seconds of nothing: the microphone went silent.
+        let mut x = spoken(4, 0.6, 0.6, 0.14, 0.0003).0;
+        x.extend(vec![0.0; 16_000 * 5 + FRAME]);
+        assert_eq!(note(&x), Some("silent"));
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Copy a Pointcast session as rich HTML with a plain-text fallback, then optionally paste.
-use crate::prompt::{assemble_clipboard, Item};
+use crate::prompt::{assemble_clipboard_files, Item};
 use crate::settings::OutputMode;
 
-pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
-    let payload = assemble_clipboard(items);
+/// `files` are the pictures' files in History, named in the plain text; none leaves the markers as they were.
+pub fn copy_session(items: &[Item], files: &[String]) -> Result<(String, String), String> {
+    let payload = assemble_clipboard_files(items, files);
     if payload.plain.is_empty() && payload.html.is_empty() {
         return Err("nothing to copy".into());
     }
@@ -237,20 +238,20 @@ fn send_paste() -> Result<(), String> {
     Ok(())
 }
 
-pub fn deliver(items: &[Item], mode: OutputMode, also_clipboard: bool) -> Result<String, String> {
+pub fn deliver(items: &[Item], files: &[String], mode: OutputMode, also_clipboard: bool) -> Result<String, String> {
     match mode {
         OutputMode::Clipboard => {
-            copy_session(items)?;
+            copy_session(items, files)?;
             Ok("Copied to clipboard".into())
         }
         OutputMode::AutoPaste => {
-            copy_session(items)?;
+            copy_session(items, files)?;
             paste_now()?;
             Ok("Pasted into the focused app".into())
         }
         OutputMode::Folder => {
             if also_clipboard {
-                let _ = copy_session(items);
+                let _ = copy_session(items, files);
             }
             Ok("Exported".into())
         }
@@ -282,7 +283,7 @@ mod tests {
             end_ms: 10,
             text: "hi".into(),
         }];
-        let p = assemble_clipboard(&items);
+        let p = crate::prompt::assemble_clipboard(&items);
         assert_eq!(p.plain, "hi");
         let _ = (OutputMode::Clipboard, png(), Label {
             n: 1,

@@ -136,6 +136,12 @@ pub struct Settings {
     pub sounds: bool,
     #[serde(default)]
     pub granted: Granted,
+    /// Keep each recording's audio in History (the newest ten), so it can be transcribed again.
+    #[serde(default = "yes")]
+    pub keep_audio: bool,
+    /// The plain-text prompt names each picture's file, for agents in a terminal that cannot take pasted images.
+    #[serde(default = "yes")]
+    pub picture_paths: bool,
 }
 
 fn default_model() -> String {
@@ -180,6 +186,8 @@ impl Default for Settings {
             onboarded: false,
             sounds: true,
             granted: Granted::default(),
+            keep_audio: true,
+            picture_paths: true,
         }
     }
 }
@@ -386,6 +394,17 @@ mod tests {
         let s = Settings { granted: g, ..Settings::default() };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.granted, g);
+    }
+
+    #[test]
+    fn audio_is_kept_and_pictures_are_named_by_their_files_unless_turned_off() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert!(old.keep_audio && old.picture_paths, "a file from before these gets them on");
+        assert!(Settings::default().keep_audio && Settings::default().picture_paths);
+        let off: Settings = serde_json::from_str(r#"{"keep_audio":false,"picture_paths":false}"#).unwrap();
+        assert!(!off.keep_audio && !off.picture_paths);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert_eq!(back, off);
     }
 
     #[test]

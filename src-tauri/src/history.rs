@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 /// Entries kept; older ones are removed as new ones arrive.
 pub const KEEP: usize = 100;
 
+/// The newest entries keep their recording's audio; older ones lose it as new ones arrive.
+pub const KEEP_AUDIO: usize = 10;
+
+/// An entry's recording, 16-bit mono at 16 kHz, and the recording in progress as raw samples in the recovery area.
+const AUDIO: &str = "audio.wav";
+const AUDIO_PCM: &str = "audio.pcm";
+
+pub const NO_AUDIO: &str = "This recording has no audio kept to transcribe again.";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub id: String,
@@ -22,6 +31,9 @@ pub struct Meta {
     /// Rebuilt from a checkpoint after Pointcast closed mid-recording.
     #[serde(default)]
     pub recovered: bool,
+    /// The entry keeps its recording as `audio.wav`, so it can be transcribed again.
+    #[serde(default)]
+    pub has_audio: bool,
 }
 
 pub struct Store {
@@ -43,15 +55,60 @@ impl Store {
 
     /// Keep a finished session. Returns its entry.
     pub fn save(&self, items: &[Item], created_ms: u64, duration_ms: u64) -> Result<Meta, String> {
-        let meta = meta_for(items, created_ms, duration_ms, false);
+        self.save_with(items, created_ms, duration_ms, None)
+    }
+
+    /// Keep a finished recording with the audio the recovery area kept for it, if any.
+    pub fn save_recorded(&self, items: &[Item], created_ms: u64, duration_ms: u64) -> Result<Meta, String> {
+        self.save_with(items, created_ms, duration_ms, self.recorded())
+    }
+
+    fn save_with(&self, items: &[Item], created_ms: u64, duration_ms: u64, audio: Option<Vec<u8>>) -> Result<Meta, String> {
+        let mut meta = meta_for(items, created_ms, duration_ms, false);
         let dir = self.history().join(&meta.id);
         let tmp = self.history().join(format!("{}.tmp", meta.id));
         let _ = std::fs::remove_dir_all(&tmp);
+        // Audio that cannot be written leaves the entry without it, never without its words.
+        meta.has_audio = audio.is_some_and(|a| std::fs::create_dir_all(&tmp).and_then(|_| std::fs::write(tmp.join(AUDIO), a)).is_ok());
         write_entry(&tmp, items, &meta)?;
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&tmp, &dir).map_err(|e| e.to_string())?;
         self.prune(KEEP);
+        self.prune_audio(KEEP_AUDIO);
         Ok(meta)
+    }
+
+    /// Only the newest `keep` entries keep their audio.
+    fn prune_audio(&self, keep: usize) {
+        for mut m in self.list().into_iter().skip(keep).filter(|m| m.has_audio) {
+            let dir = self.history().join(&m.id);
+            let _ = std::fs::remove_file(dir.join(AUDIO));
+            m.has_audio = false;
+            let _ = write_atomic(&dir.join("meta.json"), &serde_json::to_vec(&m).unwrap_or_default());
+        }
+    }
+
+    /// An entry's recording, 16 kHz mono.
+    pub fn audio(&self, id: &str) -> Result<Vec<f32>, String> {
+        let b = std::fs::read(self.entry_dir(id)?.join(AUDIO)).map_err(|_| NO_AUDIO.to_string())?;
+        match crate::voice::audio::read_wav(&b)? {
+            (crate::voice::audio::RATE, 1, pcm) => Ok(pcm),
+            _ => Err(NO_AUDIO.into()),
+        }
+    }
+
+    /// Add the next part of the recording in progress to the recovery area.
+    pub fn append_audio(&self, samples: &[f32]) -> Result<(), String> {
+        use std::io::Write;
+        let dir = self.recovery();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(AUDIO_PCM)).map_err(|e| e.to_string())?;
+        f.write_all(&pcm16(samples)).map_err(|e| e.to_string())
+    }
+
+    /// The recording in progress as a WAV file, when its audio was kept.
+    fn recorded(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.recovery().join(AUDIO_PCM)).ok().filter(|b| b.len() >= 2).map(|b| wav(&b))
     }
 
     /// Newest first.
@@ -73,7 +130,21 @@ impl Store {
     }
 
     pub fn export(&self, id: &str) -> Result<SessionExport, String> {
-        Ok(prompt::assemble_export(&self.items(id)?))
+        self.export_with(id, false)
+    }
+
+    /// The export of an entry; with `paths`, its plain text names each picture's file.
+    pub fn export_with(&self, id: &str, paths: bool) -> Result<SessionExport, String> {
+        let items = self.items(id)?;
+        let files = if paths { self.files(id) } else { vec![] };
+        Ok(prompt::assemble_export_files(&items, &files))
+    }
+
+    /// Where an entry's pictures are, in the order its session holds them, with forward slashes.
+    pub fn files(&self, id: &str) -> Vec<String> {
+        let Ok(dir) = self.entry_dir(id) else { return vec![] };
+        let n = stored(&dir).map_or(0, |v| v.iter().filter(|i| matches!(i, Item::Image { .. })).count());
+        (0..n).map(|k| dir.join(format!("image-{k}.png")).to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")).collect()
     }
 
     /// Picture `n` of an entry (1-based, as `[image n]` numbers it), with its bytes.
@@ -185,11 +256,13 @@ impl Store {
     /// At launch: turn a checkpoint left by a crash into a history entry marked recovered.
     pub fn recover(&self) -> Option<Meta> {
         let dir = self.recovery();
-        let items = read_items(&dir).ok().filter(|v| !v.is_empty());
-        let Some(items) = items else {
+        let items = read_items(&dir).unwrap_or_default();
+        // Audio alone is kept too: what was said can be transcribed again.
+        let audio = self.recorded();
+        if items.is_empty() && audio.is_none() {
             self.clear_checkpoint();
             return None;
-        };
+        }
         let created = std::fs::read(dir.join("meta.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<Meta>(&b).ok())
@@ -199,7 +272,8 @@ impl Store {
             Item::Speech { end_ms, .. } => *end_ms,
             Item::Image { t_ms, .. } => *t_ms,
         });
-        let mut meta = self.save(&items, created, duration.max().unwrap_or(0)).ok()?;
+        let heard = audio.as_ref().map_or(0, |a| (a.len() as u64).saturating_sub(44) / 32);
+        let mut meta = self.save_with(&items, created, duration.max().unwrap_or(0).max(heard), audio).ok()?;
         meta.recovered = true;
         let _ = std::fs::write(
             self.history().join(&meta.id).join("meta.json"),
@@ -231,7 +305,31 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         preview: words,
         images: items.iter().filter(|i| matches!(i, Item::Image { .. })).count() as u32,
         recovered,
+        has_audio: false,
     }
+}
+
+/// Samples as 16-bit little-endian PCM.
+pub fn pcm16(x: &[f32]) -> Vec<u8> {
+    x.iter().flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes()).collect()
+}
+
+/// 16-bit mono PCM at 16 kHz as a WAV file.
+pub fn wav(pcm: &[u8]) -> Vec<u8> {
+    let n = pcm.len() as u32 & !1;
+    let rate = crate::voice::audio::RATE;
+    let mut b = Vec::with_capacity(44 + n as usize);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + n).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    // Chunk size, PCM and one channel, the rate, bytes a second, then 2-byte frames of 16 bits.
+    for v in [16u32, 1 | 1 << 16, rate, rate * 2, 2 | 16 << 16] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&n.to_le_bytes());
+    b.extend_from_slice(&pcm[..n as usize]);
+    b
 }
 
 /// The session without picture bytes; pictures live beside it as files.
@@ -457,6 +555,74 @@ mod tests {
         assert_eq!(s.items(&m.id).unwrap(), items());
         assert!(s.list()[0].recovered);
         assert!(s.recover().is_none(), "recovered once, then gone");
+    }
+
+    fn tone(n: usize) -> Vec<f32> {
+        (0..n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect()
+    }
+
+    #[test]
+    fn a_recording_keeps_its_audio_as_a_wav_that_reads_back() {
+        let s = store("audio");
+        let x = tone(24_000);
+        s.append_audio(&x[..16_000]).unwrap();
+        s.append_audio(&x[16_000..]).unwrap();
+        let m = s.save_recorded(&items(), 1_793_000_000_000, 2000).unwrap();
+        s.clear_checkpoint();
+        assert!(m.has_audio && s.list()[0].has_audio);
+        let back = s.audio(&m.id).unwrap();
+        assert_eq!(back.len(), x.len());
+        assert!(back.iter().zip(&x).all(|(a, b)| (a - b).abs() < 1e-4));
+        // Deleting the entry takes its audio with it.
+        let dir = s.history().join(&m.id);
+        s.delete(&m.id).unwrap();
+        assert!(!dir.exists());
+        // Nothing kept (Keep audio off, or a practice run): no audio file at all.
+        let m = s.save_recorded(&items(), 1_793_000_100_000, 2000).unwrap();
+        assert!(!m.has_audio && !s.history().join(&m.id).join(AUDIO).exists());
+        assert_eq!(s.audio(&m.id).unwrap_err(), NO_AUDIO);
+    }
+
+    #[test]
+    fn only_the_newest_ten_entries_keep_their_audio() {
+        let s = store("audio-ten");
+        for i in 0..(KEEP_AUDIO as u64 + 3) {
+            s.append_audio(&tone(1_600)).unwrap();
+            s.save_recorded(&items()[..1], 1_793_000_000_000 + i * 1000, 10).unwrap();
+            s.clear_checkpoint();
+        }
+        let l = s.list();
+        assert_eq!(l.iter().map(|m| m.has_audio).collect::<Vec<_>>(), (0..l.len()).map(|i| i < KEEP_AUDIO).collect::<Vec<_>>());
+        let files = l.iter().filter(|m| s.history().join(&m.id).join(AUDIO).exists()).count();
+        assert_eq!(files, KEEP_AUDIO, "the older ones' files are gone too");
+        assert_eq!(s.items(&l[KEEP_AUDIO].id).unwrap(), items()[..1].to_vec(), "their words stay");
+    }
+
+    #[test]
+    fn a_crash_keeps_the_audio_even_before_any_words_came_back() {
+        let s = store("audio-crash");
+        s.checkpoint(&items(), 1_793_000_123_000).unwrap();
+        s.append_audio(&tone(32_000)).unwrap();
+        let m = s.recover().expect("recovered");
+        assert!(m.recovered && m.has_audio);
+        assert_eq!(s.audio(&m.id).unwrap().len(), 32_000);
+        // Only audio: the model never answered before the crash. It is kept, two seconds long, to transcribe again.
+        s.append_audio(&tone(32_000)).unwrap();
+        let m = s.recover().expect("recovered");
+        assert!(m.has_audio && m.duration_ms == 2_000 && s.items(&m.id).unwrap().is_empty());
+        assert!(s.recover().is_none());
+    }
+
+    #[test]
+    fn audio_that_cannot_be_kept_never_costs_the_prompt() {
+        let s = store("audio-fail");
+        // The recovery area's audio file cannot be written or read (a folder is in its place).
+        std::fs::create_dir_all(s.recovery().join(AUDIO_PCM)).unwrap();
+        assert!(s.append_audio(&tone(1_600)).is_err());
+        s.checkpoint(&items(), 1_793_000_000_000).unwrap();
+        let m = s.save_recorded(&items(), 1_793_000_000_000, 2000).unwrap();
+        assert!(!m.has_audio);
+        assert_eq!(s.items(&m.id).unwrap(), items());
     }
 
     #[test]
