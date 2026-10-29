@@ -100,7 +100,7 @@ Artifacts land under `src-tauri/target/release/bundle/`:
 | --- | --- |
 | Linux | `.deb`, AppImage (needs `libfuse2` to run the AppImage) |
 | macOS | `.app`, `.dmg` (CI universal) |
-| Windows | `.msi` / `.exe` (CI) |
+| Windows | `.exe` setup (NSIS) |
 
 Copy a Linux release into a folder of your own when packaging demos.
 
