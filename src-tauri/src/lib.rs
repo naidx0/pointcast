@@ -89,7 +89,20 @@ fn recording(svc: &App) -> bool {
     matches!(svc.ui().phase, Phase::Recording | Phase::Loading)
 }
 
+/// No recording runs or is finishing.
+fn idle(svc: &App) -> bool {
+    matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error)
+}
+
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
+    // The installer closes Pointcast: a recording started now would stop mid-sentence.
+    if update::installing() {
+        svc.refuse(session::UPDATING);
+        platform::show_indicator(app);
+        emit_state(app, svc);
+        hide_hud_soon(app, svc);
+        return Err(session::UPDATING.into());
+    }
     platform::forget_front();
     svc.start()?;
     if svc.settings.lock().unwrap().sounds {
@@ -98,6 +111,17 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     platform::show_indicator(app);
     emit_state(app, svc);
     Ok(())
+}
+
+/// The HUD's last word stays a moment, then it goes unless a new recording took it.
+fn hide_hud_soon(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        if svc.ui().phase == Phase::Ready {
+            hide_window(&app, "indicator");
+        }
+    });
 }
 
 /// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
@@ -123,13 +147,7 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
         hide_window(app, "indicator");
     } else {
         emit_state_now(app, svc);
-        let (app, svc) = (app.clone(), svc.clone());
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1600));
-            if svc.ui().phase == Phase::Ready {
-                hide_window(&app, "indicator");
-            }
-        });
+        hide_hud_soon(app, svc);
     }
     if practice {
         svc.practice.store(false, Ordering::SeqCst);
@@ -1026,12 +1044,16 @@ async fn update_check(app: AppHandle) -> Result<Option<String>, String> {
 /// Run the installer: it closes Pointcast, installs the new version and opens it again.
 #[tauri::command]
 fn update_install(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
-    if !matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error) {
+    if !idle(&svc) {
         return Err("Finish the recording first, then update.".into());
     }
-    update::install(move |why| {
-        let _ = app.emit("update://failed", why);
-    })
+    let svc = svc.inner().clone();
+    update::install(
+        move || idle(&svc),
+        move |why| {
+            let _ = app.emit("update://failed", why);
+        },
+    )
 }
 
 #[tauri::command]

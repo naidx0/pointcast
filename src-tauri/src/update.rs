@@ -156,10 +156,10 @@ const SCRIPT: Option<Script> =
 const SCRIPT: Option<Script> = None;
 
 /// Download the update, check it and run the built-in installer, all in the background; the
-/// installer's output goes to `update.log` in the data folder. A good update closes Pointcast
-/// before the installer ends, so `failed` runs only when the update stopped and this copy is
-/// still running.
-pub fn install(failed: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
+/// installer's output goes to `update.log` in the data folder. The installer starts only once
+/// `idle` says no recording runs. A good update closes Pointcast before the installer ends, so
+/// `failed` runs only when the update stopped and this copy is still running.
+pub fn install(idle: impl Fn() -> bool + Send + 'static, failed: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
     let Some(script) = SCRIPT else {
         return Err("On Linux, update Pointcast from the releases page.".into());
     };
@@ -170,6 +170,7 @@ pub fn install(failed: impl FnOnce(String) + Send + 'static) -> Result<(), Strin
         tmp: std::env::temp_dir().join("pointcast-update"),
         data: crate::settings::data_dir(),
         run,
+        idle: Box::new(idle),
     };
     start(job, &RUNNING, failed)
 }
@@ -184,6 +185,8 @@ struct Job {
     data: PathBuf,
     /// Start the script on the verified download with its output in the log; return when it ends.
     run: fn(script: &Path, package: &Path, log: &Path) -> Result<(), String>,
+    /// No recording runs: the installer closes Pointcast, so one that began during the download finishes first.
+    idle: Box<dyn Fn() -> bool + Send>,
 }
 
 /// Refuse a second update while one runs; otherwise do `job` on a thread of its own.
@@ -216,6 +219,9 @@ impl Job {
         verify(&package, &self.offer.sha256)?;
         let script = self.tmp.join(self.script.file);
         std::fs::write(&script, self.script.text).map_err(io)?;
+        while !(self.idle)() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
         std::fs::create_dir_all(&self.data).map_err(io)?;
         let record = serde_json::json!({ "from": env!("CARGO_PKG_VERSION"), "to": self.offer.version });
         std::fs::write(self.data.join(RECORD), record.to_string()).map_err(io)?;
@@ -514,6 +520,7 @@ mod tests {
             tmp: dir.join("tmp"),
             data: dir.join("data"),
             run,
+            idle: Box::new(|| true),
         }
     }
 
@@ -560,6 +567,31 @@ mod tests {
         assert!(why.contains("404"), "{why}");
         let why = reported(job("plain", "http://example.com/setup.exe".into(), "0".repeat(64), fake_run), &BUSY);
         assert!(why.contains("not secure"), "{why}");
+    }
+
+    #[test]
+    fn the_installer_waits_for_a_recording_that_began_during_the_download() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        static RECORDING: AtomicBool = AtomicBool::new(true);
+        static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let sha = format!("{:x}", Sha256::digest(PACKAGE.as_bytes()));
+        let mut j = job("wait", serve(200, PACKAGE.into()), sha, fake_run);
+        j.idle = Box::new(|| {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+            !RECORDING.load(Ordering::SeqCst)
+        });
+        let data = j.data.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        start(j, &BUSY, move |why| tx.send(why).unwrap()).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while ASKED.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ASKED.load(Ordering::SeqCst) >= 2, "downloaded and verified, it asks whether a recording runs");
+        assert!(!data.join(LOG).exists() && !data.join(RECORD).exists(), "the installer has not run");
+        assert!(rx.try_recv().is_err());
+        RECORDING.store(false, Ordering::SeqCst);
+        assert!(rx.recv_timeout(Duration::from_secs(30)).unwrap().starts_with("ran install.ps1"));
     }
 
     #[test]

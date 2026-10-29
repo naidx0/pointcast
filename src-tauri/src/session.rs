@@ -476,6 +476,17 @@ impl App {
         r
     }
 
+    /// A recording that may not start says why on the HUD, as a stop that kept nothing does. One already running is
+    /// left alone.
+    pub fn refuse(&self, why: &str) {
+        let mut st = self.state.lock().unwrap();
+        if !matches!(st.phase, Phase::Recording | Phase::Loading | Phase::Transcribing) {
+            st.phase = Phase::Ready;
+            st.notice = Some("empty");
+            st.error = Some(why.to_string());
+        }
+    }
+
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
         let t = self.t_ms();
@@ -738,6 +749,8 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str
 }
 
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
+
+pub const UPDATING: &str = "Pointcast is updating; it reopens in a moment.";
 
 pub const NO_MODEL: &str = "No speech model yet. Open Settings › Speech to download one.";
 
@@ -1046,6 +1059,19 @@ mod tests {
         assert!(a.capture_shot(off).is_err());
         assert_eq!(a.ui().error.as_deref(), Some("Screen Recording is off for Pointcast."));
         assert_eq!(a.ui().image_count, 0);
+    }
+
+    #[test]
+    fn a_recording_refused_while_updating_says_why_on_the_hud_and_a_running_one_is_left_alone() {
+        let a = app("refuse");
+        a.state.lock().unwrap().notice = Some("pasted");
+        a.refuse(UPDATING);
+        let st = a.ui();
+        assert_eq!((st.phase, st.notice, st.error.as_deref()), (Phase::Ready, Some("empty"), Some(UPDATING)));
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.state.lock().unwrap().error = None;
+        a.refuse(UPDATING);
+        assert_eq!((a.ui().phase, a.ui().error), (Phase::Recording, None));
     }
 
     #[test]
