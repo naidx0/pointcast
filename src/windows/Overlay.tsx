@@ -50,11 +50,15 @@ type Ix =
   | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" }
   | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt };
 
-type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null };
+// `edit`: a picture from History, its labels already drawn in; new pins are numbered on from `base`.
+type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null; edit?: boolean; base?: number };
 
 type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null };
 
 const PREVIEW = typeof location !== "undefined" && location.search.includes("preview=1");
+const PREVIEW_EDIT = PREVIEW && location.search.includes("edit=1");
+// Room a picture from History leaves around it (logical px) for the toolbar below and the hint under that.
+const EDGE = { side: 40, top: 40, bottom: 128 };
 const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
 const HL = "#FFCC00";
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
@@ -92,7 +96,8 @@ const GESTURE: Record<Tool, string> = {
   magnify: "Click to drop a 2x loupe",
 };
 
-function hint(layer: Layer, tool: Tool, picked?: Shape["kind"]): string {
+function hint(layer: Layer, tool: Tool, picked?: Shape["kind"], edit = false): string {
+  if (edit && layer === "annotating") return "Edit picture · Return saves · Esc cancels";
   if (layer === "selecting") return "Drag to select · Click for full screen · Esc cancel";
   if (picked === "ring" && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
   if (picked === "element" && layer === "annotating") return "Delete removes the outline · Enter capture";
@@ -171,9 +176,9 @@ const ringed = (r: Rect, s: number): Rect => {
 };
 const svgRect = (r: Rect) => ({ x: r.x, y: r.y, width: r.w, height: r.h });
 
-function numbering(list: Shape[]): Map<number, number> {
+function numbering(list: Shape[], base = 0): Map<number, number> {
   const m = new Map<number, number>();
-  let n = 0;
+  let n = base;
   for (const sh of list) if (sh.kind === "pin") m.set(sh.id, ++n);
   return m;
 }
@@ -479,6 +484,8 @@ export function Overlay() {
   const [out, setOut] = useState<Out | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [nudge, setNudge] = useState<{ id: number; at: Pt } | null>(null);
+  const [edit, setEdit] = useState(false);
+  const [base, setBase] = useState(0);
   const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
   const ix = useRef<Ix | null>(null);
   const ids = useRef(0);
@@ -496,8 +503,11 @@ export function Overlay() {
     const load = (f: Frame) => {
       setSrc(`data:image/png;base64,${f.png_b64}`);
       setNatural({ w: f.width, h: f.height });
-      setLayer("selecting");
-      setBox(null);
+      // A picture from History is the whole box from the start: there is nothing around it to select.
+      setEdit(!!f.edit);
+      setBase(f.edit ? (f.base ?? 0) : 0);
+      setLayer(f.edit ? "annotating" : "selecting");
+      setBox(f.edit ? { x: 0, y: 0, w: f.width, h: f.height } : null);
       setLive(null);
       setEditing(null);
       setOut(null);
@@ -505,7 +515,7 @@ export function Overlay() {
       setNudge(null);
       editRef.current = null;
       ix.current = null;
-      seed.current = placed(f.element, f.pointer, colorRef.current);
+      seed.current = f.edit ? [] : placed(f.element, f.pointer, colorRef.current);
       restart();
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
@@ -522,6 +532,14 @@ export function Overlay() {
         setSrc("/freeze.png");
         setNatural({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
         setLayer("annotating");
+        if (PREVIEW_EDIT) {
+          setEdit(true);
+          setBase(1);
+          setBox({ x: 0, y: 0, w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
+          seed.current = [];
+          restart();
+          return;
+        }
         setBox({ x: 975, y: 240, w: 380, h: 310 });
         seed.current = placed({ role: "button", name: "Place order", rect: { x: 987, y: 435, w: 116, h: 41 } }, { x: 1060, y: 456 }, COLORS[0]);
         restart([{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 1128, y: 456 }, text: "28px too far left" }]);
@@ -552,12 +570,15 @@ export function Overlay() {
   }
 
   // Frame px <-> logical px. s = natural.w / displayed image width: every size drawn into the frame is multiplied by it.
-  const fit = natural.w && vp.w && vp.h ? Math.min(vp.w / natural.w, vp.h / natural.h) : 1;
+  // A picture from History sits clear of the toolbar and hint, and never larger than its own pixels.
+  const room = edit ? { w: vp.w - 2 * EDGE.side, h: vp.h - EDGE.top - EDGE.bottom } : vp;
+  const most = edit ? 1 / (window.devicePixelRatio || 1) : Infinity;
+  const fit = natural.w && room.w > 0 && room.h > 0 ? Math.min(room.w / natural.w, room.h / natural.h, most) : 1;
   const s = 1 / fit;
   const dw = natural.w * fit;
   const dh = natural.h * fit;
   const ox = (vp.w - dw) / 2;
-  const oy = (vp.h - dh) / 2;
+  const oy = edit ? EDGE.top + (room.h - dh) / 2 : (vp.h - dh) / 2;
   const toImg = (e: { clientX: number; clientY: number }): Pt => ({ x: (e.clientX - ox) / fit, y: (e.clientY - oy) / fit });
   const clampP = (p: Pt): Pt => ({ x: clamp(p.x, 0, natural.w), y: clamp(p.y, 0, natural.h) });
   const toScr = (r: Rect): Rect => ({ x: ox + r.x * fit, y: oy + r.y * fit, w: r.w * fit, h: r.h * fit });
@@ -565,7 +586,7 @@ export function Overlay() {
 
   const shapes = nudge ? hs.now.map((x) => (x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : x)) : hs.now;
   const vis = box ? shapes.filter((x) => seen(x, box)) : shapes;
-  const nums = numbering(vis);
+  const nums = numbering(vis, base);
   const sb = box ? toScr(box) : null;
   const grab = (e: PE) => {
     try {
@@ -591,7 +612,7 @@ export function Overlay() {
   }
 
   function back() {
-    const next = esc(layer);
+    const next = edit && layer === "annotating" ? "idle" : esc(layer);
     if (next === "idle") {
       void regionCancel().catch(() => {});
       return;
@@ -619,13 +640,13 @@ export function Overlay() {
     try {
       const b = layer === "selecting" || !box ? full : box;
       const list = shapes.filter((x) => seen(x, b) && !(x.kind === "text" && !x.text.trim()));
-      const nn = numbering(list);
+      const nn = numbering(list, base);
       const png = await rasterize(src, b, list, s, nn);
       const pins = list.filter((x) => x.kind === "pin");
       const notes = list.filter((x) => x.kind === "text");
       const labels: Label[] = [
-        ...pins.map((p, i) => ({ n: i + 1, text: ("text" in p && p.text.trim()) || `pin ${i + 1}` })),
-        ...notes.map((t, i) => ({ n: pins.length + i + 1, text: "text" in t ? t.text.trim() : "" })),
+        ...pins.map((p, i) => ({ n: base + i + 1, text: ("text" in p && p.text.trim()) || `pin ${base + i + 1}` })),
+        ...notes.map((t, i) => ({ n: base + pins.length + i + 1, text: "text" in t ? t.text.trim() : "" })),
       ];
       const el = list.find((x) => x.kind === "element");
       const rect = el?.kind === "element" ? within(el.r, b) : null;
@@ -824,7 +845,7 @@ export function Overlay() {
   return (
     <div
       ref={rootRef}
-      className="ov-root"
+      className={edit ? "ov-root ov-edit" : "ov-root"}
       style={{ cursor }}
       onPointerDown={down}
       onPointerMove={move}
@@ -987,13 +1008,13 @@ export function Overlay() {
             <Redo2 size={18} strokeWidth={1.75} />
           </button>
           <span className="ov-sep" />
-          <button type="button" className="ov-go" title="Capture (Enter)" onClick={() => void commit()}>
+          <button type="button" className="ov-go" title={edit ? "Save (Return)" : "Capture (Enter)"} onClick={() => void commit()}>
             <Check size={16} strokeWidth={2.25} />
-            Capture
+            {edit ? "Save" : "Capture"}
           </button>
         </div>
       ) : null}
-      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind)}</div> : null}
+      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />

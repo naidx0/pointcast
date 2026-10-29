@@ -1390,3 +1390,52 @@ html.win select.field {
 .onb-step .card.model .sub {
   font-size: var(--fs-small);
 }
+/* —— History: a picture reopens in the annotate overlay —— */
+.prompt-doc .pd-pic {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.prompt-doc .pd-pic img {
+  display: block;
+  transition: filter 0.15s ease;
+}
+.prompt-doc .pd-pic:hover img {
+  filter: brightness(0.94);
+}
+.prompt-doc .pd-edit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px 0 8px;
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.74);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  color: #fff;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.prompt-doc .pd-pic:hover .pd-edit,
+.prompt-doc .pd-pic:focus-visible .pd-edit {
+  opacity: 1;
+  transform: none;
+}

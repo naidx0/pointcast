@@ -76,6 +76,35 @@ impl Store {
         Ok(prompt::assemble_export(&self.items(id)?))
     }
 
+    /// Picture `n` of an entry (1-based, as `[image n]` numbers it), with its bytes.
+    pub fn picture(&self, id: &str, n: usize) -> Result<prompt::Capture, String> {
+        let dir = self.entry_dir(id)?;
+        let items = stored(&dir)?;
+        let (i, k) = locate(&dir, &items, n)?;
+        let Item::Image { capture, .. } = &items[i] else { unreachable!() };
+        let png = std::fs::read(dir.join(format!("image-{k}.png"))).map_err(|e| e.to_string())?;
+        Ok(prompt::Capture { png, ..capture.clone() })
+    }
+
+    /// Put a marked-up picture in place of picture `n`: its pixels and size, and its labels after the ones it had,
+    /// numbered on from them. The picture and the session are written together or not at all.
+    pub fn replace(&self, id: &str, n: usize, png: &[u8], labels: Vec<prompt::Label>) -> Result<prompt::Capture, String> {
+        let (width, height) = crate::image_ops::png_size(png).ok_or("that is not a PNG")?;
+        let dir = self.entry_dir(id)?;
+        let mut items = stored(&dir)?;
+        let (i, k) = locate(&dir, &items, n)?;
+        let Item::Image { capture: c, .. } = &mut items[i] else { unreachable!() };
+        let base = c.labels.iter().map(|l| l.n).max().unwrap_or(0);
+        c.labels.extend(labels.into_iter().zip(base + 1..).map(|(l, n)| prompt::Label { n, ..l }));
+        (c.width, c.height) = (width, height);
+        let out = prompt::Capture { png: png.to_vec(), ..c.clone() };
+        write_together(&[
+            (dir.join(format!("image-{k}.png")), png.to_vec()),
+            (dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?),
+        ])?;
+        Ok(out)
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         std::fs::remove_dir_all(self.entry_dir(id)?).map_err(|e| e.to_string())
     }
@@ -224,9 +253,56 @@ fn write_entry(dir: &Path, items: &[Item], meta: &Meta) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn read_items(dir: &Path) -> Result<Vec<Item>, String> {
+/// The session as written, picture bytes left out.
+fn stored(dir: &Path) -> Result<Vec<Item>, String> {
     let b = std::fs::read(dir.join("items.json")).map_err(|e| e.to_string())?;
-    let mut items: Vec<Item> = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&b).map_err(|e| e.to_string())
+}
+
+/// Where picture `n` lives: its place in `items` and its file number. Counted as the prompt counts them, in time order
+/// over the pictures whose files are there.
+fn locate(dir: &Path, items: &[Item], n: usize) -> Result<(usize, usize), String> {
+    let mut found = vec![];
+    let mut k = 0;
+    for (i, it) in items.iter().enumerate() {
+        if let Item::Image { t_ms, .. } = it {
+            if std::fs::metadata(dir.join(format!("image-{k}.png"))).is_ok_and(|m| m.len() > 0) {
+                found.push((*t_ms, i, k));
+            }
+            k += 1;
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    let at = n.checked_sub(1).and_then(|j| found.get(j)).ok_or("no such picture")?;
+    Ok((at.1, at.2))
+}
+
+/// Write each file to a temp beside it; only once every one has landed are they renamed into place, so a write that
+/// fails part way leaves the old files as they were.
+fn write_together(files: &[(PathBuf, Vec<u8>)]) -> Result<(), String> {
+    let tmp = |p: &Path| p.with_extension("tmp");
+    let undo = || {
+        for (p, _) in files {
+            let _ = std::fs::remove_file(tmp(p));
+        }
+    };
+    for (p, b) in files {
+        if let Err(e) = std::fs::write(tmp(p), b) {
+            undo();
+            return Err(e.to_string());
+        }
+    }
+    for (p, _) in files {
+        if let Err(e) = std::fs::rename(tmp(p), p) {
+            undo();
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn read_items(dir: &Path) -> Result<Vec<Item>, String> {
+    let mut items = stored(dir)?;
     let mut k = 0;
     for it in items.iter_mut() {
         if let Item::Image { capture, .. } = it {
@@ -374,5 +450,106 @@ mod tests {
             assert!(s.items(bad).is_err(), "{bad}");
             assert!(s.delete(bad).is_err(), "{bad}");
         }
+    }
+
+    fn png_of(w: u32, h: u32, v: u8) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            use image::ImageEncoder;
+            let px: Vec<u8> = (0..w * h).flat_map(|_| [v, 24, 24, 255]).collect();
+            image::codecs::png::PngEncoder::new(&mut buf).write_image(&px, w, h, image::ExtendedColorType::Rgba8).unwrap();
+        }
+        buf
+    }
+
+    /// Words, then picture 1, more words, then picture 2 (written to disk before picture 1, as a late commit is).
+    fn two_pictures() -> Vec<Item> {
+        let mut v = items();
+        let Item::Image { capture, .. } = &v[1] else { panic!() };
+        let mut late = capture.clone();
+        (late.t_ms, late.png, late.labels, late.element) = (1500, png(90), vec![], None);
+        v.insert(1, Item::Image { t_ms: 1500, capture: late });
+        v
+    }
+
+    fn label(n: u32, text: &str) -> Label {
+        Label { n, text: text.into() }
+    }
+
+    #[test]
+    fn a_picture_marked_up_again_replaces_that_picture_and_keeps_the_rest() {
+        let s = store("replace");
+        let m = s.save(&two_pictures(), 1_793_000_000_000, 2000).unwrap();
+        let before = s.export(&m.id).unwrap();
+        let first = s.picture(&m.id, 1).unwrap();
+        assert_eq!((first.png.clone(), first.labels.clone()), (png(200), vec![label(1, "this one")]), "numbered in time order, as the prompt numbers them");
+        let new = png_of(3, 2, 10);
+        let cap = s.replace(&m.id, 1, &new, vec![label(1, "too far left"), label(2, "and this")]).unwrap();
+        assert_eq!((cap.width, cap.height, cap.png.clone()), (3, 2, new.clone()));
+        let after = s.export(&m.id).unwrap();
+        let labels = vec![label(1, "this one"), label(2, "too far left"), label(3, "and this")];
+        assert_eq!(after.images[0].labels, labels, "new labels go after the old ones, numbered on");
+        assert_eq!((after.images[0].width, after.images[0].height), (3, 2));
+        assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; 2=too far left; 3=and this]"#), "{}", after.plain);
+        assert_eq!(s.picture(&m.id, 1).unwrap().png, new);
+        assert_eq!(s.picture(&m.id, 2).unwrap().png, png(90), "the other picture is untouched");
+        assert_eq!((&after.images[1].data_url, &after.images[1].labels), (&before.images[1].data_url, &before.images[1].labels));
+        let said = |v: Vec<Item>| v.into_iter().filter(|i| matches!(i, Item::Speech { .. })).collect::<Vec<_>>();
+        assert_eq!(said(s.items(&m.id).unwrap()), said(two_pictures()), "and so are the words");
+        assert_eq!(s.list(), vec![m.clone()], "the entry keeps its place and its summary");
+        let dir = s.history().join(&m.id);
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(left.iter().all(|f| !f.ends_with(".tmp")), "{left:?}");
+    }
+
+    #[test]
+    fn a_replace_refuses_bad_ids_and_pictures_that_are_not_there() {
+        let s = store("replace-bad");
+        let m = s.save(&items(), 1_793_000_000_000, 2000).unwrap();
+        let new = png_of(2, 2, 10);
+        for bad in ["", "..", "../settings", "a/b", "nope"] {
+            assert!(s.picture(bad, 1).is_err(), "{bad}");
+            assert!(s.replace(bad, 1, &new, vec![]).is_err(), "{bad}");
+        }
+        for n in [0, 2, usize::MAX] {
+            assert!(s.picture(&m.id, n).is_err(), "{n}");
+            assert!(s.replace(&m.id, n, &new, vec![]).is_err(), "{n}");
+        }
+        assert!(s.replace(&m.id, 1, b"not a png", vec![]).is_err());
+        assert_eq!(s.items(&m.id).unwrap(), items(), "nothing changed");
+    }
+
+    #[test]
+    fn a_replace_that_fails_part_way_leaves_the_entry_as_it_was() {
+        let s = store("replace-fail");
+        let m = s.save(&items(), 1_793_000_000_000, 2000).unwrap();
+        let dir = s.history().join(&m.id);
+        let (png0, json0) = (std::fs::read(dir.join("image-0.png")).unwrap(), std::fs::read(dir.join("items.json")).unwrap());
+        // The picture's temp lands; the session's cannot be written.
+        std::fs::create_dir(dir.join("items.tmp")).unwrap();
+        assert!(s.replace(&m.id, 1, &png_of(3, 2, 10), vec![label(1, "lost")]).is_err());
+        assert_eq!(std::fs::read(dir.join("image-0.png")).unwrap(), png0, "the picture was not renamed into place");
+        assert_eq!(std::fs::read(dir.join("items.json")).unwrap(), json0);
+        assert!(!dir.join("image-0.tmp").exists(), "and its temp is gone");
+        assert_eq!(s.items(&m.id).unwrap(), items());
+    }
+
+    #[test]
+    fn an_entry_saved_before_outlines_existed_can_be_marked_up_again() {
+        let s = store("replace-old");
+        let dir = s.history().join("20260901-101500-000");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"[{"type":"speech","t_ms":0,"end_ms":900,"text":"look here"},{"type":"image","t_ms":5,"capture":{"id":0,"kind":"full","t_ms":5,"png":[],"width":1,"height":1,"labels":[]}}]"#;
+        std::fs::write(dir.join("items.json"), old).unwrap();
+        std::fs::write(dir.join("image-0.png"), png(200)).unwrap();
+        let id = "20260901-101500-000";
+        assert_eq!(s.items(id).unwrap().len(), 2, "it still loads");
+        assert_eq!(s.picture(id, 1).unwrap().png, png(200));
+        s.replace(id, 1, &png_of(2, 1, 10), vec![label(1, "pin 1")]).unwrap();
+        let v = s.items(id).unwrap();
+        let Item::Image { capture, .. } = &v[1] else { panic!("{v:?}") };
+        assert_eq!((capture.width, capture.labels.clone(), capture.element.clone()), (2, vec![label(1, "pin 1")], None));
+        let back = String::from_utf8(std::fs::read(dir.join("items.json")).unwrap()).unwrap();
+        assert!(!back.contains("element") && !back.contains("anchors"), "no fields it never had: {back}");
     }
 }

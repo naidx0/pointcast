@@ -168,7 +168,8 @@ fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
     })
 }
 
-fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
+/// Show a frame in the overlay, remembering the app in front unless the overlay already is.
+fn show_frame(app: &AppHandle, payload: &Value) {
     let already = app
         .get_webview_window("overlay")
         .and_then(|w| w.is_visible().ok())
@@ -176,12 +177,17 @@ fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
     if !already {
         platform::remember_front();
     }
+    *FRAME.lock().unwrap() = Some(payload.clone());
+    let _ = app.emit("overlay://frame", payload);
+    platform::show_overlay(app);
+}
+
+fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
     let shot = svc.begin_region()?;
+    EDIT.cancel();
     let mark = svc.settings.lock().unwrap().mark_point;
     let payload = frame_payload(&shot, mark);
-    *FRAME.lock().unwrap() = Some(payload.clone());
-    let _ = app.emit("overlay://frame", &payload);
-    platform::show_overlay(app);
+    show_frame(app, &payload);
     Ok(payload)
 }
 
@@ -192,6 +198,54 @@ static FRAME: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
 #[tauri::command]
 fn region_frame() -> Option<Value> {
     FRAME.lock().unwrap().clone()
+}
+
+/// A picture from History reopened in the overlay: (entry id, picture n). Committing writes back into it.
+struct Editing(std::sync::Mutex<Option<(String, usize)>>);
+
+static EDIT: Editing = Editing(std::sync::Mutex::new(None));
+
+impl Editing {
+    /// The overlay frame for picture `n` of entry `id`; the next commit goes back into that picture.
+    fn begin(&self, store: &history::Store, id: &str, n: usize) -> Result<Value, String> {
+        let cap = store.picture(id, n)?;
+        let (width, height) = image_ops::png_size(&cap.png).unwrap_or((cap.width, cap.height));
+        *self.0.lock().unwrap() = Some((id.to_string(), n));
+        Ok(json!({
+            "png_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cap.png),
+            "width": width,
+            "height": height,
+            "pointer": null,
+            "element": null,
+            "edit": true,
+            // New pins are numbered on from the labels already drawn into the picture.
+            "base": cap.labels.iter().map(|l| l.n).max().unwrap_or(0),
+        }))
+    }
+
+    /// Write a commit back into the picture being edited; None when the overlay is not editing one. A failed write
+    /// keeps the edit open, so a second try never falls through into a live recording.
+    fn commit(&self, store: &history::Store, png: &[u8], labels: Vec<Label>) -> Option<Result<(String, prompt::Capture), String>> {
+        let mut g = self.0.lock().unwrap();
+        let (id, n) = g.clone()?;
+        let r = store.replace(&id, n, png, labels);
+        if r.is_ok() {
+            *g = None;
+        }
+        Some(r.map(|c| (id, c)))
+    }
+
+    fn cancel(&self) {
+        self.0.lock().unwrap().take();
+    }
+}
+
+/// Reopen picture `n` of a past prompt in the overlay to mark it up again.
+#[tauri::command]
+async fn history_edit(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n: usize) -> Result<(), String> {
+    let payload = EDIT.begin(&svc.history, &id, n)?;
+    show_frame(&app, &payload);
+    Ok(())
 }
 
 /// What the session chord's release does: stop only a held (not tapped) push-to-talk.
@@ -427,16 +481,35 @@ fn region_commit(
     let png = base64::engine::general_purpose::STANDARD
         .decode(body.png_b64.trim())
         .map_err(|e| e.to_string())?;
-    let cap = svc.commit_region(png, body.labels, body.element)?;
+    // A picture from History goes back into its entry, which becomes the last prompt and is copied again.
+    let (cap, edited) = match EDIT.commit(&svc.history, &png, body.labels.clone()) {
+        Some(r) => {
+            let (id, cap) = r?;
+            (cap, Some(id))
+        }
+        None => (svc.commit_region(png, body.labels, body.element)?, None),
+    };
     hide_window(&app, "overlay");
     platform::restore_front();
     FRAME.lock().unwrap().take();
+    let last = match edited {
+        Some(id) => {
+            let exp = svc.set_last(&id)?;
+            let _ = app.emit("history://changed", json!({ "id": id }));
+            Some(exp)
+        }
+        None => None,
+    };
     emit_state(&app, &svc);
+    if let Some(exp) = last {
+        copy_export(&exp)?;
+    }
     Ok(json!({"kind": cap.kind, "width": cap.width, "height": cap.height, "labels": cap.labels}))
 }
 
 #[tauri::command]
 fn region_cancel(app: AppHandle) {
+    EDIT.cancel();
     hide_window(&app, "overlay");
     platform::restore_front();
     FRAME.lock().unwrap().take();
@@ -862,6 +935,7 @@ pub fn run() {
             speech_setup,
             history_list,
             history_get,
+            history_edit,
             history_copy,
             history_paste,
             history_delete,
@@ -1034,6 +1108,62 @@ mod tests {
         assert!(old.element.is_none());
         let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
         assert!(gone.element.is_none());
+    }
+
+    fn png(w: u32, v: u8) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut buf = Vec::new();
+        let px: Vec<u8> = (0..w).flat_map(|_| [v, 24, 24, 255]).collect();
+        image::codecs::png::PngEncoder::new(&mut buf).write_image(&px, w, 1, image::ExtendedColorType::Rgba8).unwrap();
+        buf
+    }
+
+    #[test]
+    fn a_history_picture_opens_for_editing_and_one_commit_goes_back_into_it() {
+        let dir = std::env::temp_dir().join(format!("pc-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = history::Store::new(&dir);
+        let pic = prompt::Capture {
+            id: 0,
+            kind: prompt::CaptureKind::Region,
+            t_ms: 10,
+            png: png(2, 200),
+            width: 2,
+            height: 1,
+            labels: vec![Label { n: 1, text: "old".into() }],
+            pointer: None,
+            trail: vec![],
+            element: None,
+            place: None,
+            anchors: vec![],
+        };
+        let items = vec![
+            prompt::Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() },
+            prompt::Item::Image { t_ms: 10, capture: pic },
+        ];
+        let m = store.save(&items, 1_793_000_000_000, 100).unwrap();
+        let ed = Editing(std::sync::Mutex::new(None));
+        assert!(ed.commit(&store, &png(3, 1), vec![]).is_none(), "not editing: a commit belongs to the recording");
+        assert!(ed.begin(&store, "../settings", 1).is_err() && ed.begin(&store, &m.id, 2).is_err());
+        assert!(ed.0.lock().unwrap().is_none(), "a refused edit opens nothing");
+
+        let f = ed.begin(&store, &m.id, 1).unwrap();
+        assert_eq!((&f["edit"], &f["width"], &f["height"], &f["base"]), (&json!(true), &json!(2), &json!(1), &json!(1)));
+        assert!(f["pointer"].is_null() && f["element"].is_null(), "marks already drawn into it are not placed again");
+        let b64 = f["png_b64"].as_str().unwrap();
+        assert_eq!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap(), png(2, 200));
+        ed.cancel();
+        assert!(ed.commit(&store, &png(3, 1), vec![]).is_none(), "Esc: nothing is written");
+        assert_eq!(store.picture(&m.id, 1).unwrap().png, png(2, 200));
+
+        ed.begin(&store, &m.id, 1).unwrap();
+        assert!(ed.commit(&store, b"not a png", vec![]).unwrap().is_err());
+        assert!(ed.0.lock().unwrap().is_some(), "a failed write keeps the edit open");
+        let (id, cap) = ed.commit(&store, &png(3, 1), vec![Label { n: 1, text: "new".into() }]).unwrap().unwrap();
+        assert_eq!((id.as_str(), cap.width, cap.labels.len()), (m.id.as_str(), 3, 2));
+        assert_eq!(store.picture(&m.id, 1).unwrap().png, png(3, 1));
+        assert!(ed.commit(&store, &png(4, 1), vec![]).is_none(), "written once; the next commit is the recording's again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
