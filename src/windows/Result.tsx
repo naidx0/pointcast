@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { ClipboardPaste, Copy, FolderOpen, Send, Trash2 } from "lucide-react";
+import { ClipboardPaste, Copy, FolderOpen, Pencil, Send, Trash2 } from "lucide-react";
 import {
   detectTools,
   historyCopy,
   historyDelete,
+  historyEdit,
   historyGet,
   historyList,
   historyPaste,
   inTauri,
   lastFolder,
+  onHistoryChanged,
   onResult,
   openFolder,
   openTool,
@@ -30,6 +32,8 @@ export function Result() {
   const [tools, setTools] = useState<DetectedTool[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Bumped when a picture is marked up again, so the selected prompt reloads in place.
+  const [rev, setRev] = useState(0);
   const mac = platform() === "mac";
 
   const load = useCallback(async (pick?: string | null) => {
@@ -58,7 +62,13 @@ export function Result() {
     else if (preview) setTools(PREVIEW_TOOLS);
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
-    const off = subscribe(onResult(() => load(null)));
+    const off = subscribe(
+      onResult(() => load(null)),
+      onHistoryChanged(() => {
+        setRev((r) => r + 1);
+        load(null);
+      }),
+    );
     return () => {
       window.removeEventListener("focus", onFocus);
       off();
@@ -74,7 +84,7 @@ export function Result() {
     return () => {
       live = false;
     };
-  }, [sel]);
+  }, [sel, rev]);
 
   const flash = (k: "copied" | "pasted") => {
     setDone(k);
@@ -200,7 +210,7 @@ export function Result() {
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
             ) : null}
-            {exp ? <PromptDoc exp={exp} /> : null}
+            {exp ? <PromptDoc exp={exp} onEdit={sel ? (n) => void run(() => historyEdit(sel, n)) : undefined} /> : null}
           </main>
         </div>
       ) : (
@@ -228,7 +238,8 @@ function when(ms: number) {
   return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
-export function PromptDoc({ exp }: { exp: SessionExport }) {
+/** With `onEdit`, clicking a picture reopens it in the annotate overlay. */
+export function PromptDoc({ exp, onEdit }: { exp: SessionExport; onEdit?: (n: number) => void }) {
   return (
     <div className="prompt-doc">
       {splitMarkers(exp.plain).map((p, i) => {
@@ -236,7 +247,17 @@ export function PromptDoc({ exp }: { exp: SessionExport }) {
         const img = exp.images[p.n - 1];
         return (
           <figure key={i}>
-            <img src={img?.data_url} alt={p.value} />
+            {onEdit && img ? (
+              <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${p.n}`} onClick={() => onEdit(p.n)}>
+                <img src={img.data_url} alt={p.value} />
+                <span className="pd-edit" aria-hidden="true">
+                  <Pencil size={12} strokeWidth={2} />
+                  Edit picture
+                </span>
+              </button>
+            ) : (
+              <img src={img?.data_url} alt={p.value} />
+            )}
             <figcaption>
               Image {p.n}
               {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
