@@ -223,8 +223,8 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         let title = w.title().unwrap_or_default();
         if privacy::hides(&app, &title, &list) {
             rects.push(Rect {
-                x: w.x().unwrap_or(0) - mx,
-                y: w.y().unwrap_or(0) - my,
+                x: w.x().unwrap_or(0),
+                y: w.y().unwrap_or(0),
                 w: w.width().unwrap_or(0) as i32,
                 h: w.height().unwrap_or(0) as i32,
             });
@@ -233,14 +233,12 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let img = mon.capture_image().map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
     let mut buf = img.into_raw();
-    for r in rects {
-        privacy::mask(&mut buf, width, height, r);
-    }
     // macOS reports the pointer and the monitor in points but captures in pixels; Windows is
     // physical pixels throughout (scale 1).
     let scale = width as f64 / mon.width().unwrap_or(width).max(1) as f64;
     let density = mon.scale_factor().unwrap_or(scale as f32).clamp(1.0, 4.0);
     let map = Mapping { origin: (mx, my), scale, frame: (width, height), crop: (0, 0), size: (width, height) };
+    paint_out(&mut buf, &map, &rects);
     let at = map.place(Point { t_ms: 0, x: cx, y: cy }).map(|p| (p.x, p.y)).unwrap_or((0, 0));
     Ok(Frame {
         buf,
@@ -251,6 +249,13 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         density,
         map,
     })
+}
+
+/// Paint over hidden windows; `rects` are in screen coordinates (points on macOS, so a Retina picture is twice as big).
+fn paint_out(buf: &mut [u8], map: &Mapping, rects: &[Rect]) {
+    for r in rects.iter().filter_map(|r| map.place_rect(*r)) {
+        privacy::mask(buf, map.size.0, map.size.1, r);
+    }
 }
 
 /// Every window on screen, front to back (the order both xcap backends list them in).
@@ -483,6 +488,30 @@ mod tests {
         // A second monitor with a negative origin.
         let left = screen((-1920, 0), 1.0, 1920, 1080);
         assert_eq!(cut(&left, Focus::Window(r(-1000, 100, 500, 400)), ptr), Cut::Rect(r(920, 100, 500, 400)));
+    }
+
+    #[test]
+    fn a_hidden_window_is_painted_over_where_it_is_in_the_picture() {
+        let paint = |m: &Mapping, rects: &[Rect]| {
+            let (w, h) = m.frame;
+            let mut b = vec![255u8; (w * h * 4) as usize];
+            paint_out(&mut b, m, rects);
+            move |x: u32, y: u32| b[((y * w + x) * 4) as usize]
+        };
+        // Retina: a 400x300 point window at (100, 50) covers pixels 200..1000 across and 100..700 down.
+        let px = paint(&screen((0, 0), 2.0, 1000, 800), &[r(100, 50, 400, 300)]);
+        assert_eq!((px(200, 100), px(600, 400), px(999, 699)), (24, 24, 24));
+        assert_eq!((px(199, 100), px(200, 99), px(500, 700)), (255, 255, 255));
+        // A Retina screen left of the main one, and a window hanging off its right edge.
+        let px = paint(&screen((-1512, 0), 2.0, 3024, 1964), &[r(-212, 100, 600, 200)]);
+        assert_eq!((px(2600, 200), px(3023, 599)), (24, 24));
+        assert_eq!((px(2599, 200), px(2600, 199), px(2600, 600)), (255, 255, 255));
+        // Windows: physical pixels throughout.
+        let px = paint(&screen((1920, 0), 1.0, 1280, 1024), &[r(2000, 10, 100, 50)]);
+        assert_eq!((px(80, 10), px(179, 59), px(180, 10), px(79, 10)), (24, 24, 255, 255));
+        // Off this screen: nothing.
+        let px = paint(&screen((0, 0), 2.0, 100, 100), &[r(-300, 0, 200, 50)]);
+        assert_eq!(px(0, 0), 255);
     }
 
     #[test]
