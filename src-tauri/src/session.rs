@@ -1263,8 +1263,10 @@ mod tests {
         // A picture in it marked up again: agents read the new one.
         a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
         a.set_last(&rec.id).unwrap();
-        // Their plain text names the picture's file in History.
-        let named = format!("look [image 1: {}; 1=this one]", a.history.files(&rec.id)[0]);
+        // Their plain text names the picture's file in History, and ends with its folder.
+        let file = a.history.files(&rec.id)[0].clone();
+        let folder = std::path::Path::new(&file).parent().unwrap().to_string_lossy().into_owned();
+        let named = format!("look [image 1: {file}; 1=this one]\n\nPictures: {folder}");
         assert_eq!(served(&a), Some(named.clone()));
         // Copying the older prompt makes it the last one; agents still read the recording.
         a.set_last(&older.id).unwrap();
