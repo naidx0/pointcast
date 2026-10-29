@@ -23,8 +23,26 @@ pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
     Ok((payload.html, payload.plain))
 }
 
+static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
 /// Keep the app handle so a paste can be run on the main thread where the OS needs it.
-pub fn bind(_app: &tauri::AppHandle) {}
+pub fn bind(app: &tauri::AppHandle) {
+    let _ = APP.set(app.clone());
+}
+
+/// Run `f` where `post` sends it (the main thread) and wait at most `wait` for its answer.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn on_main<T: Send + 'static>(
+    post: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), String>,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+    wait: std::time::Duration,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    post(Box::new(move || {
+        let _ = tx.send(f());
+    }))?;
+    rx.recv_timeout(wait).map_err(|_| "the paste did not run".to_string())?
+}
 
 /// The V key itself, wherever the keyboard layout puts the letter: looking 'v' up through the
 /// layout finds nothing on Russian or Greek layouts and another key on Dvorak.
@@ -38,6 +56,17 @@ const PASTE: enigo::Key = enigo::Key::Unicode('v');
 
 pub fn paste_now() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(80));
+    // macOS: synthetic keys and the keyboard layout belong to the main thread (macOS 14+ asserts it).
+    #[cfg(target_os = "macos")]
+    if let Some(app) = APP.get().filter(|_| objc2::MainThreadMarker::new().is_none()) {
+        let app = app.clone();
+        let post = move |job: Box<dyn FnOnce() + Send>| app.run_on_main_thread(job).map_err(|e| e.to_string());
+        return on_main(post, send_paste, std::time::Duration::from_secs(2));
+    }
+    send_paste()
+}
+
+fn send_paste() -> Result<(), String> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
     let modifier = if cfg!(target_os = "macos") {
@@ -130,5 +159,28 @@ mod tests {
         assert_eq!(PASTE, enigo::Key::Other(9));
         #[cfg(any(windows, target_os = "macos"))]
         assert!(!matches!(PASTE, enigo::Key::Unicode(_)));
+    }
+
+    #[test]
+    fn a_paste_runs_on_the_main_thread_and_never_waits_forever() {
+        use std::time::{Duration, Instant};
+        let name = || std::thread::current().name().map(str::to_string);
+        // Posted to another thread standing in for the main one: the answer comes back from there.
+        let main = |job: Box<dyn FnOnce() + Send>| {
+            std::thread::Builder::new().name("main-stand-in".into()).spawn(job).map(|_| ()).map_err(|e| e.to_string())
+        };
+        let wait = Duration::from_secs(5);
+        assert_eq!(on_main(main, move || Ok(name()), wait), Ok(Some("main-stand-in".into())));
+        assert_eq!(on_main(main, || Err::<(), _>("refused".to_string()), wait), Err("refused".into()));
+        // The main thread is gone (the job is dropped) or cannot be reached: an error at once.
+        let t = Instant::now();
+        assert!(on_main(|job| { drop(job); Ok(()) }, || Ok(1), wait).is_err());
+        assert!(on_main(|_| Err("no event loop".to_string()), || Ok(1), wait).is_err());
+        assert!(t.elapsed() < Duration::from_secs(1));
+        // The main thread is busy: an error after the wait, not a hang.
+        let held = std::sync::Mutex::new(None);
+        let t = Instant::now();
+        let r = on_main(|job| { *held.lock().unwrap() = Some(job); Ok(()) }, || Ok(1), Duration::from_millis(200));
+        assert!(r.is_err() && t.elapsed() >= Duration::from_millis(200) && t.elapsed() < Duration::from_secs(2), "{r:?}");
     }
 }
