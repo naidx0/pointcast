@@ -1,6 +1,7 @@
 //! Recording session: live transcript, captures inserted at the moment they were taken,
 //! local STT, and export on stop.
 use crate::capture::{self, Shot};
+use crate::pointer::Point;
 use crate::prompt::{self, Capture, CaptureKind, Item, Label, SessionExport};
 use crate::settings::{OutputMode, Settings};
 use crate::voice::audio::{self, Mic, Take};
@@ -370,7 +371,7 @@ impl App {
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
         let t = self.t_ms();
-        let shot = capture::grab_freeze(&settings)?;
+        let shot = capture::grab_freeze(&settings, &self.recent(t), t)?;
         *self.freeze.lock().unwrap() = Some(shot.clone());
         *self.freeze_t.lock().unwrap() = Some(t);
         Ok(shot)
@@ -405,12 +406,12 @@ impl App {
 
     fn capture_shot(
         &self,
-        grab: impl FnOnce(&Settings) -> Result<Shot, String>,
+        grab: impl FnOnce(&Settings, &[Point], u64) -> Result<Shot, String>,
     ) -> Result<Capture, String> {
         let settings = self.settings.lock().unwrap().clone();
-        let shot = grab(&settings)?;
+        let asked = self.t_ms();
+        let shot = grab(&settings, &self.recent(asked), asked)?;
         let t = self.t_ms();
-        let (pointer, trail) = self.pointing(&shot, t);
         let cap = Capture {
             id: 0,
             kind: shot.kind,
@@ -419,8 +420,8 @@ impl App {
             width: shot.width,
             height: shot.height,
             labels: vec![],
-            pointer,
-            trail,
+            pointer: shot.pointer,
+            trail: shot.trail,
         };
         self.push(Item::Image {
             t_ms: t,
@@ -440,16 +441,9 @@ impl App {
         }
     }
 
-    /// Where the person was pointing in this picture: their last rest in the trail, else the
-    /// pointer, plus the last few seconds of the path; all in picture pixels.
-    fn pointing(&self, shot: &Shot, t: u64) -> (Option<crate::pointer::Point>, Vec<crate::pointer::Point>) {
-        use crate::pointer::{dwell, TRAIL_MS};
-        let recent = self.trail.lock().unwrap().since(t.saturating_sub(TRAIL_MS));
-        let trail: Vec<_> = recent.iter().filter_map(|p| shot.map.place(*p)).collect();
-        let pointer = dwell(&recent)
-            .and_then(|d| shot.map.place(d))
-            .or_else(|| recent.last().and_then(|p| shot.map.place(*p)));
-        (pointer, trail)
+    /// The last few seconds of the pointer's path before `t`, in screen coordinates.
+    fn recent(&self, t: u64) -> Vec<Point> {
+        self.trail.lock().unwrap().since(t.saturating_sub(crate::pointer::TRAIL_MS))
     }
 
     fn t_ms(&self) -> u64 {

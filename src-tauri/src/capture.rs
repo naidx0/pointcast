@@ -1,12 +1,15 @@
 //! Cross-platform screen grab via xcap. Hidden (password-manager) windows are painted over.
 //! Pointcast's own windows are treated as hidden unless `include_app` is on.
-use crate::image_ops::{self, crop, encode_png, ring};
+use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
+use crate::pointer::{self, dwell, Point};
 use crate::privacy::{self, Rect};
 use crate::prompt::CaptureKind;
-use crate::settings::Settings;
-use crate::pointer::{self, Point};
+use crate::settings::{MarkPoint, Settings, ZoomTarget};
 use mouse_position::mouse_position::Mouse;
 use serde::Serialize;
+
+/// A close-up centred on where the person paused looks this far back for the pause.
+pub const ZOOM_DWELL_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Shot {
@@ -15,6 +18,9 @@ pub struct Shot {
     pub height: u32,
     pub kind: CaptureKind,
     pub cursor: (i32, i32),
+    /// Where the person pointed (their last rest, else the pointer) and the path there, in picture pixels.
+    pub pointer: Option<Point>,
+    pub trail: Vec<Point>,
     /// How screen positions land in this picture.
     #[serde(skip)]
     pub map: Mapping,
@@ -36,6 +42,103 @@ impl Mapping {
         let (x, y) = (q.x - self.crop.0, q.y - self.crop.1);
         (x >= 0 && y >= 0 && x < self.size.0 as i32 && y < self.size.1 as i32).then_some(Point { x, y, ..q })
     }
+
+    /// A screen rect in this picture's pixels, clipped to the picture; `None` when none of it is on it.
+    pub fn place_rect(&self, r: Rect) -> Option<Rect> {
+        let at = |v: i32, origin: i32, crop: i32, n: u32| {
+            ((((v - origin) as f64 * self.scale).round() as i64) - crop as i64).clamp(0, n as i64) as i32
+        };
+        let (x0, x1) = (at(r.x, self.origin.0, self.crop.0, self.size.0), at(r.x.saturating_add(r.w), self.origin.0, self.crop.0, self.size.0));
+        let (y0, y1) = (at(r.y, self.origin.1, self.crop.1, self.size.1), at(r.y.saturating_add(r.h), self.origin.1, self.crop.1, self.size.1));
+        (x1 > x0 && y1 > y0).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+
+    /// The same picture enlarged `n` times.
+    pub fn times(self, n: u32) -> Mapping {
+        let k = n as i32;
+        Mapping {
+            origin: self.origin,
+            scale: self.scale * n as f64,
+            frame: (self.frame.0 * n, self.frame.1 * n),
+            crop: (self.crop.0 * k, self.crop.1 * k),
+            size: (self.size.0 * n, self.size.1 * n),
+        }
+    }
+}
+
+/// Where the person pointed in a picture: their last rest in `recent`, else the pointer `now`; and the path, all in
+/// picture pixels. `recent` and `now` are screen coordinates.
+pub fn pointing(map: &Mapping, recent: &[Point], now: Point) -> (Option<Point>, Vec<Point>) {
+    let trail = recent.iter().filter_map(|p| map.place(*p)).collect();
+    let at = dwell(recent).and_then(|d| map.place(d)).or_else(|| map.place(now));
+    (at, trail)
+}
+
+/// What a close-up shows, in screen coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    At(Point),
+    Window(Rect),
+}
+
+/// A window as a close-up sees it.
+#[derive(Debug, Clone, Copy)]
+pub struct Win {
+    pub rect: Rect,
+    pub minimized: bool,
+    /// One of Pointcast's own windows.
+    pub own: bool,
+}
+
+/// The topmost window under `(x, y)` in a front-to-back list, passing over minimised windows and Pointcast's own.
+pub fn window_at(list: &[Win], x: i32, y: i32) -> Option<Rect> {
+    list.iter()
+        .filter(|w| !w.minimized && !w.own)
+        .map(|w| w.rect)
+        .find(|r| r.w > 0 && r.h > 0 && x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h)
+}
+
+/// What a close-up centres on: the pointer `now`; the rest within the last `ZOOM_DWELL_MS`, else the pointer; or the
+/// window under the pointer, else the pointer. `windows` is only asked for when it is needed.
+pub fn focus(target: ZoomTarget, now: Point, recent: &[Point], windows: impl FnOnce() -> Vec<Win>) -> Focus {
+    match target {
+        ZoomTarget::Pointer => Focus::At(now),
+        ZoomTarget::Dwell => {
+            let from = recent.partition_point(|p| p.t_ms < now.t_ms.saturating_sub(ZOOM_DWELL_MS));
+            Focus::At(dwell(&recent[from..]).unwrap_or(now))
+        }
+        ZoomTarget::Window => window_at(&windows(), now.x, now.y).map_or(Focus::At(now), Focus::Window),
+    }
+}
+
+/// The part of a picture a close-up keeps, in its pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cut {
+    /// A square around this point.
+    Around(i32, i32),
+    Rect(Rect),
+}
+
+/// The focus in picture pixels: a window clipped to the picture, or a point; `pointer` when the focus is not on it.
+pub fn cut(map: &Mapping, focus: Focus, pointer: (i32, i32)) -> Cut {
+    let around = |(x, y): (i32, i32)| Cut::Around(x, y);
+    match focus {
+        Focus::Window(r) => map.place_rect(r).map_or(around(pointer), Cut::Rect),
+        Focus::At(p) => around(map.place(p).map_or(pointer, |q| (q.x, q.y))),
+    }
+}
+
+/// Draw what the person asked for where they pointed: nothing, a ring, or the ring and the path that led to it.
+/// `k` is the picture's density.
+pub fn mark(buf: &mut [u8], width: u32, height: u32, how: MarkPoint, at: Option<Point>, trail: &[Point], k: f32) {
+    let Some(at) = at else { return };
+    if how == MarkPoint::Trail {
+        let upto = trail.partition_point(|p| p.t_ms <= at.t_ms);
+        image_ops::trail(buf, width, height, &trail[..upto], at, k);
+    }
+    if how != MarkPoint::Off {
+        image_ops::ring(buf, width, height, at.x, at.y, k);
+    }
 }
 
 struct Frame {
@@ -43,7 +146,17 @@ struct Frame {
     width: u32,
     height: u32,
     cursor: (i32, i32),
+    /// The pointer in screen coordinates.
+    screen: (i32, i32),
+    /// Picture pixels per logical pixel: 1 on a plain display, 1.5 at 150 %, 2 on Retina.
+    density: f32,
     map: Mapping,
+}
+
+impl Frame {
+    fn now(&self, t_ms: u64) -> Point {
+        Point { t_ms, x: self.screen.0, y: self.screen.1 }
+    }
 }
 
 pub fn cursor_pos() -> Result<(i32, i32), String> {
@@ -86,6 +199,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     // macOS reports the pointer and the monitor in points but captures in pixels; Windows is
     // physical pixels throughout (scale 1).
     let scale = width as f64 / mon.width().unwrap_or(width).max(1) as f64;
+    let density = mon.scale_factor().unwrap_or(scale as f32).clamp(1.0, 4.0);
     let map = Mapping { origin: (mx, my), scale, frame: (width, height), crop: (0, 0), size: (width, height) };
     let at = map.place(Point { t_ms: 0, x: cx, y: cy }).map(|p| (p.x, p.y)).unwrap_or((0, 0));
     Ok(Frame {
@@ -93,41 +207,104 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         width,
         height,
         cursor: at,
+        screen: (cx, cy),
+        density,
         map,
     })
 }
 
-pub fn grab_full(settings: &Settings) -> Result<Shot, String> {
-    let f = grab_frame(settings)?;
+/// Every window on screen, front to back (the order both xcap backends list them in).
+fn windows() -> Vec<Win> {
+    let me = std::process::id();
+    xcap::Window::all()
+        .unwrap_or_default()
+        .iter()
+        .filter(|w| !shell(w))
+        .map(|w| Win {
+            rect: Rect {
+                x: w.x().unwrap_or(0),
+                y: w.y().unwrap_or(0),
+                w: w.width().unwrap_or(0) as i32,
+                h: w.height().unwrap_or(0) as i32,
+            },
+            minimized: w.is_minimized().unwrap_or(true),
+            own: w.pid().is_ok_and(|p| p == me),
+        })
+        .collect()
+}
+
+/// The menu bar and the Dock are windows over everything on macOS, never what "the window" means.
+#[cfg(target_os = "macos")]
+fn shell(w: &xcap::Window) -> bool {
+    matches!(w.app_name().unwrap_or_default().as_str(), "Window Server" | "Dock")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn shell(_: &xcap::Window) -> bool {
+    false
+}
+
+/// What the pointer did lately: `recent` is the last few seconds of the trail in screen coordinates and `t_ms` the
+/// session clock now.
+pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
+    let mut f = grab_frame(settings)?;
+    let (pointer, trail) = pointing(&f.map, recent, f.now(t_ms));
+    mark(&mut f.buf, f.width, f.height, settings.mark_point, pointer, &trail, f.density);
     Ok(Shot {
         png: encode_png(&f.buf, f.width, f.height)?,
         width: f.width,
         height: f.height,
         kind: CaptureKind::Full,
         cursor: f.cursor,
+        pointer,
+        trail,
         map: f.map,
     })
 }
 
-pub fn grab_zoom(settings: &Settings) -> Result<Shot, String> {
+pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
     let f = grab_frame(settings)?;
+    let now = f.now(t_ms);
     let n = settings.zoom_px();
-    let (cw, ch) = (n.min(f.width), n.min(f.height));
-    let (cx, cy) = f.cursor;
-    let (mut cut, ox, oy) = crop(&f.buf, f.width, f.height, cx, cy, cw, ch);
-    ring(&mut cut, cw, ch, cx - ox as i32, cy - oy as i32);
+    let (cut_buf, ox, oy, cw, ch) = match cut(&f.map, focus(settings.zoom_target, now, recent, windows), f.cursor) {
+        Cut::Rect(r) => crop_rect(&f.buf, f.width, f.height, r),
+        Cut::Around(x, y) => {
+            let (cw, ch) = (n.min(f.width), n.min(f.height));
+            let (c, ox, oy) = crop(&f.buf, f.width, f.height, x, y, cw, ch);
+            (c, ox, oy, cw, ch)
+        }
+    };
+    let up = sharpen_factor(settings.zoom_sharpen, cw, ch);
+    let (mut buf, width, height) = enlarge(cut_buf, cw, ch, up);
+    let map = Mapping { crop: (ox as i32, oy as i32), size: (cw, ch), ..f.map }.times(up);
+    let (pointer, trail) = pointing(&map, recent, now);
+    mark(&mut buf, width, height, settings.mark_point, pointer, &trail, f.density * up as f32);
     Ok(Shot {
-        png: encode_png(&cut, cw, ch)?,
-        width: cw,
-        height: ch,
+        png: encode_png(&buf, width, height)?,
+        width,
+        height,
         kind: CaptureKind::Zoom,
-        cursor: (cx - ox as i32, cy - oy as i32),
-        map: Mapping { crop: (ox as i32, oy as i32), size: (cw, ch), ..f.map },
+        cursor: map.place(now).map_or((0, 0), |p| (p.x, p.y)),
+        pointer,
+        trail,
+        map,
     })
 }
 
-pub fn grab_freeze(settings: &Settings) -> Result<Shot, String> {
-    grab_full(settings)
+/// The frame region mode annotates: unmarked, since the overlay places the ring as a shape the person can move.
+pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
+    let f = grab_frame(settings)?;
+    let (pointer, trail) = pointing(&f.map, recent, f.now(t_ms));
+    Ok(Shot {
+        png: encode_png(&f.buf, f.width, f.height)?,
+        width: f.width,
+        height: f.height,
+        kind: CaptureKind::Full,
+        cursor: f.cursor,
+        pointer,
+        trail,
+        map: f.map,
+    })
 }
 
 /// Crop `png` to `rect` (in image pixels). Used after the overlay confirms a box.
@@ -140,6 +317,8 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
         height: ch,
         kind: CaptureKind::Region,
         cursor: (0, 0),
+        pointer: None,
+        trail: vec![],
         map: Mapping::default(),
     })
 }
@@ -147,20 +326,145 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn p(t_ms: u64, x: i32, y: i32) -> Point {
+        Point { t_ms, x, y }
+    }
+    fn r(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+    fn screen(origin: (i32, i32), scale: f64, w: u32, h: u32) -> Mapping {
+        Mapping { origin, scale, frame: (w, h), crop: (0, 0), size: (w, h) }
+    }
+    fn win(rect: Rect) -> Win {
+        Win { rect, minimized: false, own: false }
+    }
+
+    /// 30 Hz samples moving in steps too long to rest from `t0` for `ms`, starting at `from`.
+    fn moving(t0: u64, ms: u64, from: (i32, i32)) -> Vec<Point> {
+        (0..ms / 33).map(|i| p(t0 + i * 33, from.0 + i as i32 * 20, from.1)).collect()
+    }
+    /// 30 Hz samples resting at `at` with a little jitter from `t0` for `ms`.
+    fn resting(t0: u64, ms: u64, at: (i32, i32)) -> Vec<Point> {
+        (0..=ms / 33).map(|i| p(t0 + i * 33, at.0 + [0, 3, -2][(i % 3) as usize], at.1)).collect()
+    }
 
     #[test]
-    fn crop_png_cuts_a_region_from_an_encoded_picture() {
-        let mut buf = vec![0u8; 8 * 6 * 4];
-        for i in (0..buf.len()).step_by(4) {
-            buf[i] = 10;
-            buf[i + 3] = 255;
-        }
-        let png = encode_png(&buf, 8, 6).unwrap();
-        let shot = crop_png(&png, 2, 1, 3, 2).unwrap();
-        assert_eq!(
-            (shot.width, shot.height, shot.kind),
-            (3, 2, CaptureKind::Region)
-        );
-        assert_eq!(crate::image_ops::png_size(&shot.png), Some((3, 2)));
+    fn a_close_up_centres_on_the_pointer_the_pause_or_the_window_and_falls_back_to_the_pointer() {
+        let asked = Cell::new(0);
+        let none = || {
+            asked.set(asked.get() + 1);
+            vec![]
+        };
+        // Rest at (400, 300) from 1.0 s to 1.7 s, then move away.
+        let mut t = moving(0, 1_000, (0, 300));
+        t.extend(resting(1_000, 700, (400, 300)));
+        t.extend(moving(1_733, 300, (420, 300)));
+        let now = p(2_100, 900, 500);
+        assert_eq!(focus(ZoomTarget::Pointer, now, &t, none), Focus::At(now));
+        let Focus::At(d) = focus(ZoomTarget::Dwell, now, &t, none) else { panic!() };
+        assert!((d.x - 400).abs() <= 3 && d.y == 300, "{d:?}");
+        assert_eq!(asked.get(), 0, "the window list is only read for the window target");
+        // The same rest seen from 2.5 s later has left the last 1.5 s: centre on the pointer.
+        let mut later = t.clone();
+        later.extend(moving(2_100, 2_000, (0, 600)));
+        let now = p(4_100, 700, 600);
+        assert_eq!(focus(ZoomTarget::Dwell, now, &later, none), Focus::At(now));
+        // A rest that mostly fell before the window is too short inside it.
+        let edge = p(1_700 + ZOOM_DWELL_MS - 300, 5, 5);
+        assert_eq!(focus(ZoomTarget::Dwell, edge, &t, none), Focus::At(edge));
+        assert_eq!(focus(ZoomTarget::Dwell, now, &[], none), Focus::At(now));
+        // Window: the one under the pointer, else the pointer.
+        let front = r(600, 400, 500, 300);
+        let list = vec![win(r(0, 0, 300, 300)), win(front), win(r(0, 0, 1920, 1080))];
+        assert_eq!(focus(ZoomTarget::Window, p(9, 900, 500), &t, || list.clone()), Focus::Window(front));
+        assert_eq!(focus(ZoomTarget::Window, p(9, 2500, 500), &t, || list.clone()), Focus::At(p(9, 2500, 500)));
+        assert_eq!(focus(ZoomTarget::Window, now, &t, none), Focus::At(now));
+        assert_eq!(asked.get(), 1);
+    }
+
+    #[test]
+    fn the_window_under_the_pointer_is_the_topmost_visible_one_that_is_not_ours() {
+        let ours = Win { own: true, ..win(r(0, 0, 800, 600)) };
+        let tucked = Win { minimized: true, ..win(r(0, 0, 800, 600)) };
+        let (front, back) = (r(100, 100, 400, 300), r(0, 0, 1920, 1080));
+        let list = [ours, tucked, win(r(900, 0, 200, 200)), win(r(0, 0, 0, 0)), win(front), win(back)];
+        assert_eq!(window_at(&list, 200, 200), Some(front));
+        assert_eq!(window_at(&list, 50, 50), Some(back), "ours and minimised ones are passed over");
+        assert_eq!(window_at(&list, 499, 399), Some(front));
+        assert_eq!(window_at(&list, 500, 400), Some(back), "right and bottom edges are outside");
+        assert_eq!(window_at(&list, -5, 10), None);
+        assert_eq!(window_at(&[ours, tucked], 10, 10), None);
+        // A window on a monitor left of the main one.
+        assert_eq!(window_at(&[win(r(-1800, 100, 900, 700))], -1000, 300), Some(r(-1800, 100, 900, 700)));
+    }
+
+    #[test]
+    fn a_close_up_cut_is_clipped_to_the_monitor_and_falls_back_to_the_pointer() {
+        let m = screen((0, 0), 1.0, 1920, 1080);
+        let ptr = (960, 540);
+        assert_eq!(cut(&m, Focus::At(p(1, 500, 400)), ptr), Cut::Around(500, 400));
+        // A pause on another monitor: the pointer.
+        assert_eq!(cut(&m, Focus::At(p(1, -300, 400)), ptr), Cut::Around(960, 540));
+        assert_eq!(cut(&m, Focus::Window(r(300, 200, 800, 600)), ptr), Cut::Rect(r(300, 200, 800, 600)));
+        // A maximised window hangs a few pixels over every edge.
+        assert_eq!(cut(&m, Focus::Window(r(-8, -8, 1936, 1056)), ptr), Cut::Rect(r(0, 0, 1920, 1048)));
+        assert_eq!(cut(&m, Focus::Window(r(1800, 900, 400, 400)), ptr), Cut::Rect(r(1800, 900, 120, 180)));
+        assert_eq!(cut(&m, Focus::Window(r(-900, 0, 800, 600)), ptr), Cut::Around(960, 540));
+        // Retina: points to pixels.
+        let retina = screen((0, 0), 2.0, 3840, 2160);
+        assert_eq!(cut(&retina, Focus::Window(r(100, 50, 400, 300)), ptr), Cut::Rect(r(200, 100, 800, 600)));
+        assert_eq!(cut(&retina, Focus::At(p(1, 100, 50)), ptr), Cut::Around(200, 100));
+        // A second monitor with a negative origin.
+        let left = screen((-1920, 0), 1.0, 1920, 1080);
+        assert_eq!(cut(&left, Focus::Window(r(-1000, 100, 500, 400)), ptr), Cut::Rect(r(920, 100, 500, 400)));
+    }
+
+    #[test]
+    fn a_capture_points_at_the_last_rest_else_the_pointer_now() {
+        let m = screen((0, 0), 1.0, 1920, 1080);
+        let mut t = moving(0, 600, (0, 100));
+        t.extend(resting(600, 700, (700, 450)));
+        let now = p(1_400, 1200, 800);
+        let (at, trail) = pointing(&m, &t, now);
+        let at = at.unwrap();
+        assert!((at.x - 700).abs() <= 3 && at.y == 450, "{at:?}");
+        assert_eq!(trail.len(), t.len());
+        assert_eq!(pointing(&m, &moving(0, 600, (0, 100)), now).0, Some(now));
+        assert_eq!(pointing(&m, &[], now), (Some(now), vec![]));
+        // A rest on another monitor does not land in this picture: the pointer does.
+        let off: Vec<Point> = resting(0, 700, (-500, 450));
+        assert_eq!(pointing(&m, &off, now), (Some(now), vec![]));
+        // Through a crop that was then enlarged 2x.
+        let zoomed = Mapping { crop: (1000, 600), size: (512, 512), ..m }.times(2);
+        assert_eq!(pointing(&zoomed, &[], now).0, Some(p(1_400, 400, 400)));
+        assert_eq!(zoomed.size, (1024, 1024));
+    }
+
+    #[test]
+    fn a_capture_marks_the_spot_only_as_asked() {
+        let blank = vec![255u8; 120 * 60 * 4];
+        let at = Some(p(2_000, 80, 30));
+        let path: Vec<Point> = (0..8).map(|i| p(i * 200, 5 + i as i32 * 8, 30)).collect();
+        let draw = |how, at, trail: &[Point]| {
+            let mut b = blank.clone();
+            mark(&mut b, 120, 60, how, at, trail, 1.0);
+            b
+        };
+        let px = |b: &[u8], x: usize, y: usize| b[(y * 120 + x) * 4];
+        assert_eq!(draw(MarkPoint::Off, at, &path), blank);
+        assert_eq!(draw(MarkPoint::Ring, None, &path), blank);
+        let on_ring = (30 * 120 + 80 + image_ops::RING_R as usize) * 4;
+        let ring = draw(MarkPoint::Ring, at, &path);
+        assert_eq!(&ring[on_ring..][..3], &[245, 165, 36]);
+        assert_eq!(px(&ring, 20, 30), 255, "a ring alone draws no path");
+        let both = draw(MarkPoint::Trail, at, &path);
+        assert_eq!(&both[on_ring..][..3], &[245, 165, 36]);
+        assert!(px(&both, 40, 30) < 255);
+        // The path ends at the rest: where the hand went after it is not drawn.
+        let mut after = path.clone();
+        after.push(p(2_200, 110, 55));
+        assert_eq!(draw(MarkPoint::Trail, at, &after), both);
     }
 }

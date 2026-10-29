@@ -27,7 +27,9 @@ type Shape =
   | { id: number; kind: "pin" | "text"; c: string; at: Pt; text: string }
   | { id: number; kind: "arrow" | "rect"; c: string; a: Pt; b: Pt }
   | { id: number; kind: "pen" | "highlight"; c: string; pts: Pt[] }
-  | { id: number; kind: "magnify"; at: Pt };
+  | { id: number; kind: "magnify"; at: Pt }
+  // Where the person pointed when the frame froze; placed for them, theirs to move or remove.
+  | { id: number; kind: "ring"; c: string; at: Pt };
 
 // Drawing primitives. Shapes compile to these once; the SVG view and the canvas rasterizer both just interpret them.
 type Seg = ["M" | "L", number, number] | ["Q", number, number, number, number] | ["Z"];
@@ -43,7 +45,10 @@ type Ix =
   | { k: "size"; h: Handle; o: Rect }
   | { k: "move"; a: Pt; o: Rect }
   | { k: "draw"; shape: Shape }
-  | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" };
+  | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" }
+  | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt };
+
+type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null };
 
 type Out = { url: string; w: number; h: number; labels: Label[] };
 
@@ -52,7 +57,7 @@ const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
 const HL = "#FFCC00";
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 // Sizes in logical (on-screen) px. Everything drawn into the frame is multiplied by s = frame px per logical px.
-const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16 };
+const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16, mark: 16, markW: 3, grip: 16 };
 const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const HX = { nw: 0, n: 0.5, ne: 1, e: 1, se: 1, s: 0.5, sw: 0, w: 0 };
 const HY = { nw: 0, n: 0, ne: 0, e: 0.5, se: 1, s: 1, sw: 1, w: 0.5 };
@@ -85,8 +90,9 @@ const GESTURE: Record<Tool, string> = {
   magnify: "Click to drop a 2x loupe",
 };
 
-function hint(layer: Layer, tool: Tool): string {
+function hint(layer: Layer, tool: Tool, picked: boolean): string {
   if (layer === "selecting") return "Drag to select · Click for full screen · Esc cancel";
+  if (picked && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
   if (layer === "pinning") return "Type a label · Enter or Esc to finish";
   if (layer === "drawing") return "Release to finish · Esc discard";
   return `${GESTURE[tool]} · Enter capture · Esc back`;
@@ -98,6 +104,9 @@ type A =
   | { t: "add"; s: Shape }
   | { t: "text"; id: number; text: string }
   | { t: "drop"; id: number }
+  | { t: "move"; id: number; at: Pt }
+  | { t: "remove"; id: number }
+  | { t: "seed"; base: Shape[]; s: Shape }
   | { t: "undo" }
   | { t: "redo" }
   | { t: "reset"; now?: Shape[] };
@@ -114,6 +123,13 @@ function hist(h: H, a: A): H {
       if (prev && last?.id === a.id && prev.length === h.now.length - 1) return { ...h, past: h.past.slice(0, -1), now: prev };
       return { ...h, now: h.now.filter((x) => x.id !== a.id) };
     }
+    case "move":
+      return { past: [...h.past, h.now], now: h.now.map((x) => (x.id === a.id && "at" in x ? { ...x, at: a.at } : x)), future: [] };
+    case "remove":
+      return { past: [...h.past, h.now], now: h.now.filter((x) => x.id !== a.id), future: [] };
+    // A shape placed for the person counts as one step, so a single undo takes it away.
+    case "seed":
+      return { past: [a.base], now: [...a.base, a.s], future: [] };
     case "undo":
       return h.past.length ? { past: h.past.slice(0, -1), now: h.past[h.past.length - 1], future: [h.now, ...h.future] } : h;
     case "redo":
@@ -232,6 +248,14 @@ function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
         { k: "ell", x, y, r, fill: "#000", shadow: true },
         { k: "lens", x, y, r, z: 2 },
         { k: "ell", x, y, r, stroke: "#fff", w: M.ring * s },
+      ];
+    }
+    case "ring": {
+      const { x, y } = sh.at;
+      const r = M.mark * s;
+      return [
+        { k: "ell", x, y, r, stroke: "rgba(0,0,0,.5)", w: (M.markW + 2.5) * s },
+        { k: "ell", x, y, r, stroke: sh.c, w: M.markW * s },
       ];
     }
   }
@@ -422,6 +446,8 @@ export function Overlay() {
   const [cur, setCur] = useState<Pt | null>(null);
   const [tb, setTb] = useState({ w: 0, h: 0 });
   const [out, setOut] = useState<Out | null>(null);
+  const [picked, setPicked] = useState<number | null>(null);
+  const [nudge, setNudge] = useState<{ id: number; at: Pt } | null>(null);
   const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
   const ix = useRef<Ix | null>(null);
   const ids = useRef(0);
@@ -429,9 +455,14 @@ export function Overlay() {
   const editRef = useRef<number | null>(null);
   const editNow = useRef(true);
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  const colorRef = useRef(color);
+  colorRef.current = color;
+  // The ring placed where the person pointed; starting over brings it back.
+  const seed = useRef<Shape | null>(null);
+  const restart = (base: Shape[] = []) => dispatch(seed.current ? { t: "seed", base, s: seed.current } : { t: "reset", now: base });
 
   useEffect(() => {
-    const load = (f: { png_b64: string; width: number; height: number }) => {
+    const load = (f: Frame) => {
       setSrc(`data:image/png;base64,${f.png_b64}`);
       setNatural({ w: f.width, h: f.height });
       setLayer("selecting");
@@ -439,9 +470,12 @@ export function Overlay() {
       setLive(null);
       setEditing(null);
       setOut(null);
+      setPicked(null);
+      setNudge(null);
       editRef.current = null;
       ix.current = null;
-      dispatch({ t: "reset" });
+      seed.current = f.pointer ? { id: ++ids.current, kind: "ring", c: colorRef.current, at: f.pointer } : null;
+      restart();
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
     try {
@@ -456,7 +490,8 @@ export function Overlay() {
         setNatural({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
         setLayer("annotating");
         setBox({ x: 420, y: 280, w: 360, h: 220 });
-        dispatch({ t: "reset", now: [{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 560, y: 360 }, text: "Place order — 28px too far left" }] });
+        seed.current = { id: ++ids.current, kind: "ring", c: COLORS[0], at: { x: 690, y: 420 } };
+        restart([{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 560, y: 360 }, text: "Place order — 28px too far left" }]);
       };
       img.src = "/freeze.png";
     }
@@ -488,8 +523,8 @@ export function Overlay() {
   const toScr = (r: Rect): Rect => ({ x: ox + r.x * fit, y: oy + r.y * fit, w: r.w * fit, h: r.h * fit });
   const full: Rect = { x: 0, y: 0, w: natural.w, h: natural.h };
 
-  const shapes = hs.now;
-  const vis = box ? shapes.filter((x) => seen(x, box)) : [];
+  const shapes = nudge ? hs.now.map((x) => (x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : x)) : hs.now;
+  const vis = box ? shapes.filter((x) => seen(x, box)) : shapes;
   const nums = numbering(vis);
   const sb = box ? toScr(box) : null;
   const grab = (e: PE) => {
@@ -532,7 +567,8 @@ export function Overlay() {
     if (next === "selecting") {
       setBox(null);
       setOut(null);
-      dispatch({ t: "reset" });
+      setPicked(null);
+      restart();
     }
     setLayer(next);
   }
@@ -580,11 +616,16 @@ export function Overlay() {
     if (mod && (k === "z" || k === "y")) {
       e.preventDefault();
       dispatch({ t: k === "y" || e.shiftKey ? "redo" : "undo" });
+    } else if ((e.key === "Delete" || e.key === "Backspace") && picked != null) {
+      e.preventDefault();
+      dispatch({ t: "remove", id: picked });
+      setPicked(null);
     } else if (!mod && !e.altKey && KEYS[k]) setTool(KEYS[k]);
   };
 
   function down(e: PE<HTMLDivElement>) {
     if (e.button !== 0 || !src || !natural.w) return;
+    setPicked(null);
     const p = toImg(e);
     if (layer === "selecting") {
       ix.current = { k: "sel", a: clampP(p), cx: e.clientX, cy: e.clientY, moved: false, r: null };
@@ -615,6 +656,14 @@ export function Overlay() {
     grab(e);
   }
 
+  function startShift(e: PE<SVGCircleElement>, sh: Shape & { at: Pt }) {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    ix.current = { k: "shift", id: sh.id, a: toImg(e), o: sh.at, at: sh.at };
+    setPicked(sh.id);
+    grab(e);
+  }
+
   function startSize(e: PE<HTMLDivElement>, h: Handle) {
     e.stopPropagation();
     if (e.button !== 0 || !box) return;
@@ -640,6 +689,12 @@ export function Overlay() {
       const q = toImg(e);
       setBox({ ...m.o, x: clamp(m.o.x + q.x - m.a.x, 0, natural.w - m.o.w), y: clamp(m.o.y + q.y - m.a.y, 0, natural.h - m.o.h) });
       setCur({ x: e.clientX, y: e.clientY });
+    } else if (m.k === "shift") {
+      const q = toImg(e);
+      const b = box ?? full;
+      const pad = Math.min(M.mark * s, b.w / 2, b.h / 2);
+      m.at = { x: clamp(m.o.x + q.x - m.a.x, b.x + pad, b.x + b.w - pad), y: clamp(m.o.y + q.y - m.a.y, b.y + pad, b.y + b.h - pad) };
+      setNudge({ id: m.id, at: m.at });
     } else if (m.k === "draw") {
       const sh = m.shape;
       if (sh.kind === "arrow" || sh.kind === "rect") m.shape = { ...sh, b: p };
@@ -662,7 +717,10 @@ export function Overlay() {
       /* not captured */
     }
     if (!m) return;
-    if (m.k === "sel") {
+    if (m.k === "shift") {
+      setNudge(null);
+      if (Math.hypot(m.at.x - m.o.x, m.at.y - m.o.y) >= 1) dispatch({ t: "move", id: m.id, at: m.at });
+    } else if (m.k === "sel") {
       if (!m.moved) {
         setBox(full);
         setLayer("annotating");
@@ -685,6 +743,7 @@ export function Overlay() {
   }
 
   function cancel() {
+    if (ix.current?.k === "shift") setNudge(null);
     if (ix.current?.k === "draw") {
       setLive(null);
       setLayer("annotating");
@@ -749,6 +808,30 @@ export function Overlay() {
             </g>
           </svg>
           {sb ? <div className="ov-sel" style={{ left: sb.x, top: sb.y, width: sb.w, height: sb.h }} /> : null}
+          {layer === "annotating" ? (
+            <svg className="ov-grips" style={{ left: ox, top: oy, width: dw, height: dh }} viewBox={`0 0 ${natural.w} ${natural.h}`}>
+              {vis.map((sh) =>
+                sh.kind === "ring" ? (
+                  <g key={sh.id}>
+                    {picked === sh.id ? (
+                      <circle cx={sh.at.x} cy={sh.at.y} r={(M.mark + M.markW + 4) * s} fill="none" stroke="#fff" strokeWidth={1.5 * s} strokeDasharray={`${4 * s} ${3 * s}`} />
+                    ) : null}
+                    <circle
+                      className="ov-grip"
+                      aria-label="Where you pointed"
+                      cx={sh.at.x}
+                      cy={sh.at.y}
+                      r={M.mark * s}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={M.grip * s}
+                      onPointerDown={(e) => startShift(e, sh)}
+                    />
+                  </g>
+                ) : null,
+              )}
+            </svg>
+          ) : null}
           {sb && layer !== "selecting"
             ? HANDLES.map((h) => (
                 <div key={h} className={`ov-h ov-h-${h}`} style={{ left: sb.x + sb.w * HX[h], top: sb.y + sb.h * HY[h] }} onPointerDown={(e) => startSize(e, h)} />
@@ -839,7 +922,7 @@ export function Overlay() {
           </button>
         </div>
       ) : null}
-      {src ? <div className="ov-hud ov-hint">{hint(layer, tool)}</div> : null}
+      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, picked != null)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />

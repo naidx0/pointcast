@@ -144,11 +144,15 @@ pub fn toggle(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     Ok(())
 }
 
-fn frame_payload(shot: &capture::Shot) -> Value {
+/// The frozen frame for the overlay, with where the person pointed (frame pixels) when they want it marked; the
+/// overlay places a ring there as a shape they can move or remove.
+fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
+    let pointer = shot.pointer.filter(|_| mark != settings::MarkPoint::Off);
     json!({
         "png_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &shot.png),
         "width": shot.width,
         "height": shot.height,
+        "pointer": pointer.map(|p| json!({ "x": p.x, "y": p.y })),
     })
 }
 
@@ -161,7 +165,8 @@ fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
         platform::remember_front();
     }
     let shot = svc.begin_region()?;
-    let payload = frame_payload(&shot);
+    let mark = svc.settings.lock().unwrap().mark_point;
+    let payload = frame_payload(&shot, mark);
     let _ = app.emit("overlay://frame", &payload);
     platform::show_overlay(app);
     Ok(payload)
@@ -248,6 +253,9 @@ fn settings_view(svc: &App) -> Value {
         "also_clipboard": s.also_clipboard,
         "export_dir": s.export_dir,
         "zoom_px": s.zoom_px(),
+        "mark_point": s.mark_point,
+        "zoom_target": s.zoom_target,
+        "zoom_sharpen": s.zoom_sharpen,
         "start_at_login": s.start_at_login,
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
@@ -905,6 +913,35 @@ mod tests {
         let back = merge(&cur, p(json!({ "export_dir": "/tmp/x" }))).unwrap();
         let cleared = merge(&back, p(json!({ "export_dir": null }))).unwrap();
         assert_eq!(cleared.export_dir, None);
+    }
+
+    #[test]
+    fn the_overlay_frame_says_where_the_person_pointed_unless_marking_is_off() {
+        let shot = capture::Shot {
+            png: vec![1, 2],
+            width: 4,
+            height: 3,
+            kind: prompt::CaptureKind::Full,
+            cursor: (0, 0),
+            pointer: Some(pointer::Point { t_ms: 9, x: 3, y: 2 }),
+            trail: vec![],
+            map: Default::default(),
+        };
+        let v = frame_payload(&shot, settings::MarkPoint::Ring);
+        assert_eq!((v["width"].clone(), v["pointer"].clone()), (json!(4), json!({ "x": 3, "y": 2 })));
+        assert!(frame_payload(&shot, settings::MarkPoint::Off)["pointer"].is_null());
+        let none = capture::Shot { pointer: None, ..shot };
+        assert!(frame_payload(&none, settings::MarkPoint::Trail)["pointer"].is_null());
+    }
+
+    #[test]
+    fn a_patch_sets_the_capture_marks_and_refuses_unknown_ones() {
+        let p = |v: Value| v.as_object().unwrap().clone();
+        let next = merge(&Settings::default(), p(json!({ "mark_point": "trail", "zoom_target": "window", "zoom_sharpen": false }))).unwrap();
+        assert_eq!((next.mark_point, next.zoom_target, next.zoom_sharpen), (settings::MarkPoint::Trail, settings::ZoomTarget::Window, false));
+        assert!(merge(&next, p(json!({ "mark_point": "sparkles" }))).is_err());
+        let back = merge(&next, p(json!({ "mark_point": null }))).unwrap();
+        assert_eq!(back.mark_point, settings::MarkPoint::Ring);
     }
 
     #[test]
