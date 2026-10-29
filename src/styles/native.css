@@ -1439,3 +1439,56 @@ html.win select.field {
   opacity: 1;
   transform: none;
 }
+/* —— History: a key frame Pointcast picked, which can be taken out —— */
+.prompt-doc .pd-frame {
+  position: relative;
+  display: block;
+  align-self: flex-start;
+  max-width: 100%;
+}
+.prompt-doc .pd-auto,
+.prompt-doc .pd-remove {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.74);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  color: #fff;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.prompt-doc .pd-auto {
+  top: 8px;
+  left: 8px;
+  height: 20px;
+  padding: 0 8px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.prompt-doc .pd-remove {
+  top: 38px;
+  right: 8px;
+  height: 24px;
+  padding: 0 9px 0 7px;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease;
+}
+.prompt-doc .pd-frame:hover .pd-remove,
+.prompt-doc .pd-frame:focus-within .pd-remove {
+  opacity: 1;
+  transform: none;
+}
+.prompt-doc .pd-remove:hover,
+.prompt-doc .pd-remove:focus-visible {
+  background: rgba(196, 43, 28, 0.9);
+}

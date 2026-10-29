@@ -34,6 +34,8 @@ export type SessionExport = {
     height: number;
     labels: Label[];
     data_url: string;
+    /** A key frame Pointcast picked from the recording. */
+    auto: boolean;
   }[];
 };
 
@@ -160,6 +162,8 @@ export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string |
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
 /** Reopen picture n (as `[image n]` numbers it) of a past prompt in the overlay to mark it up again. */
 export const historyEdit = (id: string, n: number) => invoke<void>("history_edit", { id, n });
+/** Take key frame n out of a past prompt; it becomes the last prompt and is copied again. */
+export const historyRemove = (id: string, n: number) => invoke<SessionExport>("history_remove", { id, n });
 export const historyCopy = (id: string) => invoke<void>("history_copy", { id });
 export const historyPaste = (id: string) => invoke<void>("history_paste", { id });
 export const historyDelete = (id: string) => invoke<void>("history_delete", { id });
