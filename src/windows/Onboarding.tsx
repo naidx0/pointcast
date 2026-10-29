@@ -366,11 +366,6 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
   const mac = platform() === "mac";
   const canPaste = !mac || cfg.permissions.accessibility === "granted";
   const [login, setLogin] = useState(cfg.start_at_login);
-  useEffect(() => {
-    // Without Accessibility, macOS drops the synthetic paste: copy instead so nothing is lost.
-    if (!canPaste && cfg.output === "auto_paste") patch({ output: "clipboard" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   return (
     <div className="onb-step">
       <AppIcon />
