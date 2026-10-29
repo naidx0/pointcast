@@ -186,6 +186,8 @@ const on =
 export const onState = on<UiState>("session://state");
 export const onResult = on<SessionExport>("session://result");
 export const onPracticeResult = on<SessionExport>("practice://result");
+/** The session shortcut while the overlay is open: capture what is marked, then finish the recording. */
+export const onOverlayFinish = on<null>("overlay://finish");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
 export const onHistoryChanged = on<{ id: string }>("history://changed");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");

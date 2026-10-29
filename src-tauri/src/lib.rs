@@ -181,13 +181,15 @@ fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
     })
 }
 
+fn overlay_open(app: &AppHandle) -> bool {
+    app.get_webview_window("overlay")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
 /// Show a frame in the overlay, remembering the app in front unless the overlay already is.
 fn show_frame(app: &AppHandle, payload: &Value) {
-    let already = app
-        .get_webview_window("overlay")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    if !already {
+    if !overlay_open(app) {
         platform::remember_front();
     }
     *FRAME.lock().unwrap() = Some(payload.clone());
@@ -266,6 +268,23 @@ fn release_stops(mode: TalkMode, held_from: Option<u64>, now: u64) -> bool {
     mode == TalkMode::Hold && held_from.is_some_and(|t| now.saturating_sub(t) >= HOLD_MS)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Press {
+    Start,
+    Stop,
+    /// The overlay is open: what is marked there goes in first, then the recording stops.
+    CommitThenStop,
+}
+
+/// What pressing the session chord does.
+fn session_press(rec: bool, overlay: bool) -> Press {
+    match (rec, overlay) {
+        (false, _) => Press::Start,
+        (true, false) => Press::Stop,
+        (true, true) => Press::CommitThenStop,
+    }
+}
+
 /// Every shortcut, from the keyboard or the tray. A capture chord with no session starts one.
 pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
     let _ = app.emit("hotkey://fired", json!({ "action": action, "pressed": pressed }));
@@ -279,18 +298,26 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         return;
     }
     match (action, pressed) {
-        (Action::Session, true) => {
-            if rec {
+        (Action::Session, true) => match session_press(rec, rec && overlay_open(app)) {
+            Press::CommitThenStop => {
+                *svc.hold_from.lock().unwrap() = None;
+                let _ = app.emit_to("overlay", "overlay://finish", ());
+            }
+            Press::Stop => {
                 *svc.hold_from.lock().unwrap() = None;
                 finish_soon(app, &svc);
-            } else if begin(app, &svc).is_ok() {
-                *svc.hold_from.lock().unwrap() = Some(now_ms());
             }
-        }
+            Press::Start => {
+                if begin(app, &svc).is_ok() {
+                    *svc.hold_from.lock().unwrap() = Some(now_ms());
+                }
+            }
+        },
         (Action::Session, false) => {
             let from = svc.hold_from.lock().unwrap().take();
             let mode = svc.settings.lock().unwrap().talk_mode;
-            if rec && release_stops(mode, from, now_ms()) {
+            // A release while the overlay is open keeps recording, so the box being drawn is not lost.
+            if rec && release_stops(mode, from, now_ms()) && !overlay_open(app) {
                 finish_soon(app, &svc);
             }
         }
@@ -1146,6 +1173,13 @@ mod tests {
         assert!(!release_stops(TalkMode::Hold, Some(1_000), 1_000 + HOLD_MS - 1));
         assert!(release_stops(TalkMode::Hold, Some(1_000), 1_000 + HOLD_MS));
         assert!(!release_stops(TalkMode::Hold, None, 9_000));
+    }
+
+    #[test]
+    fn the_session_chord_over_the_open_overlay_keeps_the_box_then_stops() {
+        assert_eq!(session_press(false, false), Press::Start);
+        assert_eq!(session_press(true, false), Press::Stop);
+        assert_eq!(session_press(true, true), Press::CommitThenStop);
     }
 
     #[test]

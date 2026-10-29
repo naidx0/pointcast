@@ -13,7 +13,17 @@ import {
   ZoomIn,
   type LucideIcon,
 } from "lucide-react";
-import { inTauri, onOverlayFrame, regionCancel, regionCommit, regionFrame, type ElementMark, type Label } from "@/lib/api";
+import {
+  inTauri,
+  onOverlayFinish,
+  onOverlayFrame,
+  regionCancel,
+  regionCommit,
+  regionFrame,
+  sessionToggle,
+  type ElementMark,
+  type Label,
+} from "@/lib/api";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -493,6 +503,7 @@ export function Overlay() {
   const editRef = useRef<number | null>(null);
   const editNow = useRef(true);
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  const finishRef = useRef<() => void>(() => {});
   const colorRef = useRef(color);
   colorRef.current = color;
   // The outline and the ring placed where the person pointed; starting over brings them back.
@@ -519,8 +530,10 @@ export function Overlay() {
       restart();
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
+    let f: Promise<(() => void) | null> = Promise.resolve(null);
     try {
       u = onOverlayFrame(load).catch(() => null);
+      f = onOverlayFinish(() => finishRef.current()).catch(() => null);
       // Built on demand, this page may have missed the event: ask for the frame it should show.
       if (inTauri) regionFrame().then((f) => f && load(f)).catch(() => undefined);
     } catch {
@@ -554,6 +567,7 @@ export function Overlay() {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
       void u.then((fn) => fn?.());
+      void f.then((fn) => fn?.());
     };
   }, []);
 
@@ -659,6 +673,8 @@ export function Overlay() {
       busy.current = false;
     }
   }
+
+  finishRef.current = () => void commit().then(() => sessionToggle().catch(() => undefined));
 
   keyRef.current = (e: KeyboardEvent) => {
     if (e.isComposing) return;
