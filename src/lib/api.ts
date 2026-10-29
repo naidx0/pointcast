@@ -56,6 +56,7 @@ export type Output = "clipboard" | "auto_paste" | "folder";
 export type TalkMode = "tap" | "hold";
 export type MarkPoint = "off" | "ring" | "trail";
 export type ZoomTarget = "pointer" | "dwell" | "window";
+export type SpokenAnchors = "off" | "ring";
 
 export type Config = {
   platform: string;
@@ -74,6 +75,7 @@ export type Config = {
   zoom_target: ZoomTarget;
   zoom_sharpen: boolean;
   outline_element: boolean;
+  spoken_anchors: SpokenAnchors;
   start_at_login: boolean;
   include_app: boolean;
   hidden: string[];

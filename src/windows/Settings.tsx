@@ -367,6 +367,17 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ mark_point: v })}
           />
         </Row>
+        <Row label="Mark what I say “this” about" sub="When you say this or here, the spot you pointed at then is ringed on the nearest picture.">
+          <Seg
+            label="Mark what I say “this” about"
+            value={cfg.spoken_anchors}
+            options={[
+              ["off", "Off"],
+              ["ring", "Ring"],
+            ]}
+            set={(v) => patch({ spoken_anchors: v })}
+          />
+        </Row>
         <Row label="Outline the control I point at" sub="Names it in the prompt, like button “Place order”. Uses Accessibility on a Mac.">
           <Toggle label="Outline the control I point at" on={cfg.outline_element} set={(v) => patch({ outline_element: v })} />
         </Row>
