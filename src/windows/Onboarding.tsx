@@ -27,7 +27,7 @@ const STEPS = ["welcome", "access", "speech", "keys", "practice", "done"] as con
 type Step = (typeof STEPS)[number];
 
 export function Onboarding() {
-  const { cfg, setCfg, patch, refresh } = useConfig();
+  const { cfg, setCfg, patch, refresh, error } = useConfig();
   // The download keeps going in the background, so the next steps need not wait for it.
   const speech = useSpeechJob(refresh);
   const [step, setStep] = useState<Step>(() => {
@@ -72,6 +72,11 @@ export function Onboarding() {
           <PracticeStep cfg={cfg} downloading={!!speech.job} onBack={() => setStep("speech")} />
         )}
         {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
+        {error ? (
+          <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginTop: 12, maxWidth: 440 }}>
+            {error.replace(/^Error:\s*/, "")}
+          </div>
+        ) : null}
       </div>
       <footer className="onb-foot">
         <div className="dots" aria-label={`Step ${i + 1} of ${STEPS.length}`}>

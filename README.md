@@ -125,18 +125,17 @@ A local MCP server on `127.0.0.1:47821` serves the latest prompt, so Claude Code
 can fetch it themselves. It needs this computer's key and refuses web pages, so a site open in your
 browser cannot read your screenshots.
 
-**Settings → Output → Agent setup → Copy setup** copies the config with the key in it; paste it into
-`.mcp.json` (Claude Code) or `mcp.json` (Cursor):
+**Settings → Output → Agent setup** copies the setup with the key in it, for your user settings only:
+the **Claude Code** button copies a `claude mcp add --scope user` command to run in a terminal, and
+the **Cursor** button copies the server entry to paste into `mcpServers` in `~/.cursor/mcp.json`.
+The key is this computer's, so it never goes in a project file such as `.mcp.json`, which people
+commit. The Cursor entry looks like this:
 
 ```json
-{
-  "mcpServers": {
-    "pointcast": {
-      "type": "http",
-      "url": "http://127.0.0.1:47821/mcp",
-      "headers": { "Authorization": "Bearer <key>" }
-    }
-  }
+"pointcast": {
+  "type": "http",
+  "url": "http://127.0.0.1:47821/mcp",
+  "headers": { "Authorization": "Bearer <key>" }
 }
 ```
 
@@ -146,7 +145,7 @@ macOS, `~/.local/share/dev.pointcast.app` on Linux). Connected an agent before t
 the setup again.
 
 ```bash
-claude mcp add --transport http pointcast http://127.0.0.1:47821/mcp \
+claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp \
   --header "Authorization: Bearer $(cat ~/Library/Application\ Support/dev.pointcast.app/mcp-token)"
 curl -H "Authorization: Bearer <key>" http://127.0.0.1:47821/v1/session
 # JSON-RPC: POST /mcp with tools/list, then tools/call get_latest_session
@@ -155,6 +154,8 @@ curl -H "Authorization: Bearer <key>" http://127.0.0.1:47821/v1/session
 ## Privacy
 
 - Audio stays in memory and is dropped once it is transcribed.
+- The last 100 prompts, words and pictures, are kept in Pointcast's data folder on this computer
+  until you delete them in **History**. They never leave it unless you paste or share them.
 - Pointcast's own windows are excluded from every capture by the OS.
 - Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
   RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out

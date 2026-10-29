@@ -81,6 +81,9 @@
         }
         $asset = $rel.assets | Where-Object { $_.name -like '*x64-setup.exe' } | Select-Object -First 1
         if (-not $asset) { return Stop-Install "the latest release ($($rel.tag_name)) has no Windows download yet. See $releases." }
+        # GitHub lists a SHA-256 for every upload; without one the download cannot be checked.
+        $want = if ("$($asset.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { $Matches[1] } else { '' }
+        if (-not $want) { return Stop-Install "GitHub lists no SHA-256 for $($asset.name), so the download cannot be checked. See $releases." }
         $setup = Join-Path $env:TEMP $asset.name
         Say "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)..."
         try {
@@ -88,12 +91,19 @@
         } catch {
             return Stop-Install "the download did not finish. Check your connection and run this again."
         }
+        if ((Get-FileHash -Algorithm SHA256 -Path $setup).Hash -ne $want) {
+            Remove-Item $setup -ErrorAction SilentlyContinue
+            return Stop-Install "the download does not match the SHA-256 GitHub lists for it, so it was deleted. Run this again, or download the setup from $releases."
+        }
     }
     Unblock-File -Path $setup -ErrorAction SilentlyContinue
 
     # An update replaces the running app; Pointcast keeps what you were recording for its next start.
-    $stopped = [bool](Get-Process -Name pointcast -ErrorAction SilentlyContinue)
-    Get-Process -Name pointcast -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Only this Windows session's copy: other signed-in users keep theirs.
+    $session = (Get-Process -Id $PID).SessionId
+    $running = @(Get-Process -Name pointcast -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
+    $stopped = $running.Count -gt 0
+    $running | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
 
     Say $(if ($had) { "Updating..." } else { "Installing..." })

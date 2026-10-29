@@ -20,7 +20,7 @@ import {
   type LucideProps,
 } from "lucide-react";
 
-/** One icon set (Lucide) matching Sequence Nova stroke weight. */
+/** One icon set (Lucide) at one stroke weight. */
 const base: LucideProps = {
   size: 16,
   strokeWidth: 1.75,

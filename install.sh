@@ -50,11 +50,23 @@ else
   403 | 429) fail "GitHub is limiting requests from your network. Try again in a few minutes, or download the .dmg from $RELEASES." ;;
   *) fail "GitHub answered $code. Try again in a minute." ;;
   esac
-  url=$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*\.dmg"' | head -1 | sed -E 's/.*"(https[^"]*)"$/\1/' || true)
+  # The first .dmg asset: its address, then the SHA-256 GitHub lists for it.
+  pick=$(printf '%s' "$json" | tr ',{}' '\n\n\n' | awk '
+    function flush() { if (u ~ /[.]dmg$/ && !done) { print u; print d; done = 1 } }
+    /^ *"name":/ { flush(); u = ""; d = "" }
+    /^ *"digest":/ { d = $0; sub(/^[^:]*: */, "", d); gsub(/"/, "", d) }
+    /^ *"browser_download_url":/ { u = $0; sub(/^[^:]*: */, "", u); gsub(/"/, "", u) }
+    END { flush() }') || true
+  url=$(printf '%s\n' "$pick" | sed -n 1p)
+  want=$(printf '%s\n' "$pick" | sed -n 2p | sed 's/^sha256://' | tr 'A-F' 'a-f')
   [ -n "$url" ] || fail "the latest release has no macOS download yet. See $RELEASES."
+  printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' ||
+    fail "GitHub lists no SHA-256 for this download, so it cannot be checked. See $RELEASES."
   say "Downloading $(basename "$url")..."
   curl -fL --progress-bar -o "$tmp/Pointcast.dmg" "$url" ||
     fail "the download did not finish. Check your connection and run this again."
+  got=$(shasum -a 256 "$tmp/Pointcast.dmg" | awk '{print $1}')
+  [ "$got" = "$want" ] || fail "the download does not match the SHA-256 GitHub lists for it. Run this again, or download the .dmg from $RELEASES."
   dmg=$tmp/Pointcast.dmg
 fi
 

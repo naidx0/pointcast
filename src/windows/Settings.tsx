@@ -39,7 +39,7 @@ type Pane = (typeof PANES)[number]["id"];
 type Patch = (p: Record<string, unknown>) => Promise<string | null>;
 
 export function Settings() {
-  const { cfg, setCfg, patch, refresh } = useConfig();
+  const { cfg, setCfg, patch, refresh, error } = useConfig();
   const [pane, setPane] = useState<Pane>(() => {
     const q = new URLSearchParams(location.search).get("pane");
     return PANES.some((p) => p.id === q) ? (q as Pane) : "general";
@@ -90,6 +90,11 @@ export function Settings() {
           </h1>
         </div>
         <div className="prefs-pane">
+          {error ? (
+            <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginBottom: 12 }}>
+              {error.replace(/^Error:\s*/, "")}
+            </div>
+          ) : null}
           {!cfg ? null : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -283,18 +288,22 @@ function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
       setState("idle");
     }
   };
-  const sub =
-    error ??
-    cfg.update_failure ??
-    (installing
-      ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
-      : found
+  const checked = cfg.update_checked;
+  const sub = installing
+    ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
+    : (error ??
+      cfg.update_failure ??
+      (found
         ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
         : state === "checking"
           ? "Checking…"
           : state === "latest"
             ? `${cfg.version} is the latest version.`
-            : `Version ${cfg.version}.`);
+            : checked?.error
+              ? `Could not check for updates: ${checked.error}`
+              : checked && !checked.version
+                ? `${cfg.version} is the latest version.`
+                : `Version ${cfg.version}.`));
   return (
     <div className="group">
       <Row label={found ? `Pointcast ${found} is available` : "Pointcast"} sub={sub}>

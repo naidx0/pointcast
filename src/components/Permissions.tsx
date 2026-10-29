@@ -110,9 +110,16 @@ export function PermissionRows({
             {s === "granted" ? (
               <span className="badge ok">Allowed</span>
             ) : s === "denied" || asked[k] ? (
-              <button type="button" className="btn" onClick={() => permissionOpen(k).catch(() => undefined)}>
-                Open {settingsName}
-              </button>
+              <div style={{ display: "flex", gap: 8, flex: "none" }}>
+                {s === "denied" ? (
+                  <button type="button" className="btn primary" onClick={() => allow(k)}>
+                    Allow…
+                  </button>
+                ) : null}
+                <button type="button" className="btn" onClick={() => permissionOpen(k).catch(() => undefined)}>
+                  Open {settingsName}
+                </button>
+              </div>
             ) : (
               <button type="button" className="btn primary" onClick={() => allow(k)}>
                 Allow…

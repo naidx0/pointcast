@@ -102,7 +102,7 @@ Artifacts land under `src-tauri/target/release/bundle/`:
 | macOS | `.app`, `.dmg` (CI universal) |
 | Windows | `.msi` / `.exe` (CI) |
 
-Copy a Linux release into `/opt/cursor/artifacts/` when packaging demos.
+Copy a Linux release into a folder of your own when packaging demos.
 
 ## Recording a demo (30–60s)
 
