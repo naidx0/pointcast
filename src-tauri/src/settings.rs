@@ -25,6 +25,16 @@ pub enum MarkPoint {
     Trail,
 }
 
+/// What happens, at stop, where the person pointed when they said "this" or "here".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpokenAnchors {
+    Off,
+    /// A ring on the picture nearest in time.
+    #[default]
+    Ring,
+}
+
 /// What a close-up centres on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +83,8 @@ pub struct Settings {
     /// Outline the control under where the person pointed and name it in the prompt.
     #[serde(default = "yes")]
     pub outline_element: bool,
+    #[serde(default)]
+    pub spoken_anchors: SpokenAnchors,
     #[serde(default)]
     pub start_at_login: bool,
     #[serde(default)]
@@ -123,6 +135,7 @@ impl Default for Settings {
             zoom_target: ZoomTarget::default(),
             zoom_sharpen: true,
             outline_element: true,
+            spoken_anchors: SpokenAnchors::default(),
             start_at_login: false,
             include_app: false,
             hidden: None,
@@ -257,6 +270,7 @@ mod tests {
         assert!(old.onboarded && old.zoom_px == 640);
         assert_eq!((old.mark_point, old.zoom_target, old.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
         assert!(old.outline_element, "outlines are on for a file from before they existed");
+        assert_eq!(old.spoken_anchors, SpokenAnchors::Ring, "and so are spoken anchors");
         std::fs::write(&path, r#"{"mark_point":"off","zoom_target":"pointer"}"#).unwrap();
         let off = Settings::load(&path);
         assert_eq!((off.mark_point, off.zoom_target), (MarkPoint::Off, ZoomTarget::Pointer));
@@ -264,6 +278,10 @@ mod tests {
         quiet.save(&path).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains(r#""outline_element": false"#));
         assert_eq!(Settings::load(&path), quiet);
+        let mute = Settings { spoken_anchors: SpokenAnchors::Off, ..Settings::default() };
+        mute.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""spoken_anchors": "off""#));
+        assert_eq!(Settings::load(&path), mute);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

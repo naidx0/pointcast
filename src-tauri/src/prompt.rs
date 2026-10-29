@@ -33,7 +33,7 @@ pub struct Label {
 }
 
 /// One screenshot held with the session (PNG bytes stay with it until export).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Capture {
     pub id: u32,
     pub kind: CaptureKind,
@@ -52,10 +52,16 @@ pub struct Capture {
     /// The control the person pointed at, its rect in picture pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element: Option<crate::element::ElementMark>,
+    /// How screen positions land in the picture; none for a region, which the overlay cropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<crate::capture::Place>,
+    /// Rings added at stop where the person said "this" or "here", in picture pixels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<crate::pointer::Point>,
 }
 
 /// A session item: speech from `t_ms` to `end_ms`, or a picture taken at `t_ms`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Item {
     Speech {
@@ -373,6 +379,8 @@ mod tests {
                 pointer: None,
                 trail: vec![],
                 element: None,
+                place: None,
+                anchors: vec![],
             },
         }
     }
