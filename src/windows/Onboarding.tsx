@@ -3,7 +3,7 @@ import { enable as autostartOn, disable as autostartOff } from "@tauri-apps/plug
 import { AudioLines, Check, ClipboardPaste, Keyboard, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
-import { ModelPicker, speechReady } from "@/components/Models";
+import { ModelPicker, speechReady, useSpeechJob } from "@/components/Models";
 import {
   hotkeyTest,
   inTauri,
@@ -28,6 +28,8 @@ type Step = (typeof STEPS)[number];
 
 export function Onboarding() {
   const { cfg, setCfg, patch, refresh } = useConfig();
+  // The download keeps going in the background, so the next steps need not wait for it.
+  const speech = useSpeechJob(refresh);
   const [step, setStep] = useState<Step>(() => {
     const q = new URLSearchParams(location.search).get("step");
     return (STEPS as readonly string[]).includes(q ?? "") ? (q as Step) : "welcome";
@@ -47,7 +49,7 @@ export function Onboarding() {
   const next: Record<Step, { label: string; enabled?: boolean; skip?: string }> = {
     welcome: { label: "Get Started" },
     access: { label: "Continue" },
-    speech: { label: "Continue", enabled: speechReady(cfg), skip: "Skip for Now" },
+    speech: { label: "Continue", enabled: speechReady(cfg) || !!speech.job, skip: "Skip for Now" },
     keys: { label: "Continue" },
     practice: { label: "Continue", skip: "Skip" },
     done: { label: "Start Using Pointcast" },
@@ -61,7 +63,9 @@ export function Onboarding() {
         {step === "access" && <AccessStep cfg={cfg} />}
         {step === "speech" && <SpeechStep cfg={cfg} patch={patch} refresh={refresh} />}
         {step === "keys" && <KeysStep cfg={cfg} patch={patch} setCfg={setCfg} />}
-        {step === "practice" && <PracticeStep cfg={cfg} onBack={() => setStep("speech")} />}
+        {step === "practice" && (
+          <PracticeStep cfg={cfg} downloading={!!speech.job} onBack={() => setStep("speech")} />
+        )}
         {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
       </div>
       <footer className="onb-foot">
@@ -263,7 +267,7 @@ function KeysStep({
   );
 }
 
-function PracticeStep({ cfg, onBack }: { cfg: Config; onBack: () => void }) {
+function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: boolean; onBack: () => void }) {
   const [st, setSt] = useState<UiState | null>(null);
   const [result, setResult] = useState<SessionExport | null>(null);
   const [seen, setSeen] = useState({ started: false, spoke: false, marked: false });
@@ -307,7 +311,11 @@ function PracticeStep({ cfg, onBack }: { cfg: Config; onBack: () => void }) {
       <p className="t-body">
         A real run, start to finish. Nothing is pasted anywhere; the prompt shows up here.
       </p>
-      {!speechReady(cfg) ? (
+      {downloading ? (
+        <p className="t-caption" style={{ marginTop: -12, marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
+          <span className="spinner" /> The speech model is still downloading. Wait for it, or try captures now.
+        </p>
+      ) : !speechReady(cfg) ? (
         <p className="t-caption" style={{ marginTop: -12, marginBottom: 16 }}>
           No speech model yet, so your words won’t be written down.{" "}
           <button type="button" className="link" onClick={onBack}>

@@ -69,6 +69,9 @@ pub struct App {
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    pub history: crate::history::Store,
+    /// The history entry of the last finished prompt.
+    pub last_id: Mutex<Option<String>>,
     freeze: Mutex<Option<Shot>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
@@ -116,6 +119,8 @@ impl App {
             freeze: Mutex::default(),
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
+            history: crate::history::Store::new(&crate::settings::data_dir()),
+            last_id: Mutex::default(),
             practice: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
             hold_from: Mutex::default(),
@@ -260,18 +265,27 @@ impl App {
         if cancel {
             self.items.lock().unwrap().clear();
             *self.t0.lock().unwrap() = None;
+            self.history.clear_checkpoint();
             self.state.lock().unwrap().phase = Phase::Idle;
             return Ok(None);
         }
         let items = prompt::ordered(self.items.lock().unwrap().clone());
         let exp = prompt::assemble_export(&items);
+        self.history.clear_checkpoint();
         if self.practice.load(Ordering::SeqCst) {
             self.state.lock().unwrap().phase = Phase::Ready;
             return Ok(Some(exp));
         }
         *self.last_export.lock().unwrap() = Some(exp.clone());
+        if !items.is_empty() {
+            let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+            if let Ok(m) = self.history.save(&items, t0, now_ms().saturating_sub(t0)) {
+                *self.last_id.lock().unwrap() = Some(m.id);
+            }
+        }
         let settings = self.settings.lock().unwrap().clone();
-        if settings.output == OutputMode::Folder || settings.also_clipboard {
+        // History keeps every prompt; a folder in Documents only when the user chose Save.
+        if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings);
             let _ = std::fs::create_dir_all(&dir);
             if let Ok(p) = prompt::export_folder(&items, &dir) {
@@ -281,6 +295,19 @@ impl App {
         let _ = crate::clipboard::deliver(&items, settings.output, settings.also_clipboard);
         self.state.lock().unwrap().phase = Phase::Ready;
         Ok(Some(exp))
+    }
+
+    /// Quitting mid-recording: finish transcribing into the checkpoint and leave it there; the
+    /// next launch turns it into a history entry.
+    pub fn flush_for_quit(&self) {
+        if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
+            return;
+        }
+        self.stop.store(true, Ordering::SeqCst);
+        self.mic.lock().unwrap().take();
+        if let Some(w) = self.worker.lock().unwrap().take() {
+            let _ = w.join();
+        }
     }
 
     /// Open the mic without a session; `level()` reads it.
@@ -384,8 +411,22 @@ impl App {
         now_ms().saturating_sub(t0)
     }
 
+    /// Add to the recording and checkpoint it, so a crash from here on loses nothing.
     fn push(&self, item: Item) {
-        self.items.lock().unwrap().push(item);
+        let mut v = self.items.lock().unwrap();
+        v.push(item);
+        if !self.practice.load(Ordering::SeqCst) {
+            let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+            let _ = self.history.checkpoint(&v, t0);
+        }
+    }
+
+    /// Make a history entry the one "Paste Last Prompt" uses.
+    pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
+        let exp = self.history.export(id)?;
+        *self.last_export.lock().unwrap() = Some(exp.clone());
+        *self.last_id.lock().unwrap() = Some(id.to_string());
+        Ok(exp)
     }
 
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {

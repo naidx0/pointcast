@@ -102,7 +102,10 @@ export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 export const copyAgain = () => invoke<void>("copy_again");
 export const pasteAgain = () => invoke<void>("paste_again");
-export const downloadModel = (id: string) => invoke<void>("download_model", { id });
+export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: string; received?: number; total?: number };
+export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
+export const speechCancel = () => invoke<void>("speech_cancel");
+export const speechStatus = () => invoke<SpeechProgress | null>("speech_status");
 export const permissionsGet = () => invoke<Permissions>("permissions_get");
 export const permissionRequest = (kind: PermissionKind) => invoke<Permissions>("permission_request", { kind });
 export const permissionOpen = (kind: PermissionKind) => invoke<void>("permission_open", { kind });
@@ -118,6 +121,21 @@ export const onboardingFinish = () => invoke<void>("onboarding_finish");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
 export const platformInfo = () => invoke<{ os: string; materials: boolean }>("platform_info");
 
+export type HistoryMeta = {
+  id: string;
+  created_ms: number;
+  duration_ms: number;
+  preview: string;
+  images: number;
+  recovered: boolean;
+};
+export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
+export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
+export const historyCopy = (id: string) => invoke<void>("history_copy", { id });
+export const historyPaste = (id: string) => invoke<void>("history_paste", { id });
+export const historyDelete = (id: string) => invoke<void>("history_delete", { id });
+export const historyClear = () => invoke<void>("history_clear");
+
 const on =
   <T,>(name: string) =>
   (fn: (p: T) => void): Promise<UnlistenFn> =>
@@ -127,9 +145,7 @@ export const onState = on<UiState>("session://state");
 export const onResult = on<SessionExport>("session://result");
 export const onPracticeResult = on<SessionExport>("practice://result");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
-export const onSpeechProgress = on<{ state?: string; received?: number; total?: number; part?: string }>(
-  "speech://progress",
-);
+export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");

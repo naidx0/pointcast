@@ -1,6 +1,7 @@
 mod capture;
 mod chord;
 mod clipboard;
+mod history;
 mod image_ops;
 mod mcp;
 mod overlay;
@@ -21,7 +22,7 @@ use serde_json::{json, Value};
 use session::{now_ms, App, Phase};
 use settings::Settings;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use voice::ptt::TalkMode;
 
@@ -103,6 +104,14 @@ fn finish_soon(app: &AppHandle, svc: &Arc<App>) {
     std::thread::spawn(move || {
         let _ = finish(&app, &svc);
     });
+}
+
+/// Quit, even mid-recording: what was said is transcribed and kept for the next launch.
+pub fn quit(app: &AppHandle) {
+    if let Some(svc) = app.try_state::<Arc<App>>() {
+        svc.flush_for_quit();
+    }
+    app.exit(0);
 }
 
 pub fn toggle(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
@@ -382,9 +391,51 @@ fn open_folder(path: String) -> Result<(), String> {
 }
 
 fn copy_last(svc: &App) -> Result<(), String> {
-    let items = svc.last_export().ok_or("no session yet")?;
+    let exp = svc.last_export().ok_or("no session yet")?;
+    copy_export(&exp)
+}
+
+fn copy_export(exp: &SessionExport) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_html(&items.html, Some(&items.plain)).map_err(|e| e.to_string())
+    if exp.images.is_empty() {
+        return cb.set_text(&exp.plain).map_err(|e| e.to_string());
+    }
+    cb.set_html(&exp.html, Some(&exp.plain)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_list(svc: tauri::State<'_, Arc<App>>) -> Value {
+    json!({ "entries": svc.history.list(), "last": *svc.last_id.lock().unwrap() })
+}
+
+#[tauri::command]
+fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExport, String> {
+    svc.history.export(&id)
+}
+
+/// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.
+#[tauri::command]
+fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    copy_export(&svc.set_last(&id)?)
+}
+
+#[tauri::command]
+fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    copy_export(&svc.set_last(&id)?)?;
+    hide_window(&app, "result");
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    clipboard::paste_now()
+}
+
+#[tauri::command]
+fn history_delete(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    svc.history.delete(&id)
+}
+
+#[tauri::command]
+fn history_clear(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    *svc.last_id.lock().unwrap() = None;
+    svc.history.clear()
 }
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {
@@ -702,6 +753,12 @@ pub fn run() {
             copy_again,
             paste_again,
             speech_setup,
+            history_list,
+            history_get,
+            history_copy,
+            history_paste,
+            history_delete,
+            history_clear,
             speech_cancel,
             speech_status,
             permissions_get,
@@ -735,6 +792,12 @@ pub fn run() {
                 }
             }
             platform::protect(&handle, !settings.include_app);
+            if let Some(m) = svc.history.recover() {
+                let _ = svc.set_last(&m.id);
+                show_window(&handle, "result");
+            } else if let Some(m) = svc.history.list().first() {
+                let _ = svc.set_last(&m.id);
+            }
             let svc3 = svc.clone();
             std::thread::spawn(move || {
                 let _ = svc3.ensure_engine();

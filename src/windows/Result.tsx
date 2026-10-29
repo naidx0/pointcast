@@ -1,40 +1,80 @@
-import { useEffect, useState } from "react";
-import { ClipboardPaste, Copy, FolderOpen, Send } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { ClipboardPaste, Copy, FolderOpen, Send, Trash2 } from "lucide-react";
 import {
-  copyAgain,
   detectTools,
+  historyCopy,
+  historyDelete,
+  historyGet,
+  historyList,
+  historyPaste,
   inTauri,
   lastFolder,
-  lastPrompt,
   onResult,
   openFolder,
   openTool,
-  pasteAgain,
   preview,
   sendToTool,
   subscribe,
   type DetectedTool,
+  type HistoryMeta,
   type SessionExport,
 } from "@/lib/api";
 import { platform } from "@/lib/theme";
 
-/** The last prompt, as it will read in the AI tool: words with the pictures where they were taken. */
+/** Every prompt you made, newest first; the selected one as it will read in the AI tool. */
 export function Result() {
+  const [entries, setEntries] = useState<HistoryMeta[]>([]);
+  const [sel, setSel] = useState<string | null>(null);
   const [exp, setExp] = useState<SessionExport | null>(null);
   const [done, setDone] = useState<"" | "copied" | "pasted">("");
   const [tools, setTools] = useState<DetectedTool[]>([]);
+  const [folder, setFolder] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const mac = platform() === "mac";
+
+  const load = useCallback(async (pick?: string | null) => {
+    if (!inTauri) {
+      if (preview) {
+        setEntries(PREVIEW_ENTRIES);
+        setSel((s) => pick ?? s ?? PREVIEW_ENTRIES[0].id);
+        setExp(PREVIEW_EXPORT);
+      }
+      return;
+    }
+    const h = await historyList().catch(() => ({ entries: [] as HistoryMeta[], last: null }));
+    setEntries(h.entries);
+    setSel((s) => {
+      const want = pick ?? s ?? h.last ?? h.entries[0]?.id ?? null;
+      return h.entries.some((e) => e.id === want) ? want : (h.entries[0]?.id ?? null);
+    });
+    lastFolder()
+      .then(setFolder)
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
-    if (inTauri) {
-      lastPrompt().then(setExp).catch(() => undefined);
-      detectTools().then(setTools).catch(() => undefined);
-    } else if (preview) {
-      setExp(PREVIEW_EXPORT);
-      setTools(PREVIEW_TOOLS);
-    }
-    return subscribe(onResult(setExp));
-  }, []);
+    load();
+    if (inTauri) detectTools().then(setTools).catch(() => undefined);
+    else if (preview) setTools(PREVIEW_TOOLS);
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    const off = subscribe(onResult(() => load(null)));
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      off();
+    };
+  }, [load]);
+
+  useEffect(() => {
+    if (!sel || !inTauri) return;
+    let live = true;
+    historyGet(sel)
+      .then((e) => live && setExp(e))
+      .catch(() => live && setExp(null));
+    return () => {
+      live = false;
+    };
+  }, [sel]);
 
   const flash = (k: "copied" | "pasted") => {
     setDone(k);
@@ -45,29 +85,28 @@ export function Result() {
     try {
       if (inTauri) await f();
       if (k) flash(k);
+    } catch {
+      /* the button simply does not flash */
     } finally {
       setBusy(false);
     }
   };
 
   const ai = tools.filter((t) => t.kind === "ai");
-  const words = exp ? exp.plain.replace(/\[image[^\]]*\]/g, "").split(/\s+/).filter(Boolean).length : 0;
-  const mac = platform() === "mac";
+  const cur = entries.find((e) => e.id === sel);
 
   return (
     <div className="result">
       <header className="result-bar drag">
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="t-head" style={{ fontSize: 14 }}>
-            Last Prompt
+            History
           </div>
-          {exp ? (
-            <div className="t-small">
-              {words} words · {exp.images.length} {exp.images.length === 1 ? "picture" : "pictures"}
-            </div>
-          ) : null}
+          <div className="t-small">
+            {entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " "}
+          </div>
         </div>
-        {exp ? (
+        {sel && exp ? (
           <>
             {ai.map((t) => (
               <button
@@ -77,33 +116,44 @@ export function Result() {
                 title={`Copy and paste into ${t.name}`}
                 disabled={busy}
                 onClick={() =>
-                  run(() =>
-                    sendToTool(t.id).catch(async () => {
-                      await copyAgain();
-                      await openTool(t.id);
-                    }),
-                  )
+                  run(async () => {
+                    await historyCopy(sel);
+                    await sendToTool(t.id).catch(() => openTool(t.id));
+                  })
                 }
               >
                 <Send size={13} />
                 {t.name}
               </button>
             ))}
+            {folder && sel === entries[0]?.id ? (
+              <button
+                type="button"
+                className="btn icon"
+                title="Show in folder"
+                aria-label="Show in folder"
+                onClick={() => run(() => openFolder(folder))}
+              >
+                <FolderOpen size={15} />
+              </button>
+            ) : null}
             <button
               type="button"
               className="btn icon"
-              title="Show in folder"
-              aria-label="Show in folder"
+              title="Delete"
+              aria-label="Delete this prompt"
+              disabled={busy}
               onClick={() =>
                 run(async () => {
-                  const p = await lastFolder();
-                  if (p) await openFolder(p);
+                  await historyDelete(sel);
+                  setSel(null);
+                  await load(null);
                 })
               }
             >
-              <FolderOpen size={15} />
+              <Trash2 size={15} />
             </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => run(copyAgain, "copied")}>
+            <button type="button" className="btn" disabled={busy} onClick={() => run(() => historyCopy(sel), "copied")}>
               <Copy size={14} />
               {done === "copied" ? "Copied" : "Copy"}
             </button>
@@ -112,7 +162,7 @@ export function Result() {
               className="btn primary"
               title={`Paste into the app behind this window (${mac ? "⌘V" : "Ctrl+V"})`}
               disabled={busy}
-              onClick={() => run(pasteAgain, "pasted")}
+              onClick={() => run(() => historyPaste(sel), "pasted")}
             >
               <ClipboardPaste size={14} />
               {done === "pasted" ? "Pasted" : "Paste into App"}
@@ -120,22 +170,62 @@ export function Result() {
           </>
         ) : null}
       </header>
-      <main className="result-body">
-        {exp ? (
-          <PromptDoc exp={exp} />
-        ) : (
-          <div style={{ height: "100%", display: "grid", placeItems: "center", textAlign: "center" }}>
-            <div>
-              <div className="t-head">No prompt yet</div>
-              <p className="t-caption" style={{ marginTop: 4 }}>
-                Start a recording from the {mac ? "menu bar" : "tray"} and it will show up here.
+      {entries.length ? (
+        <div className="hist">
+          <nav className="hist-list" aria-label="Past prompts">
+            {entries.map((e) => (
+              <button
+                key={e.id}
+                type="button"
+                className="hist-item"
+                aria-current={e.id === sel ? "true" : undefined}
+                onClick={() => setSel(e.id)}
+              >
+                <span className="hist-when">
+                  {when(e.created_ms)}
+                  {e.recovered ? <span className="badge warn hist-tag">Recovered</span> : null}
+                </span>
+                <span className="hist-text">{e.preview || (e.images ? "Pictures only" : "Empty")}</span>
+                {e.images ? (
+                  <span className="t-small">
+                    {e.images} {e.images === 1 ? "picture" : "pictures"}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </nav>
+          <main className="result-body">
+            {cur?.recovered ? (
+              <p className="t-caption" style={{ margin: "0 0 14px", color: "var(--orange-ink)" }}>
+                Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
-            </div>
+            ) : null}
+            {exp ? <PromptDoc exp={exp} /> : null}
+          </main>
+        </div>
+      ) : (
+        <main className="result-body" style={{ display: "grid", placeItems: "center", textAlign: "center" }}>
+          <div>
+            <div className="t-head">No prompts yet</div>
+            <p className="t-caption" style={{ marginTop: 4 }}>
+              Each recording you finish is kept here, on this computer.
+            </p>
           </div>
-        )}
-      </main>
+        </main>
+      )}
     </div>
   );
+}
+
+function when(ms: number) {
+  const d = new Date(ms);
+  const today = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === today.toDateString()) return `Today, ${time}`;
+  const y = new Date(today);
+  y.setDate(today.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `Yesterday, ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
 export function PromptDoc({ exp }: { exp: SessionExport }) {
@@ -161,6 +251,33 @@ export function PromptDoc({ exp }: { exp: SessionExport }) {
 const PREVIEW_TOOLS: DetectedTool[] = [
   { id: "claude", name: "Claude", path: "/preview", kind: "ai" },
   { id: "chatgpt", name: "ChatGPT", path: "/preview", kind: "ai" },
+];
+
+const PREVIEW_ENTRIES: HistoryMeta[] = [
+  {
+    id: "a",
+    created_ms: Date.now() - 60_000,
+    duration_ms: 16_000,
+    preview: "The Place order button is sitting on top of the total. I boxed it and dropped a pin.",
+    images: 1,
+    recovered: false,
+  },
+  {
+    id: "b",
+    created_ms: Date.now() - 3_600_000,
+    duration_ms: 9_000,
+    preview: "Reply to Sam: the build is green, ship it after lunch.",
+    images: 0,
+    recovered: true,
+  },
+  {
+    id: "c",
+    created_ms: Date.now() - 90_000_000,
+    duration_ms: 31_000,
+    preview: "Why does this chart's y axis start at forty?",
+    images: 2,
+    recovered: false,
+  },
 ];
 
 const PREVIEW_EXPORT: SessionExport = {

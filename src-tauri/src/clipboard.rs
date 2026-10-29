@@ -8,6 +8,11 @@ pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
         return Err("nothing to copy".into());
     }
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    // Words only: plain text, exactly what a dictation app would type.
+    if !items.iter().any(|i| matches!(i, Item::Image { .. })) {
+        cb.set_text(&payload.plain).map_err(|e| e.to_string())?;
+        return Ok((payload.html, payload.plain));
+    }
     // HTML with plain fallback: ChatGPT / Claude / Slack pick up inline images from the HTML.
     match cb.set_html(&payload.html, Some(&payload.plain)) {
         Ok(()) => {}

@@ -1221,3 +1221,64 @@ html.vibrant.mac .result-body {
     transition-duration: 1ms !important;
   }
 }
+
+/* —— History (the Last Prompt window) —— */
+.hist {
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  min-height: 0;
+}
+.hist-list {
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 0.5px solid var(--sep);
+  background: var(--sidebar);
+}
+html.win .hist-list {
+  border-right: 1px solid var(--box-line);
+}
+.hist-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label);
+  text-align: left;
+}
+.hist-item:hover {
+  background: var(--fill);
+}
+.hist-item[aria-current="true"] {
+  background: var(--accent-wash);
+}
+html.win .hist-item {
+  border-radius: 4px;
+}
+.hist-when {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--label-2);
+}
+.hist-tag {
+  height: 16px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+.hist-text {
+  font-size: var(--fs-caption);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

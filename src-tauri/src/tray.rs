@@ -42,7 +42,7 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
     let region = item(app, "region", "Capture Region…", Some(s.region_chord().accelerator()))?;
     let zoom = item(app, "zoom", "Capture Around Pointer", Some(s.zoom_chord().accelerator()))?;
     let paste = item(app, "paste", "Paste Last Prompt", None)?;
-    let last = item(app, "last", "Show Last Prompt…", None)?;
+    let last = item(app, "last", "History…", None)?;
     let settings = item(app, "settings", "Settings…", Some("CmdOrCtrl+,".into()))?;
     let setup = item(app, "setup", "Setup Assistant…", None)?;
     let quit = item(app, "quit", "Quit Pointcast", Some("CmdOrCtrl+Q".into()))?;
@@ -78,7 +78,7 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
                 "last" => crate::show_window(app, "result"),
                 "settings" => crate::show_window(app, "settings"),
                 "setup" => crate::show_window(app, "onboarding"),
-                "quit" => app.exit(0),
+                "quit" => crate::quit(app),
                 _ => {}
             }
         });

@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import {
-  downloadModel,
   inTauri,
   MODEL_INFO,
   onSpeechDone,
   onSpeechProgress,
+  speechCancel,
+  speechSetup,
+  speechStatus,
   subscribe,
   type Config,
+  type SpeechProgress,
 } from "@/lib/api";
 
 export function chosenModel(cfg: Config) {
@@ -19,7 +22,45 @@ export function speechReady(cfg: Config) {
   return !!cfg.speech.runtime?.installed && !!cfg.speech.models?.some((m) => m.id === id && m.installed);
 }
 
-/** Pick an on-device model and download it (runtime first, if missing) with live progress. */
+const shortName = (name: string) => name.replace(/ v2.*$/, "");
+const mbText = (b: number) => `${Math.round(b / 1_000_000)} MB`;
+
+/** The one setup job (engine + model) as every window sees it, including one started elsewhere. */
+export function useSpeechJob(refresh: () => void) {
+  const [job, setJob] = useState<SpeechProgress | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (inTauri) speechStatus().then((p) => p && setJob(p)).catch(() => undefined);
+    return subscribe(
+      onSpeechProgress((p) => {
+        setError("");
+        setJob(p);
+      }),
+      onSpeechDone((d) => {
+        setJob(null);
+        if (!d.ok) setError(d.error || "Setup did not finish. Try again.");
+        refresh();
+      }),
+    );
+  }, [refresh]);
+
+  async function start(id: string, cfg: Config, patch: (p: Record<string, unknown>) => Promise<string | null>) {
+    setError("");
+    setJob({ phase: "download", received: 0, total: 0 });
+    if (!inTauri) return simulate(id, cfg, patch, setJob);
+    try {
+      await speechSetup(id);
+    } catch (e) {
+      setJob(null);
+      setError(String(e));
+    }
+  }
+
+  return { job, error, start, cancel: () => (inTauri ? speechCancel() : setJob(null)) };
+}
+
+/** Pick an on-device model and install it: one button, one progress bar, checked before "ready". */
 export function ModelPicker({
   cfg,
   patch,
@@ -29,83 +70,15 @@ export function ModelPicker({
   patch: (p: Record<string, unknown>) => Promise<string | null>;
   refresh: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [pct, setPct] = useState<number | null>(null);
-  const [step, setStep] = useState("");
-  const [err, setErr] = useState("");
+  const { job, error, start, cancel } = useSpeechJob(refresh);
   const chosen = chosenModel(cfg);
   const models = [...(cfg.speech.models ?? [])].sort((a, b) =>
     a.id === cfg.recommended ? -1 : b.id === cfg.recommended ? 1 : 0,
   );
   const ready = speechReady(cfg);
-  const chosenRef = useRefValue(chosen);
-
-  useEffect(() => {
-    return subscribe(
-      onSpeechProgress((p) => {
-        if (p.state === "downloading" && p.total) {
-          setPct(Math.min(99, Math.round(((p.received ?? 0) / p.total) * 100)));
-          setStep(p.part === "runtime" ? "Downloading the speech engine…" : "Downloading the model…");
-        } else if (p.state === "unpacking") {
-          setPct(null);
-          setStep("Unpacking…");
-        } else if (p.state === "checking") {
-          setPct(null);
-          setStep("Checking…");
-        }
-      }),
-      onSpeechDone((d) => {
-        if (!d.ok) {
-          setBusy(false);
-          setErr(d.error || "The download did not finish. Check your connection and try again.");
-          return;
-        }
-        if (d.id === "runtime") {
-          downloadModel(chosenRef.current).catch((e) => setErr(String(e)));
-          return;
-        }
-        setBusy(false);
-        setPct(null);
-        setStep("");
-        refresh();
-      }),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function download() {
-    setErr("");
-    setBusy(true);
-    setPct(null);
-    setStep("Starting…");
-    if (!inTauri) {
-      let p = 0;
-      const id = setInterval(() => {
-        p += 9;
-        setPct(Math.min(99, p));
-        setStep("Downloading the model…");
-        if (p >= 99) {
-          clearInterval(id);
-          setBusy(false);
-          setPct(null);
-          patch({
-            speech: {
-              ...cfg.speech,
-              runtime: { ...(cfg.speech.runtime ?? { id: "runtime", lib: "" }), installed: true },
-              models: cfg.speech.models?.map((m) => (m.id === chosen ? { ...m, installed: true } : m)),
-            },
-          });
-        }
-      }, 120);
-      return;
-    }
-    try {
-      await downloadModel(cfg.speech.runtime?.installed ? chosen : "runtime");
-    } catch (e) {
-      setBusy(false);
-      setErr(String(e));
-    }
-  }
+  const pick = models.find((m) => m.id === chosen);
+  const pct = job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
+  const cancelled = error === "Cancelled.";
 
   return (
     <div className="cards">
@@ -118,13 +91,13 @@ export function ModelPicker({
             type="button"
             className="card"
             aria-pressed={on}
-            disabled={busy}
+            disabled={!!job}
             onClick={() => patch({ model: m.id })}
           >
             <span className="radio" />
             <div className="grow">
               <div className="ttl">
-                {m.name.replace(/ v2 \(English\)$/, "").replace(" v2", "")}
+                {shortName(m.name)}
                 {m.id === cfg.recommended ? (
                   <span className="badge" style={{ marginLeft: 8, height: 18, verticalAlign: 1 }}>
                     Recommended
@@ -132,7 +105,7 @@ export function ModelPicker({
                 ) : null}
               </div>
               <div className="sub">
-                {info?.blurb ?? "English, on-device."} {info ? `· ${info.size}` : ""}
+                {info?.blurb ?? "English, on this computer."} {info ? `· ${info.size}` : ""}
               </div>
             </div>
             {m.installed ? (
@@ -143,14 +116,24 @@ export function ModelPicker({
           </button>
         );
       })}
-      <div style={{ minHeight: 44, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8 }}>
-        {busy ? (
+      <div style={{ minHeight: 52, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8 }}>
+        {job ? (
           <>
-            <div className="row-flex" style={{ display: "flex", justifyContent: "space-between" }}>
-              <span className="t-caption">{step}</span>
-              <span className="t-caption" style={{ fontVariantNumeric: "tabular-nums" }}>
-                {pct != null ? `${pct}%` : ""}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span className="t-caption">
+                {job.phase === "check"
+                  ? "Checking it works on this computer…"
+                  : job.phase === "unpack"
+                    ? "Unpacking…"
+                    : job.total
+                      ? `Downloading ${pick ? shortName(pick.name) : "the model"} · ${mbText(job.received ?? 0)} of ${mbText(job.total)}`
+                      : "Starting…"}
               </span>
+              {job.phase === "download" ? (
+                <button type="button" className="btn plain" onClick={() => cancel()}>
+                  Cancel
+                </button>
+              ) : null}
             </div>
             <div className={`progress ${pct == null ? "indet" : ""}`} role="progressbar" aria-valuenow={pct ?? undefined}>
               <i style={pct == null ? undefined : { width: `${pct}%` }} />
@@ -161,19 +144,21 @@ export function ModelPicker({
             <span className="check on" style={{ width: 16, height: 16 }}>
               <Check size={10} strokeWidth={3.5} />
             </span>
-            Ready. Nothing you say leaves this computer.
+            Ready and tested on this computer. Nothing you say leaves it.
           </span>
         ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button type="button" className="btn primary" onClick={download}>
-              Download {(models.find((m) => m.id === chosen)?.name ?? "model").replace(/ v2.*$/, "")}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <button type="button" className="btn primary" onClick={() => start(chosen, cfg, patch)}>
+              {error && !cancelled ? "Try Again" : `Download ${pick ? shortName(pick.name) : "model"}`}
             </button>
-            <span className="t-small">Downloads once. Works offline after that.</span>
+            <span className="t-small">
+              {error && !cancelled ? "It picks up where it stopped." : "Downloads once. Works offline after that."}
+            </span>
           </div>
         )}
-        {err ? (
-          <span className="t-caption" style={{ color: "var(--red-ink)" }}>
-            {err}
+        {error && !cancelled ? (
+          <span className="t-caption" role="alert" style={{ color: "var(--red-ink)" }}>
+            {error.replace(/^Error:\s*/, "")}
           </span>
         ) : null}
       </div>
@@ -181,8 +166,29 @@ export function ModelPicker({
   );
 }
 
-function useRefValue<T>(v: T) {
-  const r = useRef(v);
-  r.current = v;
-  return r;
+/** Browser preview: walk the same states without a backend. */
+function simulate(
+  id: string,
+  cfg: Config,
+  patch: (p: Record<string, unknown>) => Promise<string | null>,
+  setJob: (p: SpeechProgress | null) => void,
+) {
+  const total = 120_000_000;
+  let got = 0;
+  const t = setInterval(() => {
+    got += 9_000_000;
+    if (got < total) return setJob({ phase: "download", received: got, total });
+    clearInterval(t);
+    setJob({ phase: "check" });
+    setTimeout(() => {
+      setJob(null);
+      patch({
+        speech: {
+          ...cfg.speech,
+          runtime: { ...(cfg.speech.runtime ?? { id: "runtime", lib: "" }), installed: true },
+          models: cfg.speech.models?.map((m) => (m.id === id ? { ...m, installed: true } : m)),
+        },
+      });
+    }, 700);
+  }, 120);
 }
