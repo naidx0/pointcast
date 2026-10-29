@@ -270,6 +270,23 @@ struct Listed {
     rect: Rect,
     minimized: bool,
     pid: Option<u32>,
+    /// Only painted over, never what a close-up centres on: a window xcap would not list, having no title or app name.
+    paint_only: bool,
+}
+
+impl Listed {
+    /// A window as the OS described it, read to fail closed: a missing title or app name is an empty one, so the window
+    /// is still matched by the other, and a minimised state that could not be read counts as on screen.
+    fn seen(app: Option<String>, title: Option<String>, rect: Rect, minimized: Option<bool>, pid: Option<u32>) -> Listed {
+        Listed {
+            paint_only: app.is_none() || title.is_none(),
+            app: app.unwrap_or_default(),
+            title: title.unwrap_or_default(),
+            rect,
+            minimized: minimized.unwrap_or(false),
+            pid,
+        }
+    }
 }
 
 /// From one read of the window list: what to paint over (visible windows the hide-list names) and the windows a
@@ -282,7 +299,7 @@ fn sort_out(seen: &[Listed], hidden: &[String], me: u32) -> (Vec<Rect>, Vec<Win>
         .collect();
     let windows = seen
         .iter()
-        .filter(|w| !shell(&w.app))
+        .filter(|w| !w.paint_only && !shell(&w.app))
         .map(|w| Win { rect: w.rect, minimized: w.minimized, own: w.pid == Some(me) })
         .collect();
     (rects, windows)
@@ -291,34 +308,80 @@ fn sort_out(seen: &[Listed], hidden: &[String], me: u32) -> (Vec<Rect>, Vec<Win>
 /// Every window on screen, front to back (the order both xcap backends list them in).
 #[cfg(not(target_os = "macos"))]
 fn listed() -> Vec<Listed> {
-    xcap::Window::all()
+    let seen: Vec<Listed> = xcap::Window::all()
         .unwrap_or_default()
         .iter()
         .map(|w| {
-            let minimized = w.is_minimized().unwrap_or(true);
-            let (app, title) = if minimized {
+            let minimized = w.is_minimized().ok();
+            let (app, title) = if minimized == Some(true) {
                 Default::default()
             } else {
                 (w.app_name().unwrap_or_default(), w.title().unwrap_or_default())
             };
-            Listed {
-                app,
-                title,
-                rect: Rect {
-                    x: w.x().unwrap_or(0),
-                    y: w.y().unwrap_or(0),
-                    w: w.width().unwrap_or(0) as i32,
-                    h: w.height().unwrap_or(0) as i32,
-                },
-                minimized,
-                pid: w.pid().ok(),
+            let rect = Rect {
+                x: w.x().unwrap_or(0),
+                y: w.y().unwrap_or(0),
+                w: w.width().unwrap_or(0) as i32,
+                h: w.height().unwrap_or(0) as i32,
+            };
+            Listed::seen(Some(app), Some(title), rect, minimized, w.pid().ok())
+        })
+        .collect();
+    #[cfg(windows)]
+    let seen = seen.into_iter().chain(untitled_tools(std::process::id())).collect();
+    seen
+}
+
+/// Windows: the untitled tool windows xcap leaves out of its list (a password manager's quick-access panel can be one),
+/// read here so they are still painted over. Their app is the program's file name; `me`'s windows are skipped.
+#[cfg(windows)]
+fn untitled_tools(me: u32) -> Vec<Listed> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    };
+    unsafe extern "system" fn each(h: HWND, all: LPARAM) -> BOOL {
+        (*(all.0 as *mut Vec<HWND>)).push(h);
+        true.into()
+    }
+    let program = |pid: u32| unsafe {
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL::from(false), pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut n = buf.len() as u32;
+        let read = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut n);
+        let _ = CloseHandle(p);
+        read.ok()?;
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
+    };
+    let mut all: Vec<HWND> = vec![];
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut Vec<HWND> as isize));
+    }
+    all.into_iter()
+        .filter_map(|h| unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            let tool = (GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0) != 0;
+            // This process's windows are passed over before their title is read: reading it sends them a message.
+            if pid == me || !tool || !IsWindowVisible(h).as_bool() || GetWindowTextLengthW(h) > 0 {
+                return None;
             }
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_err() || r.right <= r.left || r.bottom <= r.top {
+                return None;
+            }
+            let rect = Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+            Some(Listed::seen(program(pid), None, rect, Some(IsIconic(h).as_bool()), Some(pid)))
         })
         .collect()
 }
 
 /// macOS: xcap copies the whole window list again for every property of every window, so the list is copied once
-/// here, keeping the windows xcap would list, in its order.
+/// here, keeping the windows xcap would list, in its order, and for painting over the ones it passes over.
 #[cfg(target_os = "macos")]
 fn listed() -> Vec<Listed> {
     use core_foundation::array::{CFArray, CFArrayRef};
@@ -347,21 +410,18 @@ fn listed() -> Vec<Listed> {
     list.iter()
         .filter_map(|item| {
             let d: CFDictionary = unsafe { CFDictionary::wrap_under_get_rule((*item).cast()) };
-            let (app, title) = (text(&d, "kCGWindowOwnerName")?, text(&d, "kCGWindowName")?);
+            // Both are optional; xcap passes over a window without them, so a close-up does too.
+            let (app, title) = (text(&d, "kCGWindowOwnerName"), text(&d, "kCGWindowName"));
             // Like xcap: not the menu bar's status indicator, nor windows that refuse to be captured.
-            if (title == "StatusIndicator" && app == "Window Server") || number(&d, "kCGWindowSharingState")? == 0.0 {
+            let status = title.as_deref() == Some("StatusIndicator") && app.as_deref() == Some("Window Server");
+            if status || number(&d, "kCGWindowSharingState") == Some(0.0) {
                 return None;
             }
             let bounds = get(&d, "kCGWindowBounds")?.downcast::<CFDictionary>()?;
             let at = |k: &str| number(&bounds, k).unwrap_or(0.0);
-            let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).is_some_and(bool::from);
-            Some(Listed {
-                rect: Rect { x: at("X") as i32, y: at("Y") as i32, w: at("Width") as i32, h: at("Height") as i32 },
-                minimized: !shown,
-                pid: number(&d, "kCGWindowOwnerPID").map(|p| p as u32),
-                app,
-                title,
-            })
+            let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).map(bool::from);
+            let rect = Rect { x: at("X") as i32, y: at("Y") as i32, w: at("Width") as i32, h: at("Height") as i32 };
+            Some(Listed::seen(app, title, rect, shown.map(|s| !s), number(&d, "kCGWindowOwnerPID").map(|p| p as u32)))
         })
         .collect()
 }
@@ -599,7 +659,7 @@ mod tests {
 
     #[test]
     fn one_read_of_the_window_list_gives_what_to_paint_over_and_what_to_zoom_to() {
-        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid };
+        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid, paint_only: false };
         let seen = [
             w("Bitwarden", "Vault", r(0, 0, 400, 300), false, Some(7)),
             w("1Password", "", r(10, 10, 50, 50), true, Some(8)),
@@ -615,6 +675,83 @@ mod tests {
         assert_eq!(own[..4], [false, false, true, false]);
         assert!(wins[1].minimized && !wins[0].minimized);
         assert_eq!(wins[3].rect, r(500, 0, 300, 300));
+    }
+
+    #[test]
+    fn a_window_read_without_a_title_an_app_or_its_minimised_state_is_still_painted_over() {
+        let s = |s: &str| Some(s.to_string());
+        let seen = [
+            Listed::seen(s("1Password"), None, r(700, 200, 600, 400), Some(false), Some(8)),
+            Listed::seen(s("Bitwarden"), s("Vault"), r(0, 0, 400, 300), None, Some(7)),
+            Listed::seen(None, s("KeePassXC - Passwords.kdbx"), r(0, 500, 300, 200), Some(false), None),
+            Listed::seen(s("Notes"), None, r(900, 900, 100, 100), None, Some(9)),
+            Listed::seen(s("1Password"), None, r(10, 10, 50, 50), Some(true), Some(8)),
+        ];
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42);
+        assert_eq!(rects, vec![r(700, 200, 600, 400), r(0, 0, 400, 300), r(0, 500, 300, 200)]);
+        // A window xcap would not list is only painted over, never the window a close-up centres on.
+        assert_eq!(wins.iter().map(|w| w.rect).collect::<Vec<_>>(), vec![r(0, 0, 400, 300)]);
+        assert!(!wins[0].minimized, "a minimised state that could not be read counts as on screen");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "puts an untitled tool window on screen for a moment and reads the window list"]
+    fn an_untitled_tool_window_is_read_for_painting_by_its_program_name() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+        use windows::core::w;
+        use windows::Win32::Foundation::{HINSTANCE, HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let (tx, rx) = mpsc::channel();
+        let ui = std::thread::spawn(move || unsafe {
+            let _ = SetProcessDPIAware();
+            let panel = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE | WS_BORDER,
+                90,
+                90,
+                300,
+                200,
+                HWND::default(),
+                HMENU::default(),
+                HINSTANCE::default(),
+                None,
+            )
+            .unwrap();
+            let mut r = RECT::default();
+            GetWindowRect(panel, &mut r).unwrap();
+            tx.send(r).unwrap();
+            let mut msg = MSG::default();
+            while !stop.load(Ordering::SeqCst) {
+                while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = DestroyWindow(panel);
+        });
+        let got = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let rect = r(got.left, got.top, got.right - got.left, got.bottom - got.top);
+        let me = std::process::id();
+        // Read as another program would see it (0 is no process), then as Pointcast skips its own.
+        let seen = untitled_tools(0);
+        let own = untitled_tools(me);
+        done.store(true, Ordering::SeqCst);
+        ui.join().unwrap();
+        let exe = std::env::current_exe().unwrap().file_stem().unwrap().to_string_lossy().into_owned();
+        let panel = seen.iter().find(|w| w.pid == Some(me) && w.rect == rect).expect("the untitled tool window is read");
+        assert_eq!((panel.app.as_str(), panel.title.as_str(), panel.minimized, panel.paint_only), (exe.as_str(), "", false, true));
+        let (rects, wins) = sort_out(&seen, &[exe], 0);
+        assert!(rects.contains(&rect) && wins.iter().all(|w| w.rect != rect));
+        assert!(own.iter().all(|w| w.pid != Some(me)));
     }
 
     #[test]
