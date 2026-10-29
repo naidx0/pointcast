@@ -60,12 +60,20 @@ pub fn pointer_monitor(app: &AppHandle) -> Option<Monitor> {
 }
 
 /// Bottom centre of the pointer's screen, clear of the Dock or taskbar.
-pub fn hud_origin(area: (i32, i32, u32, u32), size: (u32, u32), gap: u32) -> (i32, i32) {
+pub fn hud_origin(area: (f64, f64, f64, f64), size: (f64, f64), gap: f64) -> (f64, f64) {
     let (x, y, w, h) = area;
     let (sw, sh) = size;
-    (
-        x + (w.saturating_sub(sw) / 2) as i32,
-        y + h.saturating_sub(sh + gap) as i32,
+    (x + ((w - sw) / 2.0).max(0.0), y + (h - sh - gap).max(0.0))
+}
+
+/// Where the HUD goes in logical pixels: `area` is the target screen's work area in its physical pixels at `scale`,
+/// `size` the HUD's physical size at `hud_scale`, the scale of the screen it is on now.
+pub fn hud_spot(area: (i32, i32, u32, u32), scale: f64, size: (u32, u32), hud_scale: f64) -> (f64, f64) {
+    let at = |v: f64| v / scale;
+    hud_origin(
+        (at(area.0 as f64), at(area.1 as f64), at(area.2 as f64), at(area.3 as f64)),
+        (size.0 as f64 / hud_scale, size.1 as f64 / hud_scale),
+        28.0,
     )
 }
 
@@ -77,12 +85,18 @@ pub fn show_indicator(app: &AppHandle) {
     if let (Some(m), Ok(size)) = (pointer_monitor(app), w.outer_size()) {
         let wa = m.work_area();
         let s = m.scale_factor();
-        let (x, y) = hud_origin(
+        let (x, y) = hud_spot(
             (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
+            s,
             (size.width, size.height),
-            (28.0 * s) as u32,
+            w.scale_factor().unwrap_or(s),
         );
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        // AppKit places windows in points; Windows in physical pixels of one desktop, whatever each screen's scale.
+        if cfg!(target_os = "macos") {
+            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+        } else {
+            let _ = w.set_position(tauri::PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32));
+        }
     }
     let _ = w.set_always_on_top(true);
     let _ = w.show();
@@ -304,10 +318,27 @@ mod tests {
     #[test]
     fn the_hud_sits_bottom_centre_inside_the_work_area() {
         // 1920x1040 work area under a 40 px top bar, a 300x52 HUD, 28 px off the bottom.
-        assert_eq!(hud_origin((0, 40, 1920, 1040), (300, 52), 28), (810, 1000));
+        assert_eq!(hud_origin((0.0, 40.0, 1920.0, 1040.0), (300.0, 52.0), 28.0), (810.0, 1000.0));
         // A second screen to the left of the first.
-        assert_eq!(hud_origin((-1280, 0, 1280, 800), (300, 52), 28), (-790, 720));
+        assert_eq!(hud_origin((-1280.0, 0.0, 1280.0, 800.0), (300.0, 52.0), 28.0), (-790.0, 720.0));
         // A HUD wider than the screen pins to its left edge instead of going negative.
-        assert_eq!(hud_origin((0, 0, 200, 100), (300, 52), 28), (0, 20));
+        assert_eq!(hud_origin((0.0, 0.0, 200.0, 100.0), (300.0, 52.0), 28.0), (0.0, 20.0));
+    }
+
+    #[test]
+    fn the_hud_lands_on_the_target_screen_whatever_scale_it_comes_from() {
+        let at = |area, scale, size, hud_scale, want: (f64, f64)| {
+            let got = hud_spot(area, scale, size, hud_scale);
+            assert!((got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6, "{got:?} != {want:?}");
+        };
+        // Same screen, same scale: the old physical answer, in logical pixels.
+        at((0, 40, 1920, 1040), 1.0, (300, 52), 1.0, (810.0, 1000.0));
+        at((0, 0, 2560, 1400), 1.5, (450, 78), 1.5, (1055.0 / 1.5, 1280.0 / 1.5));
+        // macOS: from a Retina laptop (scale 2, 392x64 points) to a 1x screen right of it at 1512 points.
+        at((1512, 25, 1920, 1055), 1.0, (784, 128), 2.0, (2276.0, 988.0));
+        // And back: the 1x HUD to the Retina screen, whose work area is (0, 25) 1512x944 points.
+        at((0, 50, 3024, 1888), 2.0, (392, 64), 1.0, (560.0, 877.0));
+        // Windows: a 100 % HUD to a 150 % screen keeps its logical size there.
+        at((1920, 0, 2560, 1400), 1.5, (300, 52), 1.0, (1280.0 + 703.0 + 1.0 / 3.0, 853.0 + 1.0 / 3.0));
     }
 }
