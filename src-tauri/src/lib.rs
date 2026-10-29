@@ -188,6 +188,7 @@ fn settings_view(svc: &App) -> Value {
     };
     json!({
         "platform": std::env::consts::OS,
+        "materials": platform::materials(),
         "version": env!("CARGO_PKG_VERSION"),
         "session_hotkey": s.session_chord().label(),
         "full_hotkey": s.full_chord().label(),
@@ -546,6 +547,11 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
 }
 
 #[tauri::command]
+fn platform_info() -> Value {
+    json!({ "os": std::env::consts::OS, "materials": platform::materials() })
+}
+
+#[tauri::command]
 fn window_open(app: AppHandle, label: String) {
     show_window(&app, &label);
 }
@@ -639,6 +645,7 @@ pub fn run() {
             mic_monitor,
             onboarding_finish,
             window_open,
+            platform_info,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]

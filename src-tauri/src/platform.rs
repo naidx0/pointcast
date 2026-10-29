@@ -110,6 +110,40 @@ fn raise(w: &WebviewWindow, level: Level) {
     }
 }
 
+/// Whether the window materials in tauri.conf.json really draw: always on macOS 12+, only from
+/// Windows 11 (build 22000) on Windows. Without them the UI paints opaque surfaces.
+pub fn materials() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let build = *BUILD.get_or_init(|| {
+            let out = std::process::Command::new("reg")
+                .args([
+                    "query",
+                    r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                    "/v",
+                    "CurrentBuildNumber",
+                ])
+                .creation_flags(0x0800_0000)
+                .output();
+            out.ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .last()
+                        .and_then(|n| n.parse().ok())
+                })
+                .unwrap_or(0)
+        });
+        build >= 22000
+    }
+    #[cfg(not(windows))]
+    {
+        cfg!(target_os = "macos")
+    }
+}
+
 /// A short native cue when a session starts or stops.
 pub fn chime(start: bool) {
     #[cfg(target_os = "macos")]

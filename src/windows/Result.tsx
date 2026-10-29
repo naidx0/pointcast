@@ -1,212 +1,166 @@
 import { useEffect, useState } from "react";
-import { Mark, PRODUCT } from "@/components/brand/Mark";
-import { Icon } from "@/components/Icons";
+import { ClipboardPaste, Copy, FolderOpen, Send } from "lucide-react";
 import {
   copyAgain,
   detectTools,
+  inTauri,
+  lastFolder,
   lastPrompt,
   onResult,
+  openFolder,
   openTool,
   pasteAgain,
+  preview,
   sendToTool,
+  subscribe,
   type DetectedTool,
   type SessionExport,
 } from "@/lib/api";
-import { invoke } from "@tauri-apps/api/core";
+import { platform } from "@/lib/theme";
 
+/** The last prompt, as it will read in the AI tool: words with the pictures where they were taken. */
 export function Result() {
   const [exp, setExp] = useState<SessionExport | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [pasted, setPasted] = useState(false);
+  const [done, setDone] = useState<"" | "copied" | "pasted">("");
   const [tools, setTools] = useState<DetectedTool[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    lastPrompt()
-      .then(setExp)
-      .catch(() => {
-        if (typeof location !== "undefined" && location.search.includes("preview=1")) {
-          setExp(PREVIEW_EXPORT);
-        }
-      });
-    detectTools()
-      .then(setTools)
-      .catch(() => setTools(PREVIEW_TOOLS));
-    const u = onResult(setExp);
-    return () => {
-      u.then((fn) => fn());
-    };
+    if (inTauri) {
+      lastPrompt().then(setExp).catch(() => undefined);
+      detectTools().then(setTools).catch(() => undefined);
+    } else if (preview) {
+      setExp(PREVIEW_EXPORT);
+      setTools(PREVIEW_TOOLS);
+    }
+    return subscribe(onResult(setExp));
   }, []);
 
-  if (!exp) {
-    return (
-      <div className="page" style={{ display: "grid", placeItems: "center", padding: 32 }}>
-        <div style={{ textAlign: "center" }}>
-          <Mark size="lg" />
-          <p className="sub" style={{ marginTop: 12 }}>
-            No session yet. Start recording from the tray.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const flash = (k: "copied" | "pasted") => {
+    setDone(k);
+    setTimeout(() => setDone(""), 1600);
+  };
+  const run = async (f: () => Promise<void>, k?: "copied" | "pasted") => {
+    setBusy(true);
+    try {
+      if (inTauri) await f();
+      if (k) flash(k);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const ai = tools.filter((t) => t.kind === "ai");
+  const words = exp ? exp.plain.replace(/\[image[^\]]*\]/g, "").split(/\s+/).filter(Boolean).length : 0;
+  const mac = platform() === "mac";
 
   return (
-    <div className="page">
-      <header className="title-drag" style={{ borderBottom: "1px solid var(--line)", padding: "14px 24px 16px" }}>
-        <div className="row-between" style={{ alignItems: "flex-start" }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <div className="traffic" aria-hidden="true">
-              <i />
-              <i />
-              <i />
+    <div className="result">
+      <header className="result-bar drag">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="t-head" style={{ fontSize: 14 }}>
+            Last Prompt
+          </div>
+          {exp ? (
+            <div className="t-small">
+              {words} words · {exp.images.length} {exp.images.length === 1 ? "picture" : "pictures"}
             </div>
-            <Mark />
+          ) : null}
+        </div>
+        {exp ? (
+          <>
+            {ai.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className="btn"
+                title={`Copy and paste into ${t.name}`}
+                disabled={busy}
+                onClick={() =>
+                  run(() =>
+                    sendToTool(t.id).catch(async () => {
+                      await copyAgain();
+                      await openTool(t.id);
+                    }),
+                  )
+                }
+              >
+                <Send size={13} />
+                {t.name}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="btn icon"
+              title="Show in folder"
+              aria-label="Show in folder"
+              onClick={() =>
+                run(async () => {
+                  const p = await lastFolder();
+                  if (p) await openFolder(p);
+                })
+              }
+            >
+              <FolderOpen size={15} />
+            </button>
+            <button type="button" className="btn" disabled={busy} onClick={() => run(copyAgain, "copied")}>
+              <Copy size={14} />
+              {done === "copied" ? "Copied" : "Copy"}
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              title={`Paste into the app behind this window (${mac ? "⌘V" : "Ctrl+V"})`}
+              disabled={busy}
+              onClick={() => run(pasteAgain, "pasted")}
+            >
+              <ClipboardPaste size={14} />
+              {done === "pasted" ? "Pasted" : "Paste into App"}
+            </button>
+          </>
+        ) : null}
+      </header>
+      <main className="result-body">
+        {exp ? (
+          <PromptDoc exp={exp} />
+        ) : (
+          <div style={{ height: "100%", display: "grid", placeItems: "center", textAlign: "center" }}>
             <div>
-              <p className="kicker">{PRODUCT} · last prompt</p>
-              <h1 className="title" style={{ fontSize: "var(--fs-sheet)" }}>
-                Ready to paste
-              </h1>
+              <div className="t-head">No prompt yet</div>
+              <p className="t-caption" style={{ marginTop: 4 }}>
+                Start a recording from the {mac ? "menu bar" : "tray"} and it will show up here.
+              </p>
             </div>
           </div>
-        </div>
-      </header>
-
-      <main style={{ padding: "16px 24px 40px", maxWidth: 820, margin: "0 auto" }}>
-        <div
-          className="capbar glassbar result-actions no-drag"
-          style={{ position: "sticky", top: 12, zIndex: 5, marginBottom: 16, width: "100%", justifyContent: "flex-start" }}
-        >
-          <button
-            type="button"
-            className="pill pri lg"
-            title="Paste into the focused app (Ctrl/Cmd+V)"
-            disabled={busy === "paste"}
-            onClick={async () => {
-              setBusy("paste");
-              try {
-                await pasteAgain();
-                setPasted(true);
-                setTimeout(() => setPasted(false), 1400);
-              } finally {
-                setBusy(null);
-              }
-            }}
-          >
-            <Icon name="paste" size={16} />
-            {pasted ? "Pasted" : "Paste into app"}
-          </button>
-          <button
-            type="button"
-            className="pill lg"
-            title="Copy HTML + plain"
-            disabled={busy === "copy"}
-            onClick={async () => {
-              setBusy("copy");
-              try {
-                await copyAgain();
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1400);
-              } finally {
-                setBusy(null);
-              }
-            }}
-          >
-            <Icon name="copy" size={15} />
-            {copied ? "Copied" : "Copy"}
-          </button>
-          <button
-            type="button"
-            className="ib"
-            title="Open export folder"
-            onClick={async () => {
-              const p = await invoke<string | null>("last_folder");
-              if (p) await invoke("open_folder", { path: p });
-            }}
-          >
-            <Icon name="folder" size={18} />
-          </button>
-          {ai.length ? <span className="sep" /> : null}
-          {ai.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className="pill"
-              title={`Copy and open ${t.name}`}
-              disabled={busy === t.id}
-              onClick={async () => {
-                setBusy(t.id);
-                try {
-                  await sendToTool(t.id);
-                } catch {
-                  await copyAgain();
-                  await openTool(t.id);
-                } finally {
-                  setBusy(null);
-                }
-              }}
-            >
-              <Icon name="send" size={14} />
-              {t.name}
-            </button>
-          ))}
-        </div>
-
-        <article className="card" style={{ lineHeight: 1.62, fontSize: "var(--fs-chat)" }}>
-          <PromptBody exp={exp} />
-        </article>
-        <p className="mono" style={{ marginTop: 12, fontSize: "var(--fs-xs)", color: "var(--text3)" }}>
-          Click Paste into app with your chat focused — or use the tray · Paste last prompt.
-        </p>
+        )}
       </main>
     </div>
   );
 }
 
-function PromptBody({ exp }: { exp: SessionExport }) {
-  const parts = splitMarkers(exp.plain);
+export function PromptDoc({ exp }: { exp: SessionExport }) {
   return (
-    <div style={{ whiteSpace: "pre-wrap" }}>
-      {parts.map((p, i) =>
-        p.kind === "text" ? (
-          <span key={i}>{p.value}</span>
-        ) : (
-          <span
-            key={i}
-            style={{
-              display: "inline-flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
-              margin: "8px 0",
-              verticalAlign: "middle",
-            }}
-          >
-            <img
-              src={exp.images[p.n - 1]?.data_url}
-              alt={p.value}
-              style={{
-                maxHeight: 280,
-                maxWidth: "100%",
-                borderRadius: 12,
-                border: "1px solid var(--line)",
-              }}
-            />
-            <span className="photo-chip" style={{ marginTop: 6 }}>
-              {p.value}
-            </span>
-          </span>
-        ),
-      )}
+    <div className="prompt-doc">
+      {splitMarkers(exp.plain).map((p, i) => {
+        if (p.kind === "text") return <span key={i}>{p.value}</span>;
+        const img = exp.images[p.n - 1];
+        return (
+          <figure key={i}>
+            <img src={img?.data_url} alt={p.value} />
+            <figcaption>
+              Image {p.n}
+              {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
+            </figcaption>
+          </figure>
+        );
+      })}
     </div>
   );
 }
 
 const PREVIEW_TOOLS: DetectedTool[] = [
-  { id: "chatgpt", name: "ChatGPT", path: "/preview", kind: "ai" },
   { id: "claude", name: "Claude", path: "/preview", kind: "ai" },
-  { id: "cursor", name: "Cursor", path: "/preview", kind: "ai" },
+  { id: "chatgpt", name: "ChatGPT", path: "/preview", kind: "ai" },
 ];
 
 const PREVIEW_EXPORT: SessionExport = {

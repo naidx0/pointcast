@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react";
-import { Icon } from "@/components/Icons";
+import { useEffect, useRef, useState } from "react";
+import { Monitor, SquareDashedMousePointer, X, ZoomIn } from "lucide-react";
 import {
   captureFull,
+  captureZoom,
+  inTauri,
   onState,
+  preview,
   regionBegin,
   sessionCancel,
   sessionState,
   sessionToggle,
+  settingsGet,
   stamp,
+  subscribe,
+  type Config,
   type UiState,
 } from "@/lib/api";
+import { chordText } from "@/lib/keys";
 
 const idle: UiState = {
   phase: "idle",
@@ -24,71 +31,114 @@ const idle: UiState = {
   level: 0,
 };
 
-/** Floating recording bar — core only: talk, full shot, region annotate, stop. */
+const BARS = 9;
+
+/** The recording HUD: a small capsule that never takes focus from the app you are talking about. */
 export function Indicator() {
   const [s, setS] = useState<UiState>(idle);
+  const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
+  const [lv, setLv] = useState<number[]>(Array(BARS).fill(0));
+  const last = useRef(0);
 
   useEffect(() => {
-    sessionState()
-      .then(setS)
-      .catch(() => {
-        if (typeof location !== "undefined" && location.search.includes("preview=1")) {
-          setS({
-            ...idle,
-            phase: "recording",
-            mic: true,
-            screen: true,
-            partial: "The Place order button…",
-            duration_ms: 16_000,
-            image_count: 1,
-            level: 0.4,
-          });
+    if (inTauri) {
+      sessionState().then(setS).catch(() => undefined);
+      settingsGet()
+        .then((c) => setKeys(c.hotkeys))
+        .catch(() => undefined);
+    } else if (preview) {
+      setS({ ...idle, phase: "recording", mic: true, duration_ms: 16_000, image_count: 2, level: 0.4 });
+      const id = setInterval(() => setLv((x) => [...x.slice(1), Math.random() * 0.9]), 110);
+      return () => clearInterval(id);
+    }
+    return subscribe(
+      onState((st) => {
+        setS(st);
+        const now = performance.now();
+        if (now - last.current > 80) {
+          last.current = now;
+          setLv((x) => [...x.slice(1), st.mic ? Math.min(1, st.level) : 0]);
         }
-      });
-    const u = onState(setS);
-    return () => {
-      u.then((fn) => fn());
-    };
+      }),
+    );
   }, []);
 
-  const rec = s.phase === "recording" || s.phase === "loading";
-  const tip = s.partial || s.text || (rec ? "Listening…" : "Idle");
+  useEffect(() => {
+    if (s.phase === "recording" && inTauri)
+      settingsGet()
+        .then((c) => setKeys(c.hotkeys))
+        .catch(() => undefined);
+  }, [s.phase === "recording"]);
+
+  const waiting = s.phase === "loading";
+  const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
+  const problem = !s.mic && s.error ? s.error : null;
 
   return (
-    <div
-      style={{
-        height: "100vh",
-        width: "100vw",
-        background: "transparent",
-        display: "grid",
-        placeItems: "center",
-        padding: 8,
-        boxSizing: "border-box",
-      }}
-      data-tauri-drag-region
-      title={tip}
-    >
-      <div className="capbar glassbar ind-bar" data-tauri-drag-region>
-        <span className={`dot ${rec ? "rec" : ""}`} style={{ marginLeft: 6 }} />
-        <span className="mono ind-clock">{stamp(s.duration_ms)}</span>
+    <div className="hud-wrap" data-tauri-drag-region>
+      <div className="hud" data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
+        <span className={`rec ${waiting ? "wait" : ""}`} data-tauri-drag-region />
+        <span className="time" data-tauri-drag-region>
+          {stamp(s.duration_ms)}
+        </span>
+        {problem ? (
+          <span className="note" title={problem} data-tauri-drag-region>
+            {problem}
+          </span>
+        ) : (
+          <span className="wave" aria-hidden="true" data-tauri-drag-region>
+            {lv.map((v, i) => (
+              <i key={i} style={{ height: `${Math.max(3, v * 22)}px`, opacity: 0.45 + v * 0.55 }} />
+            ))}
+          </span>
+        )}
         <span className="sep" />
-        <button type="button" className="ib no-drag" title="Full screenshot" onClick={() => captureFull()}>
-          <Icon name="monitor" size={18} />
+        <button
+          type="button"
+          className="hb"
+          title={tip("Mark up a region", keys?.region.label)}
+          aria-label="Mark up a region"
+          onClick={() => regionBegin().catch(() => undefined)}
+        >
+          <SquareDashedMousePointer size={18} strokeWidth={1.75} />
+          {s.image_count ? <span className="n">{s.image_count}</span> : null}
         </button>
-        <button type="button" className="ib no-drag" title="Region / annotate" onClick={() => regionBegin()}>
-          <Icon name="crop" size={18} />
+        <button
+          type="button"
+          className="hb"
+          title={tip("Capture the screen", keys?.full.label)}
+          aria-label="Capture the screen"
+          onClick={() => captureFull().catch(() => undefined)}
+        >
+          <Monitor size={18} strokeWidth={1.75} />
         </button>
-        <button type="button" className={`ib no-drag ${s.mic ? "on" : ""}`} title={s.mic ? "Mic on" : "Mic off"} aria-pressed={s.mic}>
-          <Icon name="mic" size={18} />
+        <button
+          type="button"
+          className="hb"
+          title={tip("Capture around the pointer", keys?.zoom.label)}
+          aria-label="Capture around the pointer"
+          onClick={() => captureZoom().catch(() => undefined)}
+        >
+          <ZoomIn size={18} strokeWidth={1.75} />
         </button>
-        {s.image_count ? <span className="photo-chip">{s.image_count}</span> : null}
-        <span className="vb-sp" style={{ flex: 1 }} />
-        <button type="button" className="pill pri no-drag" title="Stop" onClick={() => sessionToggle()}>
-          <Icon name="stop" size={12} />
-          Stop
+        <span className="sep" />
+        <button
+          type="button"
+          className="hb"
+          title="Discard"
+          aria-label="Discard this recording"
+          onClick={() => sessionCancel().catch(() => undefined)}
+        >
+          <X size={17} strokeWidth={2} />
         </button>
-        <button type="button" className="ib no-drag" title="Cancel" onClick={() => sessionCancel()}>
-          <Icon name="x" size={18} />
+        <button
+          type="button"
+          className="stop"
+          title={tip("Finish", keys?.session.label)}
+          aria-label="Finish recording"
+          onClick={() => sessionToggle().catch(() => undefined)}
+        >
+          <i />
         </button>
       </div>
     </div>

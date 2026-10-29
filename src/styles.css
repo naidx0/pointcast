@@ -1,4 +1,1 @@
-@import "@fontsource-variable/geist/index.css";
-@import "@fontsource-variable/geist-mono/index.css";
-@import "./styles/tokens.css";
-@import "./styles/pointcast.css";
+@import "./styles/native.css";
