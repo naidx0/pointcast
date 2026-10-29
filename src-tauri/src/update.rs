@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const LATEST: &str = "https://api.github.com/repos/naidx0/pointcast/releases/latest";
@@ -36,10 +36,25 @@ pub fn installing() -> bool {
 }
 
 /// Why the last update did not finish, if it failed while Pointcast was closed. The first call
-/// reads and clears the record; later calls give the same answer.
+/// reads and clears the record; later calls give the same answer, until an update starts again.
 pub fn last_failure() -> Option<String> {
-    static LAST: OnceLock<Option<String>> = OnceLock::new();
-    LAST.get_or_init(|| failure(&crate::settings::data_dir(), env!("CARGO_PKG_VERSION"))).clone()
+    LAST.get(|| failure(&crate::settings::data_dir(), env!("CARGO_PKG_VERSION")))
+}
+
+static LAST: Kept = Kept(Mutex::new(None));
+
+/// An answer read once and kept, until it is dropped.
+struct Kept(Mutex<Option<Option<String>>>);
+
+impl Kept {
+    fn get(&self, read: impl FnOnce() -> Option<String>) -> Option<String> {
+        self.0.lock().unwrap().get_or_insert_with(read).clone()
+    }
+
+    /// A new update is starting: the old failure no longer says anything about it.
+    fn drop_answer(&self) {
+        *self.0.lock().unwrap() = Some(None);
+    }
 }
 
 #[derive(Deserialize)]
@@ -193,6 +208,7 @@ pub fn install(idle: impl Fn() -> bool + Send + 'static, failed: impl FnOnce(Str
         run,
         idle: Box::new(idle),
     };
+    LAST.drop_answer();
     start(job, &RUNNING, failed)
 }
 
@@ -642,6 +658,16 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(30)).unwrap().starts_with("ran install.ps1"));
         assert!(!installing(), "a failed update frees the way for the next");
         assert!(reported(job("busy3", serve(200, PACKAGE.into()), sha, fake_run), &RUNNING).starts_with("ran install.ps1"));
+    }
+
+    #[test]
+    fn a_new_update_drops_the_failure_an_old_one_left() {
+        let kept = Kept(Mutex::new(None));
+        let said = "the installer stopped with code 2.";
+        assert_eq!(kept.get(|| Some(said.into())).as_deref(), Some(said));
+        assert_eq!(kept.get(|| panic!("the record is read once")).as_deref(), Some(said), "later calls give the same answer");
+        kept.drop_answer();
+        assert_eq!(kept.get(|| panic!("the record was already read")), None, "a retry is not reported as the old failure");
     }
 
     #[test]
