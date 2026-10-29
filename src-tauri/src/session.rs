@@ -392,7 +392,7 @@ impl App {
         }
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
-            let dir = export_dir(&settings);
+            let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
             let _ = std::fs::create_dir_all(&dir);
             if let Ok(p) = prompt::export_folder(&items, &dir) {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
@@ -684,16 +684,19 @@ impl App {
     }
 }
 
-fn export_dir(s: &Settings) -> std::path::PathBuf {
-    if let Some(d) = &s.export_dir {
-        return std::path::PathBuf::from(d);
-    }
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Pointcast")
-        .join(stamp)
+/// One new folder per recording, named by when it was saved, in the chosen folder or Documents › Pointcast.
+fn export_dir(s: &Settings, stamp: &str) -> std::path::PathBuf {
+    let base = match &s.export_dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("Pointcast"),
+    };
+    std::iter::once(base.join(stamp))
+        .chain((2..).map(|n| base.join(format!("{stamp}-{n}"))))
+        .find(|p| !p.exists())
+        .unwrap_or_default()
 }
 
 /// Auto-paste needs the OS to accept synthetic keys; where it will not (macOS without
@@ -945,6 +948,21 @@ mod tests {
         a.history.clear().unwrap();
         assert!(a.forget(None));
         assert!(a.last_export().is_none() && a.last_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn each_saved_recording_gets_its_own_folder_in_a_chosen_folder_too() {
+        let root = std::env::temp_dir().join(format!("pc-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mine = Settings { export_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
+        let first = export_dir(&mine, "20261029-101500");
+        assert_eq!(first, root.join("20261029-101500"));
+        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first).unwrap();
+        // A second recording in the same second never writes over the first one's prompt.md.
+        let second = export_dir(&mine, "20261029-101500");
+        assert_eq!(second, root.join("20261029-101500-2"));
+        assert!(export_dir(&Settings::default(), "20261029-101501").ends_with("Pointcast/20261029-101501"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
