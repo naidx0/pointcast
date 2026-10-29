@@ -100,7 +100,10 @@ export function ModelPicker({
   removable?: boolean;
 }) {
   const { job, error, start, cancel } = useSpeechJob(refresh);
+  const [removeErr, setRemoveErr] = useState<{ id: string; text: string } | null>(null);
   const chosen = chosenModel(cfg);
+  // Marked is the model recordings really use; picking one that is not downloaded yet does not change that.
+  const active = cfg.speech_in_use ?? chosen;
   const engine = cfg.speech.runtime?.installed ?? false;
   const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
   const busyId = job ? (job.id ?? chosen) : null;
@@ -111,11 +114,13 @@ export function ModelPicker({
     <div className="cards">
       {models.map((m) => {
         const o = offer(m);
-        const on = m.id === chosen;
+        const on = m.id === active;
         const ready = m.installed && engine;
         const mine = busyId === m.id;
         const pct = mine && job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
-        const err = error?.id === m.id && error.text !== "Cancelled." ? error.text : "";
+        const err =
+          error?.id === m.id && error.text !== "Cancelled." ? error.text : removeErr?.id === m.id ? removeErr.text : "";
+        const pick = () => !job && m.installed && patch({ model: m.id });
         return (
           <div
             key={m.id}
@@ -123,8 +128,8 @@ export function ModelPicker({
             role="radio"
             aria-checked={on}
             tabIndex={0}
-            onClick={() => !job && patch({ model: m.id })}
-            onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !job && patch({ model: m.id })}
+            onClick={pick}
+            onKeyDown={(e) => (e.key === " " || e.key === "Enter") && pick()}
           >
             <span className="radio" />
             <div className="grow">
@@ -175,7 +180,9 @@ export function ModelPicker({
                     disabled={!!job}
                     onClick={async (e) => {
                       e.stopPropagation();
-                      if (inTauri) await speechRemove(m.id).catch(() => undefined);
+                      setRemoveErr(null);
+                      if (inTauri)
+                        await speechRemove(m.id).catch((x) => setRemoveErr({ id: m.id, text: String(x) }));
                       refresh();
                     }}
                   >

@@ -336,8 +336,17 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
     }
 }
 
+fn installed_models<'a>(root: &std::path::Path, cat: &'a voice::models::Catalog) -> Vec<&'a str> {
+    cat.models
+        .iter()
+        .filter(|x| voice::models::model_installed(root, x))
+        .map(|x| x.id.as_str())
+        .collect()
+}
+
 fn settings_view(svc: &App) -> Value {
     let s = svc.settings.lock().unwrap().clone();
+    let speech = (voice::models::speech_dir(), voice::models::catalog());
     let errors: Vec<Value> = svc
         .hotkey_errors
         .lock()
@@ -386,8 +395,10 @@ fn settings_view(svc: &App) -> Value {
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
-        "speech": voice::models::view(&voice::models::speech_dir(), &voice::models::catalog()),
+        "speech": voice::models::view(&speech.0, &speech.1),
         "speech_check": svc.speech_check().map(|r| json!({ "ok": r.is_ok(), "error": r.err() })),
+        // The model a recording loads, which may not be the one picked (that one is not downloaded).
+        "speech_in_use": voice::machine::route(&s.model, voice::machine::recommended(), &installed_models(&speech.0, &speech.1)),
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
         "recommended": voice::machine::recommended(),
@@ -771,12 +782,7 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
     let cat = voice::models::catalog();
     let m = cat.model(&id).ok_or("That model isn't in the catalog.")?;
     let root = voice::models::speech_dir();
-    let installed: Vec<&str> = cat
-        .models
-        .iter()
-        .filter(|x| voice::models::model_installed(&root, x))
-        .map(|x| x.id.as_str())
-        .collect();
+    let installed = installed_models(&root, &cat);
     let active = in_use(&svc.settings.lock().unwrap().model, voice::machine::recommended(), &installed, &m.id);
     if active || SPEECH_BUSY.load(Ordering::SeqCst) {
         return Err("That model is in use. Pick another one first.".into());

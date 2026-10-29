@@ -92,6 +92,8 @@ export type Config = {
   speech: SpeechView;
   /** How the last load-and-run of the speech engine went; null before the first. */
   speech_check: { ok: boolean; error: string | null } | null;
+  /** The model a recording would load now (the picked one, or the installed one it falls back to). */
+  speech_in_use?: string | null;
   devices: string[];
   permissions: Permissions;
   recommended: string;
