@@ -39,7 +39,7 @@ type Pane = (typeof PANES)[number]["id"];
 type Patch = (p: Record<string, unknown>) => Promise<string | null>;
 
 export function Settings() {
-  const { cfg, setCfg, patch, refresh } = useConfig();
+  const { cfg, setCfg, patch, refresh, error } = useConfig();
   const [pane, setPane] = useState<Pane>(() => {
     const q = new URLSearchParams(location.search).get("pane");
     return PANES.some((p) => p.id === q) ? (q as Pane) : "general";
@@ -90,6 +90,11 @@ export function Settings() {
           </h1>
         </div>
         <div className="prefs-pane">
+          {error ? (
+            <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginBottom: 12 }}>
+              {error.replace(/^Error:\s*/, "")}
+            </div>
+          ) : null}
           {!cfg ? null : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
