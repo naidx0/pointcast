@@ -369,7 +369,8 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
       <h1 className="t-hero">You’re all set</h1>
       <p className="t-body">
         Pointcast lives in the {mac ? "menu bar" : "system tray"}. Press{" "}
-        <b style={{ color: "var(--label)" }}>{chordText(cfg.hotkeys.session.label)}</b> in any app to start.
+        <b style={{ color: "var(--label)" }}>{chordText(cfg.hotkeys.session.label)}</b> in any app to start. With no
+        pictures it is plain dictation: your words are typed where your cursor is.
       </p>
       <div className="group" style={{ width: "100%", textAlign: "left" }}>
         <div className="row">

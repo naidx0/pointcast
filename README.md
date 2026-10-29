@@ -5,7 +5,26 @@ hands you one prompt (your words with the annotated screenshots inline, where yo
 paste into ChatGPT, Claude, Cursor, Claude Code, Codex, Slack or any chat box.
 
 It is a small native app for **macOS** (menu bar) and **Windows 11** (system tray). Speech is
-transcribed on your computer. Nothing is uploaded.
+transcribed on your computer. Nothing is uploaded. With no pictures it is simply dictation: your
+words are typed where your cursor is.
+
+## Install
+
+**macOS 12+** (Terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash
+```
+
+**Windows 10/11** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
+```
+
+Either one downloads the latest release, installs it (no admin rights on Windows), and opens the
+setup assistant. Run it again to update. The builds are not notarised or code-signed; the scripts
+install them the same way a developer would, so no warning dialogs appear.
 
 ![Pointcast demo placeholder](docs/demo/placeholder.gif)
 
@@ -62,6 +81,11 @@ Five colours, undo (⌘Z / Ctrl+Z) and redo. **Return** captures, **Esc** steps 
 When you stop, the prompt is pasted into the app you were using (and kept on the clipboard), or
 copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output**. Rich HTML goes
 on the clipboard so chat apps show the pictures; plain text with `[image n]` markers is the fallback.
+A recording with no pictures is pasted as plain text, like any dictation app.
+
+Every prompt is kept in **History** (menu → History…, newest 100, on this computer only). If
+Pointcast closes while you are recording, whatever was already transcribed or captured is
+recovered the next time it starts.
 
 Prefer to hold a key while you talk? **Settings → Shortcuts → Start or stop by: Holding.** A quick
 tap still toggles.
@@ -83,6 +107,12 @@ curl http://127.0.0.1:47821/v1/session
 - Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
   RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out
   before a picture is kept. Add your own in **Settings → Capture → Never capture**.
+
+## Uninstall
+
+macOS: quit Pointcast and drag it from Applications to the Trash; its data is in
+`~/Library/Application Support/dev.pointcast.app`. Windows: Settings → Apps → Pointcast →
+Uninstall (tick "Delete the application data" to remove models and history too).
 
 ## Build from source
 

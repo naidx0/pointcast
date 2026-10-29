@@ -6,7 +6,7 @@ import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-rea
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker } from "@/components/Models";
-import { HOTKEY_FIELD, inTauri, windowOpen, type Config } from "@/lib/api";
+import { HOTKEY_FIELD, historyClear, historyList, inTauri, windowOpen, type Config } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
@@ -173,10 +173,55 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
         Permissions
       </h2>
       {perms ? <PermissionRows perms={perms} setPerms={setPerms} /> : null}
+      <History />
       <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
         <button type="button" className="btn" onClick={() => windowOpen("onboarding").catch(() => undefined)}>
           Open Setup Assistant…
         </button>
+      </div>
+    </>
+  );
+}
+
+function History() {
+  const [count, setCount] = useState<number | null>(null);
+  const [sure, setSure] = useState(false);
+  const load = () => {
+    if (inTauri)
+      historyList()
+        .then((h) => setCount(h.entries.length))
+        .catch(() => setCount(0));
+    else setCount(3);
+  };
+  useEffect(load, []);
+  return (
+    <>
+      <h2 className="group-title" style={{ marginTop: 24 }}>
+        History
+      </h2>
+      <div className="group">
+        <Row
+          label={count == null ? "History" : `${count} ${count === 1 ? "prompt" : "prompts"} kept`}
+          sub="Your newest 100 prompts stay on this computer, so a closed window or a crash loses nothing."
+        >
+          <button type="button" className="btn" onClick={() => windowOpen("result").catch(() => undefined)}>
+            Show History
+          </button>
+          <button
+            type="button"
+            className={`btn ${sure ? "danger" : ""}`}
+            disabled={!count}
+            onBlur={() => setSure(false)}
+            onClick={async () => {
+              if (!sure) return setSure(true);
+              setSure(false);
+              if (inTauri) await historyClear().catch(() => undefined);
+              load();
+            }}
+          >
+            {sure ? "Click Again to Clear" : "Clear…"}
+          </button>
+        </Row>
       </div>
     </>
   );

@@ -256,7 +256,7 @@ fn settings_patch(
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
     }
-    if cur.model != next.model {
+    if cur.model != next.model && !recording(&svc) {
         let svc = svc.inner().clone();
         std::thread::spawn(move || {
             let _ = svc.ensure_engine();
@@ -655,7 +655,13 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
 }
 
 /// Whatever step the assistant was on, shortcuts and sessions go back to normal.
-fn leave_onboarding(svc: &App) {
+fn leave_onboarding(app: &AppHandle, svc: &App) {
+    if svc.practice.load(Ordering::SeqCst) && recording(svc) {
+        let _ = svc.stop(true);
+        hide_window(app, "indicator");
+        hide_window(app, "overlay");
+        emit_state(app, svc);
+    }
     svc.practice.store(false, Ordering::SeqCst);
     svc.hotkey_test.store(false, Ordering::SeqCst);
     svc.monitor_off();
@@ -663,7 +669,7 @@ fn leave_onboarding(svc: &App) {
 
 #[tauri::command]
 fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
-    leave_onboarding(&svc);
+    leave_onboarding(&app, &svc);
     let mut s = svc.settings.lock().unwrap().clone();
     s.onboarded = true;
     svc.save_settings(s)?;
@@ -725,7 +731,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_window(app, "settings");
+            let onboarded = app
+                .try_state::<Arc<App>>()
+                .is_some_and(|svc| svc.settings.lock().unwrap().onboarded);
+            show_window(app, if onboarded { "settings" } else { "onboarding" });
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -782,7 +791,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
             tray::setup(&handle, &svc)?;
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
@@ -823,8 +832,9 @@ pub fn run() {
                     let _ = window.hide();
                 }
                 if window.label() == "onboarding" {
-                    if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
-                        leave_onboarding(&svc);
+                    let app = window.app_handle();
+                    if let Some(svc) = app.try_state::<Arc<App>>() {
+                        leave_onboarding(app, &svc);
                     }
                 }
             }
