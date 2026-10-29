@@ -816,14 +816,23 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
 }
 
 #[tauri::command]
-fn permissions_get() -> permissions::PermissionStatus {
-    permissions::probe()
+fn permissions_get(svc: tauri::State<'_, Arc<App>>) -> permissions::PermissionStatus {
+    noted(&svc, permissions::probe())
 }
 
 #[tauri::command]
-fn permission_request(kind: String) -> permissions::PermissionStatus {
+fn permission_request(svc: tauri::State<'_, Arc<App>>, kind: String) -> permissions::PermissionStatus {
     permissions::request(&kind);
-    permissions::probe()
+    noted(&svc, permissions::probe())
+}
+
+/// Remember what was ever granted, so launch can tell a permission an update took from one never given.
+fn noted(svc: &App, p: permissions::PermissionStatus) -> permissions::PermissionStatus {
+    let mut s = svc.settings.lock().unwrap().clone();
+    if s.granted.note(p.screen == permissions::Access::Granted, p.accessibility == permissions::Access::Granted) {
+        let _ = svc.save_settings(s);
+    }
+    p
 }
 
 #[tauri::command]
@@ -1144,8 +1153,13 @@ pub fn run() {
                 show_window(&handle, "onboarding");
             }
             #[cfg(target_os = "macos")]
-            if settings.onboarded && permissions::probe().screen != permissions::Access::Granted {
-                show_window(&handle, "onboarding");
+            if settings.onboarded {
+                let p = noted(&svc, permissions::probe());
+                let paste = settings.output == settings::OutputMode::AutoPaste;
+                let on = |a: permissions::Access| a == permissions::Access::Granted;
+                if settings.granted.lost(on(p.screen), on(p.accessibility), paste) {
+                    show_window(&handle, "onboarding");
+                }
             }
             // An entry an earlier version made is written again in this one's form (with --login).
             if settings.onboarded && settings.start_at_login {
