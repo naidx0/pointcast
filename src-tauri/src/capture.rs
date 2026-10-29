@@ -30,26 +30,22 @@ fn cursor_pos() -> Result<(i32, i32), String> {
     }
 }
 
-fn grab_frame(settings: &Settings, hide_titles: &[&str]) -> Result<Frame, String> {
+fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let (cx, cy) = cursor_pos()?;
     let mon = xcap::Monitor::from_point(cx, cy).map_err(|e| e.to_string())?;
     let mx = mon.x().unwrap_or(0);
     let my = mon.y().unwrap_or(0);
     let list = settings.hidden_list();
-    let me = std::process::id();
+    // Pointcast's own windows are content-protected (see platform::protect), so the OS leaves
+    // them out of the frame; only password managers and the hide-list are painted over here.
     let mut rects = vec![];
     for w in xcap::Window::all().unwrap_or_default() {
         if w.is_minimized().unwrap_or(true) {
             continue;
         }
-        let pid = w.pid().ok();
         let app = w.app_name().unwrap_or_default();
         let title = w.title().unwrap_or_default();
-        let ours = pid == Some(me)
-            || title.to_ascii_lowercase().contains("pointcast")
-            || hide_titles.iter().any(|t| title.contains(t));
-        let secret = privacy::hides(&app, &title, &list);
-        if (ours && !settings.include_app) || secret {
+        if privacy::hides(&app, &title, &list) {
             rects.push(Rect {
                 x: w.x().unwrap_or(0) - mx,
                 y: w.y().unwrap_or(0) - my,
@@ -72,8 +68,8 @@ fn grab_frame(settings: &Settings, hide_titles: &[&str]) -> Result<Frame, String
     })
 }
 
-pub fn grab_full(settings: &Settings, hide_titles: &[&str]) -> Result<Shot, String> {
-    let f = grab_frame(settings, hide_titles)?;
+pub fn grab_full(settings: &Settings) -> Result<Shot, String> {
+    let f = grab_frame(settings)?;
     Ok(Shot {
         png: encode_png(&f.buf, f.width, f.height)?,
         width: f.width,
@@ -83,8 +79,8 @@ pub fn grab_full(settings: &Settings, hide_titles: &[&str]) -> Result<Shot, Stri
     })
 }
 
-pub fn grab_zoom(settings: &Settings, hide_titles: &[&str]) -> Result<Shot, String> {
-    let f = grab_frame(settings, hide_titles)?;
+pub fn grab_zoom(settings: &Settings) -> Result<Shot, String> {
+    let f = grab_frame(settings)?;
     let n = settings.zoom_px();
     let (cw, ch) = (n.min(f.width), n.min(f.height));
     let (cx, cy) = f.cursor;
@@ -99,8 +95,8 @@ pub fn grab_zoom(settings: &Settings, hide_titles: &[&str]) -> Result<Shot, Stri
     })
 }
 
-pub fn grab_freeze(settings: &Settings, hide_titles: &[&str]) -> Result<Shot, String> {
-    grab_full(settings, hide_titles)
+pub fn grab_freeze(settings: &Settings) -> Result<Shot, String> {
+    grab_full(settings)
 }
 
 /// Crop `png` to `rect` (in image pixels). Used after the overlay confirms a box.

@@ -14,64 +14,120 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "settings",
-        "title": "Pointcast",
-        "url": "index.html",
-        "width": 760,
-        "height": 720,
-        "minWidth": 560,
-        "minHeight": 480,
+        "label": "onboarding",
+        "title": "Welcome to Pointcast",
+        "url": "onboarding.html",
+        "width": 720,
+        "height": 600,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": true,
         "visible": false,
-        "resizable": true,
-        "decorations": true,
-        "transparent": false,
+        "center": true,
+        "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 18 }
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 22
+        },
+        "windowEffects": {
+          "effects": [
+            "underWindowBackground",
+            "mica"
+          ],
+          "state": "followsWindowActiveState"
+        }
+      },
+      {
+        "label": "settings",
+        "title": "Pointcast Settings",
+        "url": "index.html",
+        "width": 860,
+        "height": 620,
+        "minWidth": 720,
+        "minHeight": 480,
+        "visible": false,
+        "center": true,
+        "resizable": true,
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 22
+        },
+        "windowEffects": {
+          "effects": [
+            "sidebar",
+            "mica"
+          ],
+          "state": "followsWindowActiveState"
+        }
       },
       {
         "label": "indicator",
         "title": "Pointcast recording",
         "url": "indicator.html",
-        "width": 360,
-        "height": 56,
+        "width": 340,
+        "height": 64,
         "visible": false,
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
         "transparent": true,
-        "shadow": false
+        "shadow": false,
+        "focus": false,
+        "focusable": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true
       },
       {
         "label": "overlay",
         "title": "Pointcast annotate",
         "url": "overlay.html",
+        "width": 1280,
+        "height": 800,
         "visible": false,
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
         "transparent": true,
-        "fullscreen": true,
-        "shadow": false
+        "shadow": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true
       },
       {
         "label": "result",
-        "title": "Pointcast — last prompt",
+        "title": "Last Prompt",
         "url": "result.html",
-        "width": 720,
+        "width": 760,
         "height": 640,
+        "minWidth": 520,
+        "minHeight": 420,
         "visible": false,
+        "center": true,
         "resizable": true,
-        "decorations": true,
+        "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 18 }
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 22
+        },
+        "windowEffects": {
+          "effects": [
+            "underWindowBackground",
+            "mica"
+          ],
+          "state": "followsWindowActiveState"
+        }
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*"
     }
   },
   "bundle": {
@@ -85,7 +141,7 @@
       "icons/icon.png"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "12.0",
       "infoPlist": "Info.plist"
     },
     "windows": {
@@ -96,11 +152,14 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
       }
     },
     "category": "Productivity",
-    "shortDescription": "Voice plus annotated screenshots into one AI prompt",
-    "longDescription": "Pointcast lives in the tray, records your voice locally, and lets you mark up the screen. On stop it copies one prompt — transcript with inline images — you can paste into any AI tool."
+    "shortDescription": "Talk, point and paste one prompt into any AI tool",
+    "longDescription": "Pointcast lives in the menu bar or tray. Press one shortcut, talk, and mark up the screen; when you stop, one prompt with your words and the annotated screenshots is ready to paste into any AI tool. Speech is transcribed on this computer."
   }
 }

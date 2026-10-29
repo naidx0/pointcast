@@ -26,6 +26,7 @@ export default defineConfig({
         indicator: resolve(__dirname, "indicator.html"),
         overlay: resolve(__dirname, "overlay.html"),
         result: resolve(__dirname, "result.html"),
+        onboarding: resolve(__dirname, "onboarding.html"),
       },
     },
   },

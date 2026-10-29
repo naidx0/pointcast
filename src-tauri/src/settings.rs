@@ -51,6 +51,12 @@ pub struct Settings {
     pub mcp_bind: String,
     #[serde(default = "yes")]
     pub mcp_enabled: bool,
+    /// First-run setup finished; until then the onboarding window opens at launch.
+    #[serde(default)]
+    pub onboarded: bool,
+    /// Soft start and stop sounds.
+    #[serde(default = "yes")]
+    pub sounds: bool,
 }
 
 fn default_model() -> String {
@@ -85,6 +91,8 @@ impl Default for Settings {
             hidden: None,
             mcp_bind: default_mcp(),
             mcp_enabled: true,
+            onboarded: false,
+            sounds: true,
         }
     }
 }
@@ -169,6 +177,10 @@ mod tests {
         assert_eq!(back.session_chord().label(), "Ctrl+Shift+F8");
         assert_eq!(back.zoom_px(), 640);
         assert_eq!(back.output, OutputMode::Folder);
+        assert!(!back.onboarded && back.sounds);
+        std::fs::write(&path, r#"{"onboarded":true,"sounds":false}"#).unwrap();
+        let old = Settings::load(&path);
+        assert!(old.onboarded && !old.sounds);
         std::fs::write(&path, r#"{"session_hotkey":"A"}"#).unwrap();
         assert_eq!(Settings::load(&path).session_chord(), chord::default_session());
         let _ = std::fs::remove_dir_all(&dir);

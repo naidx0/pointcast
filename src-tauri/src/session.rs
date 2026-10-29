@@ -69,6 +69,16 @@ pub struct App {
     freeze: Mutex<Option<Shot>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
+    /// Onboarding practice run: keep the result in the app, deliver it nowhere.
+    pub practice: AtomicBool,
+    /// Onboarding shortcut test: hotkeys only report that they fired.
+    pub hotkey_test: AtomicBool,
+    /// When the session chord went down, for hold-to-talk.
+    pub hold_from: Mutex<Option<u64>>,
+    /// Chords the OS refused to register (`action`, reason).
+    pub hotkey_errors: Mutex<Vec<(String, String)>>,
+    /// Mic opened outside a session (onboarding level meter).
+    pub monitor: Mutex<Option<(Mic, Arc<Take>)>>,
 }
 
 impl App {
@@ -101,6 +111,11 @@ impl App {
             freeze: Mutex::default(),
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
+            practice: AtomicBool::new(false),
+            hotkey_test: AtomicBool::new(false),
+            hold_from: Mutex::default(),
+            hotkey_errors: Mutex::default(),
+            monitor: Mutex::default(),
         })
     }
 
@@ -176,6 +191,7 @@ impl App {
         ) {
             return Ok(());
         }
+        self.monitor_off();
         self.stop.store(false, Ordering::SeqCst);
         self.items.lock().unwrap().clear();
         *self.t0.lock().unwrap() = Some(now_ms());
@@ -237,6 +253,10 @@ impl App {
         }
         let items = prompt::ordered(self.items.lock().unwrap().clone());
         let exp = prompt::assemble_export(&items);
+        if self.practice.load(Ordering::SeqCst) {
+            self.state.lock().unwrap().phase = Phase::Ready;
+            return Ok(Some(exp));
+        }
         *self.last_export.lock().unwrap() = Some(exp.clone());
         let settings = self.settings.lock().unwrap().clone();
         if settings.output == OutputMode::Folder || settings.also_clipboard {
@@ -249,6 +269,27 @@ impl App {
         let _ = crate::clipboard::deliver(&items, settings.output, settings.also_clipboard);
         self.state.lock().unwrap().phase = Phase::Ready;
         Ok(Some(exp))
+    }
+
+    /// Open the mic without a session; `level()` reads it.
+    pub fn monitor_on(&self) -> Result<(), String> {
+        let mut m = self.monitor.lock().unwrap();
+        if m.is_some() {
+            return Ok(());
+        }
+        let device = self.settings.lock().unwrap().device.clone();
+        let take = Arc::new(Take::default());
+        let mic = Mic::open(device, take.clone())?;
+        *m = Some((mic, take));
+        Ok(())
+    }
+
+    pub fn monitor_off(&self) {
+        self.monitor.lock().unwrap().take();
+    }
+
+    pub fn monitor_level(&self) -> Option<f32> {
+        self.monitor.lock().unwrap().as_ref().map(|(_, t)| t.level())
     }
 
     pub fn inject_speech(&self, text: &str) {
@@ -264,16 +305,16 @@ impl App {
     }
 
     pub fn capture_full(&self) -> Result<Capture, String> {
-        self.capture_shot(|s, hide| capture::grab_full(s, hide))
+        self.capture_shot(capture::grab_full)
     }
 
     pub fn capture_zoom(&self) -> Result<Capture, String> {
-        self.capture_shot(|s, hide| capture::grab_zoom(s, hide))
+        self.capture_shot(capture::grab_zoom)
     }
 
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
-        let shot = capture::grab_freeze(&settings, &["indicator", "overlay"])?;
+        let shot = capture::grab_freeze(&settings)?;
         *self.freeze.lock().unwrap() = Some(shot.clone());
         Ok(shot)
     }
@@ -305,10 +346,10 @@ impl App {
 
     fn capture_shot(
         &self,
-        grab: impl FnOnce(&Settings, &[&str]) -> Result<Shot, String>,
+        grab: impl FnOnce(&Settings) -> Result<Shot, String>,
     ) -> Result<Capture, String> {
         let settings = self.settings.lock().unwrap().clone();
-        let shot = grab(&settings, &["indicator", "overlay"])?;
+        let shot = grab(&settings)?;
         let t = self.t_ms();
         let cap = Capture {
             id: 0,

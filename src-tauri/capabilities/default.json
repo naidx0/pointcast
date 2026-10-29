@@ -1,8 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Pointcast windows: settings, recording indicator, annotate overlay, last prompt",
-  "windows": ["settings", "indicator", "overlay", "result"],
+  "description": "Pointcast windows: onboarding, settings, recording HUD, annotate overlay, last prompt",
+  "windows": [
+    "onboarding",
+    "settings",
+    "indicator",
+    "overlay",
+    "result"
+  ],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -28,6 +34,9 @@
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
     "dialog:default",
-    "opener:default"
+    "opener:default",
+    "core:window:allow-set-theme",
+    "core:window:allow-set-content-protected",
+    "core:app:allow-default-window-icon"
   ]
 }
