@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClipboardPaste, Copy, FolderOpen, Pencil, Send, Trash2, X } from "lucide-react";
 import {
   detectTools,
@@ -35,6 +35,7 @@ export function Result() {
   const [busy, setBusy] = useState(false);
   // Why the last action did not do all it said, like a paste that could only copy.
   const [note, setNote] = useState("");
+  const noteAt = useRef(0);
   // Bumped when a picture is marked up again, so the selected prompt reloads in place.
   const [rev, setRev] = useState(0);
   const mac = platform() === "mac";
@@ -64,7 +65,11 @@ export function Result() {
     load();
     if (inTauri) detectTools().then(setTools).catch(() => undefined);
     else if (preview) setTools(PREVIEW_TOOLS);
-    const onFocus = () => load();
+    // Shown again later: an old failure no longer says anything about this visit.
+    const onFocus = () => {
+      if (Date.now() - noteAt.current > 2000) setNote("");
+      load();
+    };
     window.addEventListener("focus", onFocus);
     const off = subscribe(
       onResult(() => load(null, true)),
@@ -90,6 +95,8 @@ export function Result() {
     };
   }, [sel, rev]);
 
+  useEffect(() => setNote(""), [sel]);
+
   const flash = (k: "copied" | "pasted") => {
     setDone(k);
     setTimeout(() => setDone(""), 1600);
@@ -101,6 +108,7 @@ export function Result() {
       if (inTauri) await f();
       if (k) flash(k);
     } catch (e) {
+      noteAt.current = Date.now();
       setNote(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
