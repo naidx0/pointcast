@@ -39,7 +39,8 @@ export function Result() {
   const [rev, setRev] = useState(0);
   const mac = platform() === "mac";
 
-  const load = useCallback(async (pick?: string | null) => {
+  /** `latest`: a recording just finished, so its prompt is the one shown, whatever was picked before. */
+  const load = useCallback(async (pick?: string | null, latest = false) => {
     if (!inTauri) {
       if (preview) {
         setEntries(PREVIEW_ENTRIES);
@@ -51,7 +52,7 @@ export function Result() {
     const h = await historyList().catch(() => ({ entries: [] as HistoryMeta[], last: null }));
     setEntries(h.entries);
     setSel((s) => {
-      const want = pick ?? s ?? h.last ?? h.entries[0]?.id ?? null;
+      const want = (latest ? h.last : pick) ?? s ?? h.last ?? h.entries[0]?.id ?? null;
       return h.entries.some((e) => e.id === want) ? want : (h.entries[0]?.id ?? null);
     });
     lastFolder()
@@ -66,7 +67,7 @@ export function Result() {
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     const off = subscribe(
-      onResult(() => load(null)),
+      onResult(() => load(null, true)),
       onHistoryChanged(() => {
         setRev((r) => r + 1);
         load(null);
