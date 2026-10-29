@@ -25,6 +25,9 @@ impl Latest {
     pub fn set(&self, exp: SessionExport) {
         *self.inner.lock().unwrap() = Some(exp);
     }
+    pub fn clear(&self) {
+        *self.inner.lock().unwrap() = None;
+    }
     pub fn get(&self) -> Option<SessionExport> {
         self.inner.lock().unwrap().clone()
     }
@@ -486,6 +489,27 @@ mod tests {
         );
         let (code, resp) = send(addr, &req);
         assert_eq!(code, 403, "{resp}");
+        assert!(!resp.contains(SECRET), "{resp}");
+    }
+
+    #[test]
+    fn a_cleared_session_answers_no_session_not_an_empty_prompt() {
+        let latest = Latest::default();
+        latest.set(assemble_export(&[Item::Speech {
+            t_ms: 0,
+            end_ms: 10,
+            text: SECRET.into(),
+        }]));
+        let addr = spawn("127.0.0.1:0", latest.clone(), TOKEN.into()).unwrap();
+        latest.clear();
+        let (code, resp) = request(addr, "POST /mcp", &bearer(TOKEN), CALL);
+        assert_eq!(code, 200, "{resp}");
+        assert!(resp.contains("No Pointcast session yet."), "{resp}");
+        assert!(resp.contains("isError"), "{resp}");
+        assert!(!resp.contains(SECRET), "{resp}");
+        let (code, resp) = request(addr, "GET /v1/session", &bearer(TOKEN), "");
+        assert_eq!(code, 404, "{resp}");
+        assert!(resp.contains("no session yet"), "{resp}");
         assert!(!resp.contains(SECRET), "{resp}");
     }
 
