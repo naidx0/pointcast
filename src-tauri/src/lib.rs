@@ -619,14 +619,28 @@ fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n
 }
 
 #[tauri::command]
-fn history_delete(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    svc.history.delete(&id)
+fn history_delete(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    svc.history.delete(&id)?;
+    forgot(&app, &svc, Some(&id));
+    Ok(())
 }
 
 #[tauri::command]
-fn history_clear(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
-    *svc.last_id.lock().unwrap() = None;
-    svc.history.clear()
+fn history_clear(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    let r = svc.history.clear();
+    forgot(&app, &svc, None);
+    r
+}
+
+/// A deleted prompt leaves Paste Last Prompt and what coding agents read too.
+fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
+    if !svc.forget(gone) {
+        return;
+    }
+    if let Some(latest) = app.try_state::<Latest>() {
+        latest.set(svc.last_export().unwrap_or_else(|| prompt::assemble_export(&[])));
+    }
+    emit_state(app, svc);
 }
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {

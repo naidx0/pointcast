@@ -597,6 +597,21 @@ impl App {
         Ok(exp)
     }
 
+    /// History lost entries (`gone`, or all of them when None). When the last prompt was one, the newest entry left
+    /// takes its place, or nothing does. True when the last prompt changed.
+    pub fn forget(&self, gone: Option<&str>) -> bool {
+        let hit = gone.is_none_or(|id| self.last_id.lock().unwrap().as_deref() == Some(id));
+        if !hit {
+            return false;
+        }
+        let next = self.history.list().into_iter().next();
+        if next.and_then(|m| self.set_last(&m.id).ok()).is_none() {
+            *self.last_export.lock().unwrap() = None;
+            *self.last_id.lock().unwrap() = None;
+        }
+        true
+    }
+
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
         if let Err(e) = self.ensure_engine() {
             // Screenshots still work; the transcript stays empty.
@@ -908,6 +923,28 @@ mod tests {
         // A real recording is never turned into one, nor discarded.
         a.state.lock().unwrap().phase = Phase::Recording;
         assert!(!a.practice_off());
+    }
+
+    #[test]
+    fn deleting_the_last_prompt_or_clearing_history_forgets_it() {
+        let a = app("forget");
+        let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
+        let old = a.history.save(&said("older"), 1_000, 9).unwrap();
+        let new = a.history.save(&said("newest"), 2_000, 9).unwrap();
+        a.set_last(&new.id).unwrap();
+        // Another entry goes: the last prompt stays.
+        a.history.delete(&old.id).unwrap();
+        assert!(!a.forget(Some(&old.id)));
+        assert_eq!(a.last_export().unwrap().plain, "newest");
+        let old = a.history.save(&said("older"), 1_000, 9).unwrap();
+        // The last one goes: the newest left takes its place.
+        a.history.delete(&new.id).unwrap();
+        assert!(a.forget(Some(&new.id)));
+        assert_eq!((a.last_export().unwrap().plain.as_str(), a.last_id.lock().unwrap().clone()), ("older", Some(old.id)));
+        // Clear: nothing is left to paste.
+        a.history.clear().unwrap();
+        assert!(a.forget(None));
+        assert!(a.last_export().is_none() && a.last_id.lock().unwrap().is_none());
     }
 
     #[test]
