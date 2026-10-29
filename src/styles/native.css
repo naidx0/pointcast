@@ -1188,6 +1188,24 @@ html.win .hud .hb {
   white-space: nowrap;
   margin: 0 6px;
 }
+.hud .note.warn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 136px;
+  max-width: 136px;
+  margin: 0 6px 0 10px;
+  font-size: 11px;
+  line-height: 13px;
+}
+.hud .note.warn > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud .note.warn b {
+  color: var(--hud-ink);
+  font-weight: 600;
+}
 
 /* —— Last prompt window —— */
 .result {
@@ -1286,6 +1304,24 @@ html.win .hist-item {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.audio-bar {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--fill);
+}
+html.win .audio-bar {
+  border-radius: 4px;
+}
+.audio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.audio-row .btn:disabled {
+  opacity: 1;
 }
 
 /* —— HUD after stop: where the prompt went —— */

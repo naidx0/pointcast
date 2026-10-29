@@ -17,6 +17,7 @@ import {
   type UiState,
 } from "@/lib/api";
 import { chordText } from "@/lib/keys";
+import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
 
 const idle: UiState = {
@@ -49,7 +50,19 @@ export function Indicator() {
         .then((c) => setKeys(c.hotkeys))
         .catch(() => undefined);
     } else if (preview) {
-      setS({ ...idle, phase: "recording", mic: true, duration_ms: 16_000, image_count: 2, level: 0.4 });
+      // ?phase=transcribing&behind=40000 or ?quiet=silent|quiet to look at the other states.
+      const q = new URLSearchParams(location.search);
+      const quiet = q.get("quiet");
+      setS({
+        ...idle,
+        phase: q.get("phase") === "transcribing" ? "transcribing" : "recording",
+        mic: true,
+        duration_ms: 16_000,
+        image_count: 2,
+        level: 0.4,
+        behind_ms: Number(q.get("behind")) || 0,
+        quiet_mic: quiet === "silent" || quiet === "quiet" ? quiet : null,
+      });
       const id = setInterval(() => setLv((x) => [...x.slice(1), Math.random() * 0.9]), 110);
       return () => clearInterval(id);
     }
@@ -77,18 +90,23 @@ export function Indicator() {
   const waiting = s.phase === "loading";
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
   const problem = s.error;
+  const mic = s.phase === "recording" && s.quiet_mic ? micNotice(s.quiet_mic) : null;
 
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud" data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
         <span className={`rec ${waiting ? "wait" : ""}`} data-tauri-drag-region />
-        <span className="time" data-tauri-drag-region>
-          {stamp(s.duration_ms)}
-        </span>
+        {mic ? null : (
+          <span className="time" data-tauri-drag-region>
+            {stamp(s.duration_ms)}
+          </span>
+        )}
         {problem ? (
           <span className="note" title={problem} data-tauri-drag-region>
             {problem}
           </span>
+        ) : mic ? (
+          <MicNote notice={mic} />
         ) : (
           <span className="wave" aria-hidden="true" data-tauri-drag-region>
             {lv.map((v, i) => (
@@ -149,12 +167,43 @@ export function Indicator() {
   );
 }
 
+/** The microphone warning takes the place of the time and the wave, so the buttons stay where they are. */
+function MicNote({ notice }: { notice: ReturnType<typeof micNotice> }) {
+  return (
+    <span className="note warn" role="status" title={notice.full} aria-label={notice.full} data-tauri-drag-region>
+      <b data-tauri-drag-region>{notice.lines[0]}</b>
+      <span data-tauri-drag-region>{notice.lines[1]}</span>
+    </span>
+  );
+}
+
+/** Seconds left on the part of the recording still to be written down, counted down between updates. */
+function useLeft(behind: number) {
+  const [left, setLeft] = useState(behind);
+  useEffect(() => {
+    const from = Date.now();
+    setLeft(behind);
+    if (behind <= 0) return;
+    const id = setInterval(() => setLeft(Math.max(0, behind - (Date.now() - from))), 500);
+    return () => clearInterval(id);
+  }, [behind]);
+  return left;
+}
+
+const leftText = (ms: number) => (ms <= 90_000 ? `${Math.max(1, Math.ceil(ms / 1000))} s left` : `${Math.ceil(ms / 60_000)} min left`);
+
 /** After stop: a short pill that says where the prompt went, then the window hides itself. */
 function Done({ s }: { s: UiState }) {
   const paste = platform() === "mac" ? "⌘V" : "Ctrl+V";
+  const behind = s.phase === "transcribing" ? (s.behind_ms ?? 0) : 0;
+  const left = useLeft(behind);
   const text =
     s.phase === "transcribing"
-      ? "Finishing…"
+      ? behind > 0
+        ? left > 0
+          ? `Finishing the transcript · ${leftText(left)}`
+          : "Finishing the transcript"
+        : "Finishing…"
       : s.notice === "pasted"
         ? "Pasted"
         : s.notice === "copied"
@@ -172,7 +221,7 @@ function Done({ s }: { s: UiState }) {
             <Check size={13} strokeWidth={3} />
           </span>
         )}
-        <span>{text}</span>
+        <span style={{ fontVariantNumeric: "tabular-nums" }}>{text}</span>
       </div>
     </div>
   );

@@ -442,10 +442,18 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
             ))}
           </select>
         </Row>
+        <Row
+          label="Keep my recordings so I can transcribe them again"
+          sub="The newest 10 recordings keep their audio on this computer, deleted with the entry. Nothing is uploaded."
+        >
+          <Toggle
+            label="Keep my recordings so I can transcribe them again"
+            on={cfg.keep_audio !== false}
+            set={(v) => patch({ keep_audio: v })}
+          />
+        </Row>
       </div>
-      <p className="group-note">
-        Audio stays in memory and is dropped once it is transcribed. Models are saved in Pointcast’s data folder.
-      </p>
+      <p className="group-note">Models are saved in Pointcast’s data folder.</p>
     </>
   );
 }
@@ -630,6 +638,16 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
           >
             Choose…
           </button>
+        </Row>
+        <Row
+          label="Include picture file paths in the text"
+          sub="So terminal agents such as Claude Code can open the screenshots. Chat apps that take pictures ignore it."
+        >
+          <Toggle
+            label="Include picture file paths in the text"
+            on={cfg.picture_paths !== false}
+            set={(v) => patch({ picture_paths: v })}
+          />
         </Row>
       </div>
       <h2 className="group-title" style={{ marginTop: 24 }}>
