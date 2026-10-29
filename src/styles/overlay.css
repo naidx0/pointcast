@@ -36,6 +36,22 @@
   overflow: hidden;
 }
 
+.ov-root .ov-grips {
+  position: absolute;
+  z-index: 10;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.ov-root .ov-grip {
+  pointer-events: stroke;
+  cursor: grab;
+}
+
+.ov-root .ov-grip:active {
+  cursor: grabbing;
+}
+
 .ov-root .ov-dim {
   position: absolute;
   inset: 0;
