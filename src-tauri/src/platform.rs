@@ -154,24 +154,54 @@ fn keep_front(old: Option<isize>, now: Option<(isize, u32)>, own_pid: u32) -> Op
     }
 }
 
+#[derive(Clone, Copy)]
+enum Step {
+    /// Pointcast covers the app in front (target, process id): remember it.
+    Remember(Option<(isize, u32)>),
+    /// Focus the remembered app and keep it, since another delivery (a stop after a region) may need it too.
+    Refocus,
+    /// Focus the remembered app and forget it: for the last delivery.
+    Restore,
+    /// A session began or ended, or History closed: an app remembered before must never get the next paste.
+    Forget,
+}
+
+/// The remembered app after `step`, and the app to focus then.
+fn front_after(old: Option<isize>, step: Step, own_pid: u32) -> (Option<isize>, Option<isize>) {
+    match step {
+        Step::Remember(now) => (keep_front(old, now, own_pid), None),
+        Step::Refocus => (old, old),
+        Step::Restore => (None, old),
+        Step::Forget => (None, None),
+    }
+}
+
+fn front_at(step: Step) {
+    let focus = {
+        let mut f = FRONT.lock().unwrap();
+        let (keep, focus) = front_after(*f, step, std::process::id());
+        *f = keep;
+        focus
+    };
+    if let Some(t) = focus {
+        activate(t);
+    }
+}
+
 pub fn remember_front() {
-    let mut f = FRONT.lock().unwrap();
-    *f = keep_front(*f, front(), std::process::id());
+    front_at(Step::Remember(front()));
 }
 
-/// Focus the remembered app and forget it: for the last delivery, so a later one never lands in a stale app.
 pub fn restore_front() {
-    if let Some(t) = FRONT.lock().unwrap().take() {
-        activate(t);
-    }
+    front_at(Step::Restore);
 }
 
-/// Focus the remembered app and keep it, since another delivery (a stop after a region) may need it too.
 pub fn refocus_front() {
-    let t = *FRONT.lock().unwrap();
-    if let Some(t) = t {
-        activate(t);
-    }
+    front_at(Step::Refocus);
+}
+
+pub fn forget_front() {
+    front_at(Step::Forget);
 }
 
 #[cfg(windows)]
@@ -358,6 +388,37 @@ mod tests {
         assert_eq!(keep_front(None, Some((99, 1000)), OURS), Some(99));
         assert_eq!(keep_front(Some(7), None, OURS), Some(7));
         assert_eq!(keep_front(None, None, OURS), None);
+    }
+
+    /// What lib.rs does at each moment, in order; returns the app focused at each step.
+    fn walk(steps: &[Step]) -> Vec<Option<isize>> {
+        let mut f = None;
+        steps
+            .iter()
+            .map(|s| {
+                let (keep, focus) = front_after(f, *s, 4242);
+                f = keep;
+                focus
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stop_with_no_region_in_that_session_refocuses_nothing() {
+        use Step::*;
+        let (excel, chrome) = (Some((7, 1000)), Some((9, 2000)));
+        let ours = Some((99, 4242));
+        // A session in Excel with a region: it begins, the overlay opens over Excel, the commit and then the stop
+        // both go back to Excel, and once the stop delivered it is forgotten.
+        assert_eq!(walk(&[Forget, Remember(excel), Refocus, Refocus, Forget]), [None, None, Some(7), Some(7), None]);
+        // The next session, in Chrome, marks no region: its stop brings nothing forward, so the paste lands in Chrome.
+        assert_eq!(walk(&[Forget, Remember(excel), Refocus, Refocus, Forget, Forget, Refocus]).last(), Some(&None));
+        // Discard or leaving practice after a region forgets it too.
+        assert_eq!(walk(&[Forget, Remember(chrome), Refocus, Forget, Forget, Refocus]).last(), Some(&None));
+        // History opened over Excel and closed without pasting, then opened from Settings: its paste goes nowhere stale.
+        assert_eq!(walk(&[Remember(excel), Forget, Remember(ours), Restore]).last(), Some(&None));
+        // History's paste goes back to the app it opened over, once.
+        assert_eq!(walk(&[Remember(excel), Remember(ours), Restore, Refocus]), [None, None, Some(7), None]);
     }
 
     #[test]

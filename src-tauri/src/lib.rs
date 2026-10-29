@@ -91,6 +91,7 @@ fn recording(svc: &App) -> bool {
 }
 
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
+    platform::forget_front();
     svc.start()?;
     if svc.settings.lock().unwrap().sounds {
         platform::chime(true);
@@ -118,6 +119,7 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
     emit_state_now(app, svc);
     let practice = svc.practice.load(Ordering::SeqCst);
     let exp = svc.stop(false);
+    platform::forget_front();
     if practice || exp.is_err() {
         hide_window(app, "indicator");
     } else {
@@ -503,6 +505,7 @@ async fn session_cancel(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Resu
     let _ = svc.stop(true)?;
     hide_window(&app, "indicator");
     close_overlay(&app);
+    platform::forget_front();
     emit_state(&app, &svc);
     Ok(())
 }
@@ -958,6 +961,7 @@ fn end_practice(app: &AppHandle, svc: &App) {
         svc.practice.store(false, Ordering::SeqCst);
         hide_window(app, "indicator");
         close_overlay(app);
+        platform::forget_front();
         emit_state(app, svc);
     }
 }
@@ -1272,6 +1276,10 @@ pub fn run() {
                 }
                 if window.label() == "overlay" {
                     close_overlay(window.app_handle());
+                }
+                // History closed without pasting: the app it opened over is not where a later paste goes.
+                if window.label() == "result" && !window.app_handle().try_state::<Arc<App>>().is_some_and(|svc| recording(&svc)) {
+                    platform::forget_front();
                 }
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
