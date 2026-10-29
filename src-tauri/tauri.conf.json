@@ -69,7 +69,7 @@
         "label": "indicator",
         "title": "Pointcast recording",
         "url": "indicator.html",
-        "width": 340,
+        "width": 392,
         "height": 64,
         "visible": false,
         "decorations": false,
@@ -142,7 +142,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "digestAlgorithm": "sha256",

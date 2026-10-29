@@ -1050,9 +1050,12 @@ button.card:hover {
 }
 .hud {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 2px;
+  width: max-content;
   height: 48px;
+  white-space: nowrap;
   padding: 0 6px 0 14px;
   border-radius: 24px;
   background: var(--hud);
@@ -1091,6 +1094,9 @@ html.win .hud {
     box-shadow: 0 0 0 7px rgba(255, 59, 48, 0);
   }
 }
+.hud > * {
+  flex: none;
+}
 .hud .time {
   font-variant-numeric: tabular-nums;
   min-width: 38px;
@@ -1101,7 +1107,7 @@ html.win .hud {
   align-items: center;
   gap: 2px;
   height: 22px;
-  width: 52px;
+  width: 44px;
   margin-right: 6px;
 }
 .hud .wave i {

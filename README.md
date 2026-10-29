@@ -1,115 +1,132 @@
 # Pointcast
 
-**Voice plus annotated screenshots → one prompt you can paste into any AI tool.**
+**Talk, point, paste.** Press one shortcut, say what you see, mark up the screen, and Pointcast
+hands you one prompt (your words with the annotated screenshots inline, where you took them) to
+paste into ChatGPT, Claude, Cursor, Claude Code, Codex, Slack or any chat box.
 
-Pointcast lives in the system tray. Hold a hotkey, talk, mark the screen, stop. You get a single prompt — transcript with `[image n]` markers and the pictures inlined at the moment you took them — on the clipboard as rich HTML (so ChatGPT, Claude, Slack show the images) plus a plain-text fallback. Optional auto-paste and a `prompt.md` + PNG folder for CLI agents.
-
-Think SuperWhisper meeting Cursor’s design-mode Annotate, but desktop-wide and tool-agnostic.
+It is a small native app for **macOS** (menu bar) and **Windows 11** (system tray). Speech is
+transcribed on your computer. Nothing is uploaded.
 
 ![Pointcast demo placeholder](docs/demo/placeholder.gif)
 
-A 48-second Linux VM recording is at [`docs/demo/pointcast-demo.mp4`](docs/demo/pointcast-demo.mp4). Core loop: **tray / hotkey → talk → region annotate (box, pin, arrow, text) → Paste into app**.
-
 ## Why
 
-Cursor Annotate is excellent *inside Cursor’s browser*: click or shift-click, drag a box, draw, dictate a note, Esc backs out a layer, a hint bar names the gestures. It does not work in the rest of the OS, and it only feeds Cursor.
+Cursor's Annotate lets you point at a page and talk to the agent, but only inside Cursor's browser,
+and only for Cursor. Pointcast does the same for the whole desktop and for every AI tool: a
+native Settings window, a terminal, a Figma file, a buggy checkout page in any browser.
 
-Pointcast fills that gap. Record a walkthrough of a buggy checkout page in Chrome, a native Settings window, or a terminal; paste the result into ChatGPT, Claude, Claude Code, Codex, Cursor, Slack, or a markdown file.
+## First run
 
-## Install
+Pointcast opens a short setup assistant the first time it starts:
 
-Step-by-step prerequisites (macOS / Windows / Linux), model download, permissions, and demo tips: **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**.
+1. **Welcome.**
+2. **Allow access.** Microphone, plus Screen Recording and Accessibility on macOS (Accessibility
+   lets it paste for you; it is optional). A live meter shows the mic works.
+3. **Speech model.** Pick Moonshine Base (111 MB, most accurate) or Tiny (30 MB, fastest). It
+   downloads once and works offline.
+4. **Shortcuts.** Press each one; it lights up when it works. Click one and type new keys to change it.
+5. **Practice run.** A real recording, start to finish. The prompt appears in the window, nothing
+   is pasted anywhere.
+6. **Done.** Choose whether to paste automatically and whether to open at login.
 
-### From source
+You can reopen it any time from the menu: **Setup Assistant…**
 
-```bash
-# prerequisites: Rust 1.90+, Node 20+, Tauri 2 system deps
-git clone https://github.com/you/pointcast
-cd pointcast
-npm install
-npm run tauri build
-```
+## Using it
 
-CI publishes **macOS universal** (`.dmg` / `.app`) and **Windows** (`.msi` / NSIS) artifacts. On Linux X11, `npm run tauri build` produces `.deb` and AppImage under `src-tauri/target/release/bundle/`.
+| Shortcut | macOS | Windows |
+| --- | --- | --- |
+| Start / stop | ⇧⌘Space | Ctrl+Shift+Space |
+| Mark up a region | ⌃⇧2 | Ctrl+Shift+2 |
+| Capture the screen | ⌃⇧1 | Ctrl+Shift+1 |
+| Capture around the pointer | ⌃⇧Z | Ctrl+Shift+Z |
 
-Speech models (Moonshine v2 via sherpa-onnx 2.0.0) download on first use. They stay on disk under the OS local-data directory (`Pointcast/speech`). Nothing is uploaded.
+Any capture shortcut starts a recording if none is running. While you record, a small capsule at
+the bottom of the screen shows the time, your voice level and the capture buttons; it never takes
+focus from the app you are talking about.
 
-### Permissions
+**Mark up a region** freezes the screen. Drag a box (or click once for the whole screen), then:
 
-- **macOS:** Microphone + Screen Recording. Pointcast is a menu-bar extra (`LSUIElement`). The first capture and the first listen trigger the system prompts. Copy: *Pointcast transcribes your voice locally. Audio never leaves this computer.*
-- **Windows:** tray icon, global hotkeys, WASAPI mic, xcap capture. Password-manager windows are painted out.
-- **Linux:** X11 (Wayland is best-effort via xcap). PulseAudio / PipeWire for the mic.
+| Tool | Key | |
+| --- | --- | --- |
+| Move | V | move or resize the box |
+| Pin | P | numbered pin with a label; labels go into the prompt |
+| Arrow | A | |
+| Rectangle | R | |
+| Highlighter | H | |
+| Pen | D | |
+| Text | T | |
+| Magnifier | M | a 2× loupe of what is under it |
 
-## Usage
+Five colours, undo (⌘Z / Ctrl+Z) and redo. **Return** captures, **Esc** steps back one layer.
 
-1. Launch Pointcast. It sits in the tray / menu bar. Open **Settings** from the icon.
-2. Click **Set up Pointcast** (one click: runtime + recommended model + permissions). Advanced options stay collapsed. If SuperWhisper is installed, you can use that instead for dictation.
-3. Press **Ctrl+Shift+Space** (Windows/Linux) or **Cmd+Shift+Space** (macOS), or tray → **Record**. A compact glass indicator shows the timer.
-4. While recording:
-   - **Ctrl+Shift+1** — full screenshot
-   - **Ctrl+Shift+2** — region annotate: drag a box, then pin / arrow / text / pen. **Esc** backs out one layer
-   - Zoom crop stays on **Ctrl+Shift+Z** (Advanced) if you need it
-5. Stop. Default delivery is **auto-paste** into the focused app (clipboard kept too). Or tray → **Paste last prompt** / result window → **Paste into app**.
+When you stop, the prompt is pasted into the app you were using (and kept on the clipboard), or
+copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output**. Rich HTML goes
+on the clipboard so chat apps show the pictures; plain text with `[image n]` markers is the fallback.
 
-A tiny local MCP server listens on `127.0.0.1:47821`:
+Prefer to hold a key while you talk? **Settings → Shortcuts → Start or stop by: Holding.** A quick
+tap still toggles.
+
+## For coding agents (MCP)
+
+A local MCP server on `127.0.0.1:47821` serves the latest prompt, so Claude Code, Cursor and Codex
+can fetch it themselves:
 
 ```bash
 curl http://127.0.0.1:47821/v1/session
-# JSON-RPC tools/list and tools/call get_latest_session on POST /mcp
+# JSON-RPC: POST /mcp with tools/list, then tools/call get_latest_session
 ```
 
-Claude Code, Cursor, and Codex can fetch the latest session from there.
+## Privacy
 
-## Default hotkeys
+- Audio stays in memory and is dropped once it is transcribed.
+- Pointcast's own windows are excluded from every capture by the OS.
+- Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
+  RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out
+  before a picture is kept. Add your own in **Settings → Capture → Never capture**.
 
-| Action | Windows / Linux | macOS |
-| --- | --- | --- |
-| Start / stop session | Ctrl+Shift+Space | Cmd+Shift+Space |
-| Full screenshot | Ctrl+Shift+1 | Ctrl+Shift+1 |
-| Region / annotate | Ctrl+Shift+2 | Ctrl+Shift+2 |
-| Zoom crop | Ctrl+Shift+Z | Ctrl+Shift+Z |
+## Build from source
 
-macOS system screenshot chords (Cmd+Shift+3/4/5) are refused. All four are configurable.
+Prerequisites: Rust 1.90+, Node 20+, and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+for your OS. Details per platform, troubleshooting and demo tips: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
+
+```bash
+git clone https://github.com/naidx0/pointcast
+cd pointcast
+npm install
+npm run tauri dev          # run
+npm run tauri build        # .dmg/.app on macOS, .msi/.exe on Windows
+```
+
+Tests:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+npx tsc --noEmit
+```
 
 ## Architecture
 
 ```
 src-tauri/src/
-  prompt.rs       assemble [image n] into plain / HTML / markdown / folder
-  capture.rs      xcap grab, hide-list paint-over, zoom crop
-  overlay.rs      Esc layer stack (select → annotate → pin/draw)
-  session.rs      recording session, STT worker, export
-  voice/          cpal mic, resampler, segmenter, sherpa-onnx Moonshine v2
-  clipboard.rs    HTML + plain via arboard; Ctrl/Cmd+V auto-paste
+  lib.rs          commands, shortcuts (hold or tap), session flow
+  platform.rs     where floating windows go, window levels, start/stop sounds
+  permissions.rs  macOS AVFoundation / Screen Recording / Accessibility, Windows mic privacy
+  tray.rs         menu bar extra / tray icon and menu
+  capture.rs      screen grab, close-up around the pointer, privacy paint-out
+  prompt.rs       transcript + [image n] markers → plain, HTML, markdown, folder
+  session.rs      a recording: mic, speech worker, captures, export
+  voice/          mic, resampler, segmenter, sherpa-onnx Moonshine
+  clipboard.rs    HTML + plain clipboard, paste keystroke
   mcp.rs          localhost JSON-RPC + REST
-  tray.rs         always-on tray / menu bar
-  settings.rs     hotkeys, mic, model, output, start-at-login
+src/windows/      Onboarding, Settings, Indicator (HUD), Overlay (annotate), Result
+src/styles/       native.css (Apple and Fluent skins), overlay.css
 ```
 
-The frontend is four Tauri windows (Vite + React): **settings**, **indicator**, **overlay**, **result**. Visual language follows Sequence Nova tokens (SF system fonts, vibrancy panels, pill controls, system light/dark) with the Sequence four-square mark as the app/tray icon.
-
-Privacy: the hide-list defaults to 1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass, RoboForm, Proton Pass, Credential Manager, Windows Security, Keychain Access. Those windows are painted a flat charcoal before the PNG is kept. Audio stays in memory and is dropped after transcription.
-
-## Development
-
-```bash
-npm install
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri dev
-```
-
-Prompt-assembly tests (transcript + markers + HTML + folder export) live next to `prompt.rs` and are required to stay green.
-
-## Roadmap
-
-- Accessibility-tree element context via **macOS AX** / **Windows UIA** (click a control, attach its role, name, and frame to the note — Cursor Annotate’s missing desktop equivalent)
-- Batch mode: queue several notes, then flush one prompt
-- Wayland portal capture without painting over our own windows
-- Streaming STT partials that are fast enough on Moonshine Tiny
-- Signed macOS / Windows releases
+The UI follows each platform: SF Pro, system blue, vibrancy (Liquid Glass on macOS 26) and a
+System Settings layout on macOS; Segoe UI Variable, Mica and a Windows 11 Settings layout on
+Windows. Light and dark follow the system.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [CONTRIBUTING](CONTRIBUTING.md).
-
-Speech models: Moonshine (Useful Sensors / Moonshine AI) is MIT. sherpa-onnx is Apache-2.0. They are downloaded, not vendored.
+MIT. See [LICENSE](LICENSE) and [CONTRIBUTING](CONTRIBUTING.md). Moonshine (MIT) and sherpa-onnx
+(Apache-2.0) are downloaded at setup, not bundled.

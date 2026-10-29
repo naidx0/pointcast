@@ -42,31 +42,31 @@ Wayland: tray + global hotkeys + paste injection are best-effort; prefer an X11 
 ## Clone and install
 
 ```bash
-git clone <repo-url> pointcast
+git clone https://github.com/naidx0/pointcast
 cd pointcast
 npm install
-```
-
-## One-click setup (recommended)
-
-```bash
 npm run tauri dev
 ```
 
-1. Open the **tray** menu → **Settings…**
-2. Click **Set up Pointcast** — downloads the speech runtime + recommended Moonshine model and requests mic/screen permissions.
-3. Optional: if **SuperWhisper** is installed (macOS), use **Use existing SuperWhisper** instead of (or alongside) local STT.
-4. Advanced options (hotkeys, model pick, export folder, hide-list, zoom) stay collapsed. Stock hotkeys are fine.
+## First run
 
-Core loop: **tray / ⌃⇧Space → talk → region annotate (box, pin, arrow, text) → Paste into app**.
+The setup assistant opens on its own the first time (reopen it from the menu: **Setup Assistant…**):
 
-Models land under the OS local-data directory (`Pointcast/speech`). Default output is **auto-paste** (also keeps a clipboard copy).
+1. **Allow access**: Microphone everywhere; Screen Recording and Accessibility on macOS. After
+   turning Screen Recording on, use **Reopen Pointcast** (macOS applies it to a fresh process).
+2. **Speech model**: Moonshine Base (111 MB) or Tiny (30 MB) plus the 7 to 10 MB sherpa-onnx
+   runtime, saved under the OS local-data folder (`Pointcast/speech`).
+3. **Shortcuts**: press each one until it shows a check; click one to record new keys.
+4. **Practice run**: a real recording whose prompt stays in the window.
+
+Settings live in `Pointcast/settings.json` in the same folder. Delete it to see the assistant again.
 
 ## UI stack notes
 
-- **Fonts:** Geist Sans + Geist Mono via `@fontsource-variable/geist` and `@fontsource-variable/geist-mono` (bundled locally — no CDN), with system-ui fallback.
-- **Icons:** single set — `lucide-react` at stroke **1.75**, optically centered in 40×40 hit targets (aligned with Sequence Nova’s Lucide paths).
-- **uiarc.dev (Arc UI):** inspected for v3. It is a shadcn-style registry (free core + Pro). We did **not** vendor Arc components — Pro is paid, and Pointcast already ships Nova glassbar / pill / toggle patterns that match the product. Patterns borrowed conceptually: quiet pills, large circular icon buttons, segmented controls. Primitives remain local shadcn-style `Button` / `Input` / `Switch` plus Nova CSS.
+- **Type:** the system face (SF Pro on macOS, Segoe UI Variable on Windows); no web fonts.
+- **Materials:** `windowEffects` in `tauri.conf.json` (vibrancy or Liquid Glass on macOS, Mica on
+  Windows 11). The page only goes transparent when `platform_info` says the material draws.
+- **Icons:** `lucide-react`; app and tray icons are drawn by `scripts/make-icon.py`.
 
 ## Run / test
 
@@ -76,17 +76,16 @@ npx tsc --noEmit
 npm run tauri dev
 ```
 
-Browser UI preview (no capture):
+Browser UI preview (no capture). Add `os=mac` or `os=win` to see either skin, `theme=dark` for dark:
 
 ```bash
 npm run dev
-# http://127.0.0.1:1420/?theme=light
+# http://127.0.0.1:1420/onboarding.html?os=mac&step=keys
+# http://127.0.0.1:1420/?os=win&pane=shortcuts
 # http://127.0.0.1:1420/indicator.html?preview=1
 # http://127.0.0.1:1420/overlay.html?preview=1
 # http://127.0.0.1:1420/result.html?preview=1
 ```
-
-Default hotkeys: **Ctrl/Cmd+Shift+Space** session · **Ctrl+Shift+1** full · **Ctrl+Shift+2** region · **Ctrl+Shift+Z** zoom (Advanced).
 
 ## Build installers
 
@@ -107,9 +106,9 @@ Copy a Linux release into `/opt/cursor/artifacts/` when packaging demos.
 ## Recording a demo (30–60s)
 
 1. Open `demo/buggy-shop.html` (or any buggy UI).
-2. Start Pointcast; run one-click setup if models are not installed.
-3. Tray → Record (or session hotkey) → talk → Region (box + pin / arrow / text) → Stop.
-4. Click **Paste into app** with a chat input focused, or tray → **Paste last prompt**.
+2. Start Pointcast and finish the setup assistant.
+3. Start/stop shortcut → talk → region shortcut (box, pin, arrow, magnifier) → Return → stop.
+4. The prompt pastes into the focused app, or use the menu → **Paste Last Prompt**.
 5. Capture with OBS, QuickTime, Game Bar, or `scripts/record-demo.sh` on Linux X11.
 6. Save to `docs/demo/pointcast-demo.mp4`.
 
@@ -118,7 +117,8 @@ Copy a Linux release into `/opt/cursor/artifacts/` when packaging demos.
 | Symptom | Fix |
 | --- | --- |
 | Black captures on macOS | Enable Screen Recording, then quit and relaunch |
-| Mic device errors | Pick another mic in Advanced, or restart audio |
-| Hotkeys do nothing | Change the chord in Advanced if another app owns it |
+| Mic device errors | Pick another mic in Settings → Speech, or restart audio |
+| Hotkeys do nothing | Settings → Shortcuts names any chord another app owns; click it and pick another |
+| Nothing pastes on macOS | Allow Accessibility (Settings → General → Permissions), or choose Copy in Output |
 | AppImage fails to run | Install `libfuse2` (or extract with `--appimage-extract`) |
 | Origin/CI Rust edition errors | `rustup update stable` (needs 1.90+) |

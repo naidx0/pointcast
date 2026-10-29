@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -47,6 +48,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Rust tests (macOS)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,6 +73,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Rust tests (Windows)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
