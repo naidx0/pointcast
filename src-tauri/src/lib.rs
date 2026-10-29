@@ -431,7 +431,17 @@ fn settings_view(svc: &App) -> Value {
     v["update_checked"] = update::checked();
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
+    mark_slow(&mut v["speech"], &svc.slow_models());
     v
+}
+
+/// Each model this run has judged gets `slow_engine`: whether it transcribes slower than real time on this computer.
+fn mark_slow(speech: &mut Value, slow: &std::collections::HashMap<String, bool>) {
+    for m in speech["models"].as_array_mut().into_iter().flatten() {
+        if let Some(s) = m["id"].as_str().and_then(|id| slow.get(id)).copied() {
+            m["slow_engine"] = json!(s);
+        }
+    }
 }
 
 /// Async, like permissions_get: off the event loop, since it reads the registry and lists devices.
@@ -1498,6 +1508,17 @@ mod tests {
         assert!(old.element.is_none());
         let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
         assert!(gone.element.is_none());
+    }
+
+    #[test]
+    fn settings_say_which_models_are_slower_than_real_time_here_once_this_run_knows() {
+        let cat = voice::models::catalog();
+        let mut speech = voice::models::view(&std::env::temp_dir().join("pc-no-speech"), &cat);
+        let slow = [("whisper-turbo", true), ("moonshine-base-en", false), ("not-in-the-catalog", true)];
+        mark_slow(&mut speech, &slow.into_iter().map(|(m, s)| (m.to_string(), s)).collect());
+        let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["slow_engine"].clone();
+        assert_eq!((said("whisper-turbo"), said("moonshine-base-en")), (json!(true), json!(false)));
+        assert!(said("moonshine-tiny-en").is_null(), "a model not judged yet says nothing");
     }
 
     fn png(w: u32, v: u8) -> Vec<u8> {

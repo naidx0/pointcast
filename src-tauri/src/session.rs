@@ -98,6 +98,8 @@ pub struct App {
     pace: Mutex<(u64, u64)>,
     /// A History entry is being transcribed again; one at a time.
     retranscribing: AtomicBool,
+    /// Audio transcribed and the time that took, in ms, per model over this run.
+    paces: Mutex<std::collections::HashMap<String, (u64, u64)>>,
     pub history: crate::history::Store,
     /// Where the pointer went during this recording (positions only).
     trail: Mutex<crate::pointer::Trail>,
@@ -164,6 +166,7 @@ impl App {
             behind: AtomicU64::new(0),
             pace: Mutex::default(),
             retranscribing: AtomicBool::new(false),
+            paces: Mutex::default(),
             freeze: Mutex::default(),
             freeze_t: Mutex::default(),
             last_export: Mutex::default(),
@@ -691,9 +694,25 @@ impl App {
         let hear = |s: &[f32], voiced: u64| -> Result<Option<Heard>, String> {
             let g = self.engine.lock().unwrap();
             let eng = g.as_ref().ok_or(NO_MODEL)?;
-            Ok(crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p)))
+            let began = std::time::Instant::now();
+            let heard = crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p));
+            self.timed(&eng.model, s.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
+            Ok(heard)
         };
         self.again(id, || self.ensure_engine(), hear, progress)
+    }
+
+    /// `model` transcribed `heard_ms` of audio in `spent_ms`.
+    fn timed(&self, model: &str, heard_ms: u64, spent_ms: u64) {
+        let mut paces = self.paces.lock().unwrap();
+        let p = paces.entry(model.to_string()).or_default();
+        (p.0, p.1) = (p.0 + heard_ms, p.1 + spent_ms);
+    }
+
+    /// For each model this run has heard enough from, whether it transcribes slower than real time on this computer.
+    pub fn slow_models(&self) -> std::collections::HashMap<String, bool> {
+        let paces = self.paces.lock().unwrap();
+        paces.iter().filter(|(_, p)| p.0 >= JUDGED_MS).map(|(m, p)| (m.clone(), slow(p.0, p.1))).collect()
     }
 
     /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`.
@@ -800,7 +819,6 @@ impl App {
         self.state.lock().unwrap().partial.clear();
     }
 
-    /// Transcribe pieces of the take, heard against a room at `floor`.
     /// Transcribe pieces of the take, heard against a room at `floor`; the worker has read the take up to `pos`.
     fn decode_ranges(&self, take: &Take, ranges: &[std::ops::Range<usize>], floor: f32, pos: usize) {
         for (i, r) in ranges.iter().enumerate() {
@@ -809,14 +827,22 @@ impl App {
             let samples = take.copy(r.clone());
             let voiced = audio::voiced_ms(&samples, floor);
             let began = std::time::Instant::now();
+            let mut model = None;
             let heard = {
                 let g = self.engine.lock().unwrap();
-                g.as_ref().and_then(|eng| crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s)))
+                g.as_ref().and_then(|eng| {
+                    model = Some(eng.model.clone());
+                    crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s))
+                })
             };
+            let (heard_ms, spent_ms) = (r.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
             {
                 let mut p = self.pace.lock().unwrap();
-                p.0 += r.len() as u64 * 1000 / audio::RATE as u64;
-                p.1 += began.elapsed().as_millis() as u64;
+                p.0 += heard_ms;
+                p.1 += spent_ms;
+            }
+            if let Some(m) = model {
+                self.timed(&m, heard_ms, spent_ms);
             }
             let Some(heard) = heard else { continue };
             let text = heard.text;
@@ -874,9 +900,12 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool) -> &'static str
     }
 }
 
+/// A model's pace is judged once this much audio (5 s) has been transcribed.
+const JUDGED_MS: u64 = 5_000;
+
 /// Slower than real time, judged once 5 s of audio has been transcribed.
 pub fn slow(heard_ms: u64, spent_ms: u64) -> bool {
-    heard_ms >= 5_000 && spent_ms > heard_ms
+    heard_ms >= JUDGED_MS && spent_ms > heard_ms
 }
 
 /// A live caption covers at most this many samples (8 s) of the sentence being spoken.
@@ -1355,6 +1384,17 @@ mod tests {
         assert!(slow(6_000, 6_001) && !slow(6_000, 6_000) && !slow(60_000, 20_000));
         *a.pace.lock().unwrap() = (10_000, 25_000);
         assert!(a.ui().slow_engine);
+    }
+
+    #[test]
+    fn each_model_is_judged_slow_or_not_over_everything_it_transcribed_this_run() {
+        let a = app("paces");
+        a.timed("whisper-turbo", 4_000, 7_000);
+        a.timed("whisper-turbo", 4_000, 2_000);
+        a.timed("moonshine-base-en", 6_000, 900);
+        a.timed("moonshine-tiny-en", 4_000, 9_000);
+        let want = [("whisper-turbo".to_string(), true), ("moonshine-base-en".to_string(), false)];
+        assert_eq!(a.slow_models(), want.into_iter().collect(), "8 s in 9 s is slow; 4 s is too little to judge");
     }
 
     #[test]
