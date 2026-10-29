@@ -116,6 +116,9 @@ export const regionFrame = () =>
     height: number;
     pointer?: { x: number; y: number } | null;
     element?: ElementMark | null;
+    /** A picture from History: its labels already drawn in, new pins numbered on from `base`. */
+    edit?: boolean;
+    base?: number;
   } | null>(
     "region_frame",
   );
@@ -154,6 +157,8 @@ export type HistoryMeta = {
 };
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
+/** Reopen picture n (as `[image n]` numbers it) of a past prompt in the overlay to mark it up again. */
+export const historyEdit = (id: string, n: number) => invoke<void>("history_edit", { id, n });
 export const historyCopy = (id: string) => invoke<void>("history_copy", { id });
 export const historyPaste = (id: string) => invoke<void>("history_paste", { id });
 export const historyDelete = (id: string) => invoke<void>("history_delete", { id });
@@ -168,6 +173,7 @@ export const onState = on<UiState>("session://state");
 export const onResult = on<SessionExport>("session://result");
 export const onPracticeResult = on<SessionExport>("practice://result");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
+export const onHistoryChanged = on<{ id: string }>("history://changed");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");

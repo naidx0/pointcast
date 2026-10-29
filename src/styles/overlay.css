@@ -20,6 +20,11 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* A picture from History, smaller than the screen: the live desktop around it is dimmed further. */
+.ov-root.ov-edit {
+  background: rgba(0, 0, 0, 0.6);
+}
+
 .ov-root * {
   box-sizing: border-box;
 }
