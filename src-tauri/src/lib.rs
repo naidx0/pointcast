@@ -649,10 +649,35 @@ fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), Strin
 #[tauri::command]
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
     copy_export(&svc.set_last(&id)?)?;
-    hide_window(&app, "result");
-    platform::restore_front();
-    std::thread::sleep(std::time::Duration::from_millis(220));
-    paste()
+    paste_from_history(&app)
+}
+
+/// Hide History so the paste lands in the app underneath it.
+fn paste_from_history(app: &AppHandle) -> Result<(), String> {
+    paste_out_of(
+        permissions::can_paste(),
+        || {
+            hide_window(app, "result");
+            platform::restore_front();
+            std::thread::sleep(std::time::Duration::from_millis(220));
+        },
+        clipboard::paste_now,
+        || show_window(app, "result"),
+    )
+}
+
+/// Paste from a window that must get out of the way first. Without permission to paste it stays, and a paste that
+/// fails once it is hidden brings it back, so the person reads that the prompt was only copied.
+fn paste_out_of(can_paste: bool, hide: impl FnOnce(), paste: impl FnOnce() -> Result<(), String>, back: impl FnOnce()) -> Result<(), String> {
+    if !can_paste {
+        return Err(PASTE_YOURSELF.into());
+    }
+    hide();
+    let r = paste_or_say(true, paste);
+    if r.is_err() {
+        back();
+    }
+    r
 }
 
 pub const PASTE_YOURSELF: &str = "Copied, paste it yourself.";
@@ -736,14 +761,10 @@ fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
     }
 }
 
-/// Hide our window first so the paste lands in the app underneath it.
 #[tauri::command]
 fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     copy_last(&svc)?;
-    hide_window(&app, "result");
-    platform::restore_front();
-    std::thread::sleep(std::time::Duration::from_millis(220));
-    paste()
+    paste_from_history(&app)
 }
 
 /// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
@@ -1524,6 +1545,29 @@ mod tests {
         assert!(!tried.get(), "without permission no keys are sent");
         assert_eq!(paste_or_say(true, || Err("refused".into())).unwrap_err(), PASTE_YOURSELF);
         assert!(paste_or_say(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn history_stays_or_comes_back_to_say_a_paste_did_not_happen() {
+        let log = std::cell::RefCell::new(Vec::<&str>::new());
+        let step = |s| log.borrow_mut().push(s);
+        let pasted = || {
+            step("paste");
+            Ok(())
+        };
+        let refused = || {
+            step("paste");
+            Err("refused".to_string())
+        };
+        let r = paste_out_of(false, || step("hide"), pasted, || step("back"));
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert!(log.borrow().is_empty(), "without permission to paste History is not hidden");
+        let r = paste_out_of(true, || step("hide"), refused, || step("back"));
+        assert_eq!(r.unwrap_err(), PASTE_YOURSELF);
+        assert_eq!(*log.borrow(), ["hide", "paste", "back"], "a paste the app refused brings History back");
+        log.borrow_mut().clear();
+        assert!(paste_out_of(true, || step("hide"), pasted, || step("back")).is_ok());
+        assert_eq!(*log.borrow(), ["hide", "paste"]);
     }
 
     #[test]
