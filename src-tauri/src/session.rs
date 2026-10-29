@@ -428,6 +428,7 @@ impl App {
         };
         let exp = prompt::assemble_export_files(&items, &files);
         *self.last_export.lock().unwrap() = Some(exp.clone());
+        let audio_kept = saved.is_some();
         self.latest.set(saved, exp.clone());
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
@@ -440,7 +441,7 @@ impl App {
         let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
         let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
         let mut st = self.state.lock().unwrap();
-        st.notice = Some(notice(&items, mode, delivered.is_ok(), saved.is_some()));
+        st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept));
         st.phase = Phase::Ready;
         Ok(Some(exp))
     }
