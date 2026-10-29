@@ -324,8 +324,9 @@ impl App {
                 st.error = Some(format!("Microphone: {e}"));
             }
         }
-        // The worker loads the model if it is not in memory yet; audio waits in the take meanwhile.
-        if self.engine.lock().unwrap().is_some() {
+        // The worker loads the model if it is not in memory yet; audio waits in the take meanwhile. A model busy with a
+        // piece of a History entry transcribed again is in memory: the start never waits for that piece.
+        if self.engine.try_lock().map_or(true, |e| e.is_some()) {
             self.state.lock().unwrap().phase = Phase::Recording;
         }
         let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
