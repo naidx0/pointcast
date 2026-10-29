@@ -169,8 +169,23 @@ impl Take {
     }
 }
 
+/// cpal keeps one Windows device enumerator for the whole process, in the multithreaded COM
+/// apartment, and Windows tears that apartment down when the last thread in it ends. A listing from
+/// a thread that starts later then calls into a dead object and the process crashes. Keep the
+/// apartment for the life of the app.
+fn keep_com_apartment() {
+    #[cfg(windows)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() };
+        });
+    }
+}
+
 pub fn devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};
+    keep_com_apartment();
     let host = cpal::default_host();
     let def = host.default_input_device().and_then(|d| d.name().ok());
     let mut v: Vec<String> = host
@@ -307,6 +322,7 @@ pub fn read_wav(b: &[u8]) -> Result<(u32, usize, Vec<f32>), String> {
 
 fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    keep_com_apartment();
     let host = cpal::default_host();
     let dev = match device {
         Some(name) => host
@@ -370,6 +386,15 @@ fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn devices_can_be_listed_from_one_thread_after_another() {
+        // Each listing on a fresh thread that starts after the last one ended, as Settings and the
+        // setup assistant do from the async runtime.
+        for _ in 0..3 {
+            std::thread::spawn(|| super::devices()).join().unwrap();
+        }
+    }
+
     use super::*;
 
     fn sine(rate: u32, hz: f32, secs: f32, amp: f32) -> Vec<f32> {
