@@ -108,7 +108,8 @@ copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output*
 on the clipboard so chat apps show the pictures; plain text with `[image n]` markers is the fallback.
 A recording with no pictures is pasted as plain text, like any dictation app.
 
-Every prompt is kept in **History** (menu → History…, newest 100, on this computer only). If
+Every prompt is kept in **History** (menu → History…, newest 100, on this computer only). Click a
+picture there to mark it up again; the prompt is updated and copied. If
 Pointcast closes while you are recording, whatever was already transcribed or captured is
 recovered the next time it starts.
 

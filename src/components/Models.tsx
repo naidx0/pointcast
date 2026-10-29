@@ -203,7 +203,9 @@ export function ModelPicker({
       <p className="t-small" style={{ margin: "4px 2px 0" }}>
         {speechReady(cfg)
           ? "Ready and tested on this computer. Nothing you say leaves it."
-          : "Models download once and run offline on this computer. You can switch any time in Settings."}
+          : removable
+            ? "Models download once and run offline on this computer."
+            : "Models download once and run offline on this computer. You can switch any time in Settings."}
       </p>
     </div>
   );
