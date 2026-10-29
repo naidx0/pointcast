@@ -12,6 +12,7 @@ import {
   onPracticeResult,
   onState,
   practice,
+  preview,
   subscribe,
   type Action,
   type Config,
@@ -20,6 +21,7 @@ import {
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { chordText } from "@/lib/keys";
+import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
 import { PromptDoc } from "./Result";
 
@@ -283,32 +285,52 @@ const words = (t: string) => t.replace(/\[image[^\]]*\]/g, " ").replace(/\s+/g, 
 function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: boolean; onBack: () => void }) {
   const [st, setSt] = useState<UiState | null>(null);
   const [result, setResult] = useState<SessionExport | null>(null);
-  const [seen, setSeen] = useState({ started: false, spoke: false, marked: false });
-  useEffect(
-    () =>
-      subscribe(
-        onState((s) => {
-          setSt(s);
-          setSeen((x) => ({
-            started: x.started || s.phase === "recording",
-            spoke: x.spoke || !!words(s.partial || s.text),
-            marked: x.marked || s.image_count > 0,
-          }));
-        }),
-        onPracticeResult((r) => setResult(r)),
-      ),
-    [],
-  );
+  // `quiet`: what the microphone gave during this run, the worse of what was reported.
+  const [seen, setSeen] = useState<{ started: boolean; spoke: boolean; marked: boolean; quiet: UiState["quiet_mic"] }>({
+    started: false,
+    spoke: false,
+    marked: false,
+    quiet: null,
+  });
+  useEffect(() => {
+    // ?quiet=silent|quiet and ?result=empty show those states in a browser.
+    if (preview) {
+      const q = new URLSearchParams(location.search);
+      const quiet = q.get("quiet") === "silent" || q.get("quiet") === "quiet" ? (q.get("quiet") as "silent" | "quiet") : null;
+      if (q.get("result") === "empty") {
+        setSeen({ started: true, spoke: false, marked: false, quiet });
+        setResult({ plain: "", markdown: "", html: "", images: [] });
+      } else if (quiet) {
+        setSt({ ...PREVIEW_STATE, quiet_mic: quiet });
+        setSeen({ started: true, spoke: false, marked: false, quiet });
+      }
+    }
+    return subscribe(
+      onState((s) => {
+        setSt(s);
+        setSeen((x) => ({
+          started: x.started || s.phase === "recording",
+          spoke: x.spoke || !!words(s.partial || s.text),
+          marked: x.marked || s.image_count > 0,
+          quiet: x.quiet === "silent" ? "silent" : (s.quiet_mic ?? x.quiet),
+        }));
+      }),
+      onPracticeResult((r) => setResult(r)),
+    );
+  }, []);
   const session = chordText(cfg.hotkeys.session.label);
   const region = chordText(cfg.hotkeys.region.label);
   const rec = st?.phase === "recording" || st?.phase === "loading";
   // Discarded (or gone without a result): offer another run instead of "Finishing…" for ever.
   const dropped = seen.started && !rec && !result && (st?.phase === "idle" || st?.phase === "error");
   const empty = !!result && !words(result.plain) && !result.images.length;
+  // A couple of words and no pictures: too little to be what was said.
+  const tiny = !!result && !empty && !result.images.length && words(result.plain).split(" ").length <= 2;
+  const quiet = seen.quiet ? micNotice(seen.quiet).full : "";
   // A practice run is one recording; another needs asking for again.
   const again = () => {
     setResult(null);
-    setSeen({ started: false, spoke: false, marked: false });
+    setSeen({ started: false, spoke: false, marked: false, quiet: null });
     if (inTauri) practice(true).catch(() => undefined);
   };
   const tryAgain = (
@@ -352,7 +374,11 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
       ) : null}
       {empty ? (
         <p className="t-caption" role="alert">
-          No speech was heard. Check that the microphone is not muted and is the one picked in Settings › Speech.{" "}
+          {quiet ? (
+            <>{quiet} That is why nothing was written down.</>
+          ) : (
+            <>No speech was heard. Check that the microphone is not muted and is the one picked in Settings › Speech.</>
+          )}{" "}
           {tryAgain}
         </p>
       ) : result ? (
@@ -360,6 +386,11 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
           <div className="stage" style={{ maxHeight: 260, overflowY: "auto" }}>
             <PromptDoc exp={result} />
           </div>
+          {tiny && quiet ? (
+            <p className="t-caption" role="alert" style={{ marginTop: 8 }}>
+              {quiet} That is why so little was written down.
+            </p>
+          ) : null}
           <p className="t-caption" style={{ marginTop: 8 }}>{tryAgain}</p>
         </>
       ) : (
@@ -374,11 +405,22 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
               </div>
             </div>
           ))}
-          <p className="t-caption" style={{ minHeight: 18, textAlign: "center", marginTop: 4 }}>
+          <p
+            className="t-caption"
+            role={rec && st?.quiet_mic && !words(st.partial || st.text) ? "alert" : undefined}
+            style={{
+              minHeight: 18,
+              textAlign: "center",
+              marginTop: 4,
+              color: rec && st?.quiet_mic && !words(st.partial || st.text) ? "var(--orange-ink)" : undefined,
+            }}
+          >
             {rec
               ? words(st?.partial || st?.text || "")
                 ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
-                : "Listening…"
+                : st?.quiet_mic
+                  ? micNotice(st.quiet_mic).full
+                  : "Listening…"
               : dropped
                 ? <>That run was discarded. {tryAgain}</>
                 : seen.started
@@ -390,6 +432,20 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
     </div>
   );
 }
+
+const PREVIEW_STATE: UiState = {
+  phase: "recording",
+  mic: true,
+  screen: false,
+  partial: "",
+  text: "",
+  error: null,
+  duration_ms: 6_000,
+  image_count: 0,
+  model_ready: true,
+  level: 0,
+  notice: null,
+};
 
 function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
   const mac = platform() === "mac";
