@@ -1,227 +1,139 @@
-<p align="center"><img src="public/icon-mac.png" width="96" alt=""></p>
+<p align="center"><img src="src-tauri/icons/128x128.png" width="96" height="96" alt="Pointcast icon"></p>
 
 <h1 align="center">Pointcast</h1>
 
 <p align="center"><b>Talk, point, paste.</b><br>Show an AI what you mean instead of describing it.</p>
 
-<p align="center"><img src="docs/demo/pointcast.gif" width="760" alt="Recording a bug: the capsule shows the timer, a region is boxed with a pin and a label, and the prompt with the annotated picture lands in a chat"></p>
+<p align="center">
+  <img alt="macOS 12+" src="https://img.shields.io/badge/macOS-12%2B-555">
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-555">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-555"></a>
+  <a href="https://github.com/naidx0/pointcast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/naidx0/pointcast?color=555&label=release"></a>
+</p>
 
-Press one shortcut, say what you see, mark up the screen, and Pointcast hands you one prompt (your
-words with the annotated screenshots inline, where you took them) to paste into ChatGPT, Claude,
-Cursor, Claude Code, Codex, Slack or any chat box.
+<p align="center"><img src="docs/demo/pointcast.gif" width="760" alt="One shortcut starts a recording, a region of a checkout page is boxed with a pin, a label and an arrow, and the prompt with the annotated picture lands in a chat"></p>
 
-It is a small native app for **macOS** (menu bar) and **Windows 11** (system tray). Speech is
-transcribed on your computer. Nothing is uploaded. With no pictures it is simply dictation: your
-words are typed where your cursor is.
+Press one shortcut, say what you see, and point at or mark up the screen. When you stop, Pointcast
+pastes one prompt, your words with the annotated screenshots where you took them, into the app you
+were using: ChatGPT, Claude, Cursor, Claude Code, Codex, Slack or any text box.
+
+It is a small native app for the macOS menu bar and the Windows tray. Speech is transcribed on your
+computer. Nothing is uploaded.
 
 ## Install
 
-**macOS 12+** (Terminal):
+**macOS 12+**, in Terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash
 ```
 
-**Windows 10/11** (PowerShell):
+**Windows 10 or 11**, in PowerShell (no admin rights needed):
 
 ```powershell
 irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 ```
 
-Either one downloads the latest release, installs it (no admin rights on Windows), and opens the
-setup assistant. You only run it once: Pointcast opens at login, lives in the menu bar or tray, and
-updates from **Settings → General → Updates**: it checks the download against the SHA-256 GitHub
-publishes for it, then runs the installer built into the app. The builds are not notarised or
-code-signed; the scripts install them the same way a developer would, so no warning dialogs appear.
+Or download the installer from [Releases](https://github.com/naidx0/pointcast/releases/latest).
 
-## Why
+A setup assistant then takes about a minute: allow access, pick a speech model, try the shortcuts and
+make a practice recording. Pointcast opens at login from then on and updates itself from
+**Settings → General**.
 
-Cursor's Annotate lets you point at a page and talk to the agent, but only inside Cursor's browser,
-and only for Cursor. Pointcast does the same for the whole desktop and for every AI tool: a
-native Settings window, a terminal, a Figma file, a buggy checkout page in any browser.
+## How it works
 
-## First run
+1. **Start.** Press <kbd>⇧⌘Space</kbd> on macOS or <kbd>Ctrl+Shift+Space</kbd> on Windows. A small
+   capsule shows the time and your voice level. It never takes focus from the app you are talking about.
+2. **Talk and show.** Say what you see. Press <kbd>⌃⇧2</kbd> / <kbd>Ctrl+Shift+2</kbd> to mark up a
+   region, <kbd>⌃⇧1</kbd> / <kbd>Ctrl+Shift+1</kbd> to capture the screen, or <kbd>⌃⇧Z</kbd> /
+   <kbd>Ctrl+Shift+Z</kbd> for a close-up around the pointer.
+3. **Stop.** Press the first shortcut again. One prompt is pasted where you were working and kept on
+   the clipboard. On macOS pasting needs Accessibility; without it the prompt is copied for you to paste.
 
-Pointcast opens a short setup assistant the first time it starts:
+Any capture shortcut also starts a recording. Every shortcut can be changed in **Settings → Shortcuts**,
+and you can hold the key while you talk instead of tapping it.
 
-1. **Welcome.**
-2. **Allow access.** Microphone, plus Screen Recording and Accessibility on macOS (Accessibility
-   lets it paste for you; it is optional). A live meter shows the mic works.
-3. **Speech model.** Pick one; it downloads once and runs offline:
+## Features
 
-   | Model | Download | Best for |
-   | --- | --- | --- |
-   | Moonshine Base | 111 MB | Recommended. Fast and accurate English. |
-   | Moonshine Tiny | 30 MB | The fastest, for short notes. |
-   | Parakeet v2 | 482 MB | The most accurate English, with punctuation. |
-   | Whisper Turbo | 564 MB | Any of 99 languages, detected automatically. Slower on older computers. |
-   | Parakeet v3 | 487 MB | 25 European languages, detected automatically. |
+- **On-device speech.** Pick a model once; it downloads and then runs offline.
 
-4. **Shortcuts.** Press each one; it lights up when it works. Click one and type new keys to change it.
-5. **Practice run.** A real recording, start to finish. The prompt appears in the window, nothing
-   is pasted anywhere.
-6. **Done.** Choose whether to paste automatically. Open at login is on, so Pointcast is back after
-   every restart; on Windows, drag its icon from under the ^ arrow onto the taskbar to keep it in sight.
+  | Model | Download | Best for |
+  | --- | --- | --- |
+  | Moonshine Base | 111 MB | Recommended. Fast and accurate English. |
+  | Moonshine Tiny | 30 MB | The fastest, for short notes. |
+  | Parakeet v2 | 482 MB | The most accurate English, with punctuation. |
+  | Whisper Turbo | 564 MB | Any of 99 languages, detected automatically. Slower on older computers. |
+  | Parakeet v3 | 487 MB | 25 European languages, detected automatically. |
 
-You can reopen it any time from the menu: **Setup Assistant…**
-
-## Using it
-
-| Shortcut | macOS | Windows |
-| --- | --- | --- |
-| Start / stop | ⇧⌘Space | Ctrl+Shift+Space |
-| Mark up a region | ⌃⇧2 | Ctrl+Shift+2 |
-| Capture the screen | ⌃⇧1 | Ctrl+Shift+1 |
-| Capture around the pointer | ⌃⇧Z | Ctrl+Shift+Z |
-
-Any capture shortcut starts a recording if none is running. While you record, a small capsule at
-the bottom of the screen shows the time, your voice level and the capture buttons; it never takes
-focus from the app you are talking about.
-
-**Mark up a region** freezes the screen. Drag a box (or click once for the whole screen), then:
-
-| Tool | Key | |
-| --- | --- | --- |
-| Move | V | move or resize the box |
-| Pin | P | numbered pin with a label; labels go into the prompt |
-| Arrow | A | |
-| Rectangle | R | |
-| Highlighter | H | |
-| Pen | D | |
-| Text | T | |
-| Magnifier | M | a 2× loupe of what is under it |
-
-Five colors, undo (⌘Z / Ctrl+Z) and redo. **Return** captures, **Esc** steps back one layer.
-
-**Pointcast marks what you point at for you.** Pausing the pointer on something for half a second
-is enough:
-
-- the spot gets a ring, on full-screen pictures and as a movable shape in a marked-up region;
-- the control under it (a button, a link, a field) gets an outline, and the prompt names it, for
-  example `[image 2: button "Place order"; 1=too far left]` (Windows UI Automation; macOS
-  Accessibility);
-- close-ups center on that spot, or on the window under the pointer, and small text is sharpened 2×;
-- when you say "this" or "here", the spot you were pointing at in that moment is ringed on the
-  picture nearest in time, even if you never stopped there.
-
-Each of these has a switch in **Settings → Capture**.
-
-When you stop, the prompt is pasted into the app you were using (and kept on the clipboard), or
-copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output**. Rich HTML goes
-on the clipboard so chat apps show the pictures; plain text with `[image n]` markers is the fallback.
-A recording with no pictures is pasted as plain text, like any dictation app. The text also names
-each picture's file path, so terminal agents such as Claude Code can open the screenshots; chat apps
-that take pictures ignore it (turn it off in **Settings → Output**).
-
-Every prompt is kept in **History** (menu → History…, newest 100, on this computer only). Click a
-picture there to mark it up again; the prompt is updated and copied. If a recording's audio is
-still kept, **Transcribe again** writes it down afresh, with progress shown. Use it when a passage
-reads `[unclear]`, or after switching to a larger model. If
-Pointcast closes while you are recording, whatever was already transcribed or captured is
-recovered the next time it starts.
-
-Prefer to hold a key while you talk? **Settings → Shortcuts → Start or stop by: Holding.** A quick
-tap still toggles.
-
-## For coding agents (MCP)
-
-A local MCP server on `127.0.0.1:47821` serves the latest prompt, so Claude Code, Cursor and Codex
-can fetch it themselves. It needs this computer's key and refuses web pages, so a site open in your
-browser cannot read your screenshots.
-
-**Settings → Output → Agent setup** copies the setup with the key in it, for your user settings only:
-the **Claude Code** button copies a `claude mcp add --scope user` command to run in a terminal, and
-the **Cursor** button copies the server entry to paste into `mcpServers` in `~/.cursor/mcp.json`.
-The key is this computer's, so it never goes in a project file such as `.mcp.json`, which people
-commit. The Cursor entry looks like this:
-
-```json
-"pointcast": {
-  "type": "http",
-  "url": "http://127.0.0.1:47821/mcp",
-  "headers": { "Authorization": "Bearer <key>" }
-}
-```
-
-The key is made on first run and kept in `mcp-token` in Pointcast's data folder
-(`%LOCALAPPDATA%\dev.pointcast.app` on Windows, `~/Library/Application Support/dev.pointcast.app` on
-macOS, `~/.local/share/dev.pointcast.app` on Linux). Connected an agent before the key existed? Copy
-the setup again.
-
-```bash
-claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp \
-  --header "Authorization: Bearer $(cat ~/Library/Application\ Support/dev.pointcast.app/mcp-token)"
-curl -H "Authorization: Bearer <key>" http://127.0.0.1:47821/v1/session
-# JSON-RPC: POST /mcp with tools/list, then tools/call get_latest_session
-```
+- **Mark-up tools.** The screen freezes; drag a box, then use pins with labels (P), arrows (A),
+  rectangles (R), the highlighter (H), the pen (D), text (T) and a 2× magnifier (M). Five colors,
+  undo and redo. **Return** captures, **Esc** steps back.
+- **Pointing marks.** Rest the pointer on something for half a second and it gets a ring. The button,
+  link or field under it is outlined and named in the prompt, like `button "Place order"`. Say "this"
+  or "here" and the spot you pointed at in that moment is marked. Each is a switch in
+  **Settings → Capture**.
+- **History and Transcribe again.** The last 100 prompts are kept on this computer. Click a picture to
+  mark it up again. **Transcribe again** writes a recording down afresh, for example after switching to
+  a larger model.
+- **Pastes anywhere.** Chat apps get the pictures inline; plain text with `[image n]` markers is the
+  fallback. A recording with no pictures is plain dictation. You can also copy only, or save a
+  `prompt.md` with PNGs (**Settings → Output**).
+- **Pictures as file paths.** The prompt names each picture's file, so terminal agents such as Claude
+  Code can open the screenshots.
+- **Coding agents over MCP.** A local server lets Claude Code, Cursor and Codex fetch the latest prompt
+  themselves. **Settings → Output → Agent setup** copies the setup for each one.
+- **Native on each OS.** System Settings layout and system fonts on macOS; Mica, Segoe UI Variable and
+  a Windows 11 Settings layout on Windows. Light and dark follow the system.
+- **Private by default.** See below.
 
 ## Privacy
 
-- Audio is kept for your newest 10 recordings, on this computer only, so you can transcribe them
-  again. It is deleted with its History entry, and nothing is uploaded. Turn it off in
-  **Settings → Speech** and audio goes back to being dropped once it is transcribed.
-- The last 100 prompts, words and pictures, are kept in Pointcast's data folder on this computer
-  until you delete them in **History**. They never leave it unless you paste or share them.
-- Pointcast's own windows are excluded from every capture by the OS.
+- Speech is transcribed on this computer. Nothing is uploaded.
+- Audio of your newest 10 recordings is kept on this computer so you can transcribe it again, and is
+  deleted with its History entry. Turn this off in **Settings → Speech**.
+- The last 100 prompts, words and pictures, stay on this computer until you delete them in **History**.
+- Pointcast's own windows are left out of every capture.
 - Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
-  RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out
-  before a picture is kept. Add your own in **Settings → Capture → Never capture**.
-- Pointcast goes online only to download a speech model and, once a day, to ask GitHub whether a
-  newer version is out (turn that off in **Settings → General**).
+  RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out before
+  a picture is kept. Add your own apps in **Settings → Capture → Never capture**.
+- The MCP server listens only on this computer, needs this computer's key and refuses web pages.
+- Pointcast goes online only to download a speech model and, once a day, to ask GitHub whether a newer
+  version is out. Turn that off in **Settings → General**.
+
+## Troubleshooting
+
+- **Nothing or little is written down.** Pointcast says when the microphone is silent or very quiet.
+  Check that it is not muted, that the right one is picked in **Settings → Speech → Microphone**, and
+  raise its input volume in the system's Sound settings.
+- **A shortcut does nothing.** Another app may own it. **Settings → Shortcuts** says which one is taken;
+  click it and press new keys.
+- **Transcription is slow.** Pointcast says when a model is slower than real time on your computer.
+  Pick **Moonshine Base** in **Settings → Speech**.
+- **macOS, after an update.** macOS asks again for Screen Recording and Accessibility. Turn them back on
+  in **System Settings → Privacy & Security**, then reopen Pointcast.
+- **Run the setup again.** Menu bar or tray icon → **Setup Assistant…**
+
+Still stuck? [Open an issue](https://github.com/naidx0/pointcast/issues/new/choose).
 
 ## Uninstall
 
-macOS: turn off **Open at login** in Settings, quit Pointcast and drag it from Applications to the
-Trash; its data is in `~/Library/Application Support/dev.pointcast.app`. Windows: Settings → Apps → Pointcast →
-Uninstall (tick "Delete the application data" to remove models and history too).
+- **macOS:** turn off **Open at login** in Settings, quit Pointcast and drag it from Applications to the
+  Trash. Its data is in `~/Library/Application Support/dev.pointcast.app`.
+- **Windows:** Settings → Apps → Pointcast → Uninstall. Tick "Delete the application data" to remove
+  models and history too.
 
-## Build from source
+## Build from source and contribute
 
-Prerequisites: Rust 1.90+, Node 20+, and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
-for your OS. Details per platform, troubleshooting and demo tips: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how the code is laid out, tests and releases, and
+[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) for the prerequisites on each platform.
 
-```bash
-git clone https://github.com/naidx0/pointcast
-cd pointcast
-npm install
-npm run tauri dev          # run
-npm run tauri build        # .dmg/.app on macOS, .msi/.exe on Windows
-```
+## Credits
 
-Tests:
-
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml
-npx tsc --noEmit
-```
-
-## Architecture
-
-```
-src-tauri/src/
-  lib.rs          commands, shortcuts (hold or tap), session flow
-  platform.rs     where floating windows go, window levels, start/stop sounds
-  permissions.rs  macOS AVFoundation / Screen Recording / Accessibility, Windows mic privacy
-  tray.rs         menu bar extra / tray icon and menu
-  update.rs       checks GitHub for a newer release, runs the installer
-  capture.rs      screen grab, close-up around the pointer, privacy paint-out
-  prompt.rs       transcript + [image n] markers → plain, HTML, markdown, folder
-  session.rs      a recording: mic, speech worker, captures, export
-  voice/          mic, resampler, segmenter, model catalog and installer, sherpa-onnx
-  clipboard.rs    HTML + plain clipboard, paste keystroke
-  mcp.rs          localhost JSON-RPC + REST
-src/windows/      Onboarding, Settings, Indicator (HUD), Overlay (annotate), Result
-src/styles/       native.css (Apple and Fluent skins), overlay.css
-```
-
-The UI follows each platform: SF Pro, system blue, vibrancy (Liquid Glass on macOS 26) and a
-System Settings layout on macOS; Segoe UI Variable, Mica and a Windows 11 Settings layout on
-Windows. Light and dark follow the system.
+Speech runs on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0). The models are
+downloaded at setup, not bundled: [Moonshine](https://github.com/usefulsensors/moonshine) by Useful
+Sensors (MIT), [Whisper](https://github.com/openai/whisper) by OpenAI (MIT) and
+[Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) by NVIDIA (CC-BY-4.0).
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [CONTRIBUTING](CONTRIBUTING.md).
-
-Speech runs on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0). The models are
-downloaded at setup, not bundled: Moonshine by Useful Sensors (MIT), Whisper by OpenAI (MIT), and
-Parakeet TDT by NVIDIA (CC-BY-4.0).
+[MIT](LICENSE).
