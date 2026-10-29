@@ -462,10 +462,18 @@ impl App {
         self.capture_shot(capture::grab_zoom)
     }
 
+    /// A capture the OS refused (Screen Recording off) is said on the HUD, not dropped.
+    fn said<T>(&self, r: Result<T, String>) -> Result<T, String> {
+        if let Err(e) = &r {
+            self.state.lock().unwrap().error = Some(e.clone());
+        }
+        r
+    }
+
     pub fn begin_region(&self) -> Result<Shot, String> {
         let settings = self.settings.lock().unwrap().clone();
         let t = self.t_ms();
-        let shot = capture::grab_freeze(&settings, &self.recent(t), t)?;
+        let shot = self.said(capture::grab_freeze(&settings, &self.recent(t), t))?;
         *self.freeze.lock().unwrap() = Some(shot.clone());
         *self.freeze_t.lock().unwrap() = Some(t);
         Ok(shot)
@@ -509,7 +517,7 @@ impl App {
     ) -> Result<Capture, String> {
         let settings = self.settings.lock().unwrap().clone();
         let asked = self.t_ms();
-        let shot = grab(&settings, &self.recent(asked), asked)?;
+        let shot = self.said(grab(&settings, &self.recent(asked), asked))?;
         let t = self.t_ms();
         let place = Some(shot.place());
         let cap = Capture {
@@ -963,6 +971,16 @@ mod tests {
         assert_eq!(second, root.join("20261029-101500-2"));
         assert!(export_dir(&Settings::default(), "20261029-101501").ends_with("Pointcast/20261029-101501"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_capture_the_os_refuses_is_said_on_the_hud() {
+        let a = app("refused");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        let off = |_: &Settings, _: &[Point], _: u64| -> Result<Shot, String> { Err("Screen Recording is off for Pointcast.".into()) };
+        assert!(a.capture_shot(off).is_err());
+        assert_eq!(a.ui().error.as_deref(), Some("Screen Recording is off for Pointcast."));
+        assert_eq!(a.ui().image_count, 0);
     }
 
     #[test]
