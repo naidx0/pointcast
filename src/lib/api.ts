@@ -87,6 +87,8 @@ export type Config = {
   update_installing?: boolean;
   /** Why the last update did not finish, if it failed. */
   update_failure?: string | null;
+  /** What the last update check found, if one has run: a version, or why it could not tell. */
+  update_checked?: { version: string | null; error: string | null } | null;
   include_app: boolean;
   hidden: string[];
   mcp_bind: string;

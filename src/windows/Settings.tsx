@@ -288,18 +288,22 @@ function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
       setState("idle");
     }
   };
-  const sub =
-    error ??
-    cfg.update_failure ??
-    (installing
-      ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
-      : found
+  const checked = cfg.update_checked;
+  const sub = installing
+    ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
+    : (error ??
+      cfg.update_failure ??
+      (found
         ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
         : state === "checking"
           ? "Checking…"
           : state === "latest"
             ? `${cfg.version} is the latest version.`
-            : `Version ${cfg.version}.`);
+            : checked?.error
+              ? `Could not check for updates: ${checked.error}`
+              : checked && !checked.version
+                ? `${cfg.version} is the latest version.`
+                : `Version ${cfg.version}.`));
   return (
     <div className="group">
       <Row label={found ? `Pointcast ${found} is available` : "Pointcast"} sub={sub}>
