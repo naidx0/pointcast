@@ -148,7 +148,11 @@ impl Chord {
 
 /// Chords the picker refuses, with the reason shown in Settings.
 pub fn reserved() -> Vec<(&'static str, &'static str)> {
-    if cfg!(target_os = "macos") {
+    reserved_on(cfg!(target_os = "macos"))
+}
+
+fn reserved_on(mac: bool) -> Vec<(&'static str, &'static str)> {
+    if mac {
         vec![
             ("Cmd+Shift+3", "macOS: screenshot"),
             ("Cmd+Shift+4", "macOS: screenshot"),
@@ -167,6 +171,10 @@ pub fn reserved() -> Vec<(&'static str, &'static str)> {
 }
 
 pub fn refusal(c: &Chord) -> Option<String> {
+    refusal_on(c, cfg!(target_os = "macos"))
+}
+
+fn refusal_on(c: &Chord, mac: bool) -> Option<String> {
     let f_high = c
         .key
         .strip_prefix('F')
@@ -178,16 +186,18 @@ pub fn refusal(c: &Chord) -> Option<String> {
     if c.mods() + 1 > 4 {
         return Some("Four keys at most".into());
     }
-    if !cfg!(target_os = "macos") {
+    if !mac {
         if c.ctrl && c.alt {
             return Some("Ctrl+Alt types AltGr letters".into());
         }
         if c.meta {
             return Some("Windows: Win shortcuts".into());
         }
+    } else if c.alt && !c.ctrl && !c.meta {
+        return Some("macOS 15 refuses Option or Option+Shift alone: add Ctrl or Cmd".into());
     }
     let l = c.label();
-    reserved()
+    reserved_on(mac)
         .into_iter()
         .find(|(k, _)| Chord::parse(k).is_ok_and(|r| r == *c) || *k == l)
         .map(|(_, why)| why.to_string())
@@ -286,6 +296,19 @@ mod tests {
         for (k, why) in reserved() {
             assert_eq!(refusal(&c(k)).as_deref(), Some(why), "{k}");
         }
+    }
+
+    #[test]
+    fn macos_refuses_option_and_option_shift_alone_up_front() {
+        for k in ["Alt+K", "Option+Shift+K", "Alt+Shift+Space", "Alt+F13"] {
+            let why = refusal_on(&c(k), true).unwrap_or_default();
+            assert!(why.contains("Option"), "{k}: {why:?}");
+            assert_eq!(refusal_on(&c(k), false), None, "{k} is fine on Windows");
+        }
+        for k in ["Ctrl+Alt+K", "Cmd+Alt+K", "Cmd+Shift+Alt+K", "Ctrl+Shift+K", "F13"] {
+            assert_eq!(refusal_on(&c(k), true), None, "{k}");
+        }
+        assert!(refusal_on(&c("Ctrl+Alt+K"), false).is_some(), "Windows still refuses AltGr chords");
     }
 
     #[test]

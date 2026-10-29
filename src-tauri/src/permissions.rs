@@ -47,6 +47,12 @@ pub fn can_paste() -> bool {
     accessibility() == Access::Granted
 }
 
+/// Whether a capture shows other apps' windows: without Screen Recording macOS hands back only
+/// the wallpaper and the menu bar.
+pub fn can_capture() -> bool {
+    screen() == Access::Granted
+}
+
 /// Settings page for one permission (`microphone`, `screen`, `accessibility`).
 pub fn settings_url(kind: &str) -> Option<&'static str> {
     if cfg!(target_os = "macos") {
@@ -174,16 +180,22 @@ mod mac {
         }
     }
 
+    /// Left once Pointcast has asked for Screen Recording: macOS shows its prompt only the first time.
+    fn asked() -> std::path::PathBuf {
+        crate::settings::data_dir().join("screen-asked")
+    }
+
     pub fn screen() -> Access {
-        if unsafe { CGPreflightScreenCaptureAccess() } {
-            Access::Granted
-        } else {
-            Access::Unknown
-        }
+        super::screen_access(unsafe { CGPreflightScreenCaptureAccess() }, asked().exists())
     }
 
     pub fn request_screen() -> Access {
-        if unsafe { CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() } {
+        if unsafe { CGPreflightScreenCaptureAccess() } {
+            return Access::Granted;
+        }
+        let _ = std::fs::create_dir_all(crate::settings::data_dir());
+        let _ = std::fs::write(asked(), b"");
+        if unsafe { CGRequestScreenCaptureAccess() } {
             Access::Granted
         } else {
             Access::Unknown
@@ -219,33 +231,51 @@ mod win {
 
     const STORE: &str =
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    const DEVICE: &str =
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    const POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy";
     const NO_WINDOW: u32 = 0x0800_0000;
 
-    fn value(key: &str) -> Option<String> {
+    fn value(key: &str, name: &str) -> Option<String> {
         let out = std::process::Command::new("reg")
-            .args(["query", key, "/v", "Value"])
+            .args(["query", key, "/v", name])
             .creation_flags(NO_WINDOW)
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.lines()
-            .find(|l| l.trim_start().starts_with("Value"))
+            .find(|l| l.split_whitespace().next() == Some(name))
             .and_then(|l| l.split_whitespace().last())
             .map(str::to_string)
     }
 
-    /// Windows: the privacy switch for all apps, then the one for desktop apps.
+    /// Windows: the privacy switch for all apps, the one for desktop apps, the one for the whole
+    /// device, and an administrator's policy.
     pub fn microphone() -> Access {
-        let all = value(STORE);
-        let desktop = value(&format!(r"{STORE}\NonPackaged"));
-        super::windows_mic(all.as_deref(), desktop.as_deref())
+        let all = value(STORE, "Value");
+        let desktop = value(&format!(r"{STORE}\NonPackaged"), "Value");
+        let device = value(DEVICE, "Value");
+        let policy = value(POLICY, "LetAppsAccessMicrophone");
+        super::windows_mic(all.as_deref(), desktop.as_deref(), device.as_deref(), policy.as_deref())
     }
 }
 
-/// Either switch at "Deny" blocks a desktop app's microphone.
+/// Screen Recording: macOS says only yes or no, and shows its prompt once ever; after that only
+/// System Settings can turn it on, so a no after asking is a refusal.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn screen_access(allowed: bool, asked: bool) -> Access {
+    match (allowed, asked) {
+        (true, _) => Access::Granted,
+        (false, false) => Access::Unknown,
+        (false, true) => Access::Denied,
+    }
+}
+
+/// Any switch at "Deny" blocks a desktop app's microphone, and so does a policy that forces it off
+/// (LetAppsAccessMicrophone 2, a DWORD `reg` prints as 0x2).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn windows_mic(all: Option<&str>, desktop: Option<&str>) -> Access {
-    if all == Some("Deny") || desktop == Some("Deny") {
+fn windows_mic(all: Option<&str>, desktop: Option<&str>, device: Option<&str>, policy: Option<&str>) -> Access {
+    if [all, desktop, device].contains(&Some("Deny")) || policy == Some("0x2") {
         Access::Denied
     } else if crate::voice::audio::devices().is_empty() {
         Access::Unknown
@@ -260,10 +290,32 @@ mod tests {
 
     #[test]
     fn a_windows_deny_on_either_switch_blocks_the_microphone() {
-        assert_eq!(windows_mic(Some("Deny"), Some("Allow")), Access::Denied);
-        assert_eq!(windows_mic(Some("Allow"), Some("Deny")), Access::Denied);
-        assert_eq!(windows_mic(None, Some("Deny")), Access::Denied);
-        assert_ne!(windows_mic(Some("Allow"), Some("Allow")), Access::Denied);
+        assert_eq!(windows_mic(Some("Deny"), Some("Allow"), None, None), Access::Denied);
+        assert_eq!(windows_mic(Some("Allow"), Some("Deny"), None, None), Access::Denied);
+        assert_eq!(windows_mic(None, Some("Deny"), None, None), Access::Denied);
+        assert_ne!(windows_mic(Some("Allow"), Some("Allow"), None, None), Access::Denied);
+    }
+
+    #[test]
+    fn the_device_switch_and_the_policy_block_the_microphone_whatever_the_user_allowed() {
+        let allow = (Some("Allow"), Some("Allow"));
+        assert_eq!(windows_mic(allow.0, allow.1, Some("Deny"), None), Access::Denied, "microphone access for this device is off");
+        // LetAppsAccessMicrophone: 0 the user decides, 1 force allow, 2 force deny.
+        assert_eq!(windows_mic(allow.0, allow.1, Some("Allow"), Some("0x2")), Access::Denied);
+        assert_ne!(windows_mic(allow.0, allow.1, Some("Allow"), Some("0x0")), Access::Denied);
+        assert_eq!(windows_mic(Some("Deny"), allow.1, None, Some("0x1")), Access::Denied, "Deny wins over a force allow");
+        assert_ne!(windows_mic(allow.0, allow.1, None, Some("0x1")), Access::Denied);
+    }
+
+    #[test]
+    fn screen_recording_refused_after_asking_reads_as_denied() {
+        assert_eq!(screen_access(true, false), Access::Granted);
+        assert_eq!(screen_access(true, true), Access::Granted);
+        assert_eq!(screen_access(false, false), Access::Unknown, "never asked: asking shows the prompt");
+        assert_eq!(screen_access(false, true), Access::Denied, "asked before: only System Settings helps");
+        if !cfg!(target_os = "macos") {
+            assert!(can_capture(), "only macOS gates captures");
+        }
     }
 
     #[test]

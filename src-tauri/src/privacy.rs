@@ -16,6 +16,8 @@ pub const DEFAULT_HIDDEN: &[&str] = &[
     "Windows Security",
     "CredentialUIBroker",
     "Keychain Access",
+    "Passwords",
+    "SecurityAgent",
     "Secret Service",
 ];
 
@@ -73,6 +75,9 @@ mod tests {
         ));
         assert!(hides("Google Chrome", "Bitwarden Web Vault", &list));
         assert!(hides("Keychain Access", "login", &list));
+        // macOS 15's Passwords app, and the system dialog that asks for an admin or login password.
+        assert!(hides("Passwords", "", &list));
+        assert!(hides("SecurityAgent", "", &list));
         assert!(!hides("Notepad", "notes.txt", &list));
         assert!(!hides("Notepad", "x", &["  ".into()]));
 

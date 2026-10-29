@@ -173,10 +173,7 @@ pub fn open(id: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &t.path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        tauri_plugin_opener::open_path(&t.path, None::<&str>).map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
