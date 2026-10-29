@@ -189,6 +189,7 @@ export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null 
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
 export const onUpdateChecked = on<string | null>("update://checked");
+export const onUpdateFailed = on<string>("update://failed");
 export const onSettingsPane = on<string>("settings://pane");
 
 /** Subscribe in an effect; returns the cleanup. */

@@ -85,14 +85,29 @@ fn check_at(url: &str, current: &str, os: &str) -> Result<Option<String>, String
     }
 }
 
-/// Start the installer in the background. Its output goes to `update.log` in the data folder.
-pub fn install() -> Result<(), String> {
+/// Start the installer in the background; its output goes to `update.log` in the data folder.
+/// A good update closes Pointcast before the installer ends, so `failed` runs only when the
+/// installer is done and this copy is still running.
+pub fn install(failed: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
     let log = crate::settings::data_dir().join("update.log");
     let out = std::fs::File::create(&log).map_err(|e| e.to_string())?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = installer()?;
     cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err);
-    cmd.spawn().map(|_| ()).map_err(|e| format!("The installer did not start: {e}"))
+    let mut child = cmd.spawn().map_err(|e| format!("The installer did not start: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        failed(reason(&String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default())));
+    });
+    Ok(())
+}
+
+/// The installer's own words for why it stopped.
+fn reason(log: &str) -> String {
+    log.lines()
+        .find_map(|l| l.split_once("was not installed:").map(|(_, why)| why.trim().to_string()))
+        .filter(|why| !why.is_empty())
+        .unwrap_or_else(|| "The update did not finish. Try again in a minute.".into())
 }
 
 #[cfg(windows)]
@@ -182,6 +197,26 @@ mod tests {
             let _ = write!(s, "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         });
         url
+    }
+
+    #[test]
+    fn a_failed_update_says_what_the_installer_said() {
+        let ps1 = "  Pointcast
+  Finding the latest version...
+
+  Pointcast was not installed: can't reach GitHub. Check your internet connection and run this again.
+";
+        assert_eq!(reason(ps1), "can't reach GitHub. Check your internet connection and run this again.");
+        let sh = "
+  Pointcast
+  Downloading Pointcast.dmg...
+
+  Pointcast was not installed: the disk image would not open.
+
+";
+        assert_eq!(reason(sh), "the disk image would not open.");
+        assert!(reason("").contains("did not finish"));
+        assert!(reason("powershell: some other error").contains("did not finish"));
     }
 
     #[test]

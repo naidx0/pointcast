@@ -13,6 +13,7 @@ import {
   inTauri,
   onSettingsPane,
   onUpdateChecked,
+  onUpdateFailed,
   subscribe,
   updateCheck,
   updateInstall,
@@ -230,7 +231,17 @@ function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const [found, setFound] = useState<string | null>(cfg.update);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => subscribe(onUpdateChecked(setFound)), []);
+  useEffect(
+    () =>
+      subscribe(
+        onUpdateChecked(setFound),
+        onUpdateFailed((why) => {
+          setError(why);
+          setState("idle");
+        }),
+      ),
+    [],
+  );
   const check = async () => {
     setState("checking");
     setError(null);

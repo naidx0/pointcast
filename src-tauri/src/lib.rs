@@ -889,11 +889,13 @@ async fn update_check(app: AppHandle) -> Result<Option<String>, String> {
 
 /// Run the installer: it closes Pointcast, installs the new version and opens it again.
 #[tauri::command]
-fn update_install(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+fn update_install(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     if !matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error) {
         return Err("Finish the recording first, then update.".into());
     }
-    update::install()
+    update::install(move |why| {
+        let _ = app.emit("update://failed", why);
+    })
 }
 
 #[tauri::command]
