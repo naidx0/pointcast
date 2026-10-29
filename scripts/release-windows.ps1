@@ -49,7 +49,7 @@ if ($LASTEXITCODE -ne 0) { Fail "npm ci did not complete." }
 Step "Building the installer"
 $log = Join-Path ([System.IO.Path]::GetTempPath()) 'pointcast-release-build.log'
 $ErrorActionPreference = 'Continue'
-& npm run tauri build -- --bundles nsis 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+& npm run tauri build -- --bundles nsis 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } | Tee-Object -FilePath $log
 $buildExit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($buildExit -ne 0) {
