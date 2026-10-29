@@ -219,33 +219,40 @@ mod win {
 
     const STORE: &str =
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    const DEVICE: &str =
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    const POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy";
     const NO_WINDOW: u32 = 0x0800_0000;
 
-    fn value(key: &str) -> Option<String> {
+    fn value(key: &str, name: &str) -> Option<String> {
         let out = std::process::Command::new("reg")
-            .args(["query", key, "/v", "Value"])
+            .args(["query", key, "/v", name])
             .creation_flags(NO_WINDOW)
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.lines()
-            .find(|l| l.trim_start().starts_with("Value"))
+            .find(|l| l.split_whitespace().next() == Some(name))
             .and_then(|l| l.split_whitespace().last())
             .map(str::to_string)
     }
 
-    /// Windows: the privacy switch for all apps, then the one for desktop apps.
+    /// Windows: the privacy switch for all apps, the one for desktop apps, the one for the whole
+    /// device, and an administrator's policy.
     pub fn microphone() -> Access {
-        let all = value(STORE);
-        let desktop = value(&format!(r"{STORE}\NonPackaged"));
-        super::windows_mic(all.as_deref(), desktop.as_deref())
+        let all = value(STORE, "Value");
+        let desktop = value(&format!(r"{STORE}\NonPackaged"), "Value");
+        let device = value(DEVICE, "Value");
+        let policy = value(POLICY, "LetAppsAccessMicrophone");
+        super::windows_mic(all.as_deref(), desktop.as_deref(), device.as_deref(), policy.as_deref())
     }
 }
 
-/// Either switch at "Deny" blocks a desktop app's microphone.
+/// Any switch at "Deny" blocks a desktop app's microphone, and so does a policy that forces it off
+/// (LetAppsAccessMicrophone 2, a DWORD `reg` prints as 0x2).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn windows_mic(all: Option<&str>, desktop: Option<&str>) -> Access {
-    if all == Some("Deny") || desktop == Some("Deny") {
+fn windows_mic(all: Option<&str>, desktop: Option<&str>, device: Option<&str>, policy: Option<&str>) -> Access {
+    if [all, desktop, device].contains(&Some("Deny")) || policy == Some("0x2") {
         Access::Denied
     } else if crate::voice::audio::devices().is_empty() {
         Access::Unknown
@@ -260,10 +267,21 @@ mod tests {
 
     #[test]
     fn a_windows_deny_on_either_switch_blocks_the_microphone() {
-        assert_eq!(windows_mic(Some("Deny"), Some("Allow")), Access::Denied);
-        assert_eq!(windows_mic(Some("Allow"), Some("Deny")), Access::Denied);
-        assert_eq!(windows_mic(None, Some("Deny")), Access::Denied);
-        assert_ne!(windows_mic(Some("Allow"), Some("Allow")), Access::Denied);
+        assert_eq!(windows_mic(Some("Deny"), Some("Allow"), None, None), Access::Denied);
+        assert_eq!(windows_mic(Some("Allow"), Some("Deny"), None, None), Access::Denied);
+        assert_eq!(windows_mic(None, Some("Deny"), None, None), Access::Denied);
+        assert_ne!(windows_mic(Some("Allow"), Some("Allow"), None, None), Access::Denied);
+    }
+
+    #[test]
+    fn the_device_switch_and_the_policy_block_the_microphone_whatever_the_user_allowed() {
+        let allow = (Some("Allow"), Some("Allow"));
+        assert_eq!(windows_mic(allow.0, allow.1, Some("Deny"), None), Access::Denied, "microphone access for this device is off");
+        // LetAppsAccessMicrophone: 0 the user decides, 1 force allow, 2 force deny.
+        assert_eq!(windows_mic(allow.0, allow.1, Some("Allow"), Some("0x2")), Access::Denied);
+        assert_ne!(windows_mic(allow.0, allow.1, Some("Allow"), Some("0x0")), Access::Denied);
+        assert_eq!(windows_mic(Some("Deny"), allow.1, None, Some("0x1")), Access::Denied, "Deny wins over a force allow");
+        assert_ne!(windows_mic(allow.0, allow.1, None, Some("0x1")), Access::Denied);
     }
 
     #[test]
