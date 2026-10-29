@@ -48,11 +48,85 @@ fn on_main<T: Send + 'static>(
 /// layout finds nothing on Russian or Greek layouts and another key on Dvorak.
 #[cfg(windows)]
 const PASTE: enigo::Key = enigo::Key::V;
-/// kVK_ANSI_V
-#[cfg(target_os = "macos")]
-const PASTE: enigo::Key = enigo::Key::Other(9);
 #[cfg(not(any(windows, target_os = "macos")))]
 const PASTE: enigo::Key = enigo::Key::Unicode('v');
+
+/// kVK_ANSI_V
+const ANSI_V: u16 = 9;
+
+/// macOS matches Command shortcuts by what a key types with Command held, so the paste key is the first
+/// key code `typed` reads as "v" (the period key on Dvorak), else the physical V.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn command_v(typed: impl Fn(u16) -> Option<String>) -> u16 {
+    (0..128).find(|&code| typed(code).as_deref() == Some("v")).unwrap_or(ANSI_V)
+}
+
+/// The key that types "v" with Command held in the ASCII-capable layout, the one macOS itself uses for
+/// shortcuts under Russian or Greek; "Dvorak - QWERTY ⌘" keeps QWERTY there.
+#[cfg(target_os = "macos")]
+fn command_v_in_layout(_main: objc2::MainThreadMarker) -> u16 {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::data::CFData;
+    use core_foundation::string::CFStringRef;
+    use std::ffi::{c_ulong, c_void};
+
+    #[link(name = "Carbon", kind = "framework")]
+    extern "C" {
+        static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+        fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> *const c_void;
+        fn TISGetInputSourceProperty(source: *const c_void, key: CFStringRef) -> *const c_void;
+        fn LMGetKbdType() -> u8;
+        fn UCKeyTranslate(
+            layout: *const u8,
+            code: u16,
+            action: u16,
+            modifiers: u32,
+            keyboard: u32,
+            options: u32,
+            dead: *mut u32,
+            max: c_ulong,
+            len: *mut c_ulong,
+            out: *mut u16,
+        ) -> i32;
+    }
+    const KEY_DOWN: u16 = 0; // kUCKeyActionDown
+    const COMMAND: u32 = 1; // (cmdKey >> 8) & 0xFF
+    const NO_DEAD_KEYS: u32 = 1; // kUCKeyTranslateNoDeadKeysMask
+
+    let source = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
+    if source.is_null() {
+        return ANSI_V;
+    }
+    let source = unsafe { CFType::wrap_under_create_rule(source) };
+    let data = unsafe { TISGetInputSourceProperty(source.as_CFTypeRef(), kTISPropertyUnicodeKeyLayoutData) };
+    if data.is_null() {
+        return ANSI_V;
+    }
+    let data = unsafe { CFData::wrap_under_get_rule(data.cast()) };
+    let layout = data.bytes();
+    if layout.is_empty() {
+        return ANSI_V;
+    }
+    let keyboard = u32::from(unsafe { LMGetKbdType() });
+    command_v(|code| {
+        let (mut dead, mut len, mut out) = (0u32, 0 as c_ulong, [0u16; 4]);
+        let err = unsafe {
+            UCKeyTranslate(
+                layout.as_ptr(),
+                code,
+                KEY_DOWN,
+                COMMAND,
+                keyboard,
+                NO_DEAD_KEYS,
+                &mut dead,
+                out.len() as c_ulong,
+                &mut len,
+                out.as_mut_ptr(),
+            )
+        };
+        (err == 0).then(|| String::from_utf16_lossy(&out[..(len as usize).min(out.len())]))
+    })
+}
 
 /// Windows blocks synthetic keys sent to an app running as administrator when Pointcast is not;
 /// `front` is whether the app in front is elevated, `None` when that cannot be read.
@@ -131,9 +205,13 @@ fn send_paste() -> Result<(), String> {
     } else {
         Key::Control
     };
+    #[cfg(target_os = "macos")]
+    let paste = Key::Other(objc2::MainThreadMarker::new().map_or(ANSI_V, command_v_in_layout).into());
+    #[cfg(not(target_os = "macos"))]
+    let paste = PASTE;
     enigo.key(modifier, Direction::Press).map_err(|e| e.to_string())?;
     enigo
-        .key(PASTE, Direction::Click)
+        .key(paste, Direction::Click)
         .map_err(|e| e.to_string())?;
     enigo
         .key(modifier, Direction::Release)
@@ -212,10 +290,24 @@ mod tests {
     fn the_paste_key_is_the_physical_v_never_a_layout_lookup() {
         #[cfg(windows)]
         assert_eq!(PASTE, enigo::Key::V);
-        #[cfg(target_os = "macos")]
-        assert_eq!(PASTE, enigo::Key::Other(9));
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(windows)]
         assert!(!matches!(PASTE, enigo::Key::Unicode(_)));
+    }
+
+    #[test]
+    fn the_mac_paste_key_is_the_one_typing_v_with_command_held() {
+        let layout = |keys: &'static [(u16, &'static str)]| {
+            move |code: u16| keys.iter().find(|(c, _)| *c == code).map(|(_, s)| s.to_string())
+        };
+        // QWERTY, and "Dvorak - QWERTY ⌘" whose Command layer is QWERTY: the physical V (kVK_ANSI_V).
+        assert_eq!(command_v(layout(&[(0, "a"), (9, "v"), (40, "k"), (47, ".")])), 9);
+        // Plain Dvorak: the physical V types "k", the period key (kVK_ANSI_Period) types "v".
+        assert_eq!(command_v(layout(&[(0, "a"), (9, "k"), (40, "t"), (47, "v")])), 47);
+        // The first key typing "v" wins, and only an exact "v" counts.
+        assert_eq!(command_v(layout(&[(9, "V"), (20, "vv"), (47, "v"), (90, "v")])), 47);
+        // No "v" anywhere, or nothing readable: the physical V.
+        assert_eq!(command_v(layout(&[(0, "ф"), (9, "м"), (47, "ю")])), 9);
+        assert_eq!(command_v(|_| None), 9);
     }
 
     #[test]
