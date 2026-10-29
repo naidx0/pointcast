@@ -378,7 +378,7 @@ fn settings_view(svc: &App) -> Value {
     let chord = |c: chord::Chord, d: chord::Chord| {
         json!({ "label": c.label(), "keys": c.keys(), "default": d.label() })
     };
-    json!({
+    let mut v = json!({
         "platform": std::env::consts::OS,
         "materials": platform::materials(),
         "version": env!("CARGO_PKG_VERSION"),
@@ -426,7 +426,10 @@ fn settings_view(svc: &App) -> Value {
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
         "recommended": voice::machine::recommended(),
-    })
+    });
+    // Set apart: one more key in the literal above passes json!'s recursion limit.
+    v["update_checked"] = update::checked();
+    v
 }
 
 /// Async, like permissions_get: off the event loop, since it reads the registry and lists devices.

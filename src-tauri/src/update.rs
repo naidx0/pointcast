@@ -112,10 +112,31 @@ fn offer(body: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
 
 /// Ask GitHub once. `Ok(None)` means up to date, or nothing published for this system yet.
 pub fn check() -> Result<Option<String>, String> {
-    let found = check_at(LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS)?;
-    let version = found.as_ref().map(|o| o.version.clone());
-    *AVAILABLE.lock().unwrap() = found;
-    Ok(version)
+    keep(check_at(LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS))
+}
+
+/// The last check's answer, for a Settings window opened after it: the newer version (none when up to date), or why
+/// it failed.
+static CHECKED: Mutex<Option<Result<Option<String>, String>>> = Mutex::new(None);
+
+/// Remember what a check found: the offer to install (a failed check keeps the one it had) and its answer.
+fn keep(found: Result<Option<Offer>, String>) -> Result<Option<String>, String> {
+    let r = found.map(|found| {
+        let version = found.as_ref().map(|o| o.version.clone());
+        *AVAILABLE.lock().unwrap() = found;
+        version
+    });
+    *CHECKED.lock().unwrap() = Some(r.clone());
+    r
+}
+
+/// The last check's answer as Settings reads it, null before the first one.
+pub fn checked() -> serde_json::Value {
+    match &*CHECKED.lock().unwrap() {
+        None => serde_json::Value::Null,
+        Some(Ok(version)) => serde_json::json!({ "version": version, "error": null }),
+        Some(Err(why)) => serde_json::json!({ "version": null, "error": why }),
+    }
 }
 
 fn check_at(url: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
@@ -459,6 +480,21 @@ mod tests {
         assert_eq!(reason(sh), "the disk image would not open.");
         assert!(reason("").contains("did not finish"));
         assert!(reason("powershell: some other error").contains("did not finish"));
+    }
+
+    #[test]
+    fn settings_opened_after_a_check_reads_its_answer() {
+        // The only test that keeps a check's answer: CHECKED and AVAILABLE are the process's own.
+        assert_eq!(checked(), serde_json::Value::Null, "nothing checked yet");
+        let offer = Offer { version: "0.5.0".into(), url: "https://example.com/x64-setup.exe".into(), sha256: "0".repeat(64) };
+        assert_eq!(keep(Ok(Some(offer))), Ok(Some("0.5.0".into())));
+        assert_eq!(checked(), serde_json::json!({ "version": "0.5.0", "error": null }));
+        assert_eq!(keep(Err("Can't reach GitHub.".into())), Err("Can't reach GitHub.".into()));
+        assert_eq!(checked(), serde_json::json!({ "version": null, "error": "Can't reach GitHub." }));
+        assert_eq!(available().as_deref(), Some("0.5.0"), "a failed check keeps the offer it had");
+        assert_eq!(keep(Ok(None)), Ok(None));
+        assert_eq!(checked(), serde_json::json!({ "version": null, "error": null }), "up to date");
+        assert_eq!(available(), None);
     }
 
     #[test]
