@@ -591,7 +591,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        App::new(Settings::default(), d.join("settings.json"))
+        let a = App::new(Settings::default(), d.join("settings.json"));
+        // A practice run checkpoints nothing, so a test never leaves a session in the real app's recovery folder.
+        a.practice.store(true, Ordering::SeqCst);
+        a
     }
 
     fn png() -> Vec<u8> {
