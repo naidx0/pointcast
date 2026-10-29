@@ -97,8 +97,10 @@ pub struct App {
     freeze_t: Mutex<Option<u64>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
-    /// Onboarding practice run: keep the result in the app, deliver it nowhere.
+    /// This recording is onboarding's practice run: keep the result in the app, deliver it nowhere.
     pub practice: AtomicBool,
+    /// Onboarding is on its practice step: the next recording started is a practice run.
+    pub practice_next: AtomicBool,
     /// Onboarding shortcut test: hotkeys only report that they fired.
     pub hotkey_test: AtomicBool,
     /// When the session chord went down, for hold-to-talk.
@@ -152,6 +154,7 @@ impl App {
             frames: Mutex::default(),
             last_id: Mutex::default(),
             practice: AtomicBool::new(false),
+            practice_next: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
             hold_from: Mutex::default(),
             hotkey_errors: Mutex::default(),
@@ -261,6 +264,7 @@ impl App {
             _ => {}
         }
         self.monitor_off();
+        self.bind_practice();
         // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
         if self.history.recover().is_none() {
             self.history.clear_checkpoint();
@@ -307,6 +311,25 @@ impl App {
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
+    }
+
+    /// Only the recording started while onboarding asked for practice is a practice run.
+    fn bind_practice(&self) {
+        self.practice.store(self.practice_next.swap(false, Ordering::SeqCst), Ordering::SeqCst);
+    }
+
+    /// Onboarding left its practice step. True when the practice run is still recording and must be
+    /// discarded; one already finishing stays practice until its result is shown.
+    pub fn practice_off(&self) -> bool {
+        self.practice_next.store(false, Ordering::SeqCst);
+        match self.state.lock().unwrap().phase {
+            Phase::Recording | Phase::Loading => self.practice.load(Ordering::SeqCst),
+            Phase::Transcribing => false,
+            _ => {
+                self.practice.store(false, Ordering::SeqCst);
+                false
+            }
+        }
     }
 
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
@@ -861,6 +884,30 @@ mod tests {
         let r = a.engine_check();
         assert!(r.is_err());
         assert_eq!(a.speech_check(), Some(r));
+    }
+
+    #[test]
+    fn practice_is_only_the_recording_started_while_onboarding_asked_for_it() {
+        let a = app("practice");
+        a.practice.store(false, Ordering::SeqCst);
+        a.practice_next.store(true, Ordering::SeqCst);
+        a.bind_practice();
+        assert!(a.practice.load(Ordering::SeqCst) && !a.practice_next.load(Ordering::SeqCst));
+        a.bind_practice();
+        assert!(!a.practice.load(Ordering::SeqCst), "after one practice run the next recording is a real one");
+        // Back or "Download one" mid-run: the run is discarded rather than delivered as a real one.
+        a.practice_next.store(true, Ordering::SeqCst);
+        a.bind_practice();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(a.practice_off());
+        // A run already finishing stays practice until its result is shown.
+        a.state.lock().unwrap().phase = Phase::Transcribing;
+        assert!(!a.practice_off() && a.practice.load(Ordering::SeqCst));
+        a.state.lock().unwrap().phase = Phase::Ready;
+        assert!(!a.practice_off() && !a.practice.load(Ordering::SeqCst));
+        // A real recording is never turned into one, nor discarded.
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(!a.practice_off());
     }
 
     #[test]

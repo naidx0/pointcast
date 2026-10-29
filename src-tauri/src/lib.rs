@@ -111,8 +111,8 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
     }
     // The HUD reads "Finishing…" while the last words are transcribed, then where the prompt went.
     emit_state_now(app, svc);
-    let exp = svc.stop(false);
     let practice = svc.practice.load(Ordering::SeqCst);
+    let exp = svc.stop(false);
     if practice || exp.is_err() {
         hide_window(app, "indicator");
     } else {
@@ -125,9 +125,12 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
             }
         });
     }
+    if practice {
+        svc.practice.store(false, Ordering::SeqCst);
+    }
     let exp = exp?;
     if let Some(ref e) = exp {
-        if svc.practice.load(Ordering::SeqCst) {
+        if practice {
             let _ = app.emit("practice://result", e);
         } else {
             if let Some(latest) = app.try_state::<Latest>() {
@@ -270,10 +273,11 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         return;
     };
     let svc = svc.inner().clone();
-    if svc.hotkey_test.load(Ordering::SeqCst) {
+    let rec = recording(&svc);
+    // While a recording runs, its shortcuts still work: the test must not trap it.
+    if svc.hotkey_test.load(Ordering::SeqCst) && !rec {
         return;
     }
-    let rec = recording(&svc);
     match (action, pressed) {
         (Action::Session, true) => {
             if rec {
@@ -828,10 +832,26 @@ fn hotkey_test(svc: tauri::State<'_, Arc<App>>, on: bool) {
     svc.hotkey_test.store(on, Ordering::SeqCst);
 }
 
-/// Onboarding's practice run: a real session whose prompt stays in the onboarding window.
+/// Onboarding's practice run: the next session started is a real one whose prompt stays in the onboarding window.
+/// Off mid-run discards it (async: that waits for the speech worker).
 #[tauri::command]
-fn practice(svc: tauri::State<'_, Arc<App>>, on: bool) {
-    svc.practice.store(on, Ordering::SeqCst);
+async fn practice(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
+    if on {
+        svc.practice_next.store(true, Ordering::SeqCst);
+    } else {
+        end_practice(&app, &svc);
+    }
+    Ok(())
+}
+
+fn end_practice(app: &AppHandle, svc: &App) {
+    if svc.practice_off() {
+        let _ = svc.stop(true);
+        svc.practice.store(false, Ordering::SeqCst);
+        hide_window(app, "indicator");
+        close_overlay(app);
+        emit_state(app, svc);
+    }
 }
 
 /// Live input level outside a session, for the microphone check.
@@ -857,13 +877,7 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
 
 /// Whatever step the assistant was on, shortcuts and sessions go back to normal.
 fn leave_onboarding(app: &AppHandle, svc: &App) {
-    if svc.practice.load(Ordering::SeqCst) && recording(svc) {
-        let _ = svc.stop(true);
-        hide_window(app, "indicator");
-        hide_window(app, "overlay");
-        emit_state(app, svc);
-    }
-    svc.practice.store(false, Ordering::SeqCst);
+    end_practice(app, svc);
     svc.hotkey_test.store(false, Ordering::SeqCst);
     svc.monitor_off();
 }
