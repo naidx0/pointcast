@@ -11,6 +11,7 @@ import {
   historyClear,
   historyList,
   inTauri,
+  mcpCopySetup,
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
@@ -521,6 +522,7 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
 function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const mac = platform() === "mac";
   const needsAx = mac && cfg.permissions.accessibility !== "granted";
+  const [copied, setCopied] = useState(false);
   return (
     <>
       <div className="group">
@@ -587,6 +589,25 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
         >
           <Toggle label="Share over MCP" on={cfg.mcp_enabled} set={(v) => patch({ mcp_enabled: v })} />
         </Row>
+        {cfg.mcp_enabled ? (
+          <Row
+            label="Agent setup"
+            sub="Paste it into .mcp.json (Claude Code) or mcp.json (Cursor). It holds this computer's key, so web pages cannot read your prompts."
+          >
+            <button
+              type="button"
+              className="btn"
+              onClick={() =>
+                inTauri &&
+                mcpCopySetup()
+                  .then(() => setCopied(true))
+                  .catch(() => undefined)
+              }
+            >
+              {copied ? "Copied" : "Copy setup"}
+            </button>
+          </Row>
+        ) : null}
       </div>
     </>
   );

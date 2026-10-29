@@ -41,6 +41,7 @@ bzip2 = "0.4"
 dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 mouse_position = "0.1.4"
+getrandom = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -607,6 +607,17 @@ fn copy_again(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     copy_last(&svc)
 }
 
+/// Copy the MCP setup for coding agents, token included. The token never passes through a window.
+#[tauri::command]
+fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    let bind = svc.settings.lock().unwrap().mcp_bind.clone();
+    let token = mcp::token(&mcp::token_path())?;
+    let text = serde_json::to_string_pretty(&mcp::client_config(&bind, &token)).map_err(|e| e.to_string())?;
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text))
+        .map_err(|e| e.to_string())
+}
+
 /// Hide our window first so the paste lands in the app underneath it.
 #[tauri::command]
 fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
@@ -944,7 +955,8 @@ pub fn run() {
     let svc = App::new(settings.clone(), settings_path);
     let latest = Latest::default();
     if settings.mcp_enabled {
-        match mcp::spawn(&settings.mcp_bind, latest.clone()) {
+        // Errors name the problem, never the token.
+        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, latest.clone(), t)) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
             Err(e) => eprintln!("Pointcast MCP did not start: {e}"),
         }
@@ -982,6 +994,7 @@ pub fn run() {
             last_folder,
             open_folder,
             copy_again,
+            mcp_copy_setup,
             paste_again,
             speech_setup,
             history_list,

@@ -121,10 +121,33 @@ tap still toggles.
 ## For coding agents (MCP)
 
 A local MCP server on `127.0.0.1:47821` serves the latest prompt, so Claude Code, Cursor and Codex
-can fetch it themselves:
+can fetch it themselves. It needs this computer's key and refuses web pages, so a site open in your
+browser cannot read your screenshots.
+
+**Settings → Output → Agent setup → Copy setup** copies the config with the key in it; paste it into
+`.mcp.json` (Claude Code) or `mcp.json` (Cursor):
+
+```json
+{
+  "mcpServers": {
+    "pointcast": {
+      "type": "http",
+      "url": "http://127.0.0.1:47821/mcp",
+      "headers": { "Authorization": "Bearer <key>" }
+    }
+  }
+}
+```
+
+The key is made on first run and kept in `mcp-token` in Pointcast's data folder
+(`%LOCALAPPDATA%\dev.pointcast.app` on Windows, `~/Library/Application Support/dev.pointcast.app` on
+macOS, `~/.local/share/dev.pointcast.app` on Linux). Connected an agent before the key existed? Copy
+the setup again.
 
 ```bash
-curl http://127.0.0.1:47821/v1/session
+claude mcp add --transport http pointcast http://127.0.0.1:47821/mcp \
+  --header "Authorization: Bearer $(cat ~/Library/Application\ Support/dev.pointcast.app/mcp-token)"
+curl -H "Authorization: Bearer <key>" http://127.0.0.1:47821/v1/session
 # JSON-RPC: POST /mcp with tools/list, then tools/call get_latest_session
 ```
 

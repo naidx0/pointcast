@@ -132,6 +132,8 @@ export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
 export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 export const copyAgain = () => invoke<void>("copy_again");
+/** Copies the MCP setup for coding agents, with this install's key, straight to the clipboard. */
+export const mcpCopySetup = () => invoke<void>("mcp_copy_setup");
 export const pasteAgain = () => invoke<void>("paste_again");
 export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: string; received?: number; total?: number };
 export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });

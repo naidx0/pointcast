@@ -1,11 +1,19 @@
 //! Tiny local HTTP + JSON-RPC MCP server exposing the latest session.
-//! Binds 127.0.0.1 only. Tools: `get_latest_session`.
+//! Binds loopback only. Tools: `get_latest_session`.
+//!
+//! The session holds screenshots, so only a local MCP client may read it: every request must
+//! carry this install's token as `Authorization: Bearer <token>`. Anything a browser sends is
+//! refused before the token is looked at: an `Origin` header (Pointcast's own windows never call
+//! this server, so no origin is allowed) or a `Host` that is not this computer (DNS rebinding).
+//! No CORS headers are ever sent, so preflights fail too.
 use crate::prompt::SessionExport;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 #[derive(Clone, Default)]
 pub struct Latest {
@@ -21,17 +29,80 @@ impl Latest {
     }
 }
 
-pub fn spawn(bind: &str, latest: Latest) -> Result<SocketAddr, String> {
-    let listener = TcpListener::bind(bind).map_err(|e| e.to_string())?;
+/// Where this install's token lives: in the app's data folder, never in the repo or a log.
+pub fn token_path() -> PathBuf {
+    crate::settings::data_dir().join("mcp-token")
+}
+
+/// This install's token, made on first run. On macOS and Linux only this user can read the file;
+/// on Windows it sits in the user's own local app data, which other accounts cannot open.
+pub fn token(path: &Path) -> Result<String, String> {
+    if let Some(t) = read_token(path) {
+        return Ok(t);
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("no randomness for the MCP token: {e}"))?;
+    let t: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    // A damaged file is replaced; a file another start wrote in between wins.
+    let _ = std::fs::remove_file(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    match opts.open(path) {
+        Ok(mut f) => {
+            f.write_all(t.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(t)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_token(path).ok_or_else(|| "the MCP token file is unreadable".into())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn read_token(path: &Path) -> Option<String> {
+    let t = std::fs::read_to_string(path).ok()?;
+    let t = t.trim();
+    (t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| t.to_string())
+}
+
+/// What a coding agent needs to connect (Claude Code `.mcp.json`, Cursor `mcp.json`).
+pub fn client_config(bind: &str, token: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "pointcast": {
+                "type": "http",
+                "url": format!("http://{bind}/mcp"),
+                "headers": { "Authorization": format!("Bearer {token}") }
+            }
+        }
+    })
+}
+
+pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, String> {
+    if token.len() < 16 {
+        return Err("the MCP token is missing".into());
+    }
+    let addrs: Vec<SocketAddr> = bind.to_socket_addrs().map_err(|e| e.to_string())?.collect();
+    if addrs.is_empty() || addrs.iter().any(|a| !a.ip().is_loopback()) {
+        return Err(format!("{bind} is not this computer only; use 127.0.0.1"));
+    }
+    let listener = TcpListener::bind(&addrs[..]).map_err(|e| e.to_string())?;
     listener.set_nonblocking(false).ok();
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let token: Arc<str> = token.into();
     thread::Builder::new()
         .name("pointcast-mcp".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let latest = latest.clone();
+                let token = token.clone();
                 thread::spawn(move || {
-                    let _ = handle(stream, &latest);
+                    let _ = handle(stream, &latest, &token);
                 });
             }
         })
@@ -39,12 +110,81 @@ pub fn spawn(bind: &str, latest: Latest) -> Result<SocketAddr, String> {
     Ok(addr)
 }
 
-fn handle(mut stream: TcpStream, latest: &Latest) -> Result<(), String> {
-    let mut buf = vec![0u8; 64 * 1024];
-    let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+const MAX_REQUEST: usize = 1024 * 1024;
+
+/// Read the head, then as much body as Content-Length says: the headers must be whole to check them.
+fn read_request(stream: &mut TcpStream) -> Result<String, String> {
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..end]);
+            let len = header(&head, "content-length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + len {
+                break;
+            }
+        }
+        if buf.len() > MAX_REQUEST {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// A Host header, when present, must name this computer.
+fn local_host(head: &str) -> bool {
+    let Some(h) = header(head, "host") else {
+        return true;
+    };
+    let name = match h.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => h.rsplit_once(':').map_or(h, |(n, _)| n),
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+fn authorized(head: &str, token: &str) -> bool {
+    let Some((scheme, got)) = header(head, "authorization").and_then(|v| v.split_once(' ')) else {
+        return false;
+    };
+    let (a, b) = (got.trim().as_bytes(), token.as_bytes());
+    // Compare every byte, so the time taken does not say how much of a guess was right.
+    scheme.eq_ignore_ascii_case("bearer")
+        && a.len() == b.len()
+        && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn handle(mut stream: TcpStream, latest: &Latest, token: &str) -> Result<(), String> {
+    let req = read_request(&mut stream)?;
+    let head = req.split("\r\n\r\n").next().unwrap_or("");
     let (method_line, body) = split_http(&req);
-    let (code, ctype, body) = if method_line.starts_with("GET /v1/session")
+    let (code, ctype, body) = if header(head, "origin").is_some() || !local_host(head) {
+        (403, "text/plain", "web pages cannot read Pointcast".to_string())
+    } else if !authorized(head, token) {
+        (
+            401,
+            "text/plain",
+            "missing or wrong token: copy the MCP setup again from Pointcast Settings".to_string(),
+        )
+    } else if method_line.starts_with("GET /v1/session")
         || method_line.starts_with("GET /session")
         || method_line.starts_with("GET / ")
     {
@@ -68,9 +208,20 @@ fn handle(mut stream: TcpStream, latest: &Latest) -> Result<(), String> {
     } else {
         (404, "text/plain", "not found".into())
     };
+    let reason = match code {
+        200 => "OK",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        _ => "Error",
+    };
+    let challenge = if code == 401 {
+        "WWW-Authenticate: Bearer realm=\"pointcast\"\r\n"
+    } else {
+        ""
+    };
     let resp = format!(
-        "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{body}",
-        if code == 200 { "OK" } else if code == 404 { "Not Found" } else { "Error" },
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{challenge}Connection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(resp.as_bytes()).map_err(|e| e.to_string())?;
@@ -156,5 +307,186 @@ mod tests {
         let body = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_latest_session"}}"#;
         let reply = mcp_rpc(body, &latest);
         assert!(reply.contains("hello there"), "{reply}");
+    }
+
+    // Over the wire: a web page open in the browser must never read the session; a local MCP
+    // client (no Origin, the install's token) must.
+    const TOKEN: &str = "test-token-3f9a1c0d2b7e4a58";
+    const SECRET: &str = "the private words on screen";
+    const EVIL: &str = "https://evil.example";
+    const CALL: &str =
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_latest_session"}}"#;
+
+    fn start() -> SocketAddr {
+        let latest = Latest::default();
+        latest.set(assemble_export(&[Item::Speech {
+            t_ms: 0,
+            end_ms: 10,
+            text: SECRET.into(),
+        }]));
+        spawn("127.0.0.1:0", latest, TOKEN.into()).unwrap()
+    }
+
+    /// Send one raw request; return the status code and the whole response.
+    fn send(addr: SocketAddr, req: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        let code = out.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        (code, out)
+    }
+
+    fn request(addr: SocketAddr, method_path: &str, headers: &str, body: &str) -> (u16, String) {
+        send(
+            addr,
+            &format!(
+                "{method_path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    fn bearer(token: &str) -> String {
+        format!("Authorization: Bearer {token}\r\n")
+    }
+
+    fn allows_cors(resp: &str) -> bool {
+        let head = resp.split("\r\n\r\n").next().unwrap_or("").to_ascii_lowercase();
+        head.contains("access-control-allow-origin")
+    }
+
+    /// Every route the server answers, plus one it does not.
+    const ROUTES: [&str; 7] = [
+        "GET /v1/session",
+        "GET /session",
+        "GET /",
+        "GET /health",
+        "POST /mcp",
+        "POST /",
+        "GET /nope",
+    ];
+
+    #[test]
+    fn a_web_page_is_refused_even_with_the_token() {
+        let addr = start();
+        for route in ROUTES {
+            let headers = format!("Origin: {EVIL}\r\n{}", bearer(TOKEN));
+            let (code, resp) = request(addr, route, &headers, CALL);
+            assert_eq!(code, 403, "{route}: {resp}");
+            assert!(!allows_cors(&resp), "{route} must not send CORS headers: {resp}");
+            assert!(!resp.contains(SECRET), "{route} leaked the session: {resp}");
+        }
+    }
+
+    #[test]
+    fn a_preflight_from_another_origin_is_refused() {
+        let addr = start();
+        let headers = format!(
+            "Origin: {EVIL}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: authorization, content-type\r\n"
+        );
+        let (code, resp) = request(addr, "OPTIONS /mcp", &headers, "");
+        assert_eq!(code, 403, "{resp}");
+        assert!(!allows_cors(&resp), "{resp}");
+    }
+
+    #[test]
+    fn a_request_without_the_token_is_refused() {
+        let addr = start();
+        for route in ROUTES {
+            let (code, resp) = request(addr, route, "", CALL);
+            assert_eq!(code, 401, "{route}: {resp}");
+            assert!(!resp.contains(SECRET), "{route} leaked the session: {resp}");
+        }
+    }
+
+    #[test]
+    fn a_wrong_token_is_refused() {
+        let addr = start();
+        for token in ["", "nope", &TOKEN[..TOKEN.len() - 1], &format!("{TOKEN}x")] {
+            let (code, resp) = request(addr, "POST /mcp", &bearer(token), CALL);
+            assert_eq!(code, 401, "token {token:?}: {resp}");
+            assert!(!resp.contains(SECRET), "{resp}");
+        }
+    }
+
+    #[test]
+    fn a_rebound_host_name_is_refused() {
+        // DNS rebinding: a page on evil.example resolved to 127.0.0.1 sends its own host name.
+        let addr = start();
+        let req = format!(
+            "GET /v1/session HTTP/1.1\r\nHost: evil.example:{}\r\n{}\r\n",
+            addr.port(),
+            bearer(TOKEN)
+        );
+        let (code, resp) = send(addr, &req);
+        assert_eq!(code, 403, "{resp}");
+        assert!(!resp.contains(SECRET), "{resp}");
+    }
+
+    #[test]
+    fn a_local_client_with_the_token_reads_the_session() {
+        let addr = start();
+        let (code, resp) = request(addr, "POST /mcp", &bearer(TOKEN), CALL);
+        assert_eq!(code, 200, "{resp}");
+        assert!(resp.contains(SECRET), "{resp}");
+        assert!(!allows_cors(&resp), "{resp}");
+        let (code, resp) = request(addr, "GET /v1/session", &bearer(TOKEN), "");
+        assert_eq!(code, 200, "{resp}");
+        assert!(resp.contains(SECRET), "{resp}");
+    }
+
+    #[test]
+    fn the_server_listens_on_loopback_only() {
+        for bind in ["0.0.0.0:0", "[::]:0"] {
+            assert!(spawn(bind, Latest::default(), TOKEN.into()).is_err(), "{bind} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_token_is_made_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("pc-mcp-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (dir.join("a").join("mcp-token"), dir.join("b").join("mcp-token"));
+        let first = token(&a).unwrap();
+        assert_eq!(first.len(), 64, "{first}");
+        assert!(first.bytes().all(|c| c.is_ascii_hexdigit()), "{first}");
+        assert_eq!(token(&a).unwrap(), first, "a second start keeps the token");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), first);
+        assert_ne!(token(&b).unwrap(), first, "every install gets its own token");
+        // A damaged file is replaced, not trusted.
+        std::fs::write(&a, "short").unwrap();
+        let fresh = token(&a).unwrap();
+        assert_eq!(fresh.len(), 64, "{fresh}");
+        assert_ne!(fresh, "short");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&a).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "only this user may read the token");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_too_short_token_does_not_start_the_server() {
+        assert!(spawn("127.0.0.1:0", Latest::default(), String::new()).is_err());
+    }
+
+    #[test]
+    fn the_copied_setup_carries_the_token_and_reaches_the_server() {
+        let addr = start();
+        let cfg = client_config(&addr.to_string(), TOKEN);
+        let server = &cfg["mcpServers"]["pointcast"];
+        assert_eq!(server["type"], "http");
+        let url = server["url"].as_str().unwrap();
+        assert_eq!(url, format!("http://{addr}/mcp"));
+        let auth = server["headers"]["Authorization"].as_str().unwrap();
+        assert_eq!(auth, format!("Bearer {TOKEN}"));
+        // Exactly what a client would send from that config.
+        let (code, resp) = request(addr, "POST /mcp", &format!("Authorization: {auth}\r\n"), CALL);
+        assert_eq!(code, 200, "{resp}");
+        assert!(resp.contains(SECRET), "{resp}");
     }
 }
