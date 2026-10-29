@@ -109,10 +109,14 @@ Each of these has a switch in **Settings → Capture**.
 When you stop, the prompt is pasted into the app you were using (and kept on the clipboard), or
 copied, or saved as `prompt.md` with PNGs: your choice in **Settings → Output**. Rich HTML goes
 on the clipboard so chat apps show the pictures; plain text with `[image n]` markers is the fallback.
-A recording with no pictures is pasted as plain text, like any dictation app.
+A recording with no pictures is pasted as plain text, like any dictation app. The text also names
+each picture's file path, so terminal agents such as Claude Code can open the screenshots; chat apps
+that take pictures ignore it (turn it off in **Settings → Output**).
 
 Every prompt is kept in **History** (menu → History…, newest 100, on this computer only). Click a
-picture there to mark it up again; the prompt is updated and copied. If
+picture there to mark it up again; the prompt is updated and copied. If a recording's audio is
+still kept, **Transcribe again** writes it down afresh, with progress shown. Use it when a passage
+reads `[unclear]`, or after switching to a larger model. If
 Pointcast closes while you are recording, whatever was already transcribed or captured is
 recovered the next time it starts.
 
@@ -153,7 +157,9 @@ curl -H "Authorization: Bearer <key>" http://127.0.0.1:47821/v1/session
 
 ## Privacy
 
-- Audio stays in memory and is dropped once it is transcribed.
+- Audio is kept for your newest 10 recordings, on this computer only, so you can transcribe them
+  again. It is deleted with its History entry, and nothing is uploaded. Turn it off in
+  **Settings → Speech** and audio goes back to being dropped once it is transcribed.
 - The last 100 prompts, words and pictures, are kept in Pointcast's data folder on this computer
   until you delete them in **History**. They never leave it unless you paste or share them.
 - Pointcast's own windows are excluded from every capture by the OS.
