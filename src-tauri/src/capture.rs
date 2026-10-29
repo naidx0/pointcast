@@ -1,6 +1,6 @@
 //! Cross-platform screen grab via xcap. Hidden (password-manager) windows are painted over.
 //! Pointcast's own windows are treated as hidden unless `include_app` is on.
-use crate::element::{self, ElementMark};
+use crate::element::{self, Element, ElementMark};
 use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
 use crate::keyframes;
 use crate::pointer::{self, dwell, Point};
@@ -99,12 +99,21 @@ pub fn spot(map: &Mapping, recent: &[Point], now: Point) -> Point {
     dwell(recent).filter(|d| map.place(*d).is_some()).unwrap_or(now)
 }
 
-/// The control at `at` (screen coordinates) on this picture, when the person asked for outlines.
-fn element_at(settings: &Settings, map: &Mapping, at: Point) -> Option<ElementMark> {
-    if !settings.outline_element {
+/// The control at `at` (screen coordinates) on this picture, when the person asked for outlines; `ask` is the OS.
+/// A spot inside a painted-over window (`hidden`, screen coordinates) is never asked about, so nothing in that window
+/// is outlined over the paint or named in the prompt.
+fn element_at(
+    settings: &Settings,
+    map: &Mapping,
+    at: Point,
+    hidden: &[Rect],
+    ask: impl FnOnce(i32, i32) -> Option<Element>,
+) -> Option<ElementMark> {
+    let painted = |r: &Rect| at.x >= r.x && at.y >= r.y && at.x < r.x.saturating_add(r.w) && at.y < r.y.saturating_add(r.h);
+    if !settings.outline_element || hidden.iter().any(painted) {
         return None;
     }
-    element::mark(&element::at(at.x, at.y)?, at, map)
+    element::mark(&ask(at.x, at.y)?, at, map)
 }
 
 /// Outline the control the person pointed at; `k` is the picture's density.
@@ -193,6 +202,8 @@ struct Frame {
     map: Mapping,
     /// The windows on screen when it was taken, for a close-up of the window under the pointer.
     windows: Vec<Win>,
+    /// The windows painted over, in screen coordinates.
+    hidden: Vec<Rect>,
 }
 
 impl Frame {
@@ -241,6 +252,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         density,
         map,
         windows,
+        hidden: rects,
     })
 }
 
@@ -365,7 +377,7 @@ pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
     let mut f = grab_frame(settings)?;
     let now = f.now(t_ms);
     let (pointer, trail) = pointing(&f.map, recent, now);
-    let element = element_at(settings, &f.map, spot(&f.map, recent, now));
+    let element = element_at(settings, &f.map, spot(&f.map, recent, now), &f.hidden, element::at);
     outline(&mut f.buf, f.width, f.height, element.as_ref(), f.density);
     mark(&mut f.buf, f.width, f.height, settings.mark_point, pointer, &trail, f.density);
     Ok(Shot {
@@ -399,7 +411,7 @@ pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
     let (mut buf, width, height) = enlarge(cut_buf, cw, ch, up);
     let map = Mapping { crop: (ox as i32, oy as i32), size: (cw, ch), ..f.map }.times(up);
     let (pointer, trail) = pointing(&map, recent, now);
-    let element = element_at(settings, &map, spot(&map, recent, now));
+    let element = element_at(settings, &map, spot(&map, recent, now), &f.hidden, element::at);
     let k = f.density * up as f32;
     outline(&mut buf, width, height, element.as_ref(), k);
     mark(&mut buf, width, height, settings.mark_point, pointer, &trail, k);
@@ -423,7 +435,7 @@ pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<S
     let f = grab_frame(settings)?;
     let now = f.now(t_ms);
     let (pointer, trail) = pointing(&f.map, recent, now);
-    let element = element_at(settings, &f.map, spot(&f.map, recent, now));
+    let element = element_at(settings, &f.map, spot(&f.map, recent, now), &f.hidden, element::at);
     Ok(Shot {
         png: encode_png(&f.buf, f.width, f.height)?,
         width: f.width,
@@ -638,7 +650,7 @@ mod tests {
         assert_eq!(spot(&m, &[], now), now);
         assert_eq!(spot(&m, &resting(0, 700, (-500, 450)), now), now, "a rest off this picture");
         let off = Settings { outline_element: false, ..Settings::default() };
-        assert_eq!(element_at(&off, &m, now), None, "off never asks the OS");
+        assert_eq!(element_at(&off, &m, now, &[], |_, _| panic!("asked the OS")), None, "off never asks the OS");
         let blank = vec![255u8; 120 * 60 * 4];
         let mut b = blank.clone();
         outline(&mut b, 120, 60, None, 1.0);
@@ -647,6 +659,27 @@ mod tests {
         outline(&mut b, 120, 60, Some(&ok), 1.0);
         assert_eq!(&b[(28 * 120 + 27) * 4..][..3], &[245, 165, 36]);
         assert_eq!(&b[(28 * 120 + 40) * 4..][..3], &[255; 3]);
+    }
+
+    #[test]
+    fn a_control_in_a_painted_over_window_is_neither_outlined_nor_named() {
+        let m = screen((0, 0), 1.0, 1920, 1080);
+        let on = Settings { outline_element: true, ..Settings::default() };
+        let vault = [r(100, 100, 400, 300)];
+        let asked = Cell::new(0);
+        let login = |_: i32, _: i32| {
+            asked.set(asked.get() + 1);
+            Some(Element { role: "list item".into(), name: "github.com alice@example.com".into(), rect: (110, 200, 380, 40) })
+        };
+        for at in [p(0, 300, 220), p(0, 100, 100), p(0, 499, 399)] {
+            assert_eq!(element_at(&on, &m, at, &vault, login), None, "{at:?}");
+        }
+        assert_eq!(asked.get(), 0, "the OS is never asked about a painted-over spot");
+        // The same control with nothing painted over it, and a spot just past the paint's edge.
+        let named = element_at(&on, &m, p(0, 300, 220), &[r(600, 100, 400, 300)], login).unwrap();
+        assert_eq!((named.role.as_str(), named.name.as_str()), ("list item", "github.com alice@example.com"));
+        assert!(element_at(&on, &m, p(0, 480, 220), &[r(100, 100, 380, 300)], login).is_some());
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]
