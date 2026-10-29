@@ -297,7 +297,7 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
   return (
     <>
       <h2 className="group-title">Model</h2>
-      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} />
+      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} removable />
       <div className="group" style={{ marginTop: 12 }}>
         <Row label="Microphone" sub="Used only while you record.">
           <select

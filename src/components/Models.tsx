@@ -5,6 +5,7 @@ import {
   onSpeechDone,
   onSpeechProgress,
   speechCancel,
+  speechRemove,
   speechSetup,
   speechStatus,
   subscribe,
@@ -90,10 +91,13 @@ export function ModelPicker({
   cfg,
   patch,
   refresh,
+  removable,
 }: {
   cfg: Config;
   patch: (p: Record<string, unknown>) => Promise<string | null>;
   refresh: () => void;
+  /** Offer Remove on downloaded models that are not in use (Settings, not first-run setup). */
+  removable?: boolean;
 }) {
   const { job, error, start, cancel } = useSpeechJob(refresh);
   const chosen = chosenModel(cfg);
@@ -159,8 +163,25 @@ export function ModelPicker({
                 <span className="spinner" />
               )
             ) : ready ? (
-              <span className="check on" aria-label="Downloaded">
-                <Check size={14} strokeWidth={3} />
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                {removable && !on ? (
+                  <button
+                    type="button"
+                    className="btn plain"
+                    title={`Delete ${o.name} and free ${mbText(m.bytes)}`}
+                    disabled={!!job}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (inTauri) await speechRemove(m.id).catch(() => undefined);
+                      refresh();
+                    }}
+                  >
+                    Remove
+                  </button>
+                ) : null}
+                <span className="check on" aria-label="Downloaded">
+                  <Check size={14} strokeWidth={3} />
+                </span>
               </span>
             ) : (
               <button

@@ -454,6 +454,18 @@ fn swap_in(staging: &Path, dest: &Path) -> Result<(), String> {
     std::fs::rename(staging, dest).map_err(|e| io_text(&e, dest))
 }
 
+/// Delete an installed model's folder. Refuses a path outside the speech folder.
+pub fn remove_model(root: &Path, e: &ModelEntry) -> Result<(), String> {
+    let dir = install_dir(root, &e.id);
+    if dir.parent() != Some(root) || e.id.is_empty() || e.id.contains(['/', '.']) {
+        return Err("no such model".into());
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Err(x) if x.kind() != std::io::ErrorKind::NotFound => Err(io_text(&x, &dir)),
+        _ => Ok(()),
+    }
+}
+
 pub fn install_model(
     root: &Path,
     e: &ModelEntry,
@@ -733,6 +745,23 @@ mod tests {
         assert_eq!(install_model(&d, &m, &|_| {}).unwrap_err(), DAMAGED);
         assert!(!install_dir(&d, &m.id).exists());
         assert!(std::fs::read_dir(&d).unwrap().next().is_none(), "nothing left behind");
+    }
+
+    #[test]
+    fn removing_a_model_frees_its_folder_and_nothing_else() {
+        let d = scratch("remove");
+        let c = catalog();
+        let (tiny, base) = (c.model("moonshine-tiny-en").unwrap(), c.model("moonshine-base-en").unwrap());
+        for m in [tiny, base] {
+            std::fs::create_dir_all(install_dir(&d, &m.id)).unwrap();
+            std::fs::write(install_dir(&d, &m.id).join("x"), b"x").unwrap();
+        }
+        remove_model(&d, tiny).unwrap();
+        assert!(!install_dir(&d, &tiny.id).exists() && install_dir(&d, &base.id).exists());
+        remove_model(&d, tiny).unwrap();
+        let mut bad = tiny.clone();
+        bad.id = "../outside".into();
+        assert!(remove_model(&d, &bad).is_err());
     }
 
     #[test]

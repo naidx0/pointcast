@@ -603,6 +603,31 @@ fn speech_status() -> Option<Value> {
     SPEECH.lock().unwrap().clone()
 }
 
+/// The model the next recording would load, by the same rule the engine uses.
+fn in_use(chosen: &str, recommended: &str, installed: &[&str], id: &str) -> bool {
+    voice::machine::route(chosen, recommended, installed) == Some(id)
+}
+
+/// Delete a downloaded model to free its disk space. The model in use stays.
+#[tauri::command]
+fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, String> {
+    let cat = voice::models::catalog();
+    let m = cat.model(&id).ok_or("That model isn't in the catalog.")?;
+    let root = voice::models::speech_dir();
+    let installed: Vec<&str> = cat
+        .models
+        .iter()
+        .filter(|x| voice::models::model_installed(&root, x))
+        .map(|x| x.id.as_str())
+        .collect();
+    let active = in_use(&svc.settings.lock().unwrap().model, voice::machine::recommended(), &installed, &m.id);
+    if active || SPEECH_BUSY.load(Ordering::SeqCst) {
+        return Err("That model is in use. Pick another one first.".into());
+    }
+    voice::models::remove_model(&root, m)?;
+    Ok(settings_view(&svc))
+}
+
 #[tauri::command]
 fn permissions_get() -> permissions::PermissionStatus {
     permissions::probe()
@@ -672,6 +697,7 @@ fn parse_chord(text: String) -> Result<Value, String> {
 #[tauri::command]
 fn hotkeys_suspend(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Value {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    PAUSED.store(on, Ordering::SeqCst);
     if on {
         let _ = app.global_shortcut().unregister_all();
     } else {
@@ -679,6 +705,10 @@ fn hotkeys_suspend(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) ->
     }
     settings_view(&svc)
 }
+
+/// Shortcuts are unregistered while a field listens for new keys. A window closed mid-listen
+/// never runs its own cleanup, so closing it brings them back here.
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Onboarding's "press it now": shortcuts report that they fired and do nothing else.
 #[tauri::command]
@@ -830,6 +860,7 @@ pub fn run() {
             history_clear,
             speech_cancel,
             speech_status,
+            speech_remove,
             permissions_get,
             permission_request,
             permission_open,
@@ -891,6 +922,11 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Closing a window frees it; Pointcast itself stays in the tray (see ExitRequested).
                 let _ = api;
+                if PAUSED.swap(false, Ordering::SeqCst) {
+                    if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
+                        rebind(window.app_handle(), &svc);
+                    }
+                }
                 if window.label() == "onboarding" {
                     let app = window.app_handle();
                     if let Some(svc) = app.try_state::<Arc<App>>() {
@@ -996,6 +1032,17 @@ mod tests {
         assert_eq!(back.mark_point, settings::MarkPoint::Ring);
         let quiet = merge(&back, p(json!({ "outline_element": false }))).unwrap();
         assert!(!quiet.outline_element && back.outline_element);
+    }
+
+    #[test]
+    fn only_the_model_a_recording_would_load_counts_as_in_use() {
+        let both = ["moonshine-tiny-en", "moonshine-base-en"];
+        assert!(in_use("moonshine-tiny-en", "moonshine-base-en", &both, "moonshine-tiny-en"));
+        assert!(!in_use("moonshine-tiny-en", "moonshine-base-en", &both, "moonshine-base-en"));
+        assert!(in_use("auto", "moonshine-base-en", &both, "moonshine-base-en"));
+        assert!(!in_use("auto", "moonshine-base-en", &both, "moonshine-tiny-en"));
+        // The chosen one is not downloaded: the engine falls back to what is there.
+        assert!(in_use("whisper-turbo", "moonshine-base-en", &["moonshine-tiny-en"], "moonshine-tiny-en"));
     }
 
     #[test]

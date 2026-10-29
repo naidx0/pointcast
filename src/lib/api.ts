@@ -126,6 +126,7 @@ export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: st
 export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
 export const speechCancel = () => invoke<void>("speech_cancel");
 export const speechStatus = () => invoke<SpeechProgress | null>("speech_status");
+export const speechRemove = (id: string) => invoke<Config>("speech_remove", { id });
 export const permissionsGet = () => invoke<Permissions>("permissions_get");
 export const permissionRequest = (kind: PermissionKind) => invoke<Permissions>("permission_request", { kind });
 export const permissionOpen = (kind: PermissionKind) => invoke<void>("permission_open", { kind });
