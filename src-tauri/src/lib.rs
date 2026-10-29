@@ -1,6 +1,7 @@
 mod capture;
 mod chord;
 mod clipboard;
+mod element;
 mod history;
 mod image_ops;
 mod mcp;
@@ -147,8 +148,8 @@ pub fn toggle(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     Ok(())
 }
 
-/// The frozen frame for the overlay, with where the person pointed (frame pixels) when they want it marked; the
-/// overlay places a ring there as a shape they can move or remove.
+/// The frozen frame for the overlay, with where the person pointed (frame pixels) when they want it marked and the
+/// control there when they want outlines; the overlay places a ring and an outline as shapes they can move or remove.
 fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
     let pointer = shot.pointer.filter(|_| mark != settings::MarkPoint::Off);
     json!({
@@ -156,6 +157,7 @@ fn frame_payload(shot: &capture::Shot, mark: settings::MarkPoint) -> Value {
         "width": shot.width,
         "height": shot.height,
         "pointer": pointer.map(|p| json!({ "x": p.x, "y": p.y })),
+        "element": shot.element,
     })
 }
 
@@ -269,6 +271,7 @@ fn settings_view(svc: &App) -> Value {
         "mark_point": s.mark_point,
         "zoom_target": s.zoom_target,
         "zoom_sharpen": s.zoom_sharpen,
+        "outline_element": s.outline_element,
         "start_at_login": s.start_at_login,
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
@@ -401,6 +404,9 @@ struct RegionCommit {
     png_b64: String,
     #[serde(default)]
     labels: Vec<Label>,
+    /// The outlined control, in the cropped picture's pixels, when the person kept it.
+    #[serde(default)]
+    element: Option<element::ElementMark>,
 }
 
 #[tauri::command]
@@ -413,7 +419,7 @@ fn region_commit(
     let png = base64::engine::general_purpose::STANDARD
         .decode(body.png_b64.trim())
         .map_err(|e| e.to_string())?;
-    let cap = svc.commit_region(png, body.labels)?;
+    let cap = svc.commit_region(png, body.labels, body.element)?;
     hide_window(&app, "overlay");
     platform::restore_front();
     FRAME.lock().unwrap().take();
@@ -947,13 +953,37 @@ mod tests {
             cursor: (0, 0),
             pointer: Some(pointer::Point { t_ms: 9, x: 3, y: 2 }),
             trail: vec![],
+            element: None,
             map: Default::default(),
         };
         let v = frame_payload(&shot, settings::MarkPoint::Ring);
         assert_eq!((v["width"].clone(), v["pointer"].clone()), (json!(4), json!({ "x": 3, "y": 2 })));
+        assert!(v["element"].is_null());
         assert!(frame_payload(&shot, settings::MarkPoint::Off)["pointer"].is_null());
-        let none = capture::Shot { pointer: None, ..shot };
+        let none = capture::Shot { pointer: None, ..shot.clone() };
         assert!(frame_payload(&none, settings::MarkPoint::Trail)["pointer"].is_null());
+        let rect = element::Bounds { x: 1, y: 0, w: 2, h: 2 };
+        let button = element::ElementMark { role: "button".into(), name: "Place order".into(), rect };
+        let with = capture::Shot { element: Some(button), ..shot };
+        let v = frame_payload(&with, settings::MarkPoint::Off);
+        assert_eq!(v["element"], json!({ "role": "button", "name": "Place order", "rect": { "x": 1, "y": 0, "w": 2, "h": 2 } }));
+        assert!(v["pointer"].is_null(), "the outline does not need the ring");
+    }
+
+    #[test]
+    fn a_region_commit_takes_the_outlined_control_or_none() {
+        let body: RegionCommit = serde_json::from_value(json!({
+            "png_b64": "",
+            "labels": [{ "n": 1, "text": "too far left" }],
+            "element": { "role": "button", "name": "Place order", "rect": { "x": 4, "y": 6, "w": 116, "h": 41 } },
+        }))
+        .unwrap();
+        let e = body.element.unwrap();
+        assert_eq!((e.role.as_str(), e.name.as_str(), e.rect.w), ("button", "Place order", 116));
+        let old: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "labels": [] })).unwrap();
+        assert!(old.element.is_none());
+        let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
+        assert!(gone.element.is_none());
     }
 
     #[test]
@@ -964,6 +994,8 @@ mod tests {
         assert!(merge(&next, p(json!({ "mark_point": "sparkles" }))).is_err());
         let back = merge(&next, p(json!({ "mark_point": null }))).unwrap();
         assert_eq!(back.mark_point, settings::MarkPoint::Ring);
+        let quiet = merge(&back, p(json!({ "outline_element": false }))).unwrap();
+        assert!(!quiet.outline_element && back.outline_element);
     }
 
     #[test]

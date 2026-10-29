@@ -159,13 +159,16 @@ impl Store {
 }
 
 fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) -> Meta {
-    let text = prompt::compose(items).0;
-    let words: String = text
-        .split_whitespace()
-        .filter(|w| !w.starts_with("[image") && !w.ends_with(']'))
-        .take(24)
-        .collect::<Vec<_>>()
-        .join(" ");
+    // The words only: a marker can carry a control's name and pin labels.
+    let mut said: Vec<(u64, &str)> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Speech { t_ms, text, .. } => Some((*t_ms, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    said.sort_by_key(|s| s.0);
+    let words = said.iter().flat_map(|s| s.1.split_whitespace()).take(24).collect::<Vec<_>>().join(" ");
     let stamp = chrono::DateTime::from_timestamp_millis(created_ms as i64)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y%m%d-%H%M%S").to_string())
         .unwrap_or_else(|| "session".into());
@@ -196,6 +199,7 @@ fn stripped(items: &[Item]) -> Vec<Item> {
                     labels: c.labels.clone(),
                     pointer: c.pointer,
                     trail: c.trail.clone(),
+                    element: c.element.clone(),
                 },
             },
             s => s.clone(),
@@ -270,6 +274,11 @@ mod tests {
                     labels: vec![Label { n: 1, text: "this one".into() }],
                     pointer: None,
                     trail: vec![],
+                    element: Some(crate::element::ElementMark {
+                        role: "button".into(),
+                        name: "Place order".into(),
+                        rect: crate::element::Bounds { x: 0, y: 0, w: 1, h: 1 },
+                    }),
                 },
             },
             Item::Speech { t_ms: 1200, end_ms: 2000, text: "move it left".into() },
@@ -287,13 +296,22 @@ mod tests {
         let s = store("roundtrip");
         let m = s.save(&items(), 1_793_000_000_000, 2000).unwrap();
         assert_eq!(m.images, 1);
-        assert!(m.preview.starts_with("the button is off"), "{}", m.preview);
+        assert_eq!(m.preview, "the button is off by a few pixels move it left", "words only, no marker");
         assert_eq!(s.items(&m.id).unwrap(), items());
         let (a, b) = (s.export(&m.id).unwrap(), prompt::assemble_export(&items()));
         assert_eq!((a.plain, a.html, a.images.len()), (b.plain, b.html, b.images.len()));
         assert_eq!(s.list(), vec![m.clone()]);
         s.delete(&m.id).unwrap();
         assert!(s.list().is_empty());
+    }
+
+    #[test]
+    fn an_entry_saved_before_outlines_existed_still_loads() {
+        let old = r#"[{"type":"image","t_ms":5,"capture":{"id":0,"kind":"full","t_ms":5,"png":[],"width":1,"height":1,"labels":[]}}]"#;
+        let items: Vec<Item> = serde_json::from_str(old).unwrap();
+        let Item::Image { capture, .. } = &items[0] else { panic!("{items:?}") };
+        assert_eq!(capture.element, None);
+        assert_eq!(serde_json::to_string(&items).unwrap(), old, "and one without a control writes no field for it");
     }
 
     #[test]

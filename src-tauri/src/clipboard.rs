@@ -102,6 +102,7 @@ mod tests {
             labels: vec![],
             pointer: None,
             trail: vec![],
+            element: None,
         });
     }
 }

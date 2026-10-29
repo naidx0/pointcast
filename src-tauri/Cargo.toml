@@ -50,7 +50,7 @@ objc2 = "0.6"
 core-foundation = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media_Audio", "Win32_Storage_FileSystem"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_UI_Accessibility", "Win32_System_Com"] }
 
 [profile.release]
 panic = "abort"

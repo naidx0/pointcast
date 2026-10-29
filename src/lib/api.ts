@@ -73,6 +73,7 @@ export type Config = {
   mark_point: MarkPoint;
   zoom_target: ZoomTarget;
   zoom_sharpen: boolean;
+  outline_element: boolean;
   start_at_login: boolean;
   include_app: boolean;
   hidden: string[];
@@ -101,11 +102,19 @@ export const sessionCancel = () => invoke<void>("session_cancel");
 export const captureFull = () => invoke<void>("capture_full");
 export const captureZoom = () => invoke<void>("capture_zoom");
 export const regionBegin = () => invoke<{ png_b64: string; width: number; height: number }>("region_begin");
-export const regionCommit = (pngB64: string, labels: Label[]) =>
-  invoke<void>("region_commit", { body: { png_b64: pngB64, labels } });
+/** The control under the pointer, its rect in picture pixels. */
+export type ElementMark = { role: string; name: string; rect: { x: number; y: number; w: number; h: number } };
+export const regionCommit = (pngB64: string, labels: Label[], element: ElementMark | null = null) =>
+  invoke<void>("region_commit", { body: { png_b64: pngB64, labels, element } });
 export const regionCancel = () => invoke<void>("region_cancel");
 export const regionFrame = () =>
-  invoke<{ png_b64: string; width: number; height: number; pointer?: { x: number; y: number } | null } | null>(
+  invoke<{
+    png_b64: string;
+    width: number;
+    height: number;
+    pointer?: { x: number; y: number } | null;
+    element?: ElementMark | null;
+  } | null>(
     "region_frame",
   );
 export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
