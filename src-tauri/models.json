@@ -74,6 +74,117 @@
         "clip5_ms": 420
       },
       "sha256": "43232c1d13013d37317163baec3135bd771a186a4356f28c889bab453bb0e891"
+    },
+    {
+      "id": "parakeet-tdt-v2-en",
+      "name": "Parakeet TDT v2 (English)",
+      "family": "transducer",
+      "license": "CC-BY-4.0",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
+      ],
+      "bytes": 482468385,
+      "sha256": "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad",
+      "root": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+      "files": [
+        {
+          "name": "encoder.int8.onnx",
+          "role": "encoder",
+          "bytes": 652184296,
+          "sha256": "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"
+        },
+        {
+          "name": "decoder.int8.onnx",
+          "role": "decoder",
+          "bytes": 7257753,
+          "sha256": "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e"
+        },
+        {
+          "name": "joiner.int8.onnx",
+          "role": "joiner",
+          "bytes": 1739080,
+          "sha256": "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2"
+        },
+        {
+          "name": "tokens.txt",
+          "role": "tokens",
+          "bytes": 9384,
+          "sha256": "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+        }
+      ],
+      "bench": {}
+    },
+    {
+      "id": "whisper-turbo",
+      "name": "Whisper Turbo (99 languages)",
+      "family": "whisper",
+      "license": "MIT",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2"
+      ],
+      "bytes": 563790207,
+      "sha256": "b11acbbcd660b44a8e0df33724feb5aaa709cf65668f2823d59f656312544f22",
+      "root": "sherpa-onnx-whisper-turbo",
+      "files": [
+        {
+          "name": "turbo-encoder.int8.onnx",
+          "role": "encoder",
+          "bytes": 674716297,
+          "sha256": "b02dcdf54f348741e93fe732b67d933c8dcb6735655f710640143081db38878b"
+        },
+        {
+          "name": "turbo-decoder.int8.onnx",
+          "role": "decoder",
+          "bytes": 361080764,
+          "sha256": "20accd02388482eb3a46bd615631adfdc85e1eb2c7db9ea3f02a40ffe6b81547"
+        },
+        {
+          "name": "turbo-tokens.txt",
+          "role": "tokens",
+          "bytes": 816730,
+          "sha256": "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"
+        }
+      ],
+      "bench": {}
+    },
+    {
+      "id": "parakeet-tdt-v3",
+      "name": "Parakeet TDT v3 (25 languages)",
+      "family": "transducer",
+      "license": "CC-BY-4.0",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
+      ],
+      "bytes": 487170055,
+      "sha256": "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
+      "root": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+      "files": [
+        {
+          "name": "encoder.int8.onnx",
+          "role": "encoder",
+          "bytes": 652184281,
+          "sha256": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"
+        },
+        {
+          "name": "decoder.int8.onnx",
+          "role": "decoder",
+          "bytes": 11845275,
+          "sha256": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e"
+        },
+        {
+          "name": "joiner.int8.onnx",
+          "role": "joiner",
+          "bytes": 6355277,
+          "sha256": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3"
+        },
+        {
+          "name": "tokens.txt",
+          "role": "tokens",
+          "bytes": 93939,
+          "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+        }
+      ],
+      "bench": {}
     }
   ],
   "runtimes": [

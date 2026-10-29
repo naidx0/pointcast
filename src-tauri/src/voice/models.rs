@@ -743,6 +743,60 @@ mod tests {
         assert!(space_needed(100) > 300);
     }
 
+    /// Every model in the catalog through the real runtime: unpack each archive from a local folder
+    /// (`POINTCAST_ARCHIVES`, holding the files named in the catalog URLs), install its pinned
+    /// files, load it and transcribe the sample recording it ships with.
+    /// `POINTCAST_ARCHIVES=... cargo test -- --ignored every_model --nocapture`
+    #[test]
+    #[ignore]
+    fn every_model_transcribes_its_sample_recording() {
+        let dir = PathBuf::from(std::env::var("POINTCAST_ARCHIVES").expect("set POINTCAST_ARCHIVES"));
+        let root = scratch("every");
+        let c = catalog();
+        let local = |url: &str| dir.join(url.rsplit('/').next().unwrap());
+        let rt = c.runtime_for_host().unwrap();
+        unpack_tar_bz2(&local(&rt.urls[0]), &install_dir(&root, &rt.id)).unwrap();
+        std::fs::write(install_dir(&root, &rt.id).join(DONE), &rt.sha256).unwrap();
+        for m in &c.models {
+            let archive = local(&m.urls[0]);
+            if !archive.exists() {
+                eprintln!("{}: archive not in {}, skipped", m.id, dir.display());
+                continue;
+            }
+            let unpacked = root.join(format!("{}.unpack", m.id));
+            unpack_tar_bz2(&archive, &unpacked).unwrap();
+            let dest = install_dir(&root, &m.id);
+            std::fs::create_dir_all(&dest).unwrap();
+            for f in &m.files {
+                let src = find_named(&unpacked, &f.name).unwrap();
+                check(&src, f.bytes, &f.sha256).unwrap();
+                std::fs::rename(&src, dest.join(&f.name)).unwrap();
+            }
+            assert!(model_installed(&root, m), "{}", m.id);
+            let wav = ["0.wav", "en.wav"].iter().find_map(|n| find_named(&unpacked, n)).unwrap();
+            let t = Instant::now();
+            let eng = crate::voice::stt::load(&root, rt, m, 4).unwrap();
+            let loaded = t.elapsed();
+            let (rate, ch, pcm) = crate::voice::audio::read_wav(&std::fs::read(wav).unwrap()).unwrap();
+            let mut mono = vec![];
+            crate::voice::audio::downmix(&pcm, ch, &mut mono);
+            let mut at16 = vec![];
+            crate::voice::audio::Resampler::new(rate).push(&mono, &mut at16);
+            let t = Instant::now();
+            let text = eng.transcribe(&at16);
+            eprintln!(
+                "{}: load {:?}, {:.1} s of audio in {:?}: {text}",
+                m.id,
+                loaded,
+                at16.len() as f64 / 16_000.0,
+                t.elapsed()
+            );
+            assert!(text.split_whitespace().count() >= 3, "{}: {text:?}", m.id);
+            drop(eng);
+            let _ = std::fs::remove_dir_all(&unpacked);
+        }
+    }
+
     /// The real thing, over the network: install the engine and the Tiny model for this computer,
     /// load them and transcribe the sample recording that ships in the model archive.
     /// `cargo test -- --ignored real_install` (about 40 MB).
