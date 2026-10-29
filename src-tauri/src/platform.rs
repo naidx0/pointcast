@@ -19,6 +19,27 @@ pub fn ensure(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
     Some(w)
 }
 
+/// The windows a person works in (not the HUD or overlay).
+pub const DESK: [&str; 3] = ["settings", "onboarding", "result"];
+
+/// macOS: a menu bar app has no Dock icon, so its windows are out of reach of Cmd+Tab. While
+/// Settings, setup or History is open Pointcast is a regular app; then it goes back to the menu
+/// bar. `closing` is a window on its way out that still reports itself visible.
+#[allow(unused_variables)]
+pub fn dock(app: &AppHandle, closing: Option<&str>) {
+    #[cfg(target_os = "macos")]
+    {
+        let open = DESK.iter().any(|l| {
+            Some(*l) != closing && app.get_webview_window(l).is_some_and(|w| w.is_visible().unwrap_or(false))
+        });
+        let _ = app.set_activation_policy(if open {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
+}
+
 /// After a while without recording, let the HUD and overlay go; they are rebuilt on demand.
 pub fn reap(app: &AppHandle) {
     for label in ["indicator", "overlay"] {

@@ -49,12 +49,18 @@ pub fn show_window(app: &AppHandle, label: &str) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        if platform::DESK.contains(&label) {
+            platform::dock(app, None);
+        }
     }
 }
 
 fn hide_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.hide();
+        if platform::DESK.contains(&label) {
+            platform::dock(app, Some(label));
+        }
     }
 }
 
@@ -924,6 +930,9 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Closing a window frees it; Pointcast itself stays in the tray (see ExitRequested).
                 let _ = api;
+                if platform::DESK.contains(&window.label()) {
+                    platform::dock(window.app_handle(), Some(window.label()));
+                }
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
                         rebind(window.app_handle(), &svc);
@@ -939,11 +948,13 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Pointcast")
-        .run(|_app, event| {
+        .run(|_app, event| match event {
             // The last window closing is not quitting: only Quit (an explicit exit code) ends it.
-            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
-                api.prevent_exit();
-            }
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            // Clicking the Dock icon (shown while a window is open) brings Settings forward.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_window(_app, "settings"),
+            _ => {}
         });
 }
 
