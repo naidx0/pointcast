@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in Pointcast does not work as it should.
+labels: [bug]
+body:
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 15.1, Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Pointcast version
+      description: Settings → About
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Speech model
+      options:
+        - Moonshine Base
+        - Moonshine Tiny
+        - Parakeet v2
+        - Whisper Turbo
+        - Parakeet v3
+        - Not sure
+  - type: textarea
+    id: did
+    attributes:
+      label: What you did
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened, and what you expected
+      description: A screenshot helps. Leave out anything private.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Press Ctrl+Shift+Space
+        2. ...
