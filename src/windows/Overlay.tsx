@@ -168,16 +168,30 @@ function smooth(pts: Pt[]): Seg[] {
   return d;
 }
 
+const pillW = (str: string, s: number) => textW(str, M.font * s) + 2 * M.padX * s;
+
 function pill(x: number, y: number, str: string, s: number, fill: string, fg: string, edge: string): Op[] {
   const h = M.pillH * s;
   return [
-    { k: "box", x, y: y - h / 2, w: textW(str, M.font * s) + 2 * M.padX * s, h, r: 7 * s, fill, stroke: edge, sw: 1.5 * s, shadow: true },
+    { k: "box", x, y: y - h / 2, w: pillW(str, s), h, r: 7 * s, fill, stroke: edge, sw: 1.5 * s, shadow: true },
     { k: "txt", x: x + M.padX * s, y, str, px: M.font * s, wt: 600, fill: fg },
   ];
 }
 
-// The one place a shape becomes pixels. s = frame px per logical px (natural.w / displayed width).
-function ops(sh: Shape, s: number, n: number, bare: boolean): Op[] {
+// Left edge of a label of width w (frame px): right of the pin, flipped left or pulled in so it stays inside the box.
+function labelX(sh: Extract<Shape, { text: string }>, w: number, s: number, b: Rect) {
+  const flush = Math.max(b.x, b.x + b.w - w);
+  if (sh.kind === "text") return clamp(sh.at.x, b.x, flush);
+  const off = (M.pin + M.gap) * s;
+  const right = sh.at.x + off;
+  const left = sh.at.x - off - w;
+  if (right + w <= b.x + b.w) return right;
+  if (left >= b.x) return left;
+  return b.x + b.w - right >= sh.at.x - off - b.x ? right : left;
+}
+
+// The one place a shape becomes pixels. s = frame px per logical px (natural.w / displayed width); b = the box.
+function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
   switch (sh.kind) {
     case "pin": {
       const { x, y } = sh.at;
@@ -186,11 +200,11 @@ function ops(sh: Shape, s: number, n: number, bare: boolean): Op[] {
         { k: "ell", x, y, r, fill: sh.c, stroke: "#fff", w: 2 * s, shadow: true },
         { k: "txt", x, y, str: String(n), px: 12 * s, wt: 700, fill: ink(sh.c), mid: true },
       ];
-      if (sh.text && !bare) o.push(...pill(x + r + M.gap * s, y, sh.text, s, "rgba(255,255,255,.96)", "#1c1c1e", sh.c));
+      if (sh.text && !bare) o.push(...pill(labelX(sh, pillW(sh.text, s), s, b), y, sh.text, s, "rgba(255,255,255,.96)", "#1c1c1e", sh.c));
       return o;
     }
     case "text":
-      return sh.text && !bare ? pill(sh.at.x, sh.at.y, sh.text, s, sh.c, ink(sh.c), "#fff") : [];
+      return sh.text && !bare ? pill(labelX(sh, pillW(sh.text, s), s, b), sh.at.y, sh.text, s, sh.c, ink(sh.c), "#fff") : [];
     case "arrow": {
       const { a, b } = sh;
       const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
@@ -337,7 +351,7 @@ async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: M
   ctx.beginPath();
   ctx.rect(x0, y0, w, h);
   ctx.clip();
-  for (const sh of list) for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false)) paint(ctx, img, o, s);
+  for (const sh of list) for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
   const url = c.toDataURL("image/png");
   return url.slice(url.indexOf(",") + 1);
 }
@@ -457,7 +471,7 @@ export function Overlay() {
   });
 
   // Frame px <-> logical px. s = natural.w / displayed image width: every size drawn into the frame is multiplied by it.
-  const fit = natural.w ? Math.min(vp.w / natural.w, vp.h / natural.h) : 1;
+  const fit = natural.w && vp.w && vp.h ? Math.min(vp.w / natural.w, vp.h / natural.h) : 1;
   const s = 1 / fit;
   const dw = natural.w * fit;
   const dh = natural.h * fit;
@@ -472,7 +486,13 @@ export function Overlay() {
   const vis = box ? shapes.filter((x) => seen(x, box)) : [];
   const nums = numbering(vis);
   const sb = box ? toScr(box) : null;
-  const grab = (e: PE) => rootRef.current?.setPointerCapture(e.pointerId);
+  const grab = (e: PE) => {
+    try {
+      rootRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      /* pointer already gone */
+    }
+  };
 
   function startEdit(id: number) {
     editRef.current = id;
@@ -504,6 +524,7 @@ export function Overlay() {
     }
     if (next === "selecting") {
       setBox(null);
+      setOut(null);
       dispatch({ t: "reset" });
     }
     setLayer(next);
@@ -628,7 +649,11 @@ export function Overlay() {
     const m = ix.current;
     ix.current = null;
     setCur(null);
-    if (rootRef.current?.hasPointerCapture(e.pointerId)) rootRef.current.releasePointerCapture(e.pointerId);
+    try {
+      rootRef.current?.releasePointerCapture(e.pointerId);
+    } catch {
+      /* not captured */
+    }
     if (!m) return;
     if (m.k === "sel") {
       if (!m.moved) {
@@ -665,7 +690,7 @@ export function Overlay() {
   let bar = { x: 0, y: 0 };
   if (sb) {
     const m = 8;
-    const floor = vp.h - 52;
+    const floor = vp.h - 62;
     let y = sb.y + sb.h + 12;
     if (y + tb.h > floor) {
       y = sb.y - 12 - tb.h;
@@ -675,6 +700,7 @@ export function Overlay() {
   }
 
   const ed = editing != null ? vis.find((x) => x.id === editing) : undefined;
+  const edW = ed && "text" in ed ? Math.max(112, textW(ed.text || " ", M.font) + 2 * M.padX + 10) : 0;
   const readout = cur && box ? `${Math.round(box.w)} × ${Math.round(box.h)} px` : "";
   const rw = readout.length * 7 + 20;
   const cursor = layer === "selecting" ? "crosshair" : tool === "move" ? "move" : tool === "text" ? "text" : "crosshair";
@@ -711,7 +737,7 @@ export function Overlay() {
             </defs>
             <g clipPath={box ? "url(#ov-clip)" : undefined}>
               {[...vis, ...(live ? [live] : [])].map((sh) => (
-                <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? 0, sh.id === editing)} />
+                <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? 0, sh.id === editing, box ?? full)} />
               ))}
             </g>
           </svg>
@@ -724,17 +750,16 @@ export function Overlay() {
           {canEdit && layer !== "drawing"
             ? vis.map((sh) => {
                 if (sh.kind !== "pin" && sh.kind !== "text") return null;
-                const x = ox + sh.at.x * fit;
-                const y = oy + sh.at.y * fit;
-                const pw = sh.text ? textW(sh.text, M.font) + 2 * M.padX : 0;
-                const left = sh.kind === "pin" ? x - M.pin : x;
-                const width = sh.kind === "pin" ? M.pin * 2 + (pw ? M.gap + pw : 0) : pw;
-                if (!width) return null;
+                const pw = sh.text ? pillW(sh.text, s) : 0;
+                if (sh.kind === "text" && !pw) return null;
+                const lx = pw ? labelX(sh, pw, s, box ?? full) : sh.at.x;
+                const l0 = sh.kind === "pin" ? Math.min(lx, sh.at.x - M.pin * s) : lx;
+                const l1 = sh.kind === "pin" ? Math.max(pw ? lx + pw : 0, sh.at.x + M.pin * s) : lx + pw;
                 return (
                   <div
                     key={sh.id}
                     className="ov-hit"
-                    style={{ left, top: y - M.pillH / 2, width, height: M.pillH }}
+                    style={{ left: ox + l0 * fit, top: oy + sh.at.y * fit - M.pillH / 2, width: (l1 - l0) * fit, height: M.pillH }}
                     onPointerDown={(e) => {
                       e.stopPropagation();
                       startEdit(sh.id);
@@ -746,9 +771,9 @@ export function Overlay() {
           {ed && (ed.kind === "pin" || ed.kind === "text") ? (
             <EditInput
               key={ed.id}
-              x={ox + ed.at.x * fit + (ed.kind === "pin" ? M.pin + M.gap : 0)}
+              x={ox + labelX(ed, edW * s, s, box ?? full) * fit}
               y={oy + ed.at.y * fit - M.pillH / 2}
-              w={Math.max(112, textW(ed.text || " ", M.font) + 2 * M.padX + 10)}
+              w={edW}
               text={ed.text}
               hold={ed.kind === "pin" ? "Label…" : "Type a label…"}
               bg={ed.kind === "pin" ? "#fff" : ed.c}

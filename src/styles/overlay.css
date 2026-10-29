@@ -24,39 +24,39 @@
   box-sizing: border-box;
 }
 
-.ov-frame,
-.ov-shapes {
+.ov-root .ov-frame,
+.ov-root .ov-shapes {
   position: absolute;
   display: block;
   pointer-events: none;
   -webkit-user-drag: none;
 }
 
-.ov-shapes {
+.ov-root .ov-shapes {
   overflow: hidden;
 }
 
-.ov-dim {
+.ov-root .ov-dim {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
-.ov-wait {
+.ov-root .ov-wait {
   display: grid;
   place-items: center;
   height: 100%;
   font-size: 13px;
 }
 
-.ov-sel {
+.ov-root .ov-sel {
   position: absolute;
   border: 1.5px solid #fff;
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.45), inset 0 0 0 0.5px rgba(0, 0, 0, 0.3);
   pointer-events: none;
 }
 
-.ov-h {
+.ov-root .ov-h {
   position: absolute;
   z-index: 20;
   width: 18px;
@@ -66,7 +66,7 @@
   place-items: center;
 }
 
-.ov-h::after {
+.ov-root .ov-h::after {
   content: "";
   width: 9px;
   height: 9px;
@@ -75,33 +75,33 @@
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
-.ov-h-nw,
-.ov-h-se {
+.ov-root .ov-h-nw,
+.ov-root .ov-h-se {
   cursor: nwse-resize;
 }
 
-.ov-h-ne,
-.ov-h-sw {
+.ov-root .ov-h-ne,
+.ov-root .ov-h-sw {
   cursor: nesw-resize;
 }
 
-.ov-h-n,
-.ov-h-s {
+.ov-root .ov-h-n,
+.ov-root .ov-h-s {
   cursor: ns-resize;
 }
 
-.ov-h-e,
-.ov-h-w {
+.ov-root .ov-h-e,
+.ov-root .ov-h-w {
   cursor: ew-resize;
 }
 
-.ov-hit {
+.ov-root .ov-hit {
   position: absolute;
   z-index: 15;
   cursor: text;
 }
 
-.ov-in {
+.ov-root .ov-in {
   position: absolute;
   z-index: 40;
   height: 26px;
@@ -118,12 +118,12 @@
   -webkit-user-select: text;
 }
 
-.ov-in::placeholder {
+.ov-root .ov-in::placeholder {
   color: var(--ov-in-fg);
   opacity: 0.45;
 }
 
-.ov-hud {
+.ov-root .ov-hud {
   background: var(--ov-hud);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   backdrop-filter: blur(24px) saturate(180%);
@@ -133,7 +133,7 @@
   color: #fff;
 }
 
-.ov-bar {
+.ov-root .ov-bar {
   position: absolute;
   z-index: 30;
   display: flex;
@@ -144,7 +144,7 @@
   cursor: default;
 }
 
-.ov-btn {
+.ov-root .ov-btn {
   display: grid;
   place-items: center;
   flex: none;
@@ -158,26 +158,26 @@
   cursor: default;
 }
 
-.ov-btn:hover:not(:disabled) {
+.ov-root .ov-btn:hover:not(:disabled) {
   background: var(--ov-hover);
 }
 
-.ov-btn[aria-pressed="true"] {
+.ov-root .ov-btn[aria-pressed="true"] {
   background: var(--ov-on);
 }
 
-.ov-btn:disabled {
+.ov-root .ov-btn:disabled {
   opacity: 0.35;
 }
 
-.ov-btn:focus-visible,
-.ov-sw:focus-visible,
-.ov-go:focus-visible {
+.ov-root .ov-btn:focus-visible,
+.ov-root .ov-sw:focus-visible,
+.ov-root .ov-go:focus-visible {
   outline: 2px solid var(--ov-accent);
   outline-offset: -2px;
 }
 
-.ov-sep {
+.ov-root .ov-sep {
   flex: none;
   width: 0.5px;
   height: 18px;
@@ -185,7 +185,7 @@
   background: rgba(255, 255, 255, 0.22);
 }
 
-.ov-sw {
+.ov-root .ov-sw {
   display: grid;
   place-items: center;
   flex: none;
@@ -197,7 +197,7 @@
   cursor: default;
 }
 
-.ov-sw i {
+.ov-root .ov-sw i {
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -205,11 +205,11 @@
   box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.25);
 }
 
-.ov-sw[aria-pressed="true"] i {
+.ov-root .ov-sw[aria-pressed="true"] i {
   box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px #fff;
 }
 
-.ov-go {
+.ov-root .ov-go {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -224,11 +224,11 @@
   cursor: default;
 }
 
-.ov-go:hover {
+.ov-root .ov-go:hover {
   filter: brightness(1.1);
 }
 
-.ov-hint {
+.ov-root .ov-hint {
   position: absolute;
   z-index: 30;
   left: 50%;
@@ -242,7 +242,7 @@
   pointer-events: none;
 }
 
-.ov-read {
+.ov-root .ov-read {
   position: absolute;
   z-index: 35;
   padding: 6px 9px;
@@ -252,7 +252,7 @@
   pointer-events: none;
 }
 
-.ov-out {
+.ov-root .ov-out {
   position: absolute;
   z-index: 50;
   right: 20px;
@@ -262,14 +262,14 @@
   cursor: default;
 }
 
-.ov-out img {
+.ov-root .ov-out img {
   display: block;
   width: 100%;
   border-radius: 8px;
   background: #000;
 }
 
-.ov-out p {
+.ov-root .ov-out p {
   margin: 8px 2px 0;
   font-size: 12px;
   line-height: 1.4;
