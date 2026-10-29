@@ -18,8 +18,15 @@ pub struct Login {
 /// Why this copy cannot open at login: the login item would point at a disk image or at the
 /// read-only copy macOS runs an app from before it is moved, which are gone after a restart.
 pub fn refusal(exe: &str) -> Option<&'static str> {
-    (exe.starts_with("/Volumes/") || exe.contains("/AppTranslocation/"))
-        .then_some("Move Pointcast to Applications first, then turn this on.")
+    refusal_on(exe, cfg!(target_os = "macos"))
+}
+
+fn refusal_on(exe: &str, mac: bool) -> Option<&'static str> {
+    if exe.starts_with("/Volumes/") || exe.contains("/AppTranslocation/") {
+        return Some("Move Pointcast to Applications first, then turn this on.");
+    }
+    // The LaunchAgent is a plist written without escaping, which these would break.
+    (mac && exe.contains(['&', '<', '>'])).then_some("Move Pointcast to a folder without & < > in its path, then turn this on.")
 }
 
 /// Started by the login entry.
@@ -101,6 +108,17 @@ mod tests {
         assert!(refusal("/Applications/Pointcast.app/Contents/MacOS/pointcast").is_none());
         assert!(refusal("/Users/max/Applications/Pointcast.app/Contents/MacOS/pointcast").is_none());
         assert!(refusal("C:/Users/max/AppData/Local/Pointcast/pointcast.exe").is_none());
+    }
+
+    #[test]
+    fn a_path_the_launch_agent_cannot_hold_cannot_open_at_login() {
+        let odd = "/Users/max/Apps & Tools/Pointcast.app/Contents/MacOS/pointcast";
+        assert!(refusal_on(odd, true).unwrap().contains("& < >"));
+        assert!(refusal_on("/Users/max/<new>/Pointcast.app/Contents/MacOS/pointcast", true).is_some());
+        assert!(refusal_on("/Users/max/a>b/Pointcast.app/Contents/MacOS/pointcast", true).is_some());
+        assert!(refusal_on("/Applications/Pointcast.app/Contents/MacOS/pointcast", true).is_none());
+        // Windows quotes its Run entry, where & is only a character.
+        assert!(refusal_on("C:/Users/Tom & Jerry/AppData/Local/Pointcast/pointcast.exe", false).is_none());
     }
 
     #[test]
