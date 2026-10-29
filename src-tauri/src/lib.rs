@@ -711,6 +711,45 @@ fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n
     Ok(exp)
 }
 
+/// Transcribe a past prompt again from its audio, on the model chosen now, off the event loop. `transcribe://progress`
+/// `{id, done_ms, total_ms}` comes at least every 2 s while it runs, and `history://changed` `{id}` when it is done. A
+/// refusal or failure comes back as a sentence, and the entry stays as it was.
+#[tauri::command]
+async fn history_retranscribe(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    let job = tauri::async_runtime::spawn_blocking(move || {
+        let tell = |(done, total): (u64, u64)| {
+            let _ = app.emit("transcribe://progress", json!({ "id": id, "done_ms": done, "total_ms": total }));
+        };
+        let last = std::sync::Mutex::new(None);
+        let over = std::sync::atomic::AtomicBool::new(false);
+        let r = std::thread::scope(|s| {
+            // One piece can take longer than a few seconds on a slow model: the last progress is said again meanwhile.
+            let beat = s.spawn(|| loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(2));
+                if over.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Some(p) = *last.lock().unwrap() {
+                    tell(p);
+                }
+            });
+            let r = svc.retranscribe(&id, |done, total| {
+                *last.lock().unwrap() = Some((done, total));
+                tell((done, total));
+            });
+            over.store(true, Ordering::SeqCst);
+            beat.thread().unpark();
+            r
+        });
+        if r.is_ok() {
+            let _ = app.emit("history://changed", json!({ "id": id }));
+        }
+        r
+    });
+    job.await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn history_delete(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
     svc.history.delete(&id)?;
@@ -1209,6 +1248,7 @@ pub fn run() {
             history_get,
             history_edit,
             history_remove,
+            history_retranscribe,
             history_copy,
             history_paste,
             history_delete,

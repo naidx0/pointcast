@@ -111,6 +111,27 @@ impl Store {
         std::fs::read(self.recovery().join(AUDIO_PCM)).ok().filter(|b| b.len() >= 2).map(|b| wav(&b))
     }
 
+    /// Put newly transcribed words in place of an entry's speech. Its pictures stay as they are, in their order and at
+    /// their times, and the words fall between them by time. The session and its summary are written together.
+    pub fn replace_speech(&self, id: &str, speech: &[Item]) -> Result<(), String> {
+        let dir = self.entry_dir(id)?;
+        let mut said: Vec<Item> = speech.iter().filter(|i| matches!(i, Item::Speech { .. })).cloned().collect();
+        said.sort_by_key(Item::t);
+        let mut said = said.into_iter().peekable();
+        let mut items = vec![];
+        for pic in stored(&dir)?.into_iter().filter(|i| matches!(i, Item::Image { .. })) {
+            items.extend(std::iter::from_fn(|| said.next_if(|s| s.t() <= pic.t())));
+            items.push(pic);
+        }
+        items.extend(said);
+        let mut files = vec![(dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?)];
+        if let Some(mut meta) = std::fs::read(dir.join("meta.json")).ok().and_then(|b| serde_json::from_slice::<Meta>(&b).ok()) {
+            meta.preview = meta_for(&items, meta.created_ms, meta.duration_ms, false).preview;
+            files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
+        }
+        write_together(&files)
+    }
+
     /// Newest first.
     pub fn list(&self) -> Vec<Meta> {
         let mut v: Vec<Meta> = std::fs::read_dir(self.history())
@@ -623,6 +644,38 @@ mod tests {
         let m = s.save_recorded(&items(), 1_793_000_000_000, 2000).unwrap();
         assert!(!m.has_audio);
         assert_eq!(s.items(&m.id).unwrap(), items());
+    }
+
+    #[test]
+    fn transcribing_again_replaces_the_words_and_keeps_the_pictures_where_they_were() {
+        let s = store("again");
+        let mut v = with_a_key_frame();
+        v.push(Item::Speech { t_ms: 2_600, end_ms: 4_000, text: crate::voice::stt::UNCLEAR.into() });
+        s.append_audio(&tone(64_000)).unwrap();
+        let m = s.save_recorded(&v, 1_793_000_000_000, 4_000).unwrap();
+        s.clear_checkpoint();
+        let said = |t: u64, end: u64, text: &str| Item::Speech { t_ms: t, end_ms: end, text: text.into() };
+        // As the pieces come back, not in time order.
+        let new = vec![said(2_600, 4_000, "and make it blue"), said(0, 950, "the button is a few pixels off"), said(1_050, 2_400, "move it to the left")];
+        s.replace_speech(&m.id, &new).unwrap();
+        let back = s.items(&m.id).unwrap();
+        let pics = |v: &[Item]| v.iter().filter(|i| matches!(i, Item::Image { .. })).cloned().collect::<Vec<_>>();
+        assert_eq!(pics(&back), pics(&v), "the same pictures, in their order, at their times, with their bytes");
+        let order: Vec<(u64, bool)> = back.iter().map(|i| (i.t(), matches!(i, Item::Image { .. }))).collect();
+        assert_eq!(order, [(0, false), (1_000, true), (1_050, false), (1_100, true), (2_500, true), (2_600, false)]);
+        let text: Vec<String> = back.iter().filter_map(|i| if let Item::Speech { text, .. } = i { Some(text.clone()) } else { None }).collect();
+        assert_eq!(text, ["the button is a few pixels off", "move it to the left", "and make it blue"], "no [unclear] left");
+        assert_eq!(s.picture(&m.id, 2).unwrap().png, png(90), "each picture keeps its file");
+        let after = s.list()[0].clone();
+        assert_eq!(after.preview, "the button is a few pixels off move it to the left and make it blue");
+        assert_eq!(Meta { preview: m.preview.clone(), ..after }, m, "the rest of the entry is as it was");
+        let plain = r#"the button is a few pixels off [image 1: button "Place order"; 1=this one] [image 2] move it to the left [image 3] and make it blue"#;
+        assert_eq!(s.export(&m.id).unwrap().plain, plain);
+        let left: Vec<String> = std::fs::read_dir(s.history().join(&m.id)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(left.iter().all(|f| !f.ends_with(".tmp")), "{left:?}");
+        for bad in ["", "..", "../settings", "nope"] {
+            assert!(s.replace_speech(bad, &new).is_err(), "{bad}");
+        }
     }
 
     #[test]

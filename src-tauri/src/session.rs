@@ -9,7 +9,7 @@ use crate::settings::{MarkPoint, OutputMode, Settings, SpokenAnchors};
 use crate::voice::audio::{self, Mic, Take};
 use crate::voice::machine;
 use crate::voice::models;
-use crate::voice::stt::Engine;
+use crate::voice::stt::{Engine, Heard};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,6 +96,8 @@ pub struct App {
     behind: AtomicU64,
     /// This recording's audio transcribed so far and the time that took, both in ms.
     pace: Mutex<(u64, u64)>,
+    /// A History entry is being transcribed again; one at a time.
+    retranscribing: AtomicBool,
     pub history: crate::history::Store,
     /// Where the pointer went during this recording (positions only).
     trail: Mutex<crate::pointer::Trail>,
@@ -161,6 +163,7 @@ impl App {
             worker: Mutex::default(),
             behind: AtomicU64::new(0),
             pace: Mutex::default(),
+            retranscribing: AtomicBool::new(false),
             freeze: Mutex::default(),
             freeze_t: Mutex::default(),
             last_export: Mutex::default(),
@@ -258,14 +261,16 @@ impl App {
         Ok(())
     }
 
-    /// Free the model's memory while nothing is recording; the next recording loads it again
+    /// Free the model's memory while nothing is recording or transcribed again; the next recording loads it again
     /// (its audio waits in the take meanwhile, so nothing is lost).
     pub fn unload_engine(&self) {
         if matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading | Phase::Transcribing) {
             return;
         }
         let _one = self.loading.lock().unwrap();
-        *self.engine.lock().unwrap() = None;
+        if !self.retranscribing.load(Ordering::SeqCst) {
+            *self.engine.lock().unwrap() = None;
+        }
     }
 
     /// Decode half a second of silence: proves the runtime and model work on this machine.
@@ -676,6 +681,57 @@ impl App {
         true
     }
 
+    /// Transcribe a History entry again from its audio, on the model chosen now and the way a recording is transcribed.
+    /// Its words are replaced and its pictures stay where they were; the last prompt and what coding agents read follow
+    /// when it is theirs. `progress(done_ms, total_ms)` as it goes. Refused while a recording runs, and stopped if one
+    /// starts; a refusal or failure leaves the entry as it was.
+    pub fn retranscribe(&self, id: &str, progress: impl FnMut(u64, u64)) -> Result<(), String> {
+        let hear = |s: &[f32], voiced: u64| -> Result<Option<Heard>, String> {
+            let g = self.engine.lock().unwrap();
+            let eng = g.as_ref().ok_or(NO_MODEL)?;
+            Ok(crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p)))
+        };
+        self.again(id, || self.ensure_engine(), hear, progress)
+    }
+
+    /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`.
+    fn again(
+        &self,
+        id: &str,
+        load: impl FnOnce() -> Result<(), String>,
+        mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<(), String> {
+        let busy = || match self.state.lock().unwrap().phase {
+            Phase::Recording | Phase::Loading => Err(RECORDING_NOW),
+            Phase::Transcribing => Err(BUSY),
+            _ => Ok(()),
+        };
+        busy()?;
+        if self.retranscribing.swap(true, Ordering::SeqCst) {
+            return Err(AGAIN_BUSY.into());
+        }
+        let run = || -> Result<(), String> {
+            let x = self.history.audio(id)?;
+            load()?;
+            let piece = |s: &[f32], voiced: u64| match busy() {
+                Ok(()) => hear(s, voiced),
+                Err(_) => Err(INTERRUPTED.into()),
+            };
+            let said = transcribe_all(&x, piece, progress)?;
+            self.history.replace_speech(id, &said)?;
+            let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
+            if self.last_id.lock().unwrap().as_deref() == Some(id) {
+                *self.last_export.lock().unwrap() = Some(exp.clone());
+            }
+            self.latest.changed(id, &exp);
+            Ok(())
+        };
+        let r = run();
+        self.retranscribing.store(false, Ordering::SeqCst);
+        r
+    }
+
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
         if let Err(e) = self.ensure_engine() {
             // Screenshots still work; the transcript stays empty.
@@ -687,8 +743,7 @@ impl App {
                 st.phase = Phase::Recording;
             }
         }
-        // Pieces end at a 700 ms pause and stay under Whisper's 30 s window.
-        let mut seg = audio::Segmenter::new(700, 25_000);
+        let mut seg = segmenter();
         // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
         // look than a short one and the microphone never waits behind a copy of all of it.
         let mut pos = 0;
@@ -825,7 +880,54 @@ pub fn slow(heard_ms: u64, spent_ms: u64) -> bool {
 /// A live caption covers at most this many samples (8 s) of the sentence being spoken.
 const PARTIAL_SPAN: usize = audio::RATE as usize * 8;
 
+/// Pieces end at a 700 ms pause and stay under Whisper's 30 s window, live and when a recording is transcribed again.
+fn segmenter() -> audio::Segmenter {
+    audio::Segmenter::new(700, 25_000)
+}
+
+/// About what the worker reads at each look (120 ms); a recording transcribed again is fed to the segmenter in these.
+const LOOK: usize = audio::RATE as usize * 120 / 1000;
+
+/// A whole recording, 16 kHz mono from the session's start, transcribed as it was live: cut by the same segmenter, fed in
+/// the same small steps, each piece with how long it is voice against the room's level then, through `hear` (which may
+/// refuse and so stop it). Its words at their times in the session. `progress(done_ms, total_ms)` before each piece, done
+/// being where that piece starts, and at the end with done the total.
+pub fn transcribe_all(
+    x: &[f32],
+    mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<Vec<Item>, String> {
+    let ms = |n: usize| n as u64 * 1000 / audio::RATE as u64;
+    // The silence kept for the moment before the microphone opened: the worker never heard it.
+    let from = x.iter().position(|v| *v != 0.0).unwrap_or(x.len());
+    let mut seg = segmenter();
+    let mut pieces = vec![];
+    for step in x[from..].chunks(LOOK) {
+        let got = seg.feed_new(step);
+        pieces.extend(got.into_iter().map(|r| (r.start + from..r.end + from, seg.floor())));
+    }
+    let last = seg.close();
+    pieces.extend(last.into_iter().map(|r| (r.start + from..r.end + from, seg.floor())));
+    let total = ms(x.len());
+    let mut said = vec![];
+    for (r, floor) in pieces {
+        progress(ms(r.start), total);
+        let samples = &x[r.start.min(x.len())..r.end.min(x.len())];
+        if let Some(h) = hear(samples, audio::voiced_ms(samples, floor))? {
+            said.push(Item::Speech { t_ms: ms(r.start), end_ms: ms(r.end), text: h.text });
+        }
+    }
+    progress(total, total);
+    Ok(said)
+}
+
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
+
+pub const RECORDING_NOW: &str = "Pointcast is recording. Transcribe again once the recording has finished.";
+
+pub const AGAIN_BUSY: &str = "Pointcast is already transcribing a recording again.";
+
+pub const INTERRUPTED: &str = "A recording started, so transcribing again stopped. Try again once it has finished.";
 
 pub const UPDATING: &str = "Pointcast is updating; it reopens in a moment.";
 
@@ -1280,6 +1382,145 @@ mod tests {
             worker.join().unwrap();
             assert_eq!(a.history.recover().is_some(), kept, "keep {keep}, practice {practice}");
         }
+    }
+
+    /// `secs` of a quiet room with a tone over each of `spans` (in s), after 0.3 s of nothing, as a kept recording starts.
+    fn bursts(secs: f32, spans: &[(f32, f32)]) -> Vec<f32> {
+        let rate = audio::RATE as f32;
+        (0..(secs * rate) as usize)
+            .map(|i| match i as f32 / rate {
+                t if t < 0.3 => 0.0,
+                t if spans.iter().any(|(a, b)| t >= *a && t < *b) => 0.2 * (i as f32 * 0.1).sin(),
+                _ => 0.0005,
+            })
+            .collect()
+    }
+
+    /// Two sentences and a short sound.
+    const SPANS: [(f32, f32); 3] = [(1.0, 3.0), (4.0, 6.0), (7.0, 7.4)];
+
+    /// A model that says "piece 1", "piece 2" and so on, one a call.
+    fn counting() -> impl Fn(&[f32]) -> Heard {
+        let n = std::cell::Cell::new(0);
+        move |_: &[f32]| {
+            n.set(n.get() + 1);
+            Heard { text: format!("piece {}", n.get()), tokens: None }
+        }
+    }
+
+    fn texts(items: &[Item]) -> Vec<String> {
+        items.iter().filter_map(|i| if let Item::Speech { text, .. } = i { Some(text.clone()) } else { None }).collect()
+    }
+
+    #[test]
+    fn a_whole_recording_is_cut_and_heard_as_it_was_live_and_says_how_far_it_got() {
+        let x = bursts(8.5, &SPANS);
+        let total = 8_500;
+        let hear = counting();
+        let mut seen = vec![];
+        let said = transcribe_all(&x, |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        assert_eq!(texts(&said), ["piece 1", "piece 2", "piece 3"]);
+        let at: Vec<(u64, u64)> = said.iter().map(|i| if let Item::Speech { t_ms, end_ms, .. } = i { (*t_ms, *end_ms) } else { panic!() }).collect();
+        for ((t, end), (a, b)) in at.iter().zip(SPANS) {
+            // Each piece holds its sound, with a little room on each side, and starts after the silence kept before it.
+            assert!(*t >= 300 && *t <= (a * 1000.0) as u64 && *end >= (b * 1000.0) as u64 && end - t < 4_000, "{at:?}");
+        }
+        assert!(at.windows(2).all(|w| w[0].1 <= w[1].0), "{at:?}");
+        assert_eq!(seen.len(), 4, "before each piece, then at the end: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0) && seen.iter().all(|p| p.1 == total), "{seen:?}");
+        assert_eq!((seen[0].0, seen[3]), (at[0].0, (total, total)));
+        // A model that hears nothing: the sentences are kept as [unclear], the short sound is let go.
+        let deaf = |s: &[f32], v: u64| Ok(crate::voice::stt::hear_piece(s, v, |_| Heard::default()));
+        let said = transcribe_all(&x, deaf, |_, _| {}).unwrap();
+        assert_eq!(texts(&said), [crate::voice::stt::UNCLEAR; 2]);
+        // Refused part way: it stops there, short of the end.
+        let mut seen = vec![];
+        let mut calls = 0;
+        let refuse = |_: &[f32], _: u64| {
+            calls += 1;
+            if calls > 1 { Err(INTERRUPTED.to_string()) } else { Ok(Some(Heard { text: "one".into(), tokens: None })) }
+        };
+        assert_eq!(transcribe_all(&x, refuse, |d, t| seen.push((d, t))).unwrap_err(), INTERRUPTED);
+        assert!(seen.iter().all(|p| p.0 < total), "{seen:?}");
+        // Nothing but a quiet room: no pieces, and done at once.
+        let mut seen = vec![];
+        assert!(transcribe_all(&bursts(3.0, &[]), |_, _| panic!("nothing to hear"), |d, t| seen.push((d, t))).unwrap().is_empty());
+        assert_eq!(seen, [(3_000, 3_000)]);
+    }
+
+    /// A saved recording with pictures between its sentences and the audio of `SPANS`; the words came back unclear.
+    fn kept(a: &App) -> (String, Vec<Item>) {
+        let pic = |t: u64| Item::Image {
+            t_ms: t,
+            capture: Capture { id: 0, kind: CaptureKind::Region, t_ms: t, png: png(), width: 1, height: 1, labels: vec![], pointer: None, trail: vec![], element: None, place: None, anchors: vec![], auto: false },
+        };
+        let unclear = |t: u64, end: u64| Item::Speech { t_ms: t, end_ms: end, text: crate::voice::stt::UNCLEAR.into() };
+        let items = vec![unclear(600, 3_500), pic(3_800), unclear(3_600, 6_500), pic(8_000)];
+        a.history.append_audio(&bursts(8.5, &SPANS)).unwrap();
+        let m = a.history.save_recorded(&items, 1_793_000_000_000, 8_500).unwrap();
+        a.history.clear_checkpoint();
+        let items = a.history.items(&m.id).unwrap();
+        (m.id, items)
+    }
+
+    fn pictures(items: &[Item]) -> Vec<Item> {
+        items.iter().filter(|i| matches!(i, Item::Image { .. })).cloned().collect()
+    }
+
+    #[test]
+    fn transcribing_again_replaces_the_words_keeps_the_pictures_and_what_agents_read_follows() {
+        let a = app("again");
+        let (id, before) = kept(&a);
+        a.set_last(&id).unwrap();
+        a.latest.set(Some(id.clone()), a.last_export().unwrap());
+        let hear = counting();
+        let mut seen = vec![];
+        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        let after = a.history.items(&id).unwrap();
+        assert_eq!(texts(&after), ["piece 1", "piece 2", "piece 3"], "no [unclear] left");
+        assert_eq!(pictures(&after), pictures(&before), "the pictures, in order, at their times");
+        assert_eq!(seen.last(), Some(&(8_500, 8_500)));
+        let plain = "piece 1 [image 1] piece 2 piece 3 [image 2]";
+        assert_eq!(a.history.export(&id).unwrap().plain, plain);
+        let named = a.history.export_with(&id, true).unwrap().plain;
+        assert_eq!((a.last_export().unwrap().plain, a.latest.get().unwrap().plain), (named.clone(), named), "the last prompt and agents read it now");
+        assert_eq!(a.history.list()[0].preview, "piece 1 piece 2 piece 3");
+        // Another entry is the last prompt: it stays the last prompt, untouched.
+        let other = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "other".into() }], 1_793_000_100_000, 9).unwrap();
+        a.set_last(&other.id).unwrap();
+        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 4", "piece 5", "piece 6"]);
+        assert_eq!(a.last_export().unwrap().plain, "other");
+    }
+
+    #[test]
+    fn transcribing_again_is_refused_while_recording_or_without_audio_and_a_refusal_changes_nothing() {
+        let a = app("again-refused");
+        let (id, before) = kept(&a);
+        let hear = |_: &[f32], _: u64| -> Result<Option<Heard>, String> { panic!("nothing is heard when refused") };
+        let ok = || Ok(());
+        for (phase, why) in [(Phase::Recording, RECORDING_NOW), (Phase::Loading, RECORDING_NOW), (Phase::Transcribing, BUSY)] {
+            a.state.lock().unwrap().phase = phase;
+            assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), why, "{phase:?}");
+        }
+        a.state.lock().unwrap().phase = Phase::Ready;
+        let words = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "no audio kept".into() }], 1_793_000_100_000, 9).unwrap();
+        assert_eq!(a.again(&words.id, ok, hear, |_, _| {}).unwrap_err(), crate::history::NO_AUDIO);
+        assert_eq!(a.again("nope", ok, hear, |_, _| {}).unwrap_err(), "no such prompt");
+        a.retranscribing.store(true, Ordering::SeqCst);
+        assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), AGAIN_BUSY, "one at a time");
+        a.retranscribing.store(false, Ordering::SeqCst);
+        assert_eq!(a.again(&id, || Err("the speech model did not load".into()), hear, |_, _| {}).unwrap_err(), "the speech model did not load");
+        // Without a model here, the real one cannot start either.
+        assert!(a.retranscribe(&id, |_, _| {}).is_err());
+        // A recording starts after the first piece: it stops there and keeps nothing of it.
+        let start = |_: &[f32], _: u64| {
+            a.state.lock().unwrap().phase = Phase::Recording;
+            Ok(Some(Heard { text: "half".into(), tokens: None }))
+        };
+        assert_eq!(a.again(&id, ok, start, |_, _| {}).unwrap_err(), INTERRUPTED);
+        assert_eq!(a.history.items(&id).unwrap(), before, "every refusal left the entry as it was");
+        assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
     }
 
     /// Words of `s`, lower case, without punctuation.
