@@ -376,16 +376,21 @@ function loadImg(src: string) {
   });
 }
 
-function EditInput(p: { x: number; y: number; w: number; text: string; hold: string; bg: string; fg: string; edge: string; onText: (t: string) => void; onDone: (empty: boolean) => void }) {
+function EditInput(p: { now: boolean; x: number; y: number; w: number; text: string; hold: string; bg: string; fg: string; edge: string; onText: (t: string) => void; onDone: (empty: boolean) => void }) {
   const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    const f = requestAnimationFrame(() => {
+  // Placed on pointerup: focus at once. Reopened on pointerdown: wait a frame, the press would blur it right back.
+  useLayoutEffect(() => {
+    const go = () => {
       const el = ref.current;
       if (!el) return;
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
-    });
-    return () => cancelAnimationFrame(f);
+    };
+    if (p.now) go();
+    else {
+      const f = requestAnimationFrame(go);
+      return () => cancelAnimationFrame(f);
+    }
   }, []);
   return (
     <input
@@ -422,6 +427,7 @@ export function Overlay() {
   const ids = useRef(0);
   const busy = useRef(false);
   const editRef = useRef<number | null>(null);
+  const editNow = useRef(true);
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
 
   useEffect(() => {
@@ -494,8 +500,9 @@ export function Overlay() {
     }
   };
 
-  function startEdit(id: number) {
+  function startEdit(id: number, now: boolean) {
     editRef.current = id;
+    editNow.current = now;
     setEditing(id);
     setLayer("pinning");
   }
@@ -672,7 +679,7 @@ export function Overlay() {
       if (m.tool === "magnify") dispatch({ t: "add", s: { id, kind: "magnify", at: m.a } });
       else {
         dispatch({ t: "add", s: { id, kind: m.tool, c: color, at: m.a, text: "" } });
-        startEdit(id);
+        startEdit(id, true);
       }
     }
   }
@@ -762,7 +769,7 @@ export function Overlay() {
                     style={{ left: ox + l0 * fit, top: oy + sh.at.y * fit - M.pillH / 2, width: (l1 - l0) * fit, height: M.pillH }}
                     onPointerDown={(e) => {
                       e.stopPropagation();
-                      startEdit(sh.id);
+                      startEdit(sh.id, false);
                     }}
                   />
                 );
@@ -771,6 +778,7 @@ export function Overlay() {
           {ed && (ed.kind === "pin" || ed.kind === "text") ? (
             <EditInput
               key={ed.id}
+              now={editNow.current}
               x={ox + labelX(ed, edW * s, s, box ?? full) * fit}
               y={oy + ed.at.y * fit - M.pillH / 2}
               w={edW}
