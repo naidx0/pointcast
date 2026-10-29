@@ -14,6 +14,16 @@ pub fn available() -> Option<String> {
     AVAILABLE.lock().unwrap().clone()
 }
 
+/// An update is downloading or installing now.
+pub fn installing() -> bool {
+    false
+}
+
+/// Why the last update did not finish, once, if it failed while Pointcast was closed.
+pub fn last_failure() -> Option<String> {
+    None
+}
+
 #[derive(Deserialize)]
 struct Release {
     tag_name: String,

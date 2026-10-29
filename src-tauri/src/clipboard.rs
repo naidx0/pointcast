@@ -23,6 +23,9 @@ pub fn copy_session(items: &[Item]) -> Result<(String, String), String> {
     Ok((payload.html, payload.plain))
 }
 
+/// Keep the app handle so a paste can be run on the main thread where the OS needs it.
+pub fn bind(_app: &tauri::AppHandle) {}
+
 pub fn paste_now() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(80));
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
