@@ -499,7 +499,7 @@ export function Overlay() {
   const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
   const ix = useRef<Ix | null>(null);
   const ids = useRef(0);
-  const busy = useRef(false);
+  const busy = useRef<Promise<void> | null>(null);
   const editRef = useRef<number | null>(null);
   const editNow = useRef(true);
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
@@ -648,9 +648,16 @@ export function Overlay() {
     setLayer(next);
   }
 
-  async function commit() {
-    if (!src || !natural.w || busy.current) return;
-    busy.current = true;
+  // A second call while one is running waits for that one, so a stop never overtakes the region.
+  function commit(): Promise<void> {
+    if (!src || !natural.w) return Promise.resolve();
+    busy.current ??= send(src).finally(() => {
+      busy.current = null;
+    });
+    return busy.current;
+  }
+
+  async function send(src: string) {
     try {
       const b = layer === "selecting" || !box ? full : box;
       const list = shapes.filter((x) => seen(x, b) && !(x.kind === "text" && !x.text.trim()));
@@ -669,8 +676,6 @@ export function Overlay() {
       else await regionCommit(png, labels, element);
     } catch (err) {
       console.error("pointcast overlay commit failed", err);
-    } finally {
-      busy.current = false;
     }
   }
 
