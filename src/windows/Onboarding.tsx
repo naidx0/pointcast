@@ -297,6 +297,20 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
   const session = chordText(cfg.hotkeys.session.label);
   const region = chordText(cfg.hotkeys.region.label);
   const rec = st?.phase === "recording" || st?.phase === "loading";
+  // Discarded (or gone without a result): offer another run instead of "Finishing…" for ever.
+  const dropped = seen.started && !rec && !result && (st?.phase === "idle" || st?.phase === "error");
+  const empty = !!result && !words(result.plain) && !result.images.length;
+  // A practice run is one recording; another needs asking for again.
+  const again = () => {
+    setResult(null);
+    setSeen({ started: false, spoke: false, marked: false });
+    if (inTauri) practice(true).catch(() => undefined);
+  };
+  const tryAgain = (
+    <button type="button" className="link" onClick={again}>
+      Try again
+    </button>
+  );
   const steps = [
     { done: seen.started, text: <>Press <Keycaps label={cfg.hotkeys.session.label} /> to start</> },
     { done: seen.spoke, text: <>Say what you see, like “this button should be blue”</> },
@@ -331,10 +345,18 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
           </button>
         </p>
       ) : null}
-      {result ? (
-        <div className="stage" style={{ maxHeight: 260, overflowY: "auto" }}>
-          <PromptDoc exp={result} />
-        </div>
+      {empty ? (
+        <p className="t-caption" role="alert">
+          No speech was heard. Check that the microphone is not muted and is the one picked in Settings › Speech.{" "}
+          {tryAgain}
+        </p>
+      ) : result ? (
+        <>
+          <div className="stage" style={{ maxHeight: 260, overflowY: "auto" }}>
+            <PromptDoc exp={result} />
+          </div>
+          <p className="t-caption" style={{ marginTop: 8 }}>{tryAgain}</p>
+        </>
       ) : (
         <div className="cards">
           {steps.map((s, k) => (
@@ -352,9 +374,11 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
               ? words(st?.partial || st?.text || "")
                 ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
                 : "Listening…"
-              : seen.started
-                ? "Finishing…"
-                : `Try it now: ${session} to start, ${region} to mark.`}
+              : dropped
+                ? <>That run was discarded. {tryAgain}</>
+                : seen.started
+                  ? "Finishing…"
+                  : `Try it now: ${session} to start, ${region} to mark.`}
           </p>
         </div>
       )}
