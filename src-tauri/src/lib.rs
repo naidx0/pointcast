@@ -1025,11 +1025,15 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
     Ok(())
 }
 
-/// Whatever step the assistant was on, shortcuts and sessions go back to normal.
-fn leave_onboarding(app: &AppHandle, svc: &App) {
-    end_practice(app, svc);
-    svc.hotkey_test.store(false, Ordering::SeqCst);
-    svc.monitor_off();
+/// Whatever step the assistant was on, shortcuts and sessions go back to normal. On a thread of its own: discarding a
+/// practice run waits for the speech worker, which must not hold the event loop.
+fn leave_onboarding(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        end_practice(&app, &svc);
+        svc.hotkey_test.store(false, Ordering::SeqCst);
+        svc.monitor_off();
+    });
 }
 
 #[tauri::command]
