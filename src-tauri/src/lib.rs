@@ -471,16 +471,26 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
     }
     let next: Settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
     let chords = [
-        ("Start / stop", &next.session_hotkey),
-        ("Capture screen", &next.full_hotkey),
-        ("Capture region", &next.region_hotkey),
-        ("Capture around pointer", &next.zoom_hotkey),
+        ("Start / stop", &cur.session_hotkey, &next.session_hotkey),
+        ("Capture screen", &cur.full_hotkey, &next.full_hotkey),
+        ("Capture region", &cur.region_hotkey, &next.region_hotkey),
+        ("Capture around pointer", &cur.zoom_hotkey, &next.zoom_hotkey),
     ];
     let mut seen: Vec<(&str, chord::Chord)> = vec![];
-    for (name, raw) in chords {
+    for (name, was, raw) in chords {
         let Some(raw) = raw else { continue };
-        let c = chord::Chord::parse(raw)?;
+        // A saved chord this patch leaves alone and this version refuses is not in use (the default is), so it never
+        // blocks changing something else.
+        let changed = was.as_deref() != Some(raw.as_str());
+        let c = match chord::Chord::parse(raw) {
+            Ok(c) => c,
+            Err(e) if changed => return Err(e),
+            Err(_) => continue,
+        };
         if let Some(why) = chord::refusal(&c) {
+            if !changed {
+                continue;
+            }
             return Err(format!("{}: {why}", c.label()));
         }
         if let Some((other, _)) = seen.iter().find(|(_, x)| *x == c) {
@@ -1360,6 +1370,20 @@ mod tests {
         let back = merge(&cur, p(json!({ "export_dir": "/tmp/x" }))).unwrap();
         let cleared = merge(&back, p(json!({ "export_dir": null }))).unwrap();
         assert_eq!(cleared.export_dir, None);
+    }
+
+    #[test]
+    fn a_saved_chord_this_version_refuses_blocks_no_other_change() {
+        let p = |v: Value| v.as_object().unwrap().clone();
+        let old = Settings { zoom_hotkey: Some("F5".into()), ..Settings::default() };
+        let next = merge(&old, p(json!({ "sounds": false }))).unwrap();
+        assert!(!next.sounds && next.zoom_hotkey.as_deref() == Some("F5"), "kept as saved");
+        assert!(merge(&old, p(json!({ "full_hotkey": "Ctrl+Shift+F8" }))).is_ok());
+        let set = merge(&old, p(json!({ "zoom_hotkey": "F6" })));
+        assert!(set.unwrap_err().contains("Add Ctrl, Alt or Shift"), "a chord being set is still checked");
+        assert!(merge(&old, p(json!({ "zoom_hotkey": null }))).is_ok());
+        let garbled = Settings { region_hotkey: Some("Ctrl+Shift+Nope+Nope".into()), ..Settings::default() };
+        assert!(merge(&garbled, p(json!({ "model": "auto" }))).is_ok());
     }
 
     #[test]
