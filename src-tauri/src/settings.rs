@@ -143,13 +143,29 @@ impl Settings {
     }
 }
 
+/// The app identifier: the folder name Tauri's uninstaller clears when asked to delete app data.
+pub const IDENTIFIER: &str = "dev.pointcast.app";
+
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("POINTCAST_DATA_DIR") {
         return d.into();
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Pointcast")
+    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join(IDENTIFIER);
+    static MOVED: std::sync::Once = std::sync::Once::new();
+    MOVED.call_once(|| migrate(&base.join("Pointcast"), &dir));
+    dir
+}
+
+/// Before 0.4 the data sat in `<local data>/Pointcast`, which on Windows is also where the
+/// per-user installer puts the app itself. Move our entries out once; leave anything else.
+pub fn migrate(old: &Path, new: &Path) {
+    for name in ["settings.json", "speech", "history", "recovery"] {
+        let (from, to) = (old.join(name), new.join(name));
+        if from.exists() && !to.exists() && std::fs::create_dir_all(new).is_ok() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
 }
 
 pub fn settings_path() -> PathBuf {
@@ -184,5 +200,24 @@ mod tests {
         std::fs::write(&path, r#"{"session_hotkey":"A"}"#).unwrap();
         assert_eq!(Settings::load(&path).session_chord(), chord::default_session());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_data_moves_out_of_the_install_folder_and_the_app_stays() {
+        let root = std::env::temp_dir().join(format!("pc-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("Pointcast"), root.join(IDENTIFIER));
+        std::fs::create_dir_all(old.join("speech").join("runtime")).unwrap();
+        std::fs::create_dir_all(old.join("history")).unwrap();
+        std::fs::write(old.join("settings.json"), "{}").unwrap();
+        std::fs::write(old.join("pointcast.exe"), "app").unwrap();
+        migrate(&old, &new);
+        assert!(new.join("settings.json").is_file() && new.join("speech/runtime").is_dir() && new.join("history").is_dir());
+        assert!(old.join("pointcast.exe").is_file() && !old.join("settings.json").exists());
+        // Already moved: a second run changes nothing, and newer data is never overwritten.
+        std::fs::write(old.join("settings.json"), "stale").unwrap();
+        migrate(&old, &new);
+        assert_eq!(std::fs::read_to_string(new.join("settings.json")).unwrap(), "{}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

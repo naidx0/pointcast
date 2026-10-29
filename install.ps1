@@ -1,0 +1,77 @@
+# Install or update Pointcast on Windows 10 or 11. No admin rights, no prompts.
+#
+#   irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
+#
+# To install a build you already have: $env:POINTCAST_SETUP = "C:\path\Pointcast_x64-setup.exe"
+# Run as a script block so a failure never closes the PowerShell window it was pasted into.
+& {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell downloads 10x slower with the bar on
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $repo = 'naidx0/pointcast'
+
+    function Say([string]$m) { Write-Host "  $m" }
+    function Stop-Install([string]$m) {
+        Write-Host ""
+        Write-Host "  Pointcast was not installed: $m" -ForegroundColor Red
+        Write-Host ""
+    }
+
+    Write-Host ""
+    Write-Host "  Pointcast" -ForegroundColor Cyan
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        return Stop-Install "Pointcast needs 64-bit Windows."
+    }
+
+    $setup = $env:POINTCAST_SETUP
+    if ($setup) {
+        if (-not (Test-Path $setup)) { return Stop-Install "no file at $setup." }
+    } else {
+        Say "Finding the latest version..."
+        try {
+            $rel = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'pointcast-installer' } `
+                -Uri "https://api.github.com/repos/$repo/releases/latest"
+        } catch {
+            return Stop-Install "can't reach GitHub. Check your internet connection and run this again."
+        }
+        $asset = $rel.assets | Where-Object { $_.name -like '*x64-setup.exe' } | Select-Object -First 1
+        if (-not $asset) { return Stop-Install "the latest release ($($rel.tag_name)) has no Windows download yet." }
+        $setup = Join-Path $env:TEMP $asset.name
+        Say "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)..."
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $setup
+        } catch {
+            return Stop-Install "the download did not finish. Check your connection and run this again."
+        }
+    }
+    Unblock-File -Path $setup -ErrorAction SilentlyContinue
+
+    # An update replaces the running app; Pointcast keeps what you were recording for its next start.
+    Get-Process -Name pointcast -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 600
+
+    Say "Installing..."
+    $p = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru -Wait
+    if ($p.ExitCode -ne 0) { return Stop-Install "the installer stopped with code $($p.ExitCode)." }
+
+    $exe = $null
+    foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pointcast',
+                     'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.pointcast.app') {
+        $loc = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).InstallLocation
+        if ($loc) {
+            $loc = $loc.Trim('"')
+            if (Test-Path (Join-Path $loc 'pointcast.exe')) { $exe = Join-Path $loc 'pointcast.exe'; break }
+        }
+    }
+    if (-not $exe) {
+        $guess = Join-Path $env:LOCALAPPDATA 'Pointcast\pointcast.exe'
+        if (Test-Path $guess) { $exe = $guess }
+    }
+    if (-not $exe) { return Stop-Install "the installer finished but pointcast.exe is not where it should be." }
+    if (-not $env:POINTCAST_SETUP) { Remove-Item $setup -ErrorAction SilentlyContinue }
+
+    Start-Process -FilePath $exe
+    Say "Installed. Pointcast is in the system tray (bottom right, under the ^ arrow)."
+    Say "The setup assistant opens now. To uninstall: Settings > Apps > Pointcast."
+    Write-Host ""
+}

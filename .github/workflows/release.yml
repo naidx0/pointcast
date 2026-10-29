@@ -1,0 +1,48 @@
+name: Release
+
+# Push a tag like v0.4.0 (or run this by hand) to build the installers the one-line scripts
+# download. The release is created as a draft: publish it on GitHub to make it the latest.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+          - os: windows-latest
+            args: --bundles nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseName: Pointcast ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseBody: |
+            **macOS** (Terminal): `curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash`
+            **Windows** (PowerShell): `irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex`
+            Or download the file for your system below.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

@@ -117,10 +117,7 @@ pub fn speech_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("POINTCAST_SPEECH_DIR") {
         return d.into();
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Pointcast")
-        .join("speech")
+    crate::settings::data_dir().join("speech")
 }
 
 pub fn install_dir(root: &Path, id: &str) -> PathBuf {
