@@ -180,13 +180,16 @@ mod mac {
         }
     }
 
-    /// Left once Pointcast has asked for Screen Recording: macOS shows its prompt only the first time.
+    /// Left once Pointcast has asked for Screen Recording, naming the version that asked: macOS shows its prompt only
+    /// the first time.
     fn asked() -> std::path::PathBuf {
         crate::settings::data_dir().join("screen-asked")
     }
 
     pub fn screen() -> Access {
-        super::screen_access(unsafe { CGPreflightScreenCaptureAccess() }, asked().exists())
+        let marker = std::fs::read_to_string(asked()).ok();
+        let asked = super::asked_by(marker.as_deref(), env!("CARGO_PKG_VERSION"));
+        super::screen_access(unsafe { CGPreflightScreenCaptureAccess() }, asked)
     }
 
     pub fn request_screen() -> Access {
@@ -194,7 +197,7 @@ mod mac {
             return Access::Granted;
         }
         let _ = std::fs::create_dir_all(crate::settings::data_dir());
-        let _ = std::fs::write(asked(), b"");
+        let _ = std::fs::write(asked(), env!("CARGO_PKG_VERSION"));
         if unsafe { CGRequestScreenCaptureAccess() } {
             Access::Granted
         } else {
@@ -271,6 +274,13 @@ fn screen_access(allowed: bool, asked: bool) -> Access {
     }
 }
 
+/// Whether this version has asked for Screen Recording (`marker` names the version that asked). An update clears the
+/// grant with `tccutil reset`, which also lets macOS prompt again, so an earlier version's asking does not count.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn asked_by(marker: Option<&str>, version: &str) -> bool {
+    marker.is_some_and(|m| m.trim() == version)
+}
+
 /// Any switch at "Deny" blocks a desktop app's microphone, and so does a policy that forces it off
 /// (LetAppsAccessMicrophone 2, a DWORD `reg` prints as 0x2).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -316,6 +326,17 @@ mod tests {
         if !cfg!(target_os = "macos") {
             assert!(can_capture(), "only macOS gates captures");
         }
+    }
+
+    #[test]
+    fn after_an_update_screen_recording_is_asked_for_again() {
+        assert!(asked_by(Some("0.4.0"), "0.4.0"));
+        assert!(!asked_by(None, "0.4.0"), "never asked");
+        assert!(!asked_by(Some(""), "0.4.0"), "the empty marker an earlier version left");
+        assert!(!asked_by(Some("0.3.9"), "0.4.0"));
+        // Updated and reset by tccutil: the assistant offers the prompt again, not only System Settings.
+        assert_eq!(screen_access(false, asked_by(Some("0.3.9"), "0.4.0")), Access::Unknown);
+        assert_eq!(screen_access(false, asked_by(Some("0.4.0"), "0.4.0")), Access::Denied);
     }
 
     #[test]
