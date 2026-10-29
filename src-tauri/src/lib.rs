@@ -926,7 +926,10 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
     }
     s.onboarded = true;
     svc.save_settings(s)?;
-    hide_window(&app, "onboarding");
+    // Closed rather than hidden, so opening it again starts over at the first step that needs attention.
+    if let Some(w) = app.get_webview_window("onboarding") {
+        let _ = w.close();
+    }
     Ok(())
 }
 
