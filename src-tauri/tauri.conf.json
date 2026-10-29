@@ -37,7 +37,8 @@
             "mica"
           ],
           "state": "followsWindowActiveState"
-        }
+        },
+        "create": false
       },
       {
         "label": "settings",
@@ -63,7 +64,8 @@
             "mica"
           ],
           "state": "followsWindowActiveState"
-        }
+        },
+        "create": false
       },
       {
         "label": "indicator",
@@ -81,7 +83,8 @@
         "focus": false,
         "focusable": false,
         "acceptFirstMouse": true,
-        "visibleOnAllWorkspaces": true
+        "visibleOnAllWorkspaces": true,
+        "create": false
       },
       {
         "label": "overlay",
@@ -97,7 +100,8 @@
         "transparent": true,
         "shadow": false,
         "acceptFirstMouse": true,
-        "visibleOnAllWorkspaces": true
+        "visibleOnAllWorkspaces": true,
+        "create": false
       },
       {
         "label": "result",
@@ -123,7 +127,8 @@
             "mica"
           ],
           "state": "followsWindowActiveState"
-        }
+        },
+        "create": false
       }
     ],
     "security": {

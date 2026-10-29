@@ -1,5 +1,34 @@
 //! Where Pointcast's floating windows go and how they sit above other apps, per OS.
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, Monitor, WebviewWindow};
+
+/// Whether the HUD and overlay are kept out of captures; applied to each as it is built.
+static PROTECT: AtomicBool = AtomicBool::new(true);
+
+/// A window from its tauri.conf.json entry, built the first time it is needed. Nothing is built
+/// at launch, so an idle Pointcast is a tray icon and no web views.
+pub fn ensure(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
+    if let Some(w) = app.get_webview_window(label) {
+        return Some(w);
+    }
+    let cfg = app.config().app.windows.iter().find(|w| w.label == label)?.clone();
+    let w = tauri::WebviewWindowBuilder::from_config(app, &cfg).ok()?.build().ok()?;
+    if matches!(label, "indicator" | "overlay") {
+        let _ = w.set_content_protected(PROTECT.load(Ordering::SeqCst));
+    }
+    Some(w)
+}
+
+/// After a while without recording, let the HUD and overlay go; they are rebuilt on demand.
+pub fn reap(app: &AppHandle) {
+    for label in ["indicator", "overlay"] {
+        if let Some(w) = app.get_webview_window(label) {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.destroy();
+            }
+        }
+    }
+}
 
 /// The monitor under the pointer, else the primary one.
 pub fn pointer_monitor(app: &AppHandle) -> Option<Monitor> {
@@ -21,7 +50,7 @@ pub fn hud_origin(area: (i32, i32, u32, u32), size: (u32, u32), gap: u32) -> (i3
 
 /// Show the recording HUD without taking focus from the app being talked about.
 pub fn show_indicator(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("indicator") else {
+    let Some(w) = ensure(app, "indicator") else {
         return;
     };
     if let (Some(m), Ok(size)) = (pointer_monitor(app), w.outer_size()) {
@@ -41,7 +70,7 @@ pub fn show_indicator(app: &AppHandle) {
 
 /// Cover the screen the frame was taken from, above the menu bar and Dock, then take keys.
 pub fn show_overlay(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("overlay") else {
+    let Some(w) = ensure(app, "overlay") else {
         return;
     };
     if let Some(m) = pointer_monitor(app) {
@@ -138,6 +167,7 @@ fn activate(_: isize) {}
 /// them in). Only those two: on Windows a protected window is also blank in the taskbar preview,
 /// Alt+Tab and screen sharing, which ordinary windows like Settings must not be.
 pub fn protect(app: &AppHandle, on: bool) {
+    PROTECT.store(on, Ordering::SeqCst);
     for label in ["indicator", "overlay"] {
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.set_content_protected(on);

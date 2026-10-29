@@ -27,6 +27,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use voice::ptt::TalkMode;
 
+/// Minutes without recording before the HUD, overlay and speech model are released.
+const IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// A hold shorter than this is a tap: the session keeps recording until the next press.
 const HOLD_MS: u64 = 350;
 
@@ -40,7 +43,7 @@ pub enum Action {
 }
 
 pub fn show_window(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
+    if let Some(w) = platform::ensure(app, label) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -167,9 +170,19 @@ fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
     let shot = svc.begin_region()?;
     let mark = svc.settings.lock().unwrap().mark_point;
     let payload = frame_payload(&shot, mark);
+    *FRAME.lock().unwrap() = Some(payload.clone());
     let _ = app.emit("overlay://frame", &payload);
     platform::show_overlay(app);
     Ok(payload)
+}
+
+/// The frozen frame the overlay is showing; an overlay built just now asks for it on load,
+/// since the event may have fired before its page was listening.
+static FRAME: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+#[tauri::command]
+fn region_frame() -> Option<Value> {
+    FRAME.lock().unwrap().clone()
 }
 
 /// What the session chord's release does: stop only a held (not tapped) push-to-talk.
@@ -350,7 +363,7 @@ fn session_state(svc: tauri::State<'_, Arc<App>>) -> session::UiState {
 }
 
 #[tauri::command]
-fn session_toggle(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<session::UiState, String> {
+async fn session_toggle(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<session::UiState, String> {
     toggle(&app, &svc)?;
     Ok(svc.ui())
 }
@@ -379,7 +392,7 @@ fn capture_zoom(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<Value
 }
 
 #[tauri::command]
-fn region_begin(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
+async fn region_begin(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
     open_region(&app, &svc)
 }
 
@@ -403,6 +416,7 @@ fn region_commit(
     let cap = svc.commit_region(png, body.labels)?;
     hide_window(&app, "overlay");
     platform::restore_front();
+    FRAME.lock().unwrap().take();
     emit_state(&app, &svc);
     Ok(json!({"kind": cap.kind, "width": cap.width, "height": cap.height, "labels": cap.labels}))
 }
@@ -411,6 +425,7 @@ fn region_commit(
 fn region_cancel(app: AppHandle) {
     hide_window(&app, "overlay");
     platform::restore_front();
+    FRAME.lock().unwrap().take();
 }
 
 #[tauri::command]
@@ -721,7 +736,7 @@ fn platform_info() -> Value {
 }
 
 #[tauri::command]
-fn window_open(app: AppHandle, label: String) {
+async fn window_open(app: AppHandle, label: String) {
     show_window(&app, &label);
 }
 
@@ -794,6 +809,7 @@ pub fn run() {
             region_begin,
             region_commit,
             region_cancel,
+            region_frame,
             last_prompt,
             last_folder,
             open_folder,
@@ -833,11 +849,6 @@ pub fn run() {
             let handle = app.handle().clone();
             tray::setup(&handle, &svc)?;
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
-            for label in ["settings", "indicator", "overlay", "result", "onboarding"] {
-                if let Some(w) = app.get_webview_window(label) {
-                    let _ = w.hide();
-                }
-            }
             platform::protect(&handle, !settings.include_app);
             if let Some(m) = svc.history.recover() {
                 let _ = svc.set_last(&m.id);
@@ -845,30 +856,35 @@ pub fn run() {
             } else if let Some(m) = svc.history.list().first() {
                 let _ = svc.set_last(&m.id);
             }
-            let svc3 = svc.clone();
-            std::thread::spawn(move || {
-                let _ = svc3.ensure_engine();
-            });
             if !settings.onboarded {
                 show_window(&handle, "onboarding");
             }
-            // Pulse live state to the HUD and the menu bar clock while a session runs.
+            // Pulse live state to the HUD and the menu bar clock while a session runs. After
+            // IDLE without one, the floating windows and the speech model are let go.
             let svc2 = svc.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing) {
-                    emit_state(&handle, &svc2);
+            std::thread::spawn(move || {
+                let mut busy_at = std::time::Instant::now();
+                let mut resting = false;
+                loop {
+                    let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
+                    if busy {
+                        emit_state(&handle, &svc2);
+                        busy_at = std::time::Instant::now();
+                        resting = false;
+                    } else if !resting && busy_at.elapsed() >= IDLE {
+                        platform::reap(&handle);
+                        svc2.unload_engine();
+                        resting = true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
                 }
             });
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Windows close to the tray; only Quit ends Pointcast.
-                if matches!(window.label(), "settings" | "result" | "onboarding") {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+                // Closing a window frees it; Pointcast itself stays in the tray (see ExitRequested).
+                let _ = api;
                 if window.label() == "onboarding" {
                     let app = window.app_handle();
                     if let Some(svc) = app.try_state::<Arc<App>>() {
@@ -877,8 +893,14 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Pointcast");
+        .build(tauri::generate_context!())
+        .expect("error while building Pointcast")
+        .run(|_app, event| {
+            // The last window closing is not quitting: only Quit (an explicit exit code) ends it.
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]

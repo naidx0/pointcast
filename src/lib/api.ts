@@ -104,6 +104,10 @@ export const regionBegin = () => invoke<{ png_b64: string; width: number; height
 export const regionCommit = (pngB64: string, labels: Label[]) =>
   invoke<void>("region_commit", { body: { png_b64: pngB64, labels } });
 export const regionCancel = () => invoke<void>("region_cancel");
+export const regionFrame = () =>
+  invoke<{ png_b64: string; width: number; height: number; pointer?: { x: number; y: number } | null } | null>(
+    "region_frame",
+  );
 export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
 export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });

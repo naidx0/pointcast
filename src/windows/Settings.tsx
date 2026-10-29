@@ -340,9 +340,9 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
             set={(v) => patch({ zoom_px: v })}
           />
         </Row>
-        <Row label="Close-ups centre on" sub="Where I paused is the spot the pointer last rested on.">
+        <Row label="Close-ups center on" sub="Where I paused is the spot the pointer last rested on.">
           <Seg
-            label="Close-ups centre on"
+            label="Close-ups center on"
             value={cfg.zoom_target}
             options={[
               ["pointer", "Pointer"],

@@ -13,7 +13,7 @@ import {
   ZoomIn,
   type LucideIcon,
 } from "lucide-react";
-import { onOverlayFrame, regionCancel, regionCommit, type Label } from "@/lib/api";
+import { inTauri, onOverlayFrame, regionCancel, regionCommit, regionFrame, type Label } from "@/lib/api";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -480,6 +480,8 @@ export function Overlay() {
     let u: Promise<(() => void) | null> = Promise.resolve(null);
     try {
       u = onOverlayFrame(load).catch(() => null);
+      // Built on demand, this page may have missed the event: ask for the frame it should show.
+      if (inTauri) regionFrame().then((f) => f && load(f)).catch(() => undefined);
     } catch {
       /* plain browser, no Tauri */
     }

@@ -204,6 +204,16 @@ impl App {
         Ok(())
     }
 
+    /// Free the model's memory while nothing is recording; the next recording loads it again
+    /// (its audio waits in the take meanwhile, so nothing is lost).
+    pub fn unload_engine(&self) {
+        if matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading | Phase::Transcribing) {
+            return;
+        }
+        let _one = self.loading.lock().unwrap();
+        *self.engine.lock().unwrap() = None;
+    }
+
     /// Decode half a second of silence: proves the runtime and model work on this machine.
     pub fn engine_check(&self) -> Result<(), String> {
         self.ensure_engine()?;
@@ -491,8 +501,8 @@ impl App {
             self.decode_ranges(&take, &ranges, t0);
             if let Some(start) = seg.open_start() {
                 let samples = take.copy(start..all.len());
-                if let Some(eng) = self.engine.lock().unwrap().as_ref() {
-                    let t = eng.transcribe(&samples);
+                let live = self.engine.lock().unwrap().as_ref().and_then(|e| e.partial(&samples));
+                if let Some(t) = live {
                     self.state.lock().unwrap().partial = t;
                 }
             }
