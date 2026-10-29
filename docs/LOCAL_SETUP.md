@@ -54,7 +54,8 @@ The setup assistant opens on its own the first time (reopen it from the menu: **
 
 1. **Allow access**: Microphone everywhere; Screen Recording and Accessibility on macOS. After
    turning Screen Recording on, use **Reopen Pointcast** (macOS applies it to a fresh process).
-2. **Speech model**: Moonshine Base (111 MB) or Tiny (30 MB) plus the 7 to 10 MB sherpa-onnx
+2. **Speech model**: Moonshine Base (111 MB), Tiny (30 MB), Parakeet v2 (482 MB), Whisper Turbo
+   (564 MB) or Parakeet v3 (487 MB), plus the 7 to 10 MB sherpa-onnx
    runtime, saved under the OS local-data folder (`Pointcast/speech`).
 3. **Shortcuts**: press each one until it shows a check; click one to record new keys.
 4. **Practice run**: a real recording whose prompt stays in the window.

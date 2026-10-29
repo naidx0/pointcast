@@ -41,8 +41,16 @@ Pointcast opens a short setup assistant the first time it starts:
 1. **Welcome.**
 2. **Allow access.** Microphone, plus Screen Recording and Accessibility on macOS (Accessibility
    lets it paste for you; it is optional). A live meter shows the mic works.
-3. **Speech model.** Pick Moonshine Base (111 MB, most accurate) or Tiny (30 MB, fastest). It
-   downloads once and works offline.
+3. **Speech model.** Pick one; it downloads once and runs offline:
+
+   | Model | Download | Best for |
+   | --- | --- | --- |
+   | Moonshine Base | 111 MB | Recommended. Fast and accurate English. |
+   | Moonshine Tiny | 30 MB | The fastest, for short notes. |
+   | Parakeet v2 | 482 MB | The most accurate English, with punctuation. |
+   | Whisper Turbo | 564 MB | Any of 99 languages, detected automatically. Slower on older computers. |
+   | Parakeet v3 | 487 MB | 25 European languages, detected automatically. |
+
 4. **Shortcuts.** Press each one; it lights up when it works. Click one and type new keys to change it.
 5. **Practice run.** A real recording, start to finish. The prompt appears in the window, nothing
    is pasted anywhere.
@@ -145,7 +153,7 @@ src-tauri/src/
   capture.rs      screen grab, close-up around the pointer, privacy paint-out
   prompt.rs       transcript + [image n] markers → plain, HTML, markdown, folder
   session.rs      a recording: mic, speech worker, captures, export
-  voice/          mic, resampler, segmenter, sherpa-onnx Moonshine
+  voice/          mic, resampler, segmenter, model catalog and installer, sherpa-onnx
   clipboard.rs    HTML + plain clipboard, paste keystroke
   mcp.rs          localhost JSON-RPC + REST
 src/windows/      Onboarding, Settings, Indicator (HUD), Overlay (annotate), Result
@@ -158,5 +166,8 @@ Windows. Light and dark follow the system.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [CONTRIBUTING](CONTRIBUTING.md). Moonshine (MIT) and sherpa-onnx
-(Apache-2.0) are downloaded at setup, not bundled.
+MIT. See [LICENSE](LICENSE) and [CONTRIBUTING](CONTRIBUTING.md).
+
+Speech runs on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0). The models are
+downloaded at setup, not bundled: Moonshine by Useful Sensors (MIT), Whisper by OpenAI (MIT), and
+Parakeet TDT by NVIDIA (CC-BY-4.0).

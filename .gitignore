@@ -16,11 +16,6 @@ Thumbs.db
 .pointcast-speech/
 speech/
 
-# Agent / upload scratch (not part of the app)
-agent-tools/
-uploads/
-terminals/
-
 # Logs
 *.log
 npm-debug.log*
