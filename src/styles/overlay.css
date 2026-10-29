@@ -1,0 +1,279 @@
+/* Annotate overlay. Self-contained: every rule lives under .ov-root and uses its own literal variables. */
+
+.ov-root {
+  --ov-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --ov-hud: rgba(28, 28, 30, 0.78);
+  --ov-line: rgba(255, 255, 255, 0.14);
+  --ov-hover: rgba(255, 255, 255, 0.12);
+  --ov-on: rgba(255, 255, 255, 0.22);
+  --ov-accent: #0a84ff;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  font: 500 12px/1 var(--ov-font);
+  letter-spacing: 0;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.42);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.ov-root * {
+  box-sizing: border-box;
+}
+
+.ov-root .ov-frame,
+.ov-root .ov-shapes {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.ov-root .ov-shapes {
+  overflow: hidden;
+}
+
+.ov-root .ov-dim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ov-root .ov-wait {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  font-size: 13px;
+}
+
+.ov-root .ov-sel {
+  position: absolute;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.45), inset 0 0 0 0.5px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.ov-root .ov-h {
+  position: absolute;
+  z-index: 20;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  display: grid;
+  place-items: center;
+}
+
+.ov-root .ov-h::after {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.ov-root .ov-h-nw,
+.ov-root .ov-h-se {
+  cursor: nwse-resize;
+}
+
+.ov-root .ov-h-ne,
+.ov-root .ov-h-sw {
+  cursor: nesw-resize;
+}
+
+.ov-root .ov-h-n,
+.ov-root .ov-h-s {
+  cursor: ns-resize;
+}
+
+.ov-root .ov-h-e,
+.ov-root .ov-h-w {
+  cursor: ew-resize;
+}
+
+.ov-root .ov-hit {
+  position: absolute;
+  z-index: 15;
+  cursor: text;
+}
+
+.ov-root .ov-in {
+  position: absolute;
+  z-index: 40;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  outline: 0;
+  border-radius: 7px;
+  background: var(--ov-in-bg);
+  color: var(--ov-in-fg);
+  font: 600 13px/26px var(--ov-font);
+  box-shadow: 0 0 0 1.5px var(--ov-in-edge), 0 4px 12px rgba(0, 0, 0, 0.3);
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.ov-root .ov-in::placeholder {
+  color: var(--ov-in-fg);
+  opacity: 0.45;
+}
+
+.ov-root .ov-hud {
+  background: var(--ov-hud);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  border: 0.5px solid var(--ov-line);
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  color: #fff;
+}
+
+.ov-root .ov-bar {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ov-root .ov-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #fff;
+  cursor: default;
+}
+
+.ov-root .ov-btn:hover:not(:disabled) {
+  background: var(--ov-hover);
+}
+
+.ov-root .ov-btn[aria-pressed="true"] {
+  background: var(--ov-on);
+}
+
+.ov-root .ov-btn:disabled {
+  opacity: 0.35;
+}
+
+.ov-root .ov-btn:focus-visible,
+.ov-root .ov-sw:focus-visible,
+.ov-root .ov-go:focus-visible {
+  outline: 2px solid var(--ov-accent);
+  outline-offset: -2px;
+}
+
+.ov-root .ov-sep {
+  flex: none;
+  width: 0.5px;
+  height: 18px;
+  margin: 0 6px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.ov-root .ov-sw {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: default;
+}
+
+.ov-root .ov-sw i {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+}
+
+.ov-root .ov-sw[aria-pressed="true"] i {
+  box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px #fff;
+}
+
+.ov-root .ov-go {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  margin-left: 2px;
+  padding: 0 12px 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--ov-accent);
+  color: #fff;
+  font: 600 13px/1 var(--ov-font);
+  cursor: default;
+}
+
+.ov-root .ov-go:hover {
+  filter: brightness(1.1);
+}
+
+.ov-root .ov-hint {
+  position: absolute;
+  z-index: 30;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ov-root .ov-read {
+  position: absolute;
+  z-index: 35;
+  padding: 6px 9px;
+  border-radius: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ov-root .ov-out {
+  position: absolute;
+  z-index: 50;
+  right: 20px;
+  top: 20px;
+  width: 340px;
+  padding: 10px;
+  cursor: default;
+}
+
+.ov-root .ov-out img {
+  display: block;
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+.ov-root .ov-out p {
+  margin: 8px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.78);
+  user-select: text;
+  -webkit-user-select: text;
+}
