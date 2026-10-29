@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 pub struct Tray {
     record: MenuItem<Wry>,
@@ -13,6 +13,7 @@ pub struct Tray {
     region: MenuItem<Wry>,
     zoom: MenuItem<Wry>,
     paste: MenuItem<Wry>,
+    update: MenuItem<Wry>,
     shown: Mutex<Option<bool>>,
 }
 
@@ -45,13 +46,14 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
     let last = item(app, "last", "History…", None)?;
     let settings = item(app, "settings", "Settings…", Some("CmdOrCtrl+,".into()))?;
     let setup = item(app, "setup", "Setup Assistant…", None)?;
+    let update = item(app, "update", CHECK, None)?;
     let quit = item(app, "quit", "Quit Pointcast", Some("CmdOrCtrl+Q".into()))?;
     let sep = || PredefinedMenuItem::separator(app);
     let menu = Menu::with_items(
         app,
         &[
             &record, &sep()?, &full, &region, &zoom, &sep()?, &paste, &last, &sep()?, &settings, &setup,
-            &sep()?, &quit,
+            &update, &sep()?, &quit,
         ],
     )?;
     let mut b = TrayIconBuilder::with_id("main")
@@ -78,6 +80,11 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
                 "last" => crate::show_window(app, "result"),
                 "settings" => crate::show_window(app, "settings"),
                 "setup" => crate::show_window(app, "onboarding"),
+                // Both open Settings: it says what an update does before anything is replaced.
+                "update" => {
+                    crate::show_window(app, "settings");
+                    let _ = app.emit_to("settings", "settings://pane", "general");
+                }
                 "quit" => crate::quit(app),
                 _ => {}
             }
@@ -94,6 +101,7 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
         region,
         zoom,
         paste,
+        update,
         shown: Mutex::new(None),
     });
     refresh(app, &svc.ui(), svc.last_export().is_some());
@@ -134,6 +142,16 @@ fn flip(shown: &Mutex<Option<bool>>, rec: bool) -> bool {
     }
     *s = Some(rec);
     true
+}
+
+const CHECK: &str = "Check for Updates…";
+
+/// Name the newer version in the menu once a check finds one.
+pub fn offer_update(app: &AppHandle, version: Option<&str>) {
+    if let Some(tray) = app.try_state::<Tray>() {
+        let text = version.map_or_else(|| CHECK.to_string(), |v| format!("Update to Pointcast {v}…"));
+        let _ = tray.update.set_text(text);
+    }
 }
 
 /// Rebuild the shortcut hints after the user changes a chord.

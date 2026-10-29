@@ -80,6 +80,9 @@ export type Config = {
   spoken_anchors: SpokenAnchors;
   key_frames: boolean;
   start_at_login: boolean;
+  check_updates: boolean;
+  /** A newer version the last check found. */
+  update: string | null;
   include_app: boolean;
   hidden: string[];
   mcp_bind: string;
@@ -147,6 +150,8 @@ export const hotkeyTest = (on: boolean) => invoke<void>("hotkey_test", { on });
 export const practice = (on: boolean) => invoke<void>("practice", { on });
 export const micMonitor = (on: boolean) => invoke<void>("mic_monitor", { on });
 export const onboardingFinish = () => invoke<void>("onboarding_finish");
+export const updateCheck = () => invoke<string | null>("update_check");
+export const updateInstall = () => invoke<void>("update_install");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
 export const platformInfo = () => invoke<{ os: string; materials: boolean }>("platform_info");
 
@@ -183,6 +188,8 @@ export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
+export const onUpdateChecked = on<string | null>("update://checked");
+export const onSettingsPane = on<string>("settings://pane");
 
 /** Subscribe in an effect; returns the cleanup. */
 export function subscribe(...subs: Promise<UnlistenFn>[]) {

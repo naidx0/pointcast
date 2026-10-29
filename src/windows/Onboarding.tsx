@@ -376,9 +376,13 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
       <AppIcon />
       <h1 className="t-hero">You’re all set</h1>
       <p className="t-body">
-        Pointcast lives in the {mac ? "menu bar" : "system tray"}. Press{" "}
-        <b style={{ color: "var(--label)" }}>{chordText(cfg.hotkeys.session.label)}</b> in any app to start. With no
-        pictures it is plain dictation: your words are typed where your cursor is.
+        Press <b style={{ color: "var(--label)" }}>{chordText(cfg.hotkeys.session.label)}</b> in any app to start.
+        With no pictures it is plain dictation: your words are typed where your cursor is.
+      </p>
+      <p className="t-small" style={{ maxWidth: 440 }}>
+        {mac
+          ? "Pointcast lives in the menu bar at the top right. Click its icon, or open Pointcast from Spotlight, for History and Settings."
+          : "Pointcast lives in the system tray by the clock. Windows tucks new icons under the ^ arrow: drag Pointcast onto the taskbar to keep it in sight. Search Start for Pointcast to open Settings."}
       </p>
       <div className="group" style={{ width: "100%", textAlign: "left" }}>
         <div className="row">
@@ -402,7 +406,10 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
         <div className="row">
           <div className="grow">
             <div className="lbl">Open at login</div>
-            <div className="sub">Keep Pointcast ready whenever you sign in.</div>
+            <div className="sub">
+              Pointcast starts quietly in the {mac ? "menu bar" : "system tray"} whenever you sign in, so you never run
+              the install command again. Updates come from Settings.
+            </div>
           </div>
           <button
             type="button"

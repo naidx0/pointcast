@@ -29,8 +29,9 @@ irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 ```
 
 Either one downloads the latest release, installs it (no admin rights on Windows), and opens the
-setup assistant. Run it again to update. The builds are not notarised or code-signed; the scripts
-install them the same way a developer would, so no warning dialogs appear.
+setup assistant. You only run it once: Pointcast opens at login, lives in the menu bar or tray, and
+updates from **Settings → General → Updates**. The builds are not notarised or code-signed; the
+scripts install them the same way a developer would, so no warning dialogs appear.
 
 ## Why
 
@@ -58,7 +59,8 @@ Pointcast opens a short setup assistant the first time it starts:
 4. **Shortcuts.** Press each one; it lights up when it works. Click one and type new keys to change it.
 5. **Practice run.** A real recording, start to finish. The prompt appears in the window, nothing
    is pasted anywhere.
-6. **Done.** Choose whether to paste automatically and whether to open at login.
+6. **Done.** Choose whether to paste automatically. Open at login is on, so Pointcast is back after
+   every restart; on Windows, drag its icon from under the ^ arrow onto the taskbar to keep it in sight.
 
 You can reopen it any time from the menu: **Setup Assistant…**
 
@@ -133,11 +135,13 @@ curl http://127.0.0.1:47821/v1/session
 - Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
   RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out
   before a picture is kept. Add your own in **Settings → Capture → Never capture**.
+- Pointcast goes online only to download a speech model and, once a day, to ask GitHub whether a
+  newer version is out (turn that off in **Settings → General**).
 
 ## Uninstall
 
-macOS: quit Pointcast and drag it from Applications to the Trash; its data is in
-`~/Library/Application Support/dev.pointcast.app`. Windows: Settings → Apps → Pointcast →
+macOS: turn off **Open at login** in Settings, quit Pointcast and drag it from Applications to the
+Trash; its data is in `~/Library/Application Support/dev.pointcast.app`. Windows: Settings → Apps → Pointcast →
 Uninstall (tick "Delete the application data" to remove models and history too).
 
 ## Build from source
@@ -168,6 +172,7 @@ src-tauri/src/
   platform.rs     where floating windows go, window levels, start/stop sounds
   permissions.rs  macOS AVFoundation / Screen Recording / Accessibility, Windows mic privacy
   tray.rs         menu bar extra / tray icon and menu
+  update.rs       checks GitHub for a newer release, runs the installer
   capture.rs      screen grab, close-up around the pointer, privacy paint-out
   prompt.rs       transcript + [image n] markers → plain, HTML, markdown, folder
   session.rs      a recording: mic, speech worker, captures, export

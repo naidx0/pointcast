@@ -17,6 +17,7 @@ mod session;
 mod settings;
 mod tools;
 mod tray;
+mod update;
 mod voice;
 
 use mcp::Latest;
@@ -345,6 +346,8 @@ fn settings_view(svc: &App) -> Value {
         "spoken_anchors": s.spoken_anchors,
         "key_frames": s.key_frames,
         "start_at_login": s.start_at_login,
+        "check_updates": s.check_updates,
+        "update": update::available(),
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
@@ -857,10 +860,40 @@ fn leave_onboarding(app: &AppHandle, svc: &App) {
 fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
     leave_onboarding(&app, &svc);
     let mut s = svc.settings.lock().unwrap().clone();
+    // Open at login is on unless the person switched it off: register it now, so Pointcast is
+    // back after a restart without anyone running the install command again.
+    if s.start_at_login {
+        use tauri_plugin_autostart::ManagerExt;
+        let login = app.autolaunch();
+        if !login.is_enabled().unwrap_or(false) {
+            if let Err(e) = login.enable() {
+                eprintln!("Pointcast could not set itself to open at login: {e}");
+            }
+        }
+    }
     s.onboarded = true;
     svc.save_settings(s)?;
     hide_window(&app, "onboarding");
     Ok(())
+}
+
+/// Ask GitHub now. Returns the newer version, or null when up to date.
+#[tauri::command]
+async fn update_check(app: AppHandle) -> Result<Option<String>, String> {
+    let found = tauri::async_runtime::spawn_blocking(update::check)
+        .await
+        .map_err(|e| e.to_string())??;
+    tray::offer_update(&app, found.as_deref());
+    Ok(found)
+}
+
+/// Run the installer: it closes Pointcast, installs the new version and opens it again.
+#[tauri::command]
+fn update_install(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    if !matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error) {
+        return Err("Finish the recording first, then update.".into());
+    }
+    update::install()
 }
 
 #[tauri::command]
@@ -976,6 +1009,8 @@ pub fn run() {
             practice,
             mic_monitor,
             onboarding_finish,
+            update_check,
+            update_install,
             window_open,
             platform_info,
         ])
@@ -998,6 +1033,22 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if settings.onboarded && permissions::probe().screen != permissions::Access::Granted {
                 show_window(&handle, "onboarding");
+            }
+            // A minute after launch and then once a day, look for a newer release (if allowed).
+            {
+                let (handle, svc) = (handle.clone(), svc.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    loop {
+                        if svc.settings.lock().unwrap().check_updates {
+                            if let Ok(found) = update::check() {
+                                tray::offer_update(&handle, found.as_deref());
+                                let _ = handle.emit("update://checked", &found);
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
+                    }
+                });
             }
             // Pulse live state to the HUD and the menu bar clock while a session runs. After
             // IDLE without one, the floating windows and the speech model are let go.

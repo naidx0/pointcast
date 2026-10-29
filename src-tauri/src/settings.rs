@@ -88,8 +88,12 @@ pub struct Settings {
     /// Keep the screen once a second in memory while recording and add the moments talked about.
     #[serde(default)]
     pub key_frames: bool,
-    #[serde(default)]
+    /// Opens at login unless the person turns it off; set up when onboarding finishes.
+    #[serde(default = "yes")]
     pub start_at_login: bool,
+    /// Ask GitHub once a day whether a newer Pointcast is out.
+    #[serde(default = "yes")]
+    pub check_updates: bool,
     #[serde(default)]
     pub include_app: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,7 +144,8 @@ impl Default for Settings {
             outline_element: true,
             spoken_anchors: SpokenAnchors::default(),
             key_frames: false,
-            start_at_login: false,
+            start_at_login: true,
+            check_updates: true,
             include_app: false,
             hidden: None,
             mcp_bind: default_mcp(),
@@ -308,6 +313,18 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains(r#""key_frames": true"#));
         assert_eq!(Settings::load(&path), on);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_install_opens_at_login_and_checks_for_updates() {
+        let s = Settings::default();
+        assert!(s.start_at_login && s.check_updates);
+        // A settings file from before these fields existed gets the same.
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.start_at_login && old.check_updates);
+        // A choice already saved is kept.
+        let off: Settings = serde_json::from_str(r#"{"start_at_login":false,"check_updates":false}"#).unwrap();
+        assert!(!off.start_at_login && !off.check_updates);
     }
 
     #[test]

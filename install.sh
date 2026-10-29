@@ -11,6 +11,8 @@ RELEASES="https://github.com/$REPO/releases/latest"
 say() { printf '  %s\n' "$*"; }
 fail() {
   printf '\n  Pointcast was not installed: %s\n\n' "$*" >&2
+  # Closed for the update and the update failed: open the copy that is still there.
+  [ "${quit:-0}" = 1 ] && [ -d "${dest:-}/Pointcast.app" ] && open "$dest/Pointcast.app" >/dev/null 2>&1
   exit 1
 }
 
@@ -72,6 +74,7 @@ codesign --verify "$dest/.Pointcast.app.new" >/dev/null 2>&1 ||
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
 if pgrep -x pointcast >/dev/null 2>&1; then
+  quit=1
   osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
   sleep 1
   pkill -x pointcast >/dev/null 2>&1 || true

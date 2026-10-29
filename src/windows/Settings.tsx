@@ -6,7 +6,19 @@ import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-rea
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker } from "@/components/Models";
-import { HOTKEY_FIELD, historyClear, historyList, inTauri, windowOpen, type Config } from "@/lib/api";
+import {
+  HOTKEY_FIELD,
+  historyClear,
+  historyList,
+  inTauri,
+  onSettingsPane,
+  onUpdateChecked,
+  subscribe,
+  updateCheck,
+  updateInstall,
+  windowOpen,
+  type Config,
+} from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
@@ -37,6 +49,8 @@ export function Settings() {
     main.current?.scrollTo({ top: 0 });
     setScrolled(false);
   }, [pane]);
+  // The menu's update item brings Settings forward on the pane that has Updates.
+  useEffect(() => subscribe(onSettingsPane((p) => PANES.some((x) => x.id === p) && setPane(p as Pane))), []);
 
   return (
     <div className="prefs">
@@ -150,6 +164,7 @@ function Seg<T extends string | number>({
 }
 
 function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const mac = platform() === "mac";
   const [theme, setTheme] = useState<ThemePref>(themePref());
   const [login, setLogin] = useState(cfg.start_at_login);
   const [perms, setPerms] = usePermissions(cfg.permissions);
@@ -159,7 +174,10 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
   return (
     <>
       <div className="group">
-        <Row label="Open at login" sub="Keep Pointcast ready whenever you sign in.">
+        <Row
+          label="Open at login"
+          sub={`Pointcast starts quietly in the ${mac ? "menu bar" : "system tray"} when you sign in.`}
+        >
           <Toggle
             label="Open at login"
             on={login}
@@ -190,6 +208,10 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
         </Row>
       </div>
       <h2 className="group-title" style={{ marginTop: 24 }}>
+        Updates
+      </h2>
+      <Updates cfg={cfg} patch={patch} />
+      <h2 className="group-title" style={{ marginTop: 24 }}>
         Permissions
       </h2>
       {perms ? <PermissionRows perms={perms} setPerms={setPerms} /> : null}
@@ -200,6 +222,72 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
         </button>
       </div>
     </>
+  );
+}
+
+function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const mac = platform() === "mac";
+  const [found, setFound] = useState<string | null>(cfg.update);
+  const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => subscribe(onUpdateChecked(setFound)), []);
+  const check = async () => {
+    setState("checking");
+    setError(null);
+    try {
+      const v = inTauri ? await updateCheck() : null;
+      setFound(v);
+      setState(v ? "idle" : "latest");
+    } catch (e) {
+      setError(String(e));
+      setState("idle");
+    }
+  };
+  const install = async () => {
+    setState("installing");
+    setError(null);
+    try {
+      if (inTauri) await updateInstall();
+    } catch (e) {
+      setError(String(e));
+      setState("idle");
+    }
+  };
+  const sub =
+    error ??
+    (state === "installing"
+      ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
+      : found
+        ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
+        : state === "checking"
+          ? "Checking…"
+          : state === "latest"
+            ? `${cfg.version} is the latest version.`
+            : `Version ${cfg.version}.`);
+  return (
+    <div className="group">
+      <Row label={found ? `Pointcast ${found} is available` : "Pointcast"} sub={sub}>
+        {found ? (
+          <button type="button" className="btn primary" disabled={state === "installing"} onClick={install}>
+            {state === "installing" ? "Updating…" : "Update"}
+          </button>
+        ) : (
+          <button type="button" className="btn" disabled={state === "checking"} onClick={check}>
+            Check Now
+          </button>
+        )}
+      </Row>
+      <Row
+        label="Check for updates automatically"
+        sub="Once a day, Pointcast asks GitHub whether a newer version is out. Your recordings stay on this computer."
+      >
+        <Toggle
+          label="Check for updates automatically"
+          on={cfg.check_updates}
+          set={(v) => patch({ check_updates: v })}
+        />
+      </Row>
+    </div>
   );
 }
 

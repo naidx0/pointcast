@@ -17,6 +17,11 @@
         Write-Host ""
         Write-Host "  Pointcast was not installed: $m" -ForegroundColor Red
         Write-Host ""
+        # Closed for the update and the update failed: open the copy that is still there.
+        if ($stopped) {
+            $old = Find-Pointcast
+            if ($old) { Start-Process -FilePath $old }
+        }
     }
     function Find-Pointcast {
         foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pointcast',
@@ -69,6 +74,7 @@
     Unblock-File -Path $setup -ErrorAction SilentlyContinue
 
     # An update replaces the running app; Pointcast keeps what you were recording for its next start.
+    $stopped = [bool](Get-Process -Name pointcast -ErrorAction SilentlyContinue)
     Get-Process -Name pointcast -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
 
