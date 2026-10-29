@@ -54,8 +54,65 @@ const PASTE: enigo::Key = enigo::Key::Other(9);
 #[cfg(not(any(windows, target_os = "macos")))]
 const PASTE: enigo::Key = enigo::Key::Unicode('v');
 
+/// Windows blocks synthetic keys sent to an app running as administrator when Pointcast is not;
+/// `front` is whether the app in front is elevated, `None` when that cannot be read.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn uipi_blocks(front: Option<bool>, me: bool) -> bool {
+    !me && front != Some(false)
+}
+
+#[cfg(windows)]
+const ELEVATED: &str =
+    "Windows does not let Pointcast type into an app running as administrator. The prompt is copied: press Ctrl+V.";
+
+/// Whether the window in front belongs to an elevated app that Pointcast's keys cannot reach.
+#[cfg(windows)]
+fn front_is_out_of_reach() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    fn elevated(process: HANDLE) -> Option<bool> {
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+            let mut e = TOKEN_ELEVATION::default();
+            let mut len = 0u32;
+            let read = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut e as *mut TOKEN_ELEVATION as *mut std::ffi::c_void),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            let _ = CloseHandle(token);
+            read.ok()?;
+            Some(e.TokenIsElevated != 0)
+        }
+    }
+    unsafe {
+        let w = GetForegroundWindow();
+        if w.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, Some(&mut pid));
+        let front = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL::from(false), pid).ok().and_then(|h| {
+            let e = elevated(h);
+            let _ = CloseHandle(h);
+            e
+        });
+        uipi_blocks(front, elevated(GetCurrentProcess()).unwrap_or(false))
+    }
+}
+
 pub fn paste_now() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(80));
+    // SendInput reports success even when Windows drops the keys on the way to an elevated app.
+    #[cfg(windows)]
+    if front_is_out_of_reach() {
+        return Err(ELEVATED.into());
+    }
     // macOS: synthetic keys and the keyboard layout belong to the main thread (macOS 14+ asserts it).
     #[cfg(target_os = "macos")]
     if let Some(app) = APP.get().filter(|_| objc2::MainThreadMarker::new().is_none()) {
@@ -182,5 +239,14 @@ mod tests {
         let t = Instant::now();
         let r = on_main(|job| { *held.lock().unwrap() = Some(job); Ok(()) }, || Ok(1), Duration::from_millis(200));
         assert!(r.is_err() && t.elapsed() >= Duration::from_millis(200) && t.elapsed() < Duration::from_secs(2), "{r:?}");
+    }
+
+    #[test]
+    fn a_paste_into_an_elevated_app_is_refused_unless_we_are_elevated_too() {
+        assert!(uipi_blocks(Some(true), false));
+        assert!(uipi_blocks(None, false), "an app we cannot inspect counts as elevated");
+        assert!(!uipi_blocks(Some(false), false));
+        assert!(!uipi_blocks(Some(true), true));
+        assert!(!uipi_blocks(None, true));
     }
 }
