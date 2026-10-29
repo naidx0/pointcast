@@ -6,8 +6,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const LATEST: &str = "https://api.github.com/repos/naidx0/pointcast/releases/latest";
-const SCRIPT_PS1: &str = "https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1";
-const SCRIPT_SH: &str = "https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh";
 
 /// The newer version the last check found, if any.
 static AVAILABLE: Mutex<Option<String>> = Mutex::new(None);
@@ -100,25 +98,26 @@ pub fn install() -> Result<(), String> {
 #[cfg(windows)]
 fn installer() -> Result<std::process::Command, String> {
     use std::os::windows::process::CommandExt;
+    const SCRIPT: &str = "https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     let mut cmd = std::process::Command::new("powershell.exe");
     cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
-        .arg(format!("irm {SCRIPT_PS1} | iex"))
+        .arg(format!("irm {SCRIPT} | iex"))
         .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     Ok(cmd)
 }
 
 #[cfg(target_os = "macos")]
 fn installer() -> Result<std::process::Command, String> {
+    const SCRIPT: &str = "https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh";
     let mut cmd = std::process::Command::new("/bin/bash");
-    cmd.arg("-c").arg(format!("curl -fsSL {SCRIPT_SH} | bash"));
+    cmd.arg("-c").arg(format!("curl -fsSL {SCRIPT} | bash"));
     Ok(cmd)
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 fn installer() -> Result<std::process::Command, String> {
-    let _ = (SCRIPT_PS1, SCRIPT_SH);
     Err("On Linux, update Pointcast from the releases page.".into())
 }
 
