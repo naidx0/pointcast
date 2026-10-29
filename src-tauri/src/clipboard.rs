@@ -105,6 +105,7 @@ mod tests {
             element: None,
             place: None,
             anchors: vec![],
+            auto: false,
         });
     }
 }

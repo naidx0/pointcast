@@ -93,18 +93,24 @@ pub fn crowded(at: Point, rings: impl IntoIterator<Item = Point>, k: f32) -> boo
     rings.into_iter().any(|p| ((p.x - at.x) as f32).hypot((p.y - at.y) as f32) < r)
 }
 
-/// Ring, on the picture nearest in time, where the pointer was each time a pointing word was said. `trail` is the whole
-/// recording's, in screen coordinates; `tokens` holds the model's token times by the start of their piece;
-/// `rest_ringed` says the captures drew a ring where the person rested. Regions have no mapping (the overlay cropped
-/// them) and are left alone. Returns how many rings were added.
-pub fn ring_spoken(items: &mut [Item], trail: &[Point], tokens: &[(u64, Vec<Token>)], rest_ringed: bool) -> usize {
+/// When each pointing word was said, on the session clock, in the order of the pieces.
+pub fn pointing_times(items: &[Item], tokens: &[(u64, Vec<Token>)]) -> Vec<u64> {
     let mut said: Vec<u64> = vec![];
-    for it in items.iter() {
+    for it in items {
         if let Item::Speech { t_ms, end_ms, text } = it {
             let tok = tokens.iter().find(|(s, _)| s == t_ms).map(|(_, v)| v.as_slice());
             said.extend(word_times(*t_ms, *end_ms, text, tok).into_iter().filter(|(w, _)| is_pointing(w)).map(|(_, t)| t));
         }
     }
+    said
+}
+
+/// Ring, on the picture nearest in time, where the pointer was each time a pointing word was said. `trail` is the whole
+/// recording's, in screen coordinates; `tokens` holds the model's token times by the start of their piece;
+/// `rest_ringed` says the captures drew a ring where the person rested. Regions have no mapping (the overlay cropped
+/// them) and are left alone. Returns how many rings were added.
+pub fn ring_spoken(items: &mut [Item], trail: &[Point], tokens: &[(u64, Vec<Token>)], rest_ringed: bool) -> usize {
+    let said = pointing_times(items, tokens);
     let pictures: Vec<(usize, u64, Place)> = items
         .iter()
         .enumerate()
@@ -273,6 +279,7 @@ mod tests {
                 element: None,
                 place,
                 anchors: vec![],
+                auto: false,
             },
         }
     }
@@ -375,6 +382,7 @@ mod tests {
                     element: None,
                     place: Some(place),
                     anchors: vec![],
+                    auto: false,
                 },
             },
         ];

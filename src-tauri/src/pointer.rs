@@ -63,26 +63,46 @@ impl Trail {
     }
 }
 
-/// Where the person pointed: the most recent stretch in which the pointer stayed within
-/// `DWELL_RADIUS` of one spot for at least `DWELL_MS`. Returns the middle of that stretch,
-/// timed at its end.
-pub fn dwell(trail: &[Point]) -> Option<Point> {
+/// A stretch in which the pointer stayed within `DWELL_RADIUS` of one spot for at least `DWELL_MS`: its middle, timed
+/// at its end, and when it began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rest {
+    pub at: Point,
+    pub from: u64,
+}
+
+/// Every rest in the trail, newest first.
+fn rests_back(trail: &[Point]) -> impl Iterator<Item = Rest> + '_ {
     let mut end = trail.len();
-    while end > 0 {
-        let anchor = trail[end - 1];
-        let mut start = end - 1;
-        while start > 0 && near(trail[start - 1], anchor) {
-            start -= 1;
+    std::iter::from_fn(move || {
+        while end > 0 {
+            let anchor = trail[end - 1];
+            let mut start = end - 1;
+            while start > 0 && near(trail[start - 1], anchor) {
+                start -= 1;
+            }
+            let span = &trail[start..end];
+            end = start;
+            if anchor.t_ms.saturating_sub(span[0].t_ms) >= DWELL_MS {
+                let n = span.len() as i64;
+                let (sx, sy) = span.iter().fold((0i64, 0i64), |(x, y), p| (x + p.x as i64, y + p.y as i64));
+                return Some(Rest { at: Point { t_ms: anchor.t_ms, x: (sx / n) as i32, y: (sy / n) as i32 }, from: span[0].t_ms });
+            }
         }
-        let span = &trail[start..end];
-        if anchor.t_ms.saturating_sub(span[0].t_ms) >= DWELL_MS {
-            let n = span.len() as i64;
-            let (sx, sy) = span.iter().fold((0i64, 0i64), |(x, y), p| (x + p.x as i64, y + p.y as i64));
-            return Some(Point { t_ms: anchor.t_ms, x: (sx / n) as i32, y: (sy / n) as i32 });
-        }
-        end = start;
-    }
-    None
+        None
+    })
+}
+
+/// Where the person pointed: the most recent rest, its middle timed at its end.
+pub fn dwell(trail: &[Point]) -> Option<Point> {
+    rests_back(trail).next().map(|r| r.at)
+}
+
+/// Every rest in the trail, oldest first.
+pub fn rests(trail: &[Point]) -> Vec<Rest> {
+    let mut v: Vec<Rest> = rests_back(trail).collect();
+    v.reverse();
+    v
 }
 
 fn near(a: Point, b: Point) -> bool {
@@ -154,6 +174,22 @@ mod tests {
         let t3 = t.last().unwrap().t_ms;
         t.extend((1..6).map(|i| p(t3 + i * 33, 900 + i as i32 * 40, 500)));
         assert!((dwell(&t).unwrap().x - 900).abs() <= 4);
+    }
+
+    #[test]
+    fn every_rest_is_found_in_time_order_and_the_last_is_the_dwell() {
+        let mut t = glide_then_rest(0, (0, 0), (100, 100), 300, 800);
+        let t2 = t.last().unwrap().t_ms + 33;
+        t.extend(glide_then_rest(t2, (100, 100), (900, 500), 400, 300));
+        let t3 = t.last().unwrap().t_ms + 33;
+        t.extend(glide_then_rest(t3, (900, 500), (1500, 200), 400, 1_200));
+        let r = rests(&t);
+        assert_eq!(r.len(), 2, "the 300 ms pause in the middle is not a rest: {r:?}");
+        assert!((r[0].at.x - 100).abs() <= 4 && (r[1].at.x - 1500).abs() <= 4, "{r:?}");
+        assert!(r[0].at.t_ms - r[0].from >= DWELL_MS && r[0].at.t_ms <= t2, "{r:?}");
+        assert_eq!(r[1].at.t_ms, t.last().unwrap().t_ms);
+        assert_eq!(dwell(&t), Some(r[1].at));
+        assert!(rests(&[]).is_empty());
     }
 
     #[test]

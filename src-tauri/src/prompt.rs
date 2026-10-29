@@ -58,6 +58,13 @@ pub struct Capture {
     /// Rings added at stop where the person said "this" or "here", in picture pixels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchors: Vec<crate::pointer::Point>,
+    /// A key frame Pointcast picked from the recording, not a picture the person took.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A session item: speech from `t_ms` to `end_ms`, or a picture taken at `t_ms`.
@@ -325,6 +332,8 @@ pub struct SessionImage {
     pub height: u32,
     pub labels: Vec<Label>,
     pub data_url: String,
+    /// Picked from the recording by Pointcast.
+    pub auto: bool,
 }
 
 pub fn assemble_export(items: &[Item]) -> SessionExport {
@@ -343,6 +352,7 @@ pub fn assemble_export(items: &[Item]) -> SessionExport {
                 height: c.height,
                 labels: c.labels,
                 data_url: png_data_url(&c.png),
+                auto: c.auto,
             })
             .collect(),
     }
@@ -381,6 +391,7 @@ mod tests {
                 element: None,
                 place: None,
                 anchors: vec![],
+                auto: false,
             },
         }
     }

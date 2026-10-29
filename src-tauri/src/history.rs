@@ -105,6 +105,29 @@ impl Store {
         Ok(out)
     }
 
+    /// Take picture `n` out of an entry; only a key frame Pointcast picked (`auto`) can go. The pictures after it move up
+    /// a file and the words stay as they were: the prompt numbers what is left. Written together or not at all.
+    pub fn remove(&self, id: &str, n: usize) -> Result<(), String> {
+        let dir = self.entry_dir(id)?;
+        let mut items = stored(&dir)?;
+        let (i, k) = locate(&dir, &items, n)?;
+        if !matches!(&items[i], Item::Image { capture, .. } if capture.auto) {
+            return Err("only a picture Pointcast picked can be removed".into());
+        }
+        let total = items.iter().filter(|it| matches!(it, Item::Image { .. })).count();
+        items.remove(i);
+        let file = |j: usize| dir.join(format!("image-{j}.png"));
+        let mut files: Vec<(PathBuf, Vec<u8>)> = (k..total - 1).map(|j| (file(j), std::fs::read(file(j + 1)).unwrap_or_default())).collect();
+        files.push((dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?));
+        if let Some(mut meta) = std::fs::read(dir.join("meta.json")).ok().and_then(|b| serde_json::from_slice::<Meta>(&b).ok()) {
+            meta.images = (total - 1) as u32;
+            files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
+        }
+        write_together(&files)?;
+        let _ = std::fs::remove_file(file(total - 1));
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         std::fs::remove_dir_all(self.entry_dir(id)?).map_err(|e| e.to_string())
     }
@@ -231,6 +254,7 @@ fn stripped(items: &[Item]) -> Vec<Item> {
                     element: c.element.clone(),
                     place: c.place,
                     anchors: c.anchors.clone(),
+                    auto: c.auto,
                 },
             },
             s => s.clone(),
@@ -359,6 +383,7 @@ mod tests {
                     }),
                     place: None,
                     anchors: vec![],
+                    auto: false,
                 },
             },
             Item::Speech { t_ms: 1200, end_ms: 2000, text: "move it left".into() },
@@ -532,6 +557,60 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("items.json")).unwrap(), json0);
         assert!(!dir.join("image-0.tmp").exists(), "and its temp is gone");
         assert_eq!(s.items(&m.id).unwrap(), items());
+    }
+
+    /// Words, a picture the person took, a key frame Pointcast picked, then another picture they took.
+    fn with_a_key_frame() -> Vec<Item> {
+        let mut v = items();
+        let Item::Image { capture, .. } = &v[1] else { panic!() };
+        let mut auto = capture.clone();
+        (auto.t_ms, auto.png, auto.labels, auto.element, auto.auto) = (1_100, png(90), vec![], None, true);
+        let mut last = capture.clone();
+        (last.t_ms, last.png, last.labels, last.element) = (2_500, png(30), vec![], None);
+        v.insert(2, Item::Image { t_ms: 1_100, capture: auto });
+        v.push(Item::Image { t_ms: 2_500, capture: last });
+        v
+    }
+
+    #[test]
+    fn a_key_frame_stays_marked_auto_in_history_and_old_pictures_are_not() {
+        let s = store("auto");
+        let m = s.save(&with_a_key_frame(), 1_793_000_000_000, 3000).unwrap();
+        let back = s.items(&m.id).unwrap();
+        assert_eq!(back, with_a_key_frame());
+        let auto: Vec<bool> = s.export(&m.id).unwrap().images.iter().map(|i| i.auto).collect();
+        assert_eq!(auto, [false, true, false]);
+        let raw = String::from_utf8(std::fs::read(s.history().join(&m.id).join("items.json")).unwrap()).unwrap();
+        assert_eq!(raw.matches(r#""auto":true"#).count(), 1, "{raw}");
+        assert!(!raw.contains(r#""auto":false"#), "a picture the person took writes no field for it");
+        let old: Vec<Item> = serde_json::from_str(r#"[{"type":"image","t_ms":5,"capture":{"id":0,"kind":"full","t_ms":5,"png":[],"width":1,"height":1,"labels":[]}}]"#).unwrap();
+        let Item::Image { capture, .. } = &old[0] else { panic!() };
+        assert!(!capture.auto);
+    }
+
+    #[test]
+    fn removing_a_key_frame_takes_out_only_that_picture_and_the_prompt_renumbers() {
+        let s = store("remove");
+        let m = s.save(&with_a_key_frame(), 1_793_000_000_000, 3000).unwrap();
+        assert_eq!(s.export(&m.id).unwrap().plain, r#"the button is off by a few pixels [image 1: button "Place order"; 1=this one] [image 2] move it left [image 3]"#);
+        assert!(s.remove(&m.id, 1).is_err() && s.remove(&m.id, 3).is_err(), "pictures the person took stay");
+        s.remove(&m.id, 2).unwrap();
+        let after = s.export(&m.id).unwrap();
+        assert_eq!(after.plain, r#"the button is off by a few pixels [image 1: button "Place order"; 1=this one] move it left [image 2]"#);
+        assert_eq!((s.picture(&m.id, 1).unwrap().png, s.picture(&m.id, 2).unwrap().png), (png(200), png(30)));
+        assert!(after.images.iter().all(|i| !i.auto));
+        let said = |v: Vec<Item>| v.into_iter().filter(|i| matches!(i, Item::Speech { .. })).collect::<Vec<_>>();
+        assert_eq!(said(s.items(&m.id).unwrap()), said(with_a_key_frame()), "the words are untouched");
+        assert_eq!(s.list()[0].images, 2);
+        let dir = s.history().join(&m.id);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["image-0.png", "image-1.png", "items.json", "meta.json"]);
+        for bad in ["", "..", "../settings", "nope"] {
+            assert!(s.remove(bad, 1).is_err(), "{bad}");
+        }
+        assert!(s.remove(&m.id, 3).is_err() && s.remove(&m.id, 0).is_err());
+        assert_eq!(s.export(&m.id).unwrap().plain, after.plain, "a refused remove changes nothing");
     }
 
     #[test]

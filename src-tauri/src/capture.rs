@@ -2,6 +2,7 @@
 //! Pointcast's own windows are treated as hidden unless `include_app` is on.
 use crate::element::{self, ElementMark};
 use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
+use crate::keyframes;
 use crate::pointer::{self, dwell, Point};
 use crate::privacy::{self, Rect};
 use crate::prompt::CaptureKind;
@@ -359,6 +360,13 @@ pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<S
         map: f.map,
         k: f.density,
     })
+}
+
+/// A key frame of the pointer's monitor, painted over like any capture and made small; `t_ms` is the session clock
+/// when it was taken. Nothing is drawn on it until it is picked.
+pub fn grab_key(settings: &Settings, t_ms: u64) -> Result<keyframes::Still, String> {
+    let f = grab_frame(settings)?;
+    keyframes::still(f.buf, f.width, f.height, f.map, f.density, t_ms)
 }
 
 /// Crop `png` to `rect` (in image pixels). Used after the overlay confirms a box.
