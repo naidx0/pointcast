@@ -111,11 +111,11 @@ pub fn refresh(app: &AppHandle, st: &UiState, has_last: bool) {
     {
         let _ = t.set_title(rec.then(|| crate::clock(st.duration_ms)));
     }
-    let mut shown = tray.shown.lock().unwrap();
-    if *shown == Some(rec) {
+    // Decide under the lock, update outside it: off the main thread each setter waits for the main
+    // thread, which may itself be waiting for this lock in another refresh.
+    if !flip(&tray.shown, rec) {
         return;
     }
-    *shown = Some(rec);
     let _ = tray
         .record
         .set_text(if rec { "Stop Recording" } else { "Start Recording" });
@@ -124,7 +124,16 @@ pub fn refresh(app: &AppHandle, st: &UiState, has_last: bool) {
         let _ = t.set_icon(Some(icon));
         let _ = t.set_icon_as_template(cfg!(target_os = "macos"));
     }
-    let _ = (&tray.full, &tray.region, &tray.zoom);
+}
+
+/// Record the new state; true only for the caller that changed it.
+fn flip(shown: &Mutex<Option<bool>>, rec: bool) -> bool {
+    let mut s = shown.lock().unwrap();
+    if *s == Some(rec) {
+        return false;
+    }
+    *s = Some(rec);
+    true
 }
 
 /// Rebuild the shortcut hints after the user changes a chord.
@@ -141,5 +150,19 @@ pub fn rekey(app: &AppHandle, svc: &Arc<App>) {
     ];
     for (item, chord) in pairs {
         let _ = item.set_accelerator(Some(chord.accelerator().as_str()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_change_of_state_updates_the_tray_and_the_lock_is_free_after() {
+        let shown = Mutex::new(None);
+        assert!(flip(&shown, true));
+        assert!(!flip(&shown, true));
+        assert!(flip(&shown, false));
+        assert!(shown.try_lock().is_ok(), "nothing holds the lock while the tray is updated");
     }
 }
