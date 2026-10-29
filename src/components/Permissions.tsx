@@ -77,7 +77,10 @@ export function PermissionRows({
     }
     // Opening the mic is what makes macOS show its prompt.
     if (kind === "microphone") await micMonitor(true).catch(() => undefined);
-    setPerms(await permissionRequest(kind));
+    const next = await permissionRequest(kind);
+    // Without a level meter here nothing else closes the mic again.
+    if (kind === "microphone" && !meter) await micMonitor(false).catch(() => undefined);
+    setPerms(next);
   }
 
   return (
