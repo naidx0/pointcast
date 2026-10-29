@@ -159,13 +159,16 @@ impl Store {
 }
 
 fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) -> Meta {
-    let text = prompt::compose(items).0;
-    let words: String = text
-        .split_whitespace()
-        .filter(|w| !w.starts_with("[image") && !w.ends_with(']'))
-        .take(24)
-        .collect::<Vec<_>>()
-        .join(" ");
+    // The words only: a marker can carry a control's name and pin labels.
+    let mut said: Vec<(u64, &str)> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Speech { t_ms, text, .. } => Some((*t_ms, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    said.sort_by_key(|s| s.0);
+    let words = said.iter().flat_map(|s| s.1.split_whitespace()).take(24).collect::<Vec<_>>().join(" ");
     let stamp = chrono::DateTime::from_timestamp_millis(created_ms as i64)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y%m%d-%H%M%S").to_string())
         .unwrap_or_else(|| "session".into());
@@ -293,7 +296,7 @@ mod tests {
         let s = store("roundtrip");
         let m = s.save(&items(), 1_793_000_000_000, 2000).unwrap();
         assert_eq!(m.images, 1);
-        assert!(m.preview.starts_with("the button is off"), "{}", m.preview);
+        assert_eq!(m.preview, "the button is off by a few pixels move it left", "words only, no marker");
         assert_eq!(s.items(&m.id).unwrap(), items());
         let (a, b) = (s.export(&m.id).unwrap(), prompt::assemble_export(&items()));
         assert_eq!((a.plain, a.html, a.images.len()), (b.plain, b.html, b.images.len()));
