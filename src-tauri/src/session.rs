@@ -66,6 +66,9 @@ pub struct App {
     mic: Mutex<Option<Mic>>,
     take: Mutex<Option<Arc<Take>>>,
     engine: Mutex<Option<Engine>>,
+    /// One model load at a time (launch preload, a session, a model switch).
+    loading: Mutex<()>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     freeze: Mutex<Option<Shot>>,
     last_export: Mutex<Option<SessionExport>>,
     last_dir: Mutex<Option<std::path::PathBuf>>,
@@ -108,6 +111,8 @@ impl App {
             mic: Mutex::default(),
             take: Mutex::default(),
             engine: Mutex::default(),
+            loading: Mutex::default(),
+            worker: Mutex::default(),
             freeze: Mutex::default(),
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
@@ -152,20 +157,12 @@ impl App {
         Ok(())
     }
 
+    /// Load the chosen model unless it is already the one in memory.
     pub fn ensure_engine(&self) -> Result<(), String> {
-        if self.engine.lock().unwrap().is_some() {
-            self.state.lock().unwrap().model_ready = true;
-            return Ok(());
-        }
+        let _one = self.loading.lock().unwrap();
         let root = models::speech_dir();
         let cat = models::catalog();
-        let rt = cat
-            .runtime_for_host()
-            .ok_or("no speech runtime for this OS")?;
-        if !models::runtime_installed(&root, rt) {
-            return Err("Download the speech runtime in Settings".into());
-        }
-        let rec = machine::recommend(&machine::measure());
+        let rt = cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?;
         let installed: Vec<&str> = cat
             .models
             .iter()
@@ -173,14 +170,31 @@ impl App {
             .map(|m| m.id.as_str())
             .collect();
         let chosen = self.settings.lock().unwrap().model.clone();
-        let id = machine::route(&chosen, rec, &installed).ok_or("Download a speech model in Settings")?;
-        let model = cat.model(id).ok_or("unknown model")?;
+        let id = match machine::route(&chosen, machine::recommended(), &installed) {
+            Some(id) if models::runtime_installed(&root, rt) => id,
+            _ => return Err(NO_MODEL.into()),
+        };
+        if self.engine.lock().unwrap().as_ref().is_some_and(|e| e.model == id) {
+            self.state.lock().unwrap().model_ready = true;
+            return Ok(());
+        }
+        let model = cat.model(id).ok_or(NO_MODEL)?;
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().min(4) as i32)
             .unwrap_or(2);
+        *self.engine.lock().unwrap() = None;
         let eng = crate::voice::stt::load(&root, rt, model, threads)?;
         *self.engine.lock().unwrap() = Some(eng);
         self.state.lock().unwrap().model_ready = true;
+        Ok(())
+    }
+
+    /// Decode half a second of silence: proves the runtime and model work on this machine.
+    pub fn engine_check(&self) -> Result<(), String> {
+        self.ensure_engine()?;
+        let g = self.engine.lock().unwrap();
+        let eng = g.as_ref().ok_or(NO_MODEL)?;
+        let _ = eng.transcribe(&vec![0.0f32; 8_000]);
         Ok(())
     }
 
@@ -204,13 +218,6 @@ impl App {
             st.mic = false;
             st.screen = true;
         }
-        match self.ensure_engine() {
-            Ok(()) => {}
-            Err(e) => {
-                // Screenshots still work; transcript will be empty unless we inject speech.
-                self.state.lock().unwrap().error = Some(e);
-            }
-        }
         let settings = self.settings.lock().unwrap().clone();
         let take = Arc::new(Take::default());
         match Mic::open(settings.device.clone(), take.clone()) {
@@ -224,10 +231,13 @@ impl App {
                 st.error = Some(format!("Microphone: {e}"));
             }
         }
-        self.state.lock().unwrap().phase = Phase::Recording;
+        // The worker loads the model if it is not in memory yet; audio waits in the take meanwhile.
+        if self.engine.lock().unwrap().is_some() {
+            self.state.lock().unwrap().phase = Phase::Recording;
+        }
         let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         let me = Arc::clone(self);
-        std::thread::spawn(move || me.worker(no, take));
+        *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
     }
 
@@ -236,8 +246,10 @@ impl App {
         if let Some(mic) = self.mic.lock().unwrap().take() {
             drop(mic);
         }
-        // Give the worker a beat to flush the last segment.
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        // The worker transcribes what was still being said when stop was pressed; wait for it.
+        if let Some(w) = self.worker.lock().unwrap().take() {
+            let _ = w.join();
+        }
         *self.take.lock().unwrap() = None;
         {
             let mut st = self.state.lock().unwrap();
@@ -377,6 +389,16 @@ impl App {
     }
 
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
+        if let Err(e) = self.ensure_engine() {
+            // Screenshots still work; the transcript stays empty.
+            self.state.lock().unwrap().error = Some(e);
+        }
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.phase == Phase::Loading {
+                st.phase = Phase::Recording;
+            }
+        }
         let mut seg = audio::Segmenter::new(900, 12_000);
         let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
         loop {
@@ -440,6 +462,8 @@ fn export_dir(s: &Settings) -> std::path::PathBuf {
         .join("Pointcast")
         .join(stamp)
 }
+
+pub const NO_MODEL: &str = "No speech model yet. Open Settings › Speech to download one.";
 
 pub fn now_ms() -> u64 {
     SystemTime::now()

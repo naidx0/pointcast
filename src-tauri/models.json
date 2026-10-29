@@ -1,6 +1,9 @@
 {
   "version": 1,
-  "reference": { "score": 900, "cpu": "reference" },
+  "reference": {
+    "score": 900,
+    "cpu": "reference"
+  },
   "models": [
     {
       "id": "moonshine-tiny-en",
@@ -13,11 +16,29 @@
       "bytes": 29858559,
       "root": "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27",
       "files": [
-        { "name": "encoder_model.ort", "role": "encoder" },
-        { "name": "decoder_model_merged.ort", "role": "merged_decoder" },
-        { "name": "tokens.txt", "role": "tokens" }
+        {
+          "name": "encoder_model.ort",
+          "role": "encoder",
+          "bytes": 13281600,
+          "sha256": "94e90a4654fc45cdfedb77c4c08e1739f48862998e58fada384b25118134f221"
+        },
+        {
+          "name": "decoder_model_merged.ort",
+          "role": "merged_decoder",
+          "bytes": 30412256,
+          "sha256": "cf524c4862d36e9e5ab032eddc73637efd822d70e868ac575cf1a46e1e4708a0"
+        },
+        {
+          "name": "tokens.txt",
+          "role": "tokens",
+          "bytes": 549350,
+          "sha256": "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"
+        }
       ],
-      "bench": { "clip5_ms": 180 }
+      "bench": {
+        "clip5_ms": 180
+      },
+      "sha256": "9ec31b342d8fa3240c3b81b8f82e1cf7e3ac467c93ca5a999b741d5887164f8d"
     },
     {
       "id": "moonshine-base-en",
@@ -27,14 +48,32 @@
       "urls": [
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2"
       ],
-      "bytes": 0,
+      "bytes": 111266225,
       "root": "sherpa-onnx-moonshine-base-en-quantized-2026-02-27",
       "files": [
-        { "name": "encoder_model.ort", "role": "encoder" },
-        { "name": "decoder_model_merged.ort", "role": "merged_decoder" },
-        { "name": "tokens.txt", "role": "tokens" }
+        {
+          "name": "encoder_model.ort",
+          "role": "encoder",
+          "bytes": 31326816,
+          "sha256": "7c66495948d0d08ec1af454cd4b5514862ae6511e94712a60e6d83eaec8dc8cf"
+        },
+        {
+          "name": "decoder_model_merged.ort",
+          "role": "merged_decoder",
+          "bytes": 109424400,
+          "sha256": "d9d7b333af34bc552580576ddcf248a1c6c839e0d3b43b09afb9376ed009899d"
+        },
+        {
+          "name": "tokens.txt",
+          "role": "tokens",
+          "bytes": 549350,
+          "sha256": "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"
+        }
       ],
-      "bench": { "clip5_ms": 420 }
+      "bench": {
+        "clip5_ms": 420
+      },
+      "sha256": "43232c1d13013d37317163baec3135bd771a186a4356f28c889bab453bb0e891"
     }
   ],
   "runtimes": [
@@ -45,7 +84,8 @@
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-linux-x64-shared-lib.tar.bz2"
       ],
       "bytes": 9690703,
-      "lib": "libsherpa-onnx-c-api.so"
+      "lib": "libsherpa-onnx-c-api.so",
+      "sha256": "e95f0bb7dbf838d45b0c2831be780b5236fa4c2f891e8bc95b1859dd3311d392"
     },
     {
       "id": "runtime-macos-arm64",
@@ -53,8 +93,9 @@
       "urls": [
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-osx-arm64-shared-lib.tar.bz2"
       ],
-      "bytes": 0,
-      "lib": "libsherpa-onnx-c-api.dylib"
+      "bytes": 8704036,
+      "lib": "libsherpa-onnx-c-api.dylib",
+      "sha256": "a28dfdbf62677f712f29116271880a2552c09b6f06b485e6dad64ea56ad9fffe"
     },
     {
       "id": "runtime-macos-x64",
@@ -62,17 +103,19 @@
       "urls": [
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-osx-x64-shared-lib.tar.bz2"
       ],
-      "bytes": 0,
-      "lib": "libsherpa-onnx-c-api.dylib"
+      "bytes": 9932845,
+      "lib": "libsherpa-onnx-c-api.dylib",
+      "sha256": "80ca7a7896fe518716390cd2fff882fc5e06af4bf53474376115d47671e525a8"
     },
     {
       "id": "runtime-windows-x64",
       "target": "x86_64-pc-windows-msvc",
       "urls": [
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-lib.tar.bz2"
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/sherpa-onnx-v2.0.0-win-x64-shared-MT-Release-lib.tar.bz2"
       ],
-      "bytes": 0,
-      "lib": "sherpa-onnx-c-api.dll"
+      "bytes": 7878613,
+      "lib": "sherpa-onnx-c-api.dll",
+      "sha256": "7a83c48e6c07754028d99e8304da42e184b12223b9a4d15d0e0fd4b707d1cff5"
     }
   ]
 }

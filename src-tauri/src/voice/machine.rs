@@ -27,6 +27,12 @@ pub fn probe(ms: u64) -> u64 {
     n
 }
 
+/// The recommendation for this machine, measured once per launch.
+pub fn recommended() -> &'static str {
+    static R: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    R.get_or_init(|| recommend(&measure()))
+}
+
 /// Which model this machine should start with.
 pub fn recommend(m: &Machine) -> &'static str {
     if m.cores >= 4 && m.ram_gb >= 7.5 {

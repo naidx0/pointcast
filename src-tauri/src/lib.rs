@@ -77,12 +77,12 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
 }
 
 fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
-    let exp = svc.stop(false)?;
     hide_window(app, "indicator");
     hide_window(app, "overlay");
     if svc.settings.lock().unwrap().sounds {
         platform::chime(false);
     }
+    let exp = svc.stop(false)?;
     if let Some(ref e) = exp {
         if svc.practice.load(Ordering::SeqCst) {
             let _ = app.emit("practice://result", e);
@@ -97,9 +97,17 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
     Ok(exp)
 }
 
+/// Stop without holding the caller (the event loop) while the last words are transcribed.
+fn finish_soon(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        let _ = finish(&app, &svc);
+    });
+}
+
 pub fn toggle(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     if recording(svc) {
-        finish(app, svc)?;
+        finish_soon(app, svc);
     } else {
         begin(app, svc)?;
     }
@@ -142,7 +150,7 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         (Action::Session, true) => {
             if rec {
                 *svc.hold_from.lock().unwrap() = None;
-                let _ = finish(app, &svc);
+                finish_soon(app, &svc);
             } else if begin(app, &svc).is_ok() {
                 *svc.hold_from.lock().unwrap() = Some(now_ms());
             }
@@ -151,7 +159,7 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
             let from = svc.hold_from.lock().unwrap().take();
             let mode = svc.settings.lock().unwrap().talk_mode;
             if rec && release_stops(mode, from, now_ms()) {
-                let _ = finish(app, &svc);
+                finish_soon(app, &svc);
             }
         }
         (_, false) => {}
@@ -167,11 +175,6 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
             emit_state(app, &svc);
         }
     }
-}
-
-fn recommended() -> &'static str {
-    static R: OnceLock<&'static str> = OnceLock::new();
-    R.get_or_init(|| voice::machine::recommend(&voice::machine::measure()))
 }
 
 fn settings_view(svc: &App) -> Value {
@@ -219,7 +222,7 @@ fn settings_view(svc: &App) -> Value {
         "speech": voice::models::view(&voice::models::speech_dir(), &voice::models::catalog()),
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
-        "recommended": recommended(),
+        "recommended": voice::machine::recommended(),
     })
 }
 
@@ -243,6 +246,12 @@ fn settings_patch(
     }
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
+    }
+    if cur.model != next.model {
+        let svc = svc.inner().clone();
+        std::thread::spawn(move || {
+            let _ = svc.ensure_engine();
+        });
     }
     Ok(settings_view(&svc))
 }
@@ -397,31 +406,91 @@ fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), St
     clipboard::paste_now()
 }
 
+/// The latest setup progress, so a window opened mid-download picks it up.
+static SPEECH: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+static SPEECH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn speech_emit(app: &AppHandle, v: Value) {
+    *SPEECH.lock().unwrap() = Some(v.clone());
+    let _ = app.emit("speech://progress", v);
+}
+
+/// Download what is missing for `id` (engine, then model) as one job with one progress bar, then
+/// load it and decode silence so "ready" means it runs here. A second call while one runs is a no-op.
 #[tauri::command]
-fn download_model(app: AppHandle, id: String) -> Result<(), String> {
+fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    if SPEECH_BUSY.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    voice::models::CANCEL.store(false, Ordering::SeqCst);
+    let svc = svc.inner().clone();
     std::thread::spawn(move || {
-        let root = voice::models::speech_dir();
-        let cat = voice::models::catalog();
-        let emit = |p| {
-            let _ = app.emit("speech://progress", p);
-        };
-        let r = if id == "runtime" {
-            match cat.runtime_for_host() {
-                Some(rt) => voice::models::install_runtime(&root, rt, &emit),
-                None => Err("no speech runtime for this computer".into()),
-            }
-        } else {
-            match cat.model(&id) {
-                Some(m) => voice::models::install_model(&root, m, &emit),
-                None => Err(format!("unknown model {id}")),
-            }
-        };
-        let _ = app.emit(
-            "speech://done",
-            json!({ "id": id, "ok": r.is_ok(), "error": r.err() }),
-        );
+        let r = speech_job(&app, &svc, &id);
+        *SPEECH.lock().unwrap() = None;
+        SPEECH_BUSY.store(false, Ordering::SeqCst);
+        let _ = app.emit("speech://done", json!({ "id": id, "ok": r.is_ok(), "error": r.err() }));
     });
     Ok(())
+}
+
+fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
+    use voice::models::{self as m, Progress};
+    let root = m::speech_dir();
+    let cat = m::catalog();
+    let rt = cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?;
+    let model = cat.model(id).ok_or("That model isn't in the catalog.")?;
+    let need_rt = !m::runtime_installed(&root, rt);
+    let need_model = !m::model_installed(&root, model);
+    let total = if need_rt { rt.bytes } else { 0 } + if need_model { model.bytes } else { 0 };
+    if let Some(free) = m::free_bytes(&root) {
+        let need = m::space_needed(total);
+        if total > 0 && free < need {
+            return Err(format!(
+                "Not enough free disk space: setup needs about {} MB and {} MB are free.",
+                need / 1_000_000,
+                free / 1_000_000
+            ));
+        }
+    }
+    let step = |offset: u64, part: &'static str| {
+        let app = app.clone();
+        move |p: Progress| {
+            let v = match p {
+                Progress::Downloading { received, .. } => json!({
+                    "phase": "download", "part": part, "received": offset + received, "total": total,
+                }),
+                Progress::Unpacking | Progress::Verifying => json!({ "phase": "unpack", "part": part }),
+                _ => return,
+            };
+            speech_emit(&app, v);
+        }
+    };
+    speech_emit(app, json!({ "phase": "download", "part": "runtime", "received": 0, "total": total }));
+    if need_rt {
+        m::install_runtime(&root, rt, &step(0, "runtime"))?;
+    }
+    if need_model {
+        let done = if need_rt { rt.bytes } else { 0 };
+        m::install_model(&root, model, &step(done, "model"))?;
+    }
+    speech_emit(app, json!({ "phase": "check" }));
+    let mut s = svc.settings.lock().unwrap().clone();
+    if s.model != id {
+        s.model = id.to_string();
+        svc.save_settings(s)?;
+    }
+    svc.engine_check()
+        .map_err(|e| format!("The speech engine didn't start on this computer: {e}"))
+}
+
+#[tauri::command]
+fn speech_cancel() {
+    voice::models::CANCEL.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn speech_status() -> Option<Value> {
+    SPEECH.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -534,11 +603,16 @@ fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Res
     Ok(())
 }
 
-#[tauri::command]
-fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+/// Whatever step the assistant was on, shortcuts and sessions go back to normal.
+fn leave_onboarding(svc: &App) {
     svc.practice.store(false, Ordering::SeqCst);
     svc.hotkey_test.store(false, Ordering::SeqCst);
     svc.monitor_off();
+}
+
+#[tauri::command]
+fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    leave_onboarding(&svc);
     let mut s = svc.settings.lock().unwrap().clone();
     s.onboarded = true;
     svc.save_settings(s)?;
@@ -627,7 +701,9 @@ pub fn run() {
             open_folder,
             copy_again,
             paste_again,
-            download_model,
+            speech_setup,
+            speech_cancel,
+            speech_status,
             permissions_get,
             permission_request,
             permission_open,
@@ -659,6 +735,10 @@ pub fn run() {
                 }
             }
             platform::protect(&handle, !settings.include_app);
+            let svc3 = svc.clone();
+            std::thread::spawn(move || {
+                let _ = svc3.ensure_engine();
+            });
             if !settings.onboarded {
                 show_window(&handle, "onboarding");
             }
@@ -678,6 +758,11 @@ pub fn run() {
                 if matches!(window.label(), "settings" | "result" | "onboarding") {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                if window.label() == "onboarding" {
+                    if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
+                        leave_onboarding(&svc);
+                    }
                 }
             }
         })

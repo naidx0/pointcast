@@ -42,12 +42,15 @@ dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 mouse_position = "0.1.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 core-foundation = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media_Audio"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media_Audio", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 panic = "abort"
