@@ -541,7 +541,18 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
 function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const mac = platform() === "mac";
   const needsAx = mac && cfg.permissions.accessibility !== "granted";
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"" | "claude" | "cursor">("");
+  const [copyErr, setCopyErr] = useState("");
+  const copy = (agent: "claude" | "cursor") => {
+    setCopyErr("");
+    if (!inTauri) return;
+    mcpCopySetup(agent)
+      .then(() => {
+        setCopied(agent);
+        setTimeout(() => setCopied(""), 1600);
+      })
+      .catch((e) => setCopyErr(String(e)));
+  };
   return (
     <>
       <div className="group">
@@ -611,19 +622,16 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
         {cfg.mcp_enabled ? (
           <Row
             label="Agent setup"
-            sub="Paste it into .mcp.json (Claude Code) or mcp.json (Cursor). It holds this computer's key, so web pages cannot read your prompts."
+            sub={
+              copyErr ||
+              "For your user settings only: run the Claude Code command in a terminal, or paste the Cursor entry into mcpServers in ~/.cursor/mcp.json. It holds this computer's key, so never put it in a project file."
+            }
           >
-            <button
-              type="button"
-              className="btn"
-              onClick={() =>
-                inTauri &&
-                mcpCopySetup()
-                  .then(() => setCopied(true))
-                  .catch(() => undefined)
-              }
-            >
-              {copied ? "Copied" : "Copy setup"}
+            <button type="button" className="btn" onClick={() => copy("claude")}>
+              {copied === "claude" ? "Copied" : "Claude Code"}
+            </button>
+            <button type="button" className="btn" onClick={() => copy("cursor")}>
+              {copied === "cursor" ? "Copied" : "Cursor"}
             </button>
           </Row>
         ) : null}

@@ -689,13 +689,27 @@ fn copy_again(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 
 /// Copy the MCP setup for coding agents, token included. The token never passes through a window.
 #[tauri::command]
-fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), String> {
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
-    let text = serde_json::to_string_pretty(&mcp::client_config(&bind, &token)).map_err(|e| e.to_string())?;
+    let text = agent_setup(&agent, &bind, &token)?;
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text))
         .map_err(|e| e.to_string())
+}
+
+/// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets
+/// its user-scope command, Cursor the one server entry for `~/.cursor/mcp.json`.
+fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
+    let all = mcp::client_config(bind, token);
+    let server = &all["mcpServers"]["pointcast"];
+    let url = server["url"].as_str().ok_or("no MCP address")?;
+    let auth = server["headers"]["Authorization"].as_str().ok_or("no MCP key")?;
+    match agent {
+        "claude" => Ok(format!("claude mcp add --transport http --scope user pointcast {url} --header {q}Authorization: {auth}{q}", q = '"')),
+        "cursor" => Ok(format!("{q}pointcast{q}: {}", serde_json::to_string_pretty(server).map_err(|e| e.to_string())?, q = '"')),
+        _ => Err("Unknown agent.".into()),
+    }
 }
 
 /// Hide our window first so the paste lands in the app underneath it.
@@ -1432,6 +1446,20 @@ mod tests {
         assert!(!tried.get(), "without permission no keys are sent");
         assert_eq!(paste_or_say(true, || Err("refused".into())).unwrap_err(), PASTE_YOURSELF);
         assert!(paste_or_say(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn agent_setup_is_the_one_server_for_user_settings_not_a_whole_project_file() {
+        let token = "ab".repeat(32);
+        let claude = agent_setup("claude", "127.0.0.1:47821", &token).unwrap();
+        assert_eq!(
+            claude,
+            format!("claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp --header {q}Authorization: Bearer {token}{q}", q = '"')
+        );
+        let cursor = agent_setup("cursor", "127.0.0.1:47821", &token).unwrap();
+        assert!(cursor.starts_with(r#""pointcast": {"#) && cursor.contains(&token) && cursor.contains("http://127.0.0.1:47821/mcp"));
+        assert!(!cursor.contains("mcpServers"), "{cursor}");
+        assert!(agent_setup("vim", "127.0.0.1:47821", &token).is_err());
     }
 
     #[test]
