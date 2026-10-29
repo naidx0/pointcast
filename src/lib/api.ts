@@ -83,6 +83,10 @@ export type Config = {
   check_updates: boolean;
   /** A newer version the last check found. */
   update: string | null;
+  /** An update is downloading or installing now. */
+  update_installing?: boolean;
+  /** Why the last update did not finish, if it failed. */
+  update_failure?: string | null;
   include_app: boolean;
   hidden: string[];
   mcp_bind: string;

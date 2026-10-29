@@ -91,7 +91,7 @@ export function Settings() {
         </div>
         <div className="prefs-pane">
           {!cfg ? null : pane === "general" ? (
-            <General cfg={cfg} patch={patch} />
+            <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
             <Shortcuts cfg={cfg} patch={patch} setCfg={setCfg} />
           ) : pane === "speech" ? (
@@ -167,7 +167,7 @@ function Seg<T extends string | number>({
   );
 }
 
-function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const [theme, setTheme] = useState<ThemePref>(themePref());
   const [login, setLogin] = useState<Login>({ enabled: cfg.start_at_login, machine: false });
@@ -224,7 +224,7 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Updates
       </h2>
-      <Updates cfg={cfg} patch={patch} />
+      <Updates cfg={cfg} patch={patch} refresh={refresh} />
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Permissions
       </h2>
@@ -239,22 +239,28 @@ function General({ cfg, patch }: { cfg: Config; patch: Patch }) {
   );
 }
 
-function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const [found, setFound] = useState<string | null>(cfg.update);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
   const [error, setError] = useState<string | null>(null);
-  useEffect(
-    () =>
-      subscribe(
-        onUpdateChecked(setFound),
-        onUpdateFailed((why) => {
-          setError(why);
-          setState("idle");
-        }),
-      ),
-    [],
-  );
+  useEffect(() => {
+    // The pane may have been away while an update started or failed: ask again.
+    refresh();
+    return subscribe(
+      onUpdateChecked((v) => {
+        setFound(v);
+        setError(null);
+        setState(v ? "idle" : "latest");
+      }),
+      onUpdateFailed((why) => {
+        setError(why);
+        setState("idle");
+      }),
+    );
+  }, [refresh]);
+  useEffect(() => setFound((f) => cfg.update ?? f), [cfg.update]);
+  const installing = state === "installing" || !!cfg.update_installing;
   const check = async () => {
     setState("checking");
     setError(null);
@@ -279,7 +285,8 @@ function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
   };
   const sub =
     error ??
-    (state === "installing"
+    cfg.update_failure ??
+    (installing
       ? `Downloading ${found}. Pointcast closes, updates and opens again in about a minute.`
       : found
         ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
@@ -292,8 +299,8 @@ function Updates({ cfg, patch }: { cfg: Config; patch: Patch }) {
     <div className="group">
       <Row label={found ? `Pointcast ${found} is available` : "Pointcast"} sub={sub}>
         {found ? (
-          <button type="button" className="btn primary" disabled={state === "installing"} onClick={install}>
-            {state === "installing" ? "Updating…" : "Update"}
+          <button type="button" className="btn primary" disabled={installing} onClick={install}>
+            {installing ? "Updating…" : "Update"}
           </button>
         ) : (
           <button type="button" className="btn" disabled={state === "checking"} onClick={check}>

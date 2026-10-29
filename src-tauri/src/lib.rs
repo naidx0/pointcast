@@ -393,6 +393,8 @@ fn settings_view(svc: &App) -> Value {
         "start_at_login": s.start_at_login,
         "check_updates": s.check_updates,
         "update": update::available(),
+        "update_installing": update::installing(),
+        "update_failure": update::last_failure(),
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
