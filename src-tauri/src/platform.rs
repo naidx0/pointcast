@@ -53,9 +53,11 @@ pub fn reap(app: &AppHandle) {
 
 /// The monitor under the pointer, else the primary one.
 pub fn pointer_monitor(app: &AppHandle) -> Option<Monitor> {
-    app.cursor_position()
-        .ok()
-        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+    #[cfg(target_os = "macos")]
+    let at = crate::capture::cursor_pos().ok().map(|(x, y)| (x as f64, y as f64));
+    #[cfg(not(target_os = "macos"))]
+    let at = app.cursor_position().ok().map(|p| (p.x, p.y));
+    at.and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten())
 }
 
