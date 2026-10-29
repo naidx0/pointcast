@@ -97,7 +97,9 @@ is enough:
 - the control under it (a button, a link, a field) gets an outline, and the prompt names it, for
   example `[image 2: button "Place order"; 1=too far left]` (Windows UI Automation; macOS
   Accessibility);
-- close-ups center on that spot, or on the window under the pointer, and small text is sharpened 2×.
+- close-ups center on that spot, or on the window under the pointer, and small text is sharpened 2×;
+- when you say "this" or "here", the spot you were pointing at in that moment is ringed on the
+  picture nearest in time, even if you never stopped there.
 
 Each of these has a switch in **Settings → Capture**.
 
