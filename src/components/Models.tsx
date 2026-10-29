@@ -4,6 +4,9 @@ import {
   inTauri,
   onSpeechDone,
   onSpeechProgress,
+  onState,
+  preview,
+  sessionState,
   speechCancel,
   speechRemove,
   speechSetup,
@@ -86,6 +89,19 @@ export function useSpeechJob(refresh: () => void) {
   return { job, error, start, cancel: () => (inTauri ? speechCancel() : setJob(null)) };
 }
 
+/** Whether the model in use is slower than real time here, as the last recording reported it. Remembered with the model
+ * it was seen under, so picking another model starts clean. */
+function useSlowEngine(model: string) {
+  const [seen, setSeen] = useState<{ model: string; slow: boolean } | null>(null);
+  useEffect(() => {
+    const note = (slow: boolean | undefined) => slow !== undefined && setSeen({ model, slow });
+    if (inTauri) sessionState().then((s) => note(s.slow_engine)).catch(() => undefined);
+    else if (preview) note(new URLSearchParams(location.search).get("slow") === "1" || undefined);
+    return subscribe(onState((s) => note(s.slow_engine)));
+  }, [model]);
+  return seen?.model === model && seen.slow;
+}
+
 /** Pick an on-device model. Each card downloads its own model; the bar fills inside that card. */
 export function ModelPicker({
   cfg,
@@ -107,6 +123,9 @@ export function ModelPicker({
   const engine = cfg.speech.runtime?.installed ?? false;
   const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
   const busyId = job ? (job.id ?? chosen) : null;
+  const slow = useSlowEngine(active);
+  // The model to suggest instead: the fast, accurate one, or the smallest when that is already the one in use.
+  const faster = models.find((m) => m.id === (active === "moonshine-base-en" ? "moonshine-tiny-en" : "moonshine-base-en"));
   // A model is on disk but the engine did not load or run it: say so instead of "Ready".
   const failed = speechReady(cfg) && cfg.speech_check && !cfg.speech_check.ok ? (cfg.speech_check.error ?? "") : "";
 
@@ -155,7 +174,26 @@ export function ModelPicker({
                           : "Starting…"}
                   </span>
                 </div>
-              ) : err ? (
+              ) : null}
+              {on && slow && faster && !mine ? (
+                <div className="t-small" style={{ marginTop: 4, color: "var(--orange-ink)" }}>
+                  This model is slower than real time on this computer. {offer(faster).name} is{" "}
+                  {faster.id === "moonshine-base-en" ? "much " : ""}faster.{" "}
+                  <button
+                    type="button"
+                    className="link"
+                    disabled={!!job}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      patch({ model: faster.id });
+                      if (!(faster.installed && engine)) start(faster.id, cfg, patch);
+                    }}
+                  >
+                    {faster.installed && engine ? `Use ${offer(faster).name}` : `Download ${offer(faster).name}`}
+                  </button>
+                </div>
+              ) : null}
+              {mine ? null : err ? (
                 <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginTop: 4 }}>
                   {err.replace(/^Error:\s*/, "")}
                   {/can't reach|download server|download failed/i.test(err) ? " Download picks up where it stopped." : ""}
