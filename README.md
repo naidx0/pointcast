@@ -30,8 +30,9 @@ irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 
 Either one downloads the latest release, installs it (no admin rights on Windows), and opens the
 setup assistant. You only run it once: Pointcast opens at login, lives in the menu bar or tray, and
-updates from **Settings → General → Updates**. The builds are not notarised or code-signed; the
-scripts install them the same way a developer would, so no warning dialogs appear.
+updates from **Settings → General → Updates**: it checks the download against the SHA-256 GitHub
+publishes for it, then runs the installer built into the app. The builds are not notarised or
+code-signed; the scripts install them the same way a developer would, so no warning dialogs appear.
 
 ## Why
 

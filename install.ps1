@@ -9,6 +9,14 @@
     $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell downloads 10x slower with the bar on
     # Add TLS 1.2 for GitHub without taking anything away from the rest of this session.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    # Sign in to a proxy that asks for it as the current user; otherwise GitHub answers 407.
+    if ([Net.WebRequest]::DefaultWebProxy) {
+        [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials
+    }
+    # Started from an elevated PowerShell, Pointcast would run as admin too: Open at login would
+    # land in every account's startup and pasting into normal apps would fail.
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
     $repo = 'naidx0/pointcast'
     $releases = "https://github.com/$repo/releases/latest"
 
@@ -20,7 +28,17 @@
         # Closed for the update and the update failed: open the copy that is still there.
         if ($stopped) {
             $old = Find-Pointcast
-            if ($old) { Start-Process -FilePath $old }
+            if ($old) { $null = Open-Pointcast $old }
+        }
+    }
+    # Explorer starts it as the signed-in user, not as admin. False when Windows would not start it.
+    function Open-Pointcast([string]$exe) {
+        try {
+            if ($admin) { Start-Process -FilePath explorer.exe -ArgumentList ('"' + $exe + '"') }
+            else { Start-Process -FilePath $exe }
+            return $true
+        } catch {
+            return $false
         }
     }
     function Find-Pointcast {
@@ -79,11 +97,16 @@
     Start-Sleep -Milliseconds 600
 
     Say $(if ($had) { "Updating..." } else { "Installing..." })
+    # /UPDATE keeps an update from removing the old copy first and from putting the shortcuts back.
+    $switches = if ($had) { '/S', '/UPDATE' } else { '/S' }
     try {
-        $p = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru -Wait
+        $p = Start-Process -FilePath $setup -ArgumentList $switches -PassThru
+        $null = $p.Handle   # held now, so ExitCode is still there after it exits
     } catch {
         return Stop-Install "Windows blocked the installer. You can run it yourself: $setup"
     }
+    # Not -Wait: in Windows PowerShell that also waits for anything the installer left running.
+    $p.WaitForExit()
     if ($p.ExitCode -ne 0) {
         return Stop-Install "the installer stopped with code $($p.ExitCode). Close Pointcast if it is open and run this again. The installer is at $setup."
     }
@@ -92,8 +115,9 @@
     if (-not $exe) { return Stop-Install "the installer finished but pointcast.exe is not where it should be." }
     if (-not $env:POINTCAST_SETUP) { Remove-Item $setup -ErrorAction SilentlyContinue }
 
-    Start-Process -FilePath $exe
-    if ($had) {
+    if (-not (Open-Pointcast $exe)) {
+        Say "Installed, but Windows did not start it. Open Pointcast from the Start menu."
+    } elseif ($had) {
         Say "Updated. Pointcast is running in the system tray (bottom right, under the ^ arrow)."
     } else {
         Say "Installed. Pointcast is in the system tray (bottom right, under the ^ arrow)."
