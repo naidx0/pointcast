@@ -92,6 +92,7 @@ function previewConfig(): Config {
         { id: "moonshine-tiny-en", name: "Moonshine Tiny v2 (English)", installed: false, bytes: 29858559 },
       ],
     },
+    speech_check: null,
     devices: ["MacBook Pro Microphone", "AirPods Pro"],
     permissions: {
       microphone: "granted",

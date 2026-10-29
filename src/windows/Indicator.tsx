@@ -76,7 +76,7 @@ export function Indicator() {
 
   const waiting = s.phase === "loading";
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
-  const problem = !s.mic && s.error ? s.error : null;
+  const problem = s.error;
 
   return (
     <div className="hud-wrap" data-tauri-drag-region>
@@ -161,7 +161,7 @@ function Done({ s }: { s: UiState }) {
           ? `Copied · ${paste} to paste`
           : s.notice === "saved"
             ? "Saved to your folder"
-            : "Nothing was recorded";
+            : s.error || "Nothing was recorded";
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud done" role="status" aria-live="polite" data-tauri-drag-region>

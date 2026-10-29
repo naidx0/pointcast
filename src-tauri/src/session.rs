@@ -74,6 +74,8 @@ pub struct App {
     engine: Mutex<Option<Engine>>,
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
+    /// How the last attempt to load the model and run it went; none before the first.
+    checked: Mutex<Option<Result<(), String>>>,
     /// Held for the whole of a stop, so a second stop or a Quit waits for it instead of racing it.
     finishing: Mutex<()>,
     /// Set by Discard: the worker skips transcribing what is left.
@@ -135,6 +137,7 @@ impl App {
             take: Mutex::default(),
             engine: Mutex::default(),
             loading: Mutex::default(),
+            checked: Mutex::default(),
             finishing: Mutex::default(),
             cancel: AtomicBool::new(false),
             audio_at: AtomicU64::new(0),
@@ -189,8 +192,19 @@ impl App {
         Ok(())
     }
 
+    /// Whether the speech engine last loaded and ran here, or why not.
+    pub fn speech_check(&self) -> Option<Result<(), String>> {
+        self.checked.lock().unwrap().clone()
+    }
+
     /// Load the chosen model unless it is already the one in memory.
     pub fn ensure_engine(&self) -> Result<(), String> {
+        let r = self.load_engine();
+        *self.checked.lock().unwrap() = Some(r.clone());
+        r
+    }
+
+    fn load_engine(&self) -> Result<(), String> {
         let _one = self.loading.lock().unwrap();
         let root = models::speech_dir();
         let cat = models::catalog();
@@ -236,6 +250,7 @@ impl App {
         let g = self.engine.lock().unwrap();
         let eng = g.as_ref().ok_or(NO_MODEL)?;
         let _ = eng.transcribe(&vec![0.0f32; 8_000]);
+        *self.checked.lock().unwrap() = Some(Ok(()));
         Ok(())
     }
 
@@ -836,6 +851,16 @@ mod tests {
         assert!(!a.keep_frames(&Settings::default(), 2, never));
         assert!(a.frames.lock().unwrap().is_none());
         a.stop.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn the_last_engine_check_is_remembered_so_ready_is_not_claimed_after_a_failure() {
+        let a = app("check");
+        assert!(a.speech_check().is_none(), "nothing tried yet");
+        // The test's data folder has no model, so the engine cannot start.
+        let r = a.engine_check();
+        assert!(r.is_err());
+        assert_eq!(a.speech_check(), Some(r));
     }
 
     #[test]

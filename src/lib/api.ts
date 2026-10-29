@@ -90,6 +90,8 @@ export type Config = {
   onboarded: boolean;
   sounds: boolean;
   speech: SpeechView;
+  /** How the last load-and-run of the speech engine went; null before the first. */
+  speech_check: { ok: boolean; error: string | null } | null;
   devices: string[];
   permissions: Permissions;
   recommended: string;

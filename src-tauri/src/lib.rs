@@ -356,6 +356,7 @@ fn settings_view(svc: &App) -> Value {
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
         "speech": voice::models::view(&voice::models::speech_dir(), &voice::models::catalog()),
+        "speech_check": svc.speech_check().map(|r| json!({ "ok": r.is_ok(), "error": r.err() })),
         "devices": voice::audio::devices(),
         "permissions": permissions::probe(),
         "recommended": voice::machine::recommended(),

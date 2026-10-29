@@ -104,6 +104,8 @@ export function ModelPicker({
   const engine = cfg.speech.runtime?.installed ?? false;
   const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
   const busyId = job ? (job.id ?? chosen) : null;
+  // A model is on disk but the engine did not load or run it: say so instead of "Ready".
+  const failed = speechReady(cfg) && cfg.speech_check && !cfg.speech_check.ok ? (cfg.speech_check.error ?? "") : "";
 
   return (
     <div className="cards">
@@ -201,10 +203,16 @@ export function ModelPicker({
           </div>
         );
       })}
-      <p className="t-small" style={{ margin: "4px 2px 0" }}>
-        {speechReady(cfg)
-          ? "Ready and tested on this computer. Nothing you say leaves it."
-          : removable
+      <p
+        className="t-small"
+        role={failed ? "alert" : undefined}
+        style={{ margin: "4px 2px 0", color: failed ? "var(--red-ink)" : undefined }}
+      >
+        {failed
+          ? `The speech engine didn't start on this computer: ${failed.replace(/^The speech engine didn't start on this computer: /, "")}`
+          : speechReady(cfg) && cfg.speech_check?.ok
+            ? "Ready and tested on this computer. Nothing you say leaves it."
+            : removable
             ? "Models download once and run offline on this computer."
             : "Models download once and run offline on this computer. You can switch any time in Settings."}
       </p>
@@ -244,6 +252,7 @@ function simulate(
       setJob(null);
       patch({
         model: id,
+        speech_check: { ok: true, error: null },
         speech: {
           ...cfg.speech,
           runtime: { ...(cfg.speech.runtime ?? { id: "runtime", lib: "" }), installed: true },
