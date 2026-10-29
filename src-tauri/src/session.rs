@@ -92,6 +92,8 @@ pub struct App {
     frames: Mutex<Option<Buffer>>,
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
+    /// What coding agents read over MCP: the last recording's prompt, until its History entry goes.
+    pub latest: crate::mcp::Latest,
     freeze: Mutex<Option<Shot>>,
     /// When the region frame was frozen: the capture belongs there, not at the moment of Enter.
     freeze_t: Mutex<Option<u64>>,
@@ -153,6 +155,7 @@ impl App {
             tokens: Mutex::default(),
             frames: Mutex::default(),
             last_id: Mutex::default(),
+            latest: Default::default(),
             practice: AtomicBool::new(false),
             practice_next: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
@@ -381,15 +384,18 @@ impl App {
         *self.last_export.lock().unwrap() = Some(exp.clone());
         // The checkpoint goes only once History has the prompt: a failed save leaves it for
         // the next launch to recover.
+        let mut saved = None;
         if items.is_empty() {
             self.history.clear_checkpoint();
         } else {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
             if let Ok(m) = self.history.save(&items, t0, now_ms().saturating_sub(t0)) {
-                *self.last_id.lock().unwrap() = Some(m.id);
+                *self.last_id.lock().unwrap() = Some(m.id.clone());
+                saved = Some(m.id);
                 self.history.clear_checkpoint();
             }
         }
+        self.latest.set(saved, exp.clone());
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
@@ -597,17 +603,21 @@ impl App {
         }
     }
 
-    /// Make a history entry the one "Paste Last Prompt" uses.
+    /// Make a history entry the one "Paste Last Prompt" uses. When coding agents read that entry, they read it as it
+    /// is now (after a picture in it was edited).
     pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
         let exp = self.history.export(id)?;
         *self.last_export.lock().unwrap() = Some(exp.clone());
         *self.last_id.lock().unwrap() = Some(id.to_string());
+        self.latest.changed(id, &exp);
         Ok(exp)
     }
 
     /// History lost entries (`gone`, or all of them when None). When the last prompt was one, the newest entry left
-    /// takes its place, or nothing does. True when the last prompt changed.
+    /// takes its place, or nothing does; coding agents read nothing rather than an older one. True when the last
+    /// prompt changed.
     pub fn forget(&self, gone: Option<&str>) -> bool {
+        self.latest.forget(gone);
         let hit = gone.is_none_or(|id| self.last_id.lock().unwrap().as_deref() == Some(id));
         if !hit {
             return false;
@@ -956,6 +966,61 @@ mod tests {
         a.history.clear().unwrap();
         assert!(a.forget(None));
         assert!(a.last_export().is_none() && a.last_id.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn coding_agents_read_their_own_history_entry_until_it_is_deleted_or_edited() {
+        let a = app("agents");
+        let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
+        let served = |a: &App| a.latest.get().map(|e| e.plain);
+        let pic = Capture {
+            id: 0,
+            kind: CaptureKind::Region,
+            t_ms: 10,
+            png: png(),
+            width: 1,
+            height: 1,
+            labels: vec![],
+            pointer: None,
+            trail: vec![],
+            element: None,
+            place: None,
+            anchors: vec![],
+            auto: false,
+        };
+        // At launch the newest entry is the last prompt, and agents read nothing until a recording.
+        let older = a.history.save(&said("older"), 1_000, 9).unwrap();
+        let newest = a.history.save(&said("newest"), 2_000, 9).unwrap();
+        a.set_last(&newest.id).unwrap();
+        a.history.delete(&newest.id).unwrap();
+        assert!(a.forget(Some(&newest.id)));
+        assert_eq!((a.last_export().unwrap().plain.as_str(), served(&a)), ("older", None), "deleting it serves no older one");
+
+        // A recording: agents read it, as the stop saved it.
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() }, Item::Image { t_ms: 10, capture: pic }];
+        let rec = a.history.save(&items, 3_000, 9).unwrap();
+        a.latest.set(Some(rec.id.clone()), a.set_last(&rec.id).unwrap());
+        // A picture in it marked up again: agents read the new one.
+        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
+        a.set_last(&rec.id).unwrap();
+        assert_eq!(served(&a).as_deref(), Some("look [image 1: 1=this one]"));
+        // Copying the older prompt makes it the last one; agents still read the recording.
+        a.set_last(&older.id).unwrap();
+        assert_eq!(served(&a).as_deref(), Some("look [image 1: 1=this one]"));
+        // The recording deleted while it is not the last prompt: agents no longer read it.
+        a.history.delete(&rec.id).unwrap();
+        assert!(!a.forget(Some(&rec.id)));
+        assert_eq!(served(&a), None);
+
+        // Clearing History: nothing left to read.
+        let again = a.history.save(&said("again"), 4_000, 9).unwrap();
+        a.latest.set(Some(again.id.clone()), a.set_last(&again.id).unwrap());
+        a.history.delete(&older.id).unwrap();
+        a.forget(Some(&older.id));
+        assert_eq!(served(&a).as_deref(), Some("again"), "another entry going leaves it");
+        a.history.clear().unwrap();
+        a.forget(None);
+        assert_eq!(served(&a), None);
     }
 
     #[test]

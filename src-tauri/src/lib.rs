@@ -21,7 +21,6 @@ mod tray;
 mod update;
 mod voice;
 
-use mcp::Latest;
 use prompt::{Label, SessionExport};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -140,9 +139,6 @@ fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, Stri
         if practice {
             let _ = app.emit("practice://result", e);
         } else {
-            if let Some(latest) = app.try_state::<Latest>() {
-                latest.set(e.clone());
-            }
             let _ = app.emit("session://result", e);
         }
     }
@@ -672,16 +668,9 @@ fn history_clear(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), 
 
 /// A deleted prompt leaves Paste Last Prompt and what coding agents read too.
 fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
-    if !svc.forget(gone) {
-        return;
+    if svc.forget(gone) {
+        emit_state(app, svc);
     }
-    if let Some(latest) = app.try_state::<Latest>() {
-        match svc.last_export() {
-            Some(exp) => latest.set(exp),
-            None => latest.clear(),
-        }
-    }
-    emit_state(app, svc);
 }
 
 pub fn deliver_last(svc: &App) -> Result<(), String> {
@@ -1109,10 +1098,9 @@ pub fn run() {
     let settings_path = settings::settings_path();
     let settings = Settings::load(&settings_path);
     let svc = App::new(settings.clone(), settings_path);
-    let latest = Latest::default();
     if settings.mcp_enabled {
         // Errors name the problem, never the token.
-        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, latest.clone(), t)) {
+        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, svc.latest.clone(), t)) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
             Err(e) => {
                 eprintln!("Pointcast MCP did not start: {e}");
@@ -1136,7 +1124,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(svc.clone())
-        .manage(latest)
         .invoke_handler(tauri::generate_handler![
             settings_get,
             settings_patch,
