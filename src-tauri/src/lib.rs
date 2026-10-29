@@ -1,3 +1,4 @@
+mod anchor;
 mod capture;
 mod chord;
 mod clipboard;
@@ -272,6 +273,7 @@ fn settings_view(svc: &App) -> Value {
         "zoom_target": s.zoom_target,
         "zoom_sharpen": s.zoom_sharpen,
         "outline_element": s.outline_element,
+        "spoken_anchors": s.spoken_anchors,
         "start_at_login": s.start_at_login,
         "include_app": s.include_app,
         "hidden": s.hidden_list(),
@@ -991,6 +993,7 @@ mod tests {
             trail: vec![],
             element: None,
             map: Default::default(),
+            k: 1.0,
         };
         let v = frame_payload(&shot, settings::MarkPoint::Ring);
         assert_eq!((v["width"].clone(), v["pointer"].clone()), (json!(4), json!({ "x": 3, "y": 2 })));
@@ -1032,6 +1035,9 @@ mod tests {
         assert_eq!(back.mark_point, settings::MarkPoint::Ring);
         let quiet = merge(&back, p(json!({ "outline_element": false }))).unwrap();
         assert!(!quiet.outline_element && back.outline_element);
+        let mute = merge(&quiet, p(json!({ "spoken_anchors": "off" }))).unwrap();
+        assert_eq!((mute.spoken_anchors, quiet.spoken_anchors), (settings::SpokenAnchors::Off, settings::SpokenAnchors::Ring));
+        assert!(merge(&mute, p(json!({ "spoken_anchors": "trail" }))).is_err());
     }
 
     #[test]

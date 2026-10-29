@@ -200,6 +200,8 @@ fn stripped(items: &[Item]) -> Vec<Item> {
                     pointer: c.pointer,
                     trail: c.trail.clone(),
                     element: c.element.clone(),
+                    place: c.place,
+                    anchors: c.anchors.clone(),
                 },
             },
             s => s.clone(),
@@ -279,6 +281,8 @@ mod tests {
                         name: "Place order".into(),
                         rect: crate::element::Bounds { x: 0, y: 0, w: 1, h: 1 },
                     }),
+                    place: None,
+                    anchors: vec![],
                 },
             },
             Item::Speech { t_ms: 1200, end_ms: 2000, text: "move it left".into() },
@@ -311,7 +315,20 @@ mod tests {
         let items: Vec<Item> = serde_json::from_str(old).unwrap();
         let Item::Image { capture, .. } = &items[0] else { panic!("{items:?}") };
         assert_eq!(capture.element, None);
+        assert_eq!((capture.place, capture.anchors.len()), (None, 0));
         assert_eq!(serde_json::to_string(&items).unwrap(), old, "and one without a control writes no field for it");
+    }
+
+    #[test]
+    fn a_picture_keeps_its_screen_mapping_and_spoken_rings_in_history() {
+        let s = store("place");
+        let mut v = items();
+        let Item::Image { capture, .. } = &mut v[1] else { panic!() };
+        let map = crate::capture::Mapping { origin: (-1920, 0), scale: 1.5, frame: (2880, 1620), crop: (0, 0), size: (2880, 1620) };
+        capture.place = Some(crate::capture::Place { map, k: 1.5 });
+        capture.anchors = vec![crate::pointer::Point { t_ms: 1400, x: 640, y: 360 }];
+        let m = s.save(&v, 1_793_000_000_000, 2000).unwrap();
+        assert_eq!(s.items(&m.id).unwrap(), v);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::privacy::{self, Rect};
 use crate::prompt::CaptureKind;
 use crate::settings::{MarkPoint, Settings, ZoomTarget};
 use mouse_position::mouse_position::Mouse;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A close-up centred on where the person paused looks this far back for the pause.
 pub const ZOOM_DWELL_MS: u64 = 1_500;
@@ -27,10 +27,27 @@ pub struct Shot {
     /// How screen positions land in this picture.
     #[serde(skip)]
     pub map: Mapping,
+    /// The picture's density, what its marks were drawn at.
+    #[serde(skip)]
+    pub k: f32,
+}
+
+impl Shot {
+    /// What a mark added later needs: where screen positions land and how big to draw.
+    pub fn place(&self) -> Place {
+        Place { map: self.map, k: self.k }
+    }
+}
+
+/// A capture's screen mapping and density, kept so a ring can be added after it was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Place {
+    pub map: Mapping,
+    pub k: f32,
 }
 
 /// Screen coordinates to this picture's pixels: the monitor's origin and scale, then the crop.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
     pub origin: (i32, i32),
     pub scale: f64,
@@ -285,6 +302,7 @@ pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
         trail,
         element,
         map: f.map,
+        k: f.density,
     })
 }
 
@@ -318,6 +336,7 @@ pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
         trail,
         element,
         map,
+        k,
     })
 }
 
@@ -338,6 +357,7 @@ pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<S
         trail,
         element,
         map: f.map,
+        k: f.density,
     })
 }
 
@@ -355,6 +375,7 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
         trail: vec![],
         element: None,
         map: Mapping::default(),
+        k: 1.0,
     })
 }
 

@@ -158,9 +158,36 @@ struct RecognizerConfig {
     hr: Homophone,
     ctc_fst_decoder_config: CtcFst,
 }
+/// The leading fields of `SherpaOnnxOfflineRecognizerResult`; sherpa owns the rest, which is never read.
 #[repr(C)]
 struct ResultHead {
     text: P,
+    /// Token start times in seconds from the start of the audio, `count` of them, parallel to `tokens_arr`; null when
+    /// the model gives none.
+    timestamps: *const c_float,
+    count: i32,
+    tokens: P,
+    tokens_arr: *const P,
+}
+
+/// What a model heard: the text and, when the model gives them, its tokens with their start in ms.
+#[derive(Debug, Default, PartialEq)]
+pub struct Heard {
+    pub text: String,
+    pub tokens: Option<Vec<(String, u64)>>,
+}
+
+/// The tokens of a result with their start times, or None when the model gave no times.
+unsafe fn token_times(r: &ResultHead) -> Option<Vec<(String, u64)>> {
+    if r.timestamps.is_null() || r.tokens_arr.is_null() || r.count <= 0 {
+        return None;
+    }
+    let n = r.count as usize;
+    let (toks, secs) = (std::slice::from_raw_parts(r.tokens_arr, n), std::slice::from_raw_parts(r.timestamps, n));
+    toks.iter()
+        .zip(secs)
+        .map(|(t, s)| (!t.is_null()).then(|| (CStr::from_ptr(*t).to_string_lossy().into_owned(), (s.max(0.0) * 1000.0).round() as u64)))
+        .collect()
 }
 
 type Opaque = std::ffi::c_void;
@@ -337,30 +364,40 @@ impl Engine {
     }
 
     pub fn transcribe(&self, samples: &[f32]) -> String {
+        self.hear(samples).text
+    }
+
+    /// The text and, where the model gives them, when each token started. Moonshine gives none, so its words are timed
+    /// by estimate.
+    pub fn hear(&self, samples: &[f32]) -> Heard {
         if samples.is_empty() {
-            return String::new();
+            return Heard::default();
         }
         unsafe {
             let s = (self.api.stream)(self.rec);
             if s.is_null() {
-                return String::new();
+                return Heard::default();
             }
             (self.api.accept)(s, 16000, samples.as_ptr(), samples.len() as i32);
             (self.api.decode)(self.rec, s);
             let r = (self.api.result)(s);
-            let text = if r.is_null() || (*r).text.is_null() {
-                String::new()
+            let heard = if r.is_null() {
+                Heard::default()
             } else {
-                CStr::from_ptr((*r).text)
-                    .to_string_lossy()
-                    .trim()
-                    .to_string()
+                Heard {
+                    text: if (*r).text.is_null() {
+                        String::new()
+                    } else {
+                        CStr::from_ptr((*r).text).to_string_lossy().trim().to_string()
+                    },
+                    tokens: token_times(&*r),
+                }
             };
             if !r.is_null() {
                 (self.api.destroy_result)(r);
             }
             (self.api.destroy_stream)(s);
-            text
+            heard
         }
     }
 }
@@ -389,5 +426,52 @@ mod tests {
             offset_of!(RecognizerConfig, decoding_method),
             8 + size_of::<ModelConfig>() + 16
         );
+        // SherpaOnnxOfflineRecognizerResult: text, timestamps, count, tokens, tokens_arr, then fields never read.
+        assert_eq!(
+            (offset_of!(ResultHead, timestamps), offset_of!(ResultHead, count), offset_of!(ResultHead, tokens), offset_of!(ResultHead, tokens_arr)),
+            (8, 16, 24, 32)
+        );
+    }
+
+    #[test]
+    fn token_times_are_read_when_the_model_gives_them() {
+        let names = [CString::new("▁click").unwrap(), CString::new("▁th").unwrap(), CString::new("is").unwrap()];
+        let arr: Vec<P> = names.iter().map(|c| c.as_ptr()).collect();
+        let secs: [c_float; 3] = [0.08, 0.52, 0.6004];
+        let text = CString::new("click this").unwrap();
+        let mut r = ResultHead {
+            text: text.as_ptr(),
+            timestamps: secs.as_ptr(),
+            count: 3,
+            tokens: std::ptr::null(),
+            tokens_arr: arr.as_ptr(),
+        };
+        let want = vec![("▁click".to_string(), 80), ("▁th".to_string(), 520), ("is".to_string(), 600)];
+        assert_eq!(unsafe { token_times(&r) }, Some(want));
+        r.timestamps = std::ptr::null();
+        assert_eq!(unsafe { token_times(&r) }, None, "a model without times");
+        r.timestamps = secs.as_ptr();
+        r.count = 0;
+        assert_eq!(unsafe { token_times(&r) }, None);
+    }
+
+    /// Whether an installed model gives token times on real speech. Reads only.
+    /// `POINTCAST_SPEECH_DIR=<speech dir> POINTCAST_MODEL=<id> POINTCAST_WAV=<wav> cargo test -- --ignored real_token_times`
+    #[test]
+    #[ignore]
+    fn real_token_times() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let root = std::path::PathBuf::from(var("POINTCAST_SPEECH_DIR"));
+        let c = models::catalog();
+        let m = c.model(&var("POINTCAST_MODEL")).unwrap();
+        let eng = load(&root, c.runtime_for_host().unwrap(), m, 2).unwrap();
+        let (rate, ch, pcm) = crate::voice::audio::read_wav(&std::fs::read(var("POINTCAST_WAV")).unwrap()).unwrap();
+        let mut mono = vec![];
+        crate::voice::audio::downmix(&pcm, ch, &mut mono);
+        let mut at16 = vec![];
+        crate::voice::audio::Resampler::new(rate).push(&mono, &mut at16);
+        let h = eng.hear(&at16);
+        eprintln!("{}: {:?}; token times: {:?}", m.id, h.text, h.tokens);
+        assert!(h.text.split_whitespace().count() >= 3, "{h:?}");
     }
 }

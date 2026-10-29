@@ -4,7 +4,7 @@ use crate::capture::{self, Shot};
 use crate::element::ElementMark;
 use crate::pointer::Point;
 use crate::prompt::{self, Capture, CaptureKind, Item, Label, SessionExport};
-use crate::settings::{OutputMode, Settings};
+use crate::settings::{MarkPoint, OutputMode, Settings, SpokenAnchors};
 use crate::voice::audio::{self, Mic, Take};
 use crate::voice::machine;
 use crate::voice::models;
@@ -77,6 +77,8 @@ pub struct App {
     pub history: crate::history::Store,
     /// Where the pointer went during this recording (positions only).
     trail: Mutex<crate::pointer::Trail>,
+    /// When the model heard each token, by the start of its piece, for the pieces it gave times for.
+    tokens: Mutex<Vec<(u64, Vec<crate::anchor::Token>)>>,
     /// The history entry of the last finished prompt.
     pub last_id: Mutex<Option<String>>,
     freeze: Mutex<Option<Shot>>,
@@ -131,6 +133,7 @@ impl App {
             last_dir: Mutex::default(),
             history: crate::history::Store::new(&crate::settings::data_dir()),
             trail: Mutex::default(),
+            tokens: Mutex::default(),
             last_id: Mutex::default(),
             practice: AtomicBool::new(false),
             hotkey_test: AtomicBool::new(false),
@@ -264,6 +267,7 @@ impl App {
         }
         let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         self.trail.lock().unwrap().clear();
+        self.tokens.lock().unwrap().clear();
         let me = Arc::clone(self);
         std::thread::spawn(move || me.follow_pointer(no));
         let me = Arc::clone(self);
@@ -294,7 +298,13 @@ impl App {
             self.state.lock().unwrap().phase = Phase::Idle;
             return Ok(None);
         }
-        let items = prompt::ordered(self.items.lock().unwrap().clone());
+        let settings = self.settings.lock().unwrap().clone();
+        let mut items = prompt::ordered(self.items.lock().unwrap().clone());
+        if settings.spoken_anchors == SpokenAnchors::Ring {
+            let trail = self.trail.lock().unwrap().since(0);
+            let tokens = self.tokens.lock().unwrap().clone();
+            crate::anchor::ring_spoken(&mut items, &trail, &tokens, settings.mark_point != MarkPoint::Off);
+        }
         let exp = prompt::assemble_export(&items);
         self.history.clear_checkpoint();
         if self.practice.load(Ordering::SeqCst) {
@@ -308,7 +318,6 @@ impl App {
                 *self.last_id.lock().unwrap() = Some(m.id);
             }
         }
-        let settings = self.settings.lock().unwrap().clone();
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings);
@@ -408,6 +417,8 @@ impl App {
             pointer: None,
             trail: vec![],
             element,
+            place: None,
+            anchors: vec![],
         };
         self.push(Item::Image {
             t_ms: t,
@@ -425,6 +436,7 @@ impl App {
         let asked = self.t_ms();
         let shot = grab(&settings, &self.recent(asked), asked)?;
         let t = self.t_ms();
+        let place = Some(shot.place());
         let cap = Capture {
             id: 0,
             kind: shot.kind,
@@ -436,6 +448,8 @@ impl App {
             pointer: shot.pointer,
             trail: shot.trail,
             element: shot.element,
+            place,
+            anchors: vec![],
         };
         self.push(Item::Image {
             t_ms: t,
@@ -524,19 +538,23 @@ impl App {
     fn decode_ranges(&self, take: &Take, ranges: &[std::ops::Range<usize>], t0: u64) {
         for r in ranges {
             let samples = take.copy(r.clone());
-            let text = {
+            let heard = {
                 let g = self.engine.lock().unwrap();
                 match g.as_ref() {
-                    Some(eng) => eng.transcribe(&samples),
-                    None => String::new(),
+                    Some(eng) => eng.hear(&samples),
+                    None => Default::default(),
                 }
             };
+            let text = heard.text;
             if text.is_empty() {
                 continue;
             }
             let t_ms = (r.start as u64) * 1000 / audio::RATE as u64;
             let end_ms = (r.end as u64) * 1000 / audio::RATE as u64;
             let _ = t0;
+            if let Some(tok) = heard.tokens {
+                self.tokens.lock().unwrap().push((t_ms, tok));
+            }
             self.push(Item::Speech {
                 t_ms,
                 end_ms,
@@ -595,8 +613,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let a = App::new(Settings::default(), d.join("settings.json"));
-        // A practice run checkpoints nothing, so a test never leaves a session in the real app's recovery folder.
+        let mut a = App::new(Settings::default(), d.join("settings.json"));
+        // History and the recovery checkpoint live in the test's own folder, never the real app's.
+        Arc::get_mut(&mut a).expect("not shared yet").history = crate::history::Store::new(&d);
+        // A practice run checkpoints nothing and delivers nowhere: a stop never pastes into the desktop.
         a.practice.store(true, Ordering::SeqCst);
         a
     }
@@ -631,6 +651,51 @@ mod tests {
         // Deleted in the overlay: nothing to name.
         a.commit_region(png(), vec![], None).unwrap();
         assert_eq!(a.ui().text, r#"[image 1: button "Place order"; 1=too far left] [image 2]"#);
+    }
+
+    /// The colour at `(x, y)` of an exported picture.
+    fn pixel(img: &prompt::SessionImage, x: u32, y: u32) -> [u8; 3] {
+        let b64 = img.data_url.trim_start_matches("data:image/png;base64,");
+        let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
+        let (buf, w, _) = crate::image_ops::decode_rgba(&png).unwrap();
+        let i = ((y * w + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2]]
+    }
+
+    #[test]
+    fn at_stop_saying_this_rings_where_the_pointer_was_on_the_nearest_picture() {
+        let a = app("spoken");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        let map = capture::Mapping { origin: (0, 0), scale: 1.0, frame: (400, 300), crop: (0, 0), size: (400, 300) };
+        let shot = Capture {
+            id: 0,
+            kind: CaptureKind::Full,
+            t_ms: 3_000,
+            png: crate::image_ops::encode_png(&vec![255u8; 400 * 300 * 4], 400, 300).unwrap(),
+            width: 400,
+            height: 300,
+            labels: vec![],
+            pointer: None,
+            trail: vec![],
+            element: None,
+            place: Some(capture::Place { map, k: 1.0 }),
+            anchors: vec![],
+        };
+        // "this" is said at about 1.6 s while the pointer sweeps right, passing (100, 80) then.
+        a.push(Item::Speech { t_ms: 1_000, end_ms: 2_700, text: "click this button".into() });
+        a.push(Item::Image { t_ms: 3_000, capture: shot });
+        for i in 0..15 {
+            a.trail.lock().unwrap().push(Point { t_ms: 1_000 + i * 100, x: 40 + i as i32 * 10, y: 80 });
+        }
+        let on_ring = 100 + crate::image_ops::RING_R as u32;
+        let exp = a.stop(false).unwrap().unwrap();
+        assert_eq!(pixel(&exp.images[0], on_ring, 80), [245, 165, 36]);
+        assert_eq!(pixel(&exp.images[0], 100, 80), [255; 3]);
+        assert_eq!(exp.plain, "click this button [image 1]", "the words are untouched");
+        // Turned off, the same recording comes out as it was taken.
+        a.settings.lock().unwrap().spoken_anchors = SpokenAnchors::Off;
+        let exp = a.stop(false).unwrap().unwrap();
+        assert_eq!(pixel(&exp.images[0], on_ring, 80), [255; 3]);
     }
 
     #[test]

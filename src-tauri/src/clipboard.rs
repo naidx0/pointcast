@@ -103,6 +103,8 @@ mod tests {
             pointer: None,
             trail: vec![],
             element: None,
+            place: None,
+            anchors: vec![],
         });
     }
 }
