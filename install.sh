@@ -7,6 +7,7 @@
 set -euo pipefail
 
 REPO=naidx0/pointcast
+RELEASES="https://github.com/$REPO/releases/latest"
 say() { printf '  %s\n' "$*"; }
 fail() {
   printf '\n  Pointcast was not installed: %s\n\n' "$*" >&2
@@ -18,10 +19,16 @@ printf '\n  Pointcast\n'
 ver=$(sw_vers -productVersion)
 [ "${ver%%.*}" -ge 12 ] || fail "Pointcast needs macOS 12 or later; this Mac has $ver."
 
+dest=/Applications
+[ -w "$dest" ] || dest="$HOME/Applications"
+mkdir -p "$dest"
+had=0
+[ -d "$dest/Pointcast.app" ] && had=1
+
 tmp=$(mktemp -d)
 cleanup() {
   hdiutil detach -quiet "$tmp/mnt" >/dev/null 2>&1 || true
-  rm -rf "$tmp"
+  rm -rf "$tmp" "$dest/.Pointcast.app.new"
 }
 trap cleanup EXIT
 
@@ -30,10 +37,19 @@ if [ -n "${POINTCAST_DMG:-}" ]; then
   [ -f "$dmg" ] || fail "no file at $dmg."
 else
   say "Finding the latest version..."
-  json=$(curl -fsSL -H 'User-Agent: pointcast-installer' "https://api.github.com/repos/$REPO/releases/latest") ||
+  resp=$(curl -sSL -H 'User-Agent: pointcast-installer' -w '\n%{http_code}' \
+    "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) ||
     fail "can't reach GitHub. Check your internet connection and run this again."
-  url=$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*\.dmg"' | head -1 | sed -E 's/.*"(https[^"]*)"$/\1/')
-  [ -n "$url" ] || fail "the latest release has no macOS download yet."
+  code=${resp##*$'\n'}
+  json=${resp%$'\n'*}
+  case $code in
+  200) ;;
+  404) fail "there is no published release yet. See https://github.com/$REPO/releases." ;;
+  403 | 429) fail "GitHub is limiting requests from your network. Try again in a few minutes, or download the .dmg from $RELEASES." ;;
+  *) fail "GitHub answered $code. Try again in a minute." ;;
+  esac
+  url=$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*\.dmg"' | head -1 | sed -E 's/.*"(https[^"]*)"$/\1/' || true)
+  [ -n "$url" ] || fail "the latest release has no macOS download yet. See $RELEASES."
   say "Downloading $(basename "$url")..."
   curl -fL --progress-bar -o "$tmp/Pointcast.dmg" "$url" ||
     fail "the download did not finish. Check your connection and run this again."
@@ -45,25 +61,36 @@ hdiutil attach -nobrowse -noautoopen -quiet -mountpoint "$tmp/mnt" "$dmg" || fai
 app=$(find "$tmp/mnt" -maxdepth 1 -name '*.app' -print -quit)
 [ -n "$app" ] || fail "there is no app inside the disk image."
 
-dest=/Applications
-[ -w "$dest" ] || dest="$HOME/Applications"
-mkdir -p "$dest"
+say "$([ $had = 1 ] && echo Updating || echo Installing)..."
+# Copy first, then swap, so a failed copy never leaves the Mac without Pointcast.
+ditto "$app" "$dest/.Pointcast.app.new" || fail "could not copy Pointcast into $dest (is the disk full?)."
+# Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
+xattr -dr com.apple.quarantine "$dest/.Pointcast.app.new" 2>/dev/null || true
+# Release builds are ad-hoc signed; re-sign only if that signature did not survive the copy.
+codesign --verify "$dest/.Pointcast.app.new" >/dev/null 2>&1 ||
+  codesign --force --deep --sign - "$dest/.Pointcast.app.new" >/dev/null 2>&1 || true
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
-osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
-pkill -x pointcast >/dev/null 2>&1 || true
-sleep 1
+if pgrep -x pointcast >/dev/null 2>&1; then
+  osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
+  sleep 1
+  pkill -x pointcast >/dev/null 2>&1 || true
+fi
+rm -rf "$dest/Pointcast.app" || fail "could not replace the Pointcast in $dest (it may belong to another user)."
+mv "$dest/.Pointcast.app.new" "$dest/Pointcast.app" || fail "could not move Pointcast into $dest."
 
-say "Installing..."
-rm -rf "$dest/Pointcast.app"
-ditto "$app" "$dest/Pointcast.app"
-# Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
-xattr -dr com.apple.quarantine "$dest/Pointcast.app" 2>/dev/null || true
-# Release builds are ad-hoc signed; re-sign only if that signature did not survive the copy.
-codesign --verify "$dest/Pointcast.app" >/dev/null 2>&1 ||
-  codesign --force --deep --sign - "$dest/Pointcast.app" >/dev/null 2>&1 || true
+if [ $had = 1 ]; then
+  # Each build is signed ad hoc, so macOS treats an update as a new app: clear the old grants so
+  # it asks cleanly instead of showing them on while they no longer apply.
+  tccutil reset ScreenCapture dev.pointcast.app >/dev/null 2>&1 || true
+  tccutil reset Accessibility dev.pointcast.app >/dev/null 2>&1 || true
+fi
 
 open "$dest/Pointcast.app"
-say "Installed to $dest/Pointcast.app."
-say "Pointcast is in the menu bar (top right). The setup assistant opens now."
+if [ $had = 1 ]; then
+  say "Updated. macOS may ask again for Screen Recording and Accessibility: each update is a new build."
+else
+  say "Installed to $dest/Pointcast.app."
+  say "Pointcast is in the menu bar (top right). The setup assistant opens now."
+fi
 printf '\n'

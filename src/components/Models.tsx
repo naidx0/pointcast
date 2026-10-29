@@ -150,7 +150,8 @@ export function ModelPicker({
                 </div>
               ) : err ? (
                 <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginTop: 4 }}>
-                  {err.replace(/^Error:\s*/, "")} Download picks up where it stopped.
+                  {err.replace(/^Error:\s*/, "")}
+                  {/can't reach|download server|download failed/i.test(err) ? " Download picks up where it stopped." : ""}
                 </div>
               ) : null}
             </div>

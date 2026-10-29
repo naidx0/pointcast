@@ -56,11 +56,11 @@ The setup assistant opens on its own the first time (reopen it from the menu: **
    turning Screen Recording on, use **Reopen Pointcast** (macOS applies it to a fresh process).
 2. **Speech model**: Moonshine Base (111 MB), Tiny (30 MB), Parakeet v2 (482 MB), Whisper Turbo
    (564 MB) or Parakeet v3 (487 MB), plus the 7 to 10 MB sherpa-onnx
-   runtime, saved under the OS local-data folder (`Pointcast/speech`).
+   runtime, saved under the OS local-data folder (`dev.pointcast.app/speech`).
 3. **Shortcuts**: press each one until it shows a check; click one to record new keys.
 4. **Practice run**: a real recording whose prompt stays in the window.
 
-Settings live in `Pointcast/settings.json` in the same folder. Delete it to see the assistant again.
+Settings live in `dev.pointcast.app/settings.json` in the same folder. Delete it to see the assistant again.
 
 ## UI stack notes
 
