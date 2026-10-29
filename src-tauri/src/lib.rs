@@ -399,6 +399,7 @@ fn settings_view(svc: &App) -> Value {
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
         "mcp_enabled": s.mcp_enabled,
+        "mcp_error": MCP_ERROR.get(),
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
@@ -721,6 +722,9 @@ fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), St
     std::thread::sleep(std::time::Duration::from_millis(220));
     paste()
 }
+
+/// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
+static MCP_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The latest setup progress, so a window opened mid-download picks it up.
 static SPEECH: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
@@ -1083,7 +1087,10 @@ pub fn run() {
         // Errors name the problem, never the token.
         match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, latest.clone(), t)) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
-            Err(e) => eprintln!("Pointcast MCP did not start: {e}"),
+            Err(e) => {
+                eprintln!("Pointcast MCP did not start: {e}");
+                let _ = MCP_ERROR.set(e);
+            }
         }
     }
 

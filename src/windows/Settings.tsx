@@ -443,6 +443,30 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
 
 function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const [hidden, setHidden] = useState(cfg.hidden.join("\n"));
+  const unsaved = useRef<string | null>(null);
+  const saveHidden = (text: string) => {
+    unsaved.current = null;
+    patch({
+      hidden: text
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    });
+  };
+  // Saved a moment after typing stops, and on leaving the pane, not only when the field loses focus.
+  useEffect(() => {
+    if (unsaved.current == null) return;
+    const t = setTimeout(() => saveHidden(hidden), 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hidden]);
+  useEffect(
+    () => () => {
+      if (unsaved.current != null) saveHidden(unsaved.current);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
   return (
     <>
       <div className="group">
@@ -519,15 +543,11 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
           style={{ width: "100%", minHeight: 120 }}
           value={hidden}
           spellCheck={false}
-          onChange={(e) => setHidden(e.target.value)}
-          onBlur={() =>
-            patch({
-              hidden: hidden
-                .split("\n")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            })
-          }
+          onChange={(e) => {
+            unsaved.current = e.target.value;
+            setHidden(e.target.value);
+          }}
+          onBlur={() => unsaved.current != null && saveHidden(hidden)}
         />
       </div>
       <p className="group-note">
@@ -610,11 +630,18 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
         <Row
           label="Share the last prompt with coding agents"
           sub={
-            <>
-              Claude Code, Cursor and Codex can read it over MCP at{" "}
-              <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
-              Pointcast reopens.
-            </>
+            cfg.mcp_enabled && cfg.mcp_error ? (
+              <span style={{ color: "var(--red-ink)" }}>
+                Sharing did not start: {cfg.mcp_error}. Close whatever uses{" "}
+                <span className="mono">{cfg.mcp_bind}</span>, then reopen Pointcast.
+              </span>
+            ) : (
+              <>
+                Claude Code, Cursor and Codex can read it over MCP at{" "}
+                <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
+                Pointcast reopens.
+              </>
+            )
           }
         >
           <Toggle label="Share over MCP" on={cfg.mcp_enabled} set={(v) => patch({ mcp_enabled: v })} />

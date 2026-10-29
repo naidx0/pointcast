@@ -91,6 +91,8 @@ export type Config = {
   hidden: string[];
   mcp_bind: string;
   mcp_enabled: boolean;
+  /** Why sharing with agents did not start at launch. */
+  mcp_error?: string | null;
   onboarded: boolean;
   sounds: boolean;
   speech: SpeechView;
