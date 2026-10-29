@@ -2,7 +2,7 @@
 //!
 //! Markers land at the moment a capture was taken: inside the words being spoken then,
 //! or between speech segments. Captures are numbered in time order as `[image n]`.
-//! Labels from pins ride along on the marker.
+//! The control the person pointed at and labels from pins ride along on the marker.
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -49,6 +49,9 @@ pub struct Capture {
     /// The pointer's path over the last few seconds, in picture pixels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trail: Vec<crate::pointer::Point>,
+    /// The control the person pointed at, its rect in picture pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<crate::element::ElementMark>,
 }
 
 /// A session item: speech from `t_ms` to `end_ms`, or a picture taken at `t_ms`.
@@ -81,22 +84,42 @@ pub fn ordered(mut v: Vec<Item>) -> Vec<Item> {
     v
 }
 
-fn marker(n: u32, labels: &[Label]) -> String {
-    if labels.is_empty() {
+/// A control's name in a marker is cut to this many characters.
+pub const NAME_MAX: usize = 60;
+
+/// `[image n]`, naming the control the person pointed at and then the pins: `[image 2: button "Place order"; 1=too far
+/// left]`.
+fn marker(n: u32, c: &Capture) -> String {
+    let mut bits: Vec<String> = c.element.iter().map(named).filter(|b| !b.is_empty()).collect();
+    bits.extend(c.labels.iter().map(|l| {
+        let t = l.text.trim();
+        if t.is_empty() {
+            format!("{}", l.n)
+        } else {
+            format!("{}={}", l.n, t)
+        }
+    }));
+    if bits.is_empty() {
         return format!("[image {n}]");
     }
-    let bits: Vec<String> = labels
-        .iter()
-        .map(|l| {
-            let t = l.text.trim();
-            if t.is_empty() {
-                format!("{}", l.n)
-            } else {
-                format!("{}={}", l.n, t)
-            }
-        })
-        .collect();
     format!("[image {n}: {}]", bits.join("; "))
+}
+
+/// `button "Place order"`: the role, then the name in quotes on one line, its own double quotes made single and cut to
+/// `NAME_MAX` characters.
+fn named(e: &crate::element::ElementMark) -> String {
+    let name = e.name.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "'");
+    let name = if name.chars().count() > NAME_MAX {
+        format!("{}…", name.chars().take(NAME_MAX - 1).collect::<String>().trim_end())
+    } else {
+        name
+    };
+    let role = e.role.trim();
+    match (role.is_empty(), name.is_empty()) {
+        (_, true) => role.to_string(),
+        (true, false) => format!(r#""{name}""#),
+        (false, false) => format!(r#"{role} "{name}""#),
+    }
 }
 
 /// The transcript with each picture as `[image n]` at the second it was taken: inside the
@@ -140,7 +163,7 @@ pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
     let put = |k: usize, w: usize, n: &mut u32, next: &mut usize, out: &mut Vec<String>| {
         while *next < at.len() && at[*next] == (k, w) {
             *n += 1;
-            out.push(marker(*n, &shots[*next].1.labels));
+            out.push(marker(*n, &shots[*next].1));
             *next += 1;
         }
     };
@@ -205,7 +228,7 @@ pub fn assemble_markdown(items: &[Item]) -> (String, Vec<Capture>) {
     }
     let mut md = plain;
     for c in &captures {
-        let needle = marker(c.id, &c.labels);
+        let needle = marker(c.id, c);
         let img = format!(
             "![{}](images/{})",
             escape_md_alt(&needle),
@@ -237,11 +260,11 @@ pub fn assemble_clipboard(items: &[Item]) -> ClipboardPayload {
     }
     let mut html_body = escape_html(&plain);
     for c in &captures {
-        let needle = escape_html(&marker(c.id, &c.labels));
+        let needle = escape_html(&marker(c.id, c));
         let img = format!(
             "<img src=\"{}\" alt=\"{}\" width=\"{}\" height=\"{}\" style=\"max-width:100%;height:auto;vertical-align:middle;border:1px solid #d4d4d8;border-radius:6px;\" />",
             png_data_url(&c.png),
-            escape_md_alt(&marker(c.id, &c.labels)),
+            escape_html(&escape_md_alt(&marker(c.id, c))),
             c.width.max(1),
             c.height.max(1)
         );
@@ -349,6 +372,7 @@ mod tests {
                 labels,
                 pointer: None,
                 trail: vec![],
+                element: None,
             },
         }
     }
@@ -438,6 +462,50 @@ mod tests {
             shot(400, CaptureKind::Region, labels),
         ]);
         assert_eq!(text, "this [image 1: 1=Save; 2=too far left] button");
+    }
+
+    fn pointed(t: u64, role: &str, name: &str, labels: Vec<Label>) -> Item {
+        let mut it = shot(t, CaptureKind::Full, labels);
+        if let Item::Image { capture, .. } = &mut it {
+            capture.element = Some(button(role, name));
+        }
+        it
+    }
+
+    fn button(role: &str, name: &str) -> crate::element::ElementMark {
+        let rect = crate::element::Bounds { x: 10, y: 20, w: 116, h: 41 };
+        crate::element::ElementMark { role: role.into(), name: name.into(), rect }
+    }
+
+    #[test]
+    fn the_control_pointed_at_is_named_first_on_the_marker() {
+        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let (text, _) = compose(&[said(0, 1_000, "this one"), pointed(400, "button", "Place order", pin.clone())]);
+        assert_eq!(text, r#"this [image 1: button "Place order"; 1=too far left] one"#);
+        let one = |it: Item| compose(&[it]).0;
+        assert_eq!(one(pointed(0, "button", "Place order", vec![])), r#"[image 1: button "Place order"]"#);
+        assert_eq!(one(shot(0, CaptureKind::Full, pin.clone())), "[image 1: 1=too far left]");
+        assert_eq!(one(shot(0, CaptureKind::Full, vec![])), "[image 1]");
+        assert_eq!(one(pointed(0, "button", "", vec![])), "[image 1: button]", "an unnamed control by its role");
+        assert_eq!(one(pointed(0, "", "Total", vec![])), r#"[image 1: "Total"]"#);
+        assert_eq!(one(pointed(0, " ", " ", pin.clone())), "[image 1: 1=too far left]");
+        // The name stays one quoted line: its quotes become single, its breaks and runs of spaces one space.
+        assert_eq!(named(&button("link", r#"Say "hi"  to   Max "#)), r#"link "Say 'hi' to Max""#);
+        let long = named(&button("text field", &"a".repeat(100)));
+        assert_eq!(long, format!(r#"text field "{}…""#, "a".repeat(NAME_MAX - 1)));
+        assert_eq!(named(&button("text", &"b".repeat(NAME_MAX))), format!(r#"text "{}""#, "b".repeat(NAME_MAX)));
+    }
+
+    #[test]
+    fn markdown_and_html_carry_the_named_control() {
+        let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", vec![Label { n: 1, text: "too far left".into() }])];
+        let (md, _) = assemble_markdown(&items);
+        assert_eq!(md, r#"this ![image 1: button "Place order"; 1=too far left](images/01-full.png) one"#);
+        let clip = assemble_clipboard(&items);
+        assert_eq!(clip.plain, r#"this [image 1: button "Place order"; 1=too far left] one"#);
+        assert!(clip.html.contains(r#"alt="image 1: button &quot;Place order&quot;; 1=too far left""#), "{}", clip.html);
+        assert!(!clip.html.contains("[image 1"), "the marker became the picture: {}", clip.html);
+        assert_eq!(assemble_export(&items).plain, clip.plain);
     }
 
     #[test]

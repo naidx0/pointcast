@@ -70,6 +70,9 @@ pub struct Settings {
     /// Enlarge small close-ups 2x so small text reads.
     #[serde(default = "yes")]
     pub zoom_sharpen: bool,
+    /// Outline the control under where the person pointed and name it in the prompt.
+    #[serde(default = "yes")]
+    pub outline_element: bool,
     #[serde(default)]
     pub start_at_login: bool,
     #[serde(default)]
@@ -119,6 +122,7 @@ impl Default for Settings {
             mark_point: MarkPoint::default(),
             zoom_target: ZoomTarget::default(),
             zoom_sharpen: true,
+            outline_element: true,
             start_at_login: false,
             include_app: false,
             hidden: None,
@@ -252,9 +256,14 @@ mod tests {
         let old = Settings::load(&path);
         assert!(old.onboarded && old.zoom_px == 640);
         assert_eq!((old.mark_point, old.zoom_target, old.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
+        assert!(old.outline_element, "outlines are on for a file from before they existed");
         std::fs::write(&path, r#"{"mark_point":"off","zoom_target":"pointer"}"#).unwrap();
         let off = Settings::load(&path);
         assert_eq!((off.mark_point, off.zoom_target), (MarkPoint::Off, ZoomTarget::Pointer));
+        let quiet = Settings { outline_element: false, ..Settings::default() };
+        quiet.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""outline_element": false"#));
+        assert_eq!(Settings::load(&path), quiet);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

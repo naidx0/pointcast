@@ -1,5 +1,6 @@
 //! Cross-platform screen grab via xcap. Hidden (password-manager) windows are painted over.
 //! Pointcast's own windows are treated as hidden unless `include_app` is on.
+use crate::element::{self, ElementMark};
 use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
 use crate::pointer::{self, dwell, Point};
 use crate::privacy::{self, Rect};
@@ -21,6 +22,8 @@ pub struct Shot {
     /// Where the person pointed (their last rest, else the pointer) and the path there, in picture pixels.
     pub pointer: Option<Point>,
     pub trail: Vec<Point>,
+    /// The control where the person pointed, in picture pixels, when they asked for outlines.
+    pub element: Option<ElementMark>,
     /// How screen positions land in this picture.
     #[serde(skip)]
     pub map: Mapping,
@@ -70,8 +73,27 @@ impl Mapping {
 /// picture pixels. `recent` and `now` are screen coordinates.
 pub fn pointing(map: &Mapping, recent: &[Point], now: Point) -> (Option<Point>, Vec<Point>) {
     let trail = recent.iter().filter_map(|p| map.place(*p)).collect();
-    let at = dwell(recent).and_then(|d| map.place(d)).or_else(|| map.place(now));
-    (at, trail)
+    (map.place(spot(map, recent, now)), trail)
+}
+
+/// Where the person pointed in screen coordinates: their last rest in `recent` when it is on the picture, else `now`.
+pub fn spot(map: &Mapping, recent: &[Point], now: Point) -> Point {
+    dwell(recent).filter(|d| map.place(*d).is_some()).unwrap_or(now)
+}
+
+/// The control at `at` (screen coordinates) on this picture, when the person asked for outlines.
+fn element_at(settings: &Settings, map: &Mapping, at: Point) -> Option<ElementMark> {
+    if !settings.outline_element {
+        return None;
+    }
+    element::mark(&element::at(at.x, at.y)?, at, map)
+}
+
+/// Outline the control the person pointed at; `k` is the picture's density.
+pub fn outline(buf: &mut [u8], width: u32, height: u32, element: Option<&ElementMark>, k: f32) {
+    if let Some(e) = element {
+        image_ops::outline(buf, width, height, e.rect.rect(), k);
+    }
 }
 
 /// What a close-up shows, in screen coordinates.
@@ -248,7 +270,10 @@ fn shell(_: &xcap::Window) -> bool {
 /// session clock now.
 pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
     let mut f = grab_frame(settings)?;
-    let (pointer, trail) = pointing(&f.map, recent, f.now(t_ms));
+    let now = f.now(t_ms);
+    let (pointer, trail) = pointing(&f.map, recent, now);
+    let element = element_at(settings, &f.map, spot(&f.map, recent, now));
+    outline(&mut f.buf, f.width, f.height, element.as_ref(), f.density);
     mark(&mut f.buf, f.width, f.height, settings.mark_point, pointer, &trail, f.density);
     Ok(Shot {
         png: encode_png(&f.buf, f.width, f.height)?,
@@ -258,6 +283,7 @@ pub fn grab_full(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
         cursor: f.cursor,
         pointer,
         trail,
+        element,
         map: f.map,
     })
 }
@@ -278,7 +304,10 @@ pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
     let (mut buf, width, height) = enlarge(cut_buf, cw, ch, up);
     let map = Mapping { crop: (ox as i32, oy as i32), size: (cw, ch), ..f.map }.times(up);
     let (pointer, trail) = pointing(&map, recent, now);
-    mark(&mut buf, width, height, settings.mark_point, pointer, &trail, f.density * up as f32);
+    let element = element_at(settings, &map, spot(&map, recent, now));
+    let k = f.density * up as f32;
+    outline(&mut buf, width, height, element.as_ref(), k);
+    mark(&mut buf, width, height, settings.mark_point, pointer, &trail, k);
     Ok(Shot {
         png: encode_png(&buf, width, height)?,
         width,
@@ -287,14 +316,18 @@ pub fn grab_zoom(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Sho
         cursor: map.place(now).map_or((0, 0), |p| (p.x, p.y)),
         pointer,
         trail,
+        element,
         map,
     })
 }
 
-/// The frame region mode annotates: unmarked, since the overlay places the ring as a shape the person can move.
+/// The frame region mode annotates: unmarked, since the overlay places the ring and the outline as shapes the person
+/// can move or remove.
 pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<Shot, String> {
     let f = grab_frame(settings)?;
-    let (pointer, trail) = pointing(&f.map, recent, f.now(t_ms));
+    let now = f.now(t_ms);
+    let (pointer, trail) = pointing(&f.map, recent, now);
+    let element = element_at(settings, &f.map, spot(&f.map, recent, now));
     Ok(Shot {
         png: encode_png(&f.buf, f.width, f.height)?,
         width: f.width,
@@ -303,6 +336,7 @@ pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<S
         cursor: f.cursor,
         pointer,
         trail,
+        element,
         map: f.map,
     })
 }
@@ -319,6 +353,7 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
         cursor: (0, 0),
         pointer: None,
         trail: vec![],
+        element: None,
         map: Mapping::default(),
     })
 }
@@ -440,6 +475,29 @@ mod tests {
         let zoomed = Mapping { crop: (1000, 600), size: (512, 512), ..m }.times(2);
         assert_eq!(pointing(&zoomed, &[], now).0, Some(p(1_400, 400, 400)));
         assert_eq!(zoomed.size, (1024, 1024));
+    }
+
+    #[test]
+    fn the_control_is_looked_up_where_the_person_pointed_and_outlined_when_found() {
+        let m = screen((0, 0), 1.0, 1920, 1080);
+        let mut t = moving(0, 600, (0, 100));
+        t.extend(resting(600, 700, (700, 450)));
+        let now = p(1_400, 1200, 800);
+        let s = spot(&m, &t, now);
+        assert!((s.x - 700).abs() <= 3 && s.y == 450, "{s:?}");
+        assert_eq!(pointing(&m, &t, now).0, Some(s), "the ring and the outline are asked for at one spot");
+        assert_eq!(spot(&m, &[], now), now);
+        assert_eq!(spot(&m, &resting(0, 700, (-500, 450)), now), now, "a rest off this picture");
+        let off = Settings { outline_element: false, ..Settings::default() };
+        assert_eq!(element_at(&off, &m, now), None, "off never asks the OS");
+        let blank = vec![255u8; 120 * 60 * 4];
+        let mut b = blank.clone();
+        outline(&mut b, 120, 60, None, 1.0);
+        assert_eq!(b, blank);
+        let ok = ElementMark { role: "button".into(), name: "OK".into(), rect: element::Bounds { x: 30, y: 20, w: 40, h: 16 } };
+        outline(&mut b, 120, 60, Some(&ok), 1.0);
+        assert_eq!(&b[(28 * 120 + 27) * 4..][..3], &[245, 165, 36]);
+        assert_eq!(&b[(28 * 120 + 40) * 4..][..3], &[255; 3]);
     }
 
     #[test]

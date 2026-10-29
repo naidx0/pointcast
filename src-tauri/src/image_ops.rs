@@ -123,6 +123,51 @@ pub fn trail(buf: &mut [u8], width: u32, height: u32, pts: &[Point], end: Point,
     }
 }
 
+/// How far outside a control its outline runs, and its corner radius, at density 1.
+pub const OUTLINE_GAP: f32 = 3.0;
+const OUTLINE_R: f32 = 4.0;
+
+/// Distance from `(dx, dy)` to the edge of a box of half size `(hx, hy)` with corners of radius `r`, both about its
+/// centre: negative inside.
+fn rounded(dx: f32, dy: f32, hx: f32, hy: f32, r: f32) -> f32 {
+    let (qx, qy) = (dx.abs() - hx + r, dy.abs() - hy + r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+/// A thin rounded outline a little outside the control at `r`, amber on a soft dark edge like the ring, so it reads
+/// on light and dark screens and never covers the control itself. Sides off the picture are left out. `k` is the
+/// picture's density.
+pub fn outline(buf: &mut [u8], width: u32, height: u32, r: Rect, k: f32) {
+    if r.w <= 0 || r.h <= 0 {
+        return;
+    }
+    let (hw, edge, rad) = (0.9 * k, 1.0 * k, OUTLINE_R * k);
+    // The line runs through the centres of the pixels `gap` outside each side.
+    let gap = (OUTLINE_GAP * k).round().max(1.0) - 0.5;
+    let (cx, cy) = (r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0);
+    let (hx, hy) = (r.w as f32 / 2.0 + gap, r.h as f32 / 2.0 + gap);
+    let reach = hw + edge + 1.0;
+    let x0 = ((cx - hx - reach).floor() as i32).max(0);
+    let x1 = ((cx + hx + reach).ceil() as i32 + 1).min(width as i32);
+    let y0 = ((cy - hy - reach).floor() as i32).max(0);
+    let y1 = ((cy + hy + reach).ceil() as i32 + 1).min(height as i32);
+    let mut dot = |x: i32, y: i32| {
+        let d = rounded(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, hx, hy, rad).abs();
+        blend(buf, width, x, y, SHADE, 0.6 * cover(d, hw + edge));
+        blend(buf, width, x, y, AMBER, cover(d, hw));
+    };
+    for y in y0..y1 {
+        let dy = y as f32 + 0.5 - cy;
+        if (dy.abs() - hy).abs() <= reach + rad || hx <= reach + rad {
+            (x0..x1).for_each(|x| dot(x, y));
+        } else {
+            // Between the top and bottom only the two sides are near the line.
+            let side = |c: f32| ((c - reach).floor() as i32).max(x0)..((c + reach).ceil() as i32 + 1).min(x1);
+            side(cx - hx).chain(side(cx + hx)).for_each(|x| dot(x, y));
+        }
+    }
+}
+
 /// 2 when sharpening is on and a close-up is smaller than `SHARPEN_BELOW` on its long side, else 1.
 pub fn sharpen_factor(on: bool, width: u32, height: u32) -> u32 {
     if on && width.max(height) < SHARPEN_BELOW {
@@ -269,6 +314,43 @@ mod tests {
         assert_eq!(px(&b, 200, 165, 20), [255; 3], "nothing inside the ring");
         assert_eq!(px(&b, 200, 100, 15), [255; 3], "thin");
         trail(&mut b, 200, 40, &[], end, 1.0);
+    }
+
+    #[test]
+    fn the_outline_rings_the_control_without_covering_it_on_light_and_dark() {
+        let r = Rect { x: 20, y: 20, w: 40, h: 20 };
+        let mut white = canvas(100, 70, 255);
+        outline(&mut white, 100, 70, r, 1.0);
+        assert_eq!(px(&white, 100, 17, 30), AMBER, "left side, 3 px out");
+        assert_eq!(px(&white, 100, 62, 30), AMBER, "right side");
+        assert_eq!(px(&white, 100, 40, 17), AMBER, "top");
+        assert_eq!(px(&white, 100, 40, 42), AMBER, "bottom");
+        for (x, y) in [(20, 30), (59, 30), (40, 20), (40, 39), (40, 30)] {
+            assert_eq!(px(&white, 100, x, y), [255; 3], "the control itself is untouched at ({x}, {y})");
+        }
+        let rim = px(&white, 100, 15, 30);
+        assert!(rim[0] < 230 && rim != AMBER, "a dark edge shows it on white: {rim:?}");
+        assert_ne!(px(&white, 100, 17, 17), AMBER, "rounded corners");
+        assert_eq!(px(&white, 100, 5, 5), [255; 3]);
+        let mut black = canvas(100, 70, 0);
+        outline(&mut black, 100, 70, r, 1.0);
+        assert_eq!(px(&black, 100, 17, 30), AMBER, "and amber shows it on black");
+        // At 2x density it sits twice as far out.
+        let mut retina = canvas(100, 70, 255);
+        outline(&mut retina, 100, 70, r, 2.0);
+        assert_eq!(px(&retina, 100, 14, 30), AMBER);
+        assert!(px(&retina, 100, 17, 30)[0] < 200, "with a wider dark edge");
+        assert_eq!(px(&retina, 100, 19, 30), [255; 3]);
+        assert_eq!(px(&retina, 100, 20, 30), [255; 3]);
+        // A control cut by the picture's edge: the sides on it are drawn, the cut side is not.
+        let mut cut = canvas(40, 40, 255);
+        outline(&mut cut, 40, 40, Rect { x: 0, y: 10, w: 30, h: 10 }, 1.0);
+        assert_eq!(px(&cut, 40, 32, 15), AMBER);
+        assert_eq!(px(&cut, 40, 0, 15), [255; 3]);
+        let before = cut.clone();
+        outline(&mut cut, 40, 40, Rect { x: 5, y: 5, w: 0, h: 9 }, 1.0);
+        outline(&mut cut, 40, 40, Rect { x: 200, y: 200, w: 30, h: 30 }, 1.0);
+        assert_eq!(cut, before);
     }
 
     #[test]

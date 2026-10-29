@@ -1,6 +1,7 @@
 //! Recording session: live transcript, captures inserted at the moment they were taken,
 //! local STT, and export on stop.
 use crate::capture::{self, Shot};
+use crate::element::ElementMark;
 use crate::pointer::Point;
 use crate::prompt::{self, Capture, CaptureKind, Item, Label, SessionExport};
 use crate::settings::{OutputMode, Settings};
@@ -391,8 +392,9 @@ impl App {
         self.freeze.lock().unwrap().clone()
     }
 
-    /// Commit an annotated PNG (already cropped by the overlay) as the next image.
-    pub fn commit_region(&self, png: Vec<u8>, labels: Vec<Label>) -> Result<Capture, String> {
+    /// Commit an annotated PNG (already cropped by the overlay) as the next image, with the control the person pointed
+    /// at when they kept its outline.
+    pub fn commit_region(&self, png: Vec<u8>, labels: Vec<Label>, element: Option<ElementMark>) -> Result<Capture, String> {
         let (width, height) = crate::image_ops::png_size(&png).ok_or("that is not a PNG")?;
         let t = self.freeze_t.lock().unwrap().take().unwrap_or_else(|| self.t_ms());
         let cap = Capture {
@@ -405,6 +407,7 @@ impl App {
             labels,
             pointer: None,
             trail: vec![],
+            element,
         };
         self.push(Item::Image {
             t_ms: t,
@@ -432,6 +435,7 @@ impl App {
             labels: vec![],
             pointer: shot.pointer,
             trail: shot.trail,
+            element: shot.element,
         };
         self.push(Item::Image {
             t_ms: t,
@@ -607,11 +611,26 @@ mod tests {
         // Recording started 20 s ago; the frame froze 12 s in; Enter comes 8 s later.
         *a.t0.lock().unwrap() = Some(now_ms() - 20_000);
         *a.freeze_t.lock().unwrap() = Some(12_000);
-        let cap = a.commit_region(png(), vec![]).unwrap();
+        let cap = a.commit_region(png(), vec![], None).unwrap();
         assert_eq!(cap.t_ms, 12_000);
         // The freeze time is used once; a commit without a freeze falls back to now.
-        let cap = a.commit_region(png(), vec![]).unwrap();
+        let cap = a.commit_region(png(), vec![], None).unwrap();
         assert!(cap.t_ms >= 20_000, "{}", cap.t_ms);
+    }
+
+    #[test]
+    fn a_region_keeps_the_control_it_outlined_and_the_prompt_names_it() {
+        let a = app("element");
+        *a.t0.lock().unwrap() = Some(now_ms());
+        let rect = crate::element::Bounds { x: 4, y: 6, w: 116, h: 41 };
+        let mark = ElementMark { role: "button".into(), name: "Place order".into(), rect };
+        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let cap = a.commit_region(png(), pin, Some(mark.clone())).unwrap();
+        assert_eq!(cap.element, Some(mark));
+        assert_eq!(a.ui().text, r#"[image 1: button "Place order"; 1=too far left]"#);
+        // Deleted in the overlay: nothing to name.
+        a.commit_region(png(), vec![], None).unwrap();
+        assert_eq!(a.ui().text, r#"[image 1: button "Place order"; 1=too far left] [image 2]"#);
     }
 
     #[test]
