@@ -1639,30 +1639,89 @@ mod tests {
         hit as f64 / want.len().max(1) as f64
     }
 
-    /// `voice` four times at `gain`, 6, 15 and 9 s apart, over a quiet room or one with noise at rms `noise`.
-    fn long_take(voice: &[f32], gain: f32, noise: f32) -> Vec<f32> {
+    /// `voice` four times at `gain`, 6, 15 and 9 s apart, over a quiet room or one with noise at rms `noise`. Without a
+    /// `room` the noise is white; in a room (`Some(rt60)`, s) it is half white and half a low hum and rumble, and the
+    /// voice is heard as from across that room (`far`).
+    fn long_take(voice: &[f32], gain: f32, noise: f32, room: Option<f32>) -> Vec<f32> {
         let sec = |s: f32| (s * audio::RATE as f32) as usize;
+        let voice = match room {
+            Some(rt60) if rt60 > 0.0 => far(voice, rt60),
+            _ => voice.to_vec(),
+        };
         let mut v = vec![0.0f32; sec(1.0)];
         for gap in [6.0, 15.0, 9.0, 2.0] {
             v.extend(voice.iter().map(|x| x * gain));
             v.extend(std::iter::repeat(0.0).take(sec(gap)));
         }
         let mut seed = 0x9e37_79b9u32;
-        let amp = noise.max(0.0003) * 3f32.sqrt();
-        for x in v.iter_mut() {
+        let mut white = || {
             seed ^= seed << 13;
             seed ^= seed >> 17;
             seed ^= seed << 5;
-            *x += (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * amp;
+            seed as f32 / u32::MAX as f32 * 2.0 - 1.0
+        };
+        if room.is_none() {
+            let amp = noise.max(0.0003) * 3f32.sqrt();
+            v.iter_mut().for_each(|x| *x += white() * amp);
+            return v;
+        }
+        // Mains hum at 60 and 120 Hz over rumble (white noise through a one-pole low-pass at about 150 Hz).
+        let mut lp = 0.0f32;
+        let tau = 2.0 * std::f32::consts::PI / audio::RATE as f32;
+        let hum: Vec<f32> = (0..v.len())
+            .map(|i| {
+                lp += (white() - lp) * 0.057;
+                3.0 * lp + 0.5 * (tau * 60.0 * i as f32).sin() + 0.25 * (tau * 120.0 * i as f32).sin()
+            })
+            .collect();
+        let half = noise / 2f32.sqrt();
+        let k = half / audio::rms(&hum).max(1e-9);
+        let amp = half.max(0.0003) * 3f32.sqrt();
+        for (x, h) in v.iter_mut().zip(&hum) {
+            *x += h * k + white() * amp;
         }
         v
     }
 
+    /// `x` as heard a few metres away in a room whose sound dies away by 60 dB in `rt60` s: the direct sound and as much
+    /// energy again in echoes (sparse random taps under an exponential decay, one every 8 samples from 5 ms on), at the
+    /// level of `x`. Longer than `x` by the echoes' tail.
+    fn far(x: &[f32], rt60: f32) -> Vec<f32> {
+        let rate = audio::RATE as f32;
+        let span = (rt60 * rate) as usize;
+        let mut seed = 0x2545_f491u32;
+        let mut echoes = vec![];
+        for k in (audio::RATE as usize / 200..span).step_by(8) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let at = k + (seed % 8) as usize;
+            let sign = if seed & 0x100 == 0 { 1.0 } else { -1.0 };
+            echoes.push((at, sign * (-6.9 * at as f32 / rate / rt60).exp()));
+        }
+        let e = echoes.iter().map(|(_, a)| a * a).sum::<f32>().sqrt();
+        let half = 0.5f32.sqrt();
+        let mut out = vec![0.0f32; x.len() + span + 8];
+        let taps = std::iter::once((0, half)).chain(echoes.into_iter().map(|(at, a)| (at, a / e * half)));
+        for (at, a) in taps {
+            for (o, v) in out[at..].iter_mut().zip(x) {
+                *o += a * v;
+            }
+        }
+        out
+    }
+
+    /// The far-field matrix: near and quiet, the old quiet-and-noisy case, then speech 12, 20 and 30 dB down in a quiet
+    /// room and under room noise at rms 0.005 and 0.01, heard across a room that rings for 0.4 s.
+    const FAR_FIELD: &str = "1:0,0.06:0.01,0.25:0:0.4,0.25:0.005:0.4,0.25:0.01:0.4,0.1:0:0.4,0.1:0.005:0.4,0.1:0.01:0.4,0.03:0:0.4,0.03:0.005:0.4,0.03:0.01:0.4";
+
     /// The real pipeline over real speech, fed 20 times faster than real time in 10 ms pieces while the worker runs.
-    /// Prints word recall against the script, the longest stretch with no text, the longest the microphone waited for
-    /// the take, the bytes copied out of it and the wall time. Reads the models only.
+    /// Prints word recall against the script, the share of the words heard that are in it (precision: low when noise is
+    /// heard as words), the longest stretch with no text, the longest the microphone waited for
+    /// the take, the bytes copied out of it and the wall time. Reads the models only. Each case is `gain:noise` (white
+    /// noise, dry) or `gain:noise:rt60` (room noise and echoes, see `long_take`); the default is `FAR_FIELD`.
     /// `POINTCAST_SPEECH_DIR=<speech dir> POINTCAST_MODEL=<id> POINTCAST_F32=<16 kHz mono f32le> POINTCAST_SCRIPT=<script.md>
-    /// [POINTCAST_CASES=1:0,0.25:0.01] cargo test --lib -- --ignored --nocapture real_audio_pipeline`
+    /// [POINTCAST_CASES=1:0,0.25:0.01:0.4] cargo test --lib -- --ignored --nocapture real_audio_pipeline`
     #[test]
     #[ignore]
     fn real_audio_pipeline() {
@@ -1684,11 +1743,21 @@ mod tests {
         let model = var("POINTCAST_MODEL");
         a.settings.lock().unwrap().model = model.clone();
         a.ensure_engine().unwrap();
-        let cases = std::env::var("POINTCAST_CASES").unwrap_or_else(|_| "1:0,0.25:0,0.06:0,1:0.01,0.25:0.01,0.06:0.01".into());
+        let cases = std::env::var("POINTCAST_CASES").unwrap_or_else(|_| FAR_FIELD.into());
         for case in cases.split(',') {
-            let (g, n) = case.split_once(':').unwrap();
-            let (gain, noise): (f32, f32) = (g.parse().unwrap(), n.parse().unwrap());
-            let rec = long_take(&voice, gain, noise);
+            // `@<file>`: a whole take as made by `long_take`, read from a file (16 kHz mono f32le).
+            let rec = match case.strip_prefix('@') {
+                Some(file) => std::fs::read(file).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
+                None => {
+                    let c: Vec<f32> = case.split(':').map(|v| v.parse().unwrap()).collect();
+                    long_take(&voice, c[0], c[1], c.get(2).copied())
+                }
+            };
+            // POINTCAST_DUMP=<dir> keeps each case's take, 16 kHz mono f32le, to listen to or measure.
+            if let Ok(dir) = std::env::var("POINTCAST_DUMP") {
+                let bytes: Vec<u8> = rec.iter().flat_map(|v| v.to_le_bytes()).collect();
+                std::fs::write(std::path::Path::new(&dir).join(format!("{}.f32", case.replace([':', '/', '@'], "_"))), bytes).unwrap();
+            }
             // A recording as start() begins one, without a microphone.
             a.items.lock().unwrap().clear();
             *a.t0.lock().unwrap() = Some(now_ms());
@@ -1731,8 +1800,9 @@ mod tests {
             edges.push(total);
             let gap = edges.chunks(2).map(|p| p[1].saturating_sub(p[0])).max().unwrap_or(total);
             eprintln!(
-                "RESULT model={model} gain={gain} noise={noise} recall={:.3} gap_s={:.1} block_ms={:.2} copied_mb={:.1} wall_s={wall:.1} audio_s={:.1} items={}",
+                "RESULT model={model} case={case} recall={:.3} precision={:.3} gap_s={:.1} block_ms={:.2} copied_mb={:.1} wall_s={wall:.1} audio_s={:.1} items={}",
                 recall(&want, &got),
+                recall(&got, &want),
                 gap as f64 / 1000.0,
                 blocked.as_secs_f64() * 1000.0,
                 take.copied.load(Ordering::Relaxed) as f64 / 1e6,
