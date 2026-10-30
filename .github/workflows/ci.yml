@@ -50,6 +50,8 @@ jobs:
       - run: npm ci
       - name: Rust tests (macOS)
         run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: The update check reaches GitHub and is offered a release (live)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib live_ -- --ignored --nocapture
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (action-v0.6.2)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

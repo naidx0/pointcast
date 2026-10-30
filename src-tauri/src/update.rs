@@ -513,6 +513,18 @@ mod tests {
         assert_eq!(available(), None);
     }
 
+    /// Live: asks the real GitHub, as a copy of the previous release on this system would. Run on each OS with
+    /// `cargo test --lib live_ -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_the_published_release_is_offered_to_the_one_before_it() {
+        let got = check_at(LATEST, "0.0.1", std::env::consts::OS);
+        eprintln!("LIVE os={} -> {:?}", std::env::consts::OS, got.as_ref().map(|o| o.as_ref().map(|o| (&o.version, &o.url))));
+        let offer = got.expect("the check reached GitHub").expect("a release is offered to an older version");
+        assert!(offer.url.starts_with("https://github.com/naidx0/pointcast/releases/download/"), "{}", offer.url);
+        assert_eq!(offer.sha256.len(), 64);
+    }
+
     #[test]
     fn the_check_reads_github_over_the_wire() {
         let url = serve(200, release("v0.5.0", &BOTH));
