@@ -10,6 +10,7 @@ import {
   historyPaste,
   historyRemove,
   historyRetranscribe,
+  historyRetranscribeCancel,
   inTauri,
   lastFolder,
   onHistoryChanged,
@@ -44,6 +45,9 @@ export function Result() {
   // A kept recording being transcribed again. `total_ms` is 0 until the first progress report.
   const [job, setJob] = useState<{ id: string; done_ms: number; total_ms: number } | null>(null);
   const [jobErr, setJobErr] = useState<{ id: string; text: string } | null>(null);
+  // Cancel was pressed: the job ends after the piece under way, and its refusal is no error.
+  const [cancelling, setCancelling] = useState(false);
+  const cancelled = useRef(false);
   const progressAt = useRef(0);
   const mac = platform() === "mac";
 
@@ -130,17 +134,27 @@ export function Result() {
 
   const retranscribe = async (id: string) => {
     setJobErr(null);
+    cancelled.current = false;
+    setCancelling(false);
     setJob({ id, done_ms: 0, total_ms: 0 });
     try {
       if (inTauri) await historyRetranscribe(id);
-      else await simulateRetranscribe(id, setJob);
+      else await simulateRetranscribe(id, setJob, () => cancelled.current);
       // Done, unless it reports progress on its own and history://changed ends it.
       if (Date.now() - progressAt.current > 2000) setJob((j) => (j && j.id === id ? null : j));
       setRev((r) => r + 1);
     } catch (e) {
       setJob(null);
-      setJobErr({ id, text: String(e).replace(/^Error:\s*/, "") });
+      if (!cancelled.current) setJobErr({ id, text: String(e).replace(/^Error:\s*/, "") });
+    } finally {
+      setCancelling(false);
     }
+  };
+
+  const cancelAgain = () => {
+    cancelled.current = true;
+    setCancelling(true);
+    if (inTauri) historyRetranscribeCancel().catch(() => undefined);
   };
 
   const ai = tools.filter((t) => t.kind === "ai");
@@ -240,6 +254,7 @@ export function Result() {
                 <span className="hist-when">
                   {when(e.created_ms)}
                   {e.recovered ? <span className="badge warn hist-tag">Recovered</span> : null}
+                  {e.partial ? <span className="badge warn hist-tag">Partial</span> : null}
                 </span>
                 <span className="hist-text">{e.preview || (e.images ? "Pictures only" : "Empty")}</span>
                 {e.images ? (
@@ -260,10 +275,13 @@ export function Result() {
               <AudioBar
                 audio={!!cur.has_audio}
                 unclear={!!exp && exp.plain.includes("[unclear]")}
+                partial={!!cur.partial}
                 job={job && job.id === cur.id ? job : null}
                 other={!!job && job.id !== cur.id}
                 error={jobErr && jobErr.id === cur.id ? jobErr.text : ""}
+                cancelling={cancelling}
                 onRun={() => void retranscribe(cur.id)}
+                onCancel={cancelAgain}
               />
             ) : null}
             {exp ? (
@@ -297,54 +315,83 @@ export function Result() {
   );
 }
 
-/** Above a prompt: its audio is still here and can be transcribed again, with how that is going. */
+/** Above a prompt: its audio is still here and can be transcribed again, with how that is going and Cancel. */
 function AudioBar({
   audio,
   unclear,
+  partial,
   job,
   other,
   error,
+  cancelling,
   onRun,
+  onCancel,
 }: {
   audio: boolean;
   unclear: boolean;
+  partial: boolean;
   job: { done_ms: number; total_ms: number } | null;
   other: boolean;
   error: string;
+  cancelling: boolean;
   onRun: () => void;
+  onCancel: () => void;
 }) {
-  if (!audio && !unclear) return null;
-  const pct = job && job.total_ms > 0 ? Math.min(100, (job.done_ms / job.total_ms) * 100) : null;
+  if (!audio && !unclear && !partial) return null;
+  const pct = job && job.total_ms > 0 ? Math.min(100, Math.floor((job.done_ms / job.total_ms) * 100)) : null;
   return (
     <div className="audio-bar">
       <div className="audio-row">
-        <div className="grow t-small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {audio ? (
+        <div className="grow t-small" style={{ display: "flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>
+          {job ? (
+            <>
+              <span className="spinner" style={{ width: 12, height: 12 }} aria-hidden="true" />
+              {cancelling
+                ? "Stopping after this part…"
+                : pct == null
+                  ? "Transcribing…"
+                  : `Transcribing ${pct}% · ${stamp(job.done_ms)} of ${stamp(job.total_ms)}`}
+            </>
+          ) : audio ? (
             <>
               <Mic size={12} strokeWidth={2} aria-hidden="true" />
               Audio kept on this computer
             </>
           ) : null}
         </div>
-        {audio ? (
+        {job ? (
           <button
             type="button"
             className="btn"
-            disabled={!!job || other}
+            disabled={cancelling}
+            title="Stop after the part being transcribed; this prompt stays as it was"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        ) : audio ? (
+          <button
+            type="button"
+            className="btn"
+            disabled={other}
             title={other ? "Another recording is being transcribed" : "Write this recording down again from its audio"}
             onClick={onRun}
           >
-            {job ? <span className="spinner" /> : <RotateCw size={13} />}
-            {job
-              ? job.total_ms > 0
-                ? `Transcribing ${stamp(job.done_ms)} of ${stamp(job.total_ms)}`
-                : "Transcribing…"
-              : "Transcribe again"}
+            <RotateCw size={13} />
+            Transcribe again
           </button>
         ) : null}
       </div>
       {job ? (
-        <div className="progress" style={{ marginTop: 8 }} role="progressbar" aria-valuenow={pct == null ? undefined : Math.round(pct)}>
+        <div
+          className={`progress ${pct == null ? "indet" : ""}`}
+          style={{ marginTop: 8 }}
+          role="progressbar"
+          aria-label="Transcribing again"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct ?? undefined}
+        >
           <i style={pct == null ? undefined : { width: `${pct}%` }} />
         </div>
       ) : null}
@@ -353,7 +400,11 @@ function AudioBar({
           {error}
         </p>
       ) : null}
-      {unclear && !job ? (
+      {partial && !job ? (
+        <p className="t-small" style={{ margin: "6px 0 0", color: "var(--orange-ink)" }}>
+          {audio ? "Part of this recording is not transcribed yet. Transcribe again for the rest." : "Part of this recording was not transcribed."}
+        </p>
+      ) : unclear && !job ? (
         <p className="t-small" style={{ margin: "6px 0 0" }}>
           {audio ? "Part of this was unclear. Transcribe again, or use a larger model." : "Part of this was unclear. A larger model may hear it better."}
         </p>
@@ -362,14 +413,21 @@ function AudioBar({
   );
 }
 
-/** Browser preview: walk a kept recording through the same progress reports without a backend. */
-function simulateRetranscribe(id: string, setJob: (j: { id: string; done_ms: number; total_ms: number }) => void) {
+/** Browser preview: walk a kept recording through the same progress reports without a backend; `stopped` is Cancel. */
+function simulateRetranscribe(
+  id: string,
+  setJob: (j: { id: string; done_ms: number; total_ms: number }) => void,
+  stopped: () => boolean,
+) {
   const total = 667_000;
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     let done = 0;
     const t = setInterval(() => {
       done += 55_000;
-      if (done >= total) {
+      if (stopped()) {
+        clearInterval(t);
+        reject(new Error("cancelled"));
+      } else if (done >= total) {
         clearInterval(t);
         resolve();
       } else setJob({ id, done_ms: done, total_ms: total });
@@ -469,6 +527,16 @@ const PREVIEW_ENTRIES: HistoryMeta[] = [
     preview: "Reply to Sam: the build is green, ship it after lunch.",
     images: 0,
     recovered: true,
+  },
+  {
+    id: "d",
+    created_ms: Date.now() - 7_200_000,
+    duration_ms: 74_000,
+    preview: "Walk through the checkout: the shipping step forgets the address when you go back.",
+    images: 1,
+    recovered: false,
+    has_audio: true,
+    partial: true,
   },
   {
     id: "c",

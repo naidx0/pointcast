@@ -113,11 +113,13 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     Ok(())
 }
 
-/// The HUD's last word stays a moment, then it goes unless a new recording took it.
+/// The HUD's last word stays a moment, then it goes unless a new recording took it. A save that Cancel cut short has
+/// two lines to read.
 fn hide_hud_soon(app: &AppHandle, svc: &Arc<App>) {
     let (app, svc) = (app.clone(), svc.clone());
+    let ms = if matches!(svc.ui().notice, Some("partial" | "cut")) { 4500 } else { 1600 };
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1600));
+        std::thread::sleep(std::time::Duration::from_millis(ms));
         if svc.ui().phase == Phase::Ready {
             hide_window(&app, "indicator");
         }
@@ -551,6 +553,14 @@ async fn session_cancel(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Resu
     Ok(())
 }
 
+/// Cancel while the last words are transcribed: the recording is saved now with what is done, pasted or copied as
+/// usual, and its audio kept for Transcribe again. Off the event loop: it returns once that is saved.
+#[tauri::command]
+async fn session_finish_now(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || svc.finish_now()).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn capture_full(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
     let cap = svc.capture_full()?;
@@ -759,6 +769,13 @@ async fn history_retranscribe(app: AppHandle, svc: tauri::State<'_, Arc<App>>, i
         r
     });
     job.await.map_err(|e| e.to_string())?
+}
+
+/// Stop transcribing a past prompt again after the piece under way; the prompt stays as it was and
+/// `history_retranscribe` returns `AGAIN_CANCELLED`. False when none is being transcribed again.
+#[tauri::command]
+fn history_retranscribe_cancel(svc: tauri::State<'_, Arc<App>>) -> bool {
+    svc.again_cancel()
 }
 
 #[tauri::command]
@@ -1242,6 +1259,7 @@ pub fn run() {
             session_state,
             session_toggle,
             session_cancel,
+            session_finish_now,
             capture_full,
             capture_zoom,
             region_begin,
@@ -1260,6 +1278,7 @@ pub fn run() {
             history_edit,
             history_remove,
             history_retranscribe,
+            history_retranscribe_cancel,
             history_copy,
             history_paste,
             history_delete,

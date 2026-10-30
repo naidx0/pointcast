@@ -56,6 +56,9 @@
   --hud-line: rgba(255, 255, 255, 0.14);
   --hud-ink: rgba(255, 255, 255, 0.92);
   --hud-ink-2: rgba(255, 255, 255, 0.6);
+  /* The HUD is dark in both themes: the accent as each system draws it on dark. */
+  --hud-accent: #0a84ff;
+  --on-hud-accent: #ffffff;
 
   --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
   --ease: cubic-bezier(0.2, 0.9, 0.25, 1);
@@ -120,6 +123,8 @@ html.win {
   --h-control: 32px;
   --h-control-lg: 36px;
   --hud: rgba(32, 32, 32, 0.86);
+  --hud-accent: #60cdff;
+  --on-hud-accent: #000000;
 }
 html.win[data-theme="dark"] {
   /* A clear blue for buttons (white text 4.6:1); links keep Windows' light dark-mode accent. */
@@ -1350,6 +1355,98 @@ html.win .audio-bar {
 }
 .done-mark.none svg {
   display: none;
+}
+.done-mark.part {
+  background: var(--orange);
+}
+.hud.done.two {
+  height: 46px;
+}
+.hud.done .lines {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 14px;
+}
+.hud.done .lines b {
+  font-size: 13px;
+  font-weight: 600;
+}
+html.win .hud.done .lines b {
+  font-size: 14px;
+}
+.hud.done .lines span {
+  color: var(--hud-ink-2);
+}
+
+/* —— HUD while the last words are transcribed: one line, a determinate bar, Cancel —— */
+.hud.finishing {
+  width: 360px;
+  gap: 12px;
+  padding: 0 7px 0 18px;
+}
+html.win .hud.finishing {
+  padding: 0 8px 0 16px;
+}
+.hud .fin-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.hud .fin-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+/* macOS: a slim rounded track with the accent fill, as NSProgressIndicator draws it on a dark material. */
+.progress.on-hud {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+}
+.progress.on-hud > i {
+  background: var(--hud-accent);
+  transition: width 300ms linear;
+}
+/* Windows: Fluent's ProgressBar, a 1 px rail under a 3 px rounded indicator. */
+html.win .progress.on-hud {
+  height: 3px;
+  border-radius: 1.5px;
+  background: linear-gradient(transparent 1px, rgba(255, 255, 255, 0.54) 1px, rgba(255, 255, 255, 0.54) 2px, transparent 2px);
+}
+.hud .fin-cancel {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--hud-ink-2);
+  font: inherit;
+}
+html.win .hud .fin-cancel {
+  height: 32px;
+  border-radius: 4px;
+}
+.hud .fin-cancel:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--hud-ink);
+}
+.hud .fin-cancel:active {
+  background: rgba(255, 255, 255, 0.2);
+}
+.hud .fin-cancel.accent {
+  background: var(--hud-accent);
+  color: var(--on-hud-accent);
+}
+.hud .fin-cancel.accent:hover {
+  filter: brightness(1.08);
+}
+.hud .fin-cancel:disabled {
+  opacity: 0.5;
 }
 html.win select.field {
   padding-right: 32px;
