@@ -12,8 +12,8 @@ use crate::voice::models;
 use crate::voice::stt::{Engine, Heard};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +39,8 @@ pub struct UiState {
     pub image_count: u32,
     pub model_ready: bool,
     pub level: f32,
-    /// After a stop, where the prompt went: pasted, copied, saved or empty.
+    /// After a stop, where the prompt went: pasted, copied, saved, kept or empty; "partial" when Cancel saved what was
+    /// done and kept the audio, "cut" when it did with Keep audio off.
     pub notice: Option<&'static str>,
     /// Audio recorded and not yet transcribed, in ms; 0 when the model has caught up. A stop counts it down.
     pub behind_ms: u64,
@@ -47,6 +48,8 @@ pub struct UiState {
     pub quiet_mic: Option<String>,
     /// The model transcribes slower than real time on this computer.
     pub slow_engine: bool,
+    /// While a stop waits for the last words (Transcribing): how far that is. None in every other phase.
+    pub progress: Option<Shown>,
 }
 
 impl Default for UiState {
@@ -66,6 +69,7 @@ impl Default for UiState {
             behind_ms: 0,
             quiet_mic: None,
             slow_engine: false,
+            progress: None,
         }
     }
 }
@@ -94,10 +98,24 @@ pub struct App {
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Samples recorded and not yet transcribed.
     behind: AtomicU64,
+    /// Where the worker is with the take: how far it had read when it last cut it into pieces, and the samples before
+    /// that still to be transcribed (the pieces of that look not done yet, and the sentence still being said).
+    waiting: Mutex<(usize, usize)>,
+    /// The piece the worker is transcribing: its length and when it began on the steady clock, both in ms.
+    piece: Mutex<Option<(u64, u64)>>,
+    /// While a stop waits for the last words: how far that is.
+    progress: Mutex<Option<Progress>>,
+    /// Set by Cancel while a stop waits: it saves what is transcribed now.
+    hurry: AtomicBool,
+    /// This recording's audio on its way to the recovery area: what the worker read and has not written yet (it writes a
+    /// second at a time), and how far into the take it read. None when the audio is not kept.
+    unsaved: Mutex<Option<(Vec<f32>, usize)>>,
     /// This recording's audio transcribed so far and the time that took, both in ms.
     pace: Mutex<(u64, u64)>,
     /// A History entry is being transcribed again; one at a time.
     retranscribing: AtomicBool,
+    /// Set by Cancel on a History entry being transcribed again: it stops after the piece under way.
+    again_stop: AtomicBool,
     /// Audio transcribed and the time that took, in ms, per model over this run.
     paces: Mutex<std::collections::HashMap<String, (u64, u64)>>,
     pub history: crate::history::Store,
@@ -164,8 +182,14 @@ impl App {
             audio_at: AtomicU64::new(0),
             worker: Mutex::default(),
             behind: AtomicU64::new(0),
+            waiting: Mutex::default(),
+            piece: Mutex::default(),
+            progress: Mutex::default(),
+            hurry: AtomicBool::new(false),
+            unsaved: Mutex::default(),
             pace: Mutex::default(),
             retranscribing: AtomicBool::new(false),
+            again_stop: AtomicBool::new(false),
             paces: Mutex::default(),
             freeze: Mutex::default(),
             freeze_t: Mutex::default(),
@@ -197,6 +221,10 @@ impl App {
         s.behind_ms = self.behind.load(Ordering::SeqCst) * 1000 / audio::RATE as u64;
         let (heard, spent) = *self.pace.lock().unwrap();
         s.slow_engine = slow(heard, spent);
+        s.progress = match s.phase {
+            Phase::Transcribing => self.progress.lock().unwrap().as_mut().map(|p| p.view(steady_ms(), now_ms())),
+            _ => None,
+        };
         s.text = prompt::compose(&self.items.lock().unwrap()).0;
         s.image_count = self
             .items
@@ -335,6 +363,8 @@ impl App {
         let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         self.trail.lock().unwrap().clear();
         self.tokens.lock().unwrap().clear();
+        // Nothing of the last recording's audio is written for this one; its worker says what it keeps.
+        *self.unsaved.lock().unwrap() = None;
         let me = Arc::clone(self);
         std::thread::spawn(move || me.follow_pointer(no));
         self.keep_frames(&settings, no, capture::grab_key);
@@ -369,10 +399,15 @@ impl App {
         }
         self.cancel.store(cancel, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
+        // A Cancel can only be meant for this stop once it waits.
+        self.hurry.store(false, Ordering::SeqCst);
         // The frames leave memory with this; only the ones picked below live on, as pictures.
         let frames = self.frames.lock().unwrap().take();
         if let Some(mic) = self.mic.lock().unwrap().take() {
             drop(mic);
+        }
+        if !cancel {
+            self.track();
         }
         {
             let mut st = self.state.lock().unwrap();
@@ -380,9 +415,16 @@ impl App {
             st.screen = false;
             st.phase = if cancel { Phase::Idle } else { Phase::Transcribing };
         }
-        // The worker transcribes what was still being said when stop was pressed; wait for it.
-        if let Some(w) = self.worker.lock().unwrap().take() {
-            let _ = w.join();
+        // The worker transcribes what was still being said when stop was pressed; wait for it, unless Cancel cuts the
+        // wait short. A cut that left nothing undone is a stop like any other.
+        let worker = self.worker.lock().unwrap().take();
+        let cut = worker.is_some_and(|w| !self.wait_for(w));
+        let partial = cut && !self.progress.lock().unwrap().as_ref().is_some_and(Progress::complete);
+        if cut {
+            self.cut();
+        }
+        if let Some(p) = self.progress.lock().unwrap().as_mut() {
+            p.finish();
         }
         *self.take.lock().unwrap() = None;
         if cancel {
@@ -411,12 +453,15 @@ impl App {
         // the next launch to recover. A recording that came back with no words keeps its audio there, to transcribe
         // again; only one with neither is let go.
         let mut saved = None;
+        let mut has_audio = false;
         if items.is_empty() && !self.history.kept_audio() {
             self.history.clear_checkpoint();
         } else {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
-            if let Ok(m) = self.history.save_recorded(&items, t0, now_ms().saturating_sub(t0)) {
+            let save = if partial { crate::history::Store::save_partial } else { crate::history::Store::save_recorded };
+            if let Ok(m) = save(&self.history, &items, t0, now_ms().saturating_sub(t0)) {
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
+                has_audio = m.has_audio;
                 saved = Some(m.id);
                 self.history.clear_checkpoint();
             }
@@ -441,9 +486,69 @@ impl App {
         let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
         let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
         let mut st = self.state.lock().unwrap();
-        st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept));
+        st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
         st.phase = Phase::Ready;
         Ok(Some(exp))
+    }
+
+    /// Start counting how far this stop is: the audio the worker had not transcribed yet, what it had not read, and the
+    /// piece it is on.
+    fn track(&self) {
+        let len = self.take.lock().unwrap().as_ref().map_or(0, |t| t.len());
+        let (looked, left) = *self.waiting.lock().unwrap();
+        let waiting = (left + len.saturating_sub(looked)) as u64 * 1000 / audio::RATE as u64;
+        // The model's pace on this recording, or over this run when it has transcribed nothing of it yet.
+        let pace = match *self.pace.lock().unwrap() {
+            (0, _) => self.paces.lock().unwrap().values().fold((0, 0), |a, p| (a.0 + p.0, a.1 + p.1)),
+            p => p,
+        };
+        let mut g = self.progress.lock().unwrap();
+        let mut p = Progress::new(waiting, pace, now_ms());
+        if let Some((len, at)) = *self.piece.lock().unwrap() {
+            p.begin(len, at);
+        }
+        *g = Some(p);
+    }
+
+    /// Wait for the worker to finish what is left to transcribe. False when Cancel cut the wait short first: the worker
+    /// is left to end the piece it is on, as the engine cannot be stopped part way through one.
+    fn wait_for(&self, w: std::thread::JoinHandle<()>) -> bool {
+        while !w.is_finished() {
+            if self.hurry.load(Ordering::SeqCst) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = w.join();
+        true
+    }
+
+    /// Let this recording's worker go: from here on it adds nothing (checked under the items' lock, so the copy the stop
+    /// takes next is final), writes no audio and leaves the HUD alone. The audio it had not written yet goes to the
+    /// recovery area now, so the recording keeps all of it.
+    fn cut(&self) {
+        let mut unsaved = self.unsaved.lock().unwrap();
+        {
+            let _items = self.items.lock().unwrap();
+            self.take_no.fetch_add(1, Ordering::SeqCst);
+        }
+        self.behind.store(0, Ordering::SeqCst);
+        *self.waiting.lock().unwrap() = (0, 0);
+        *self.piece.lock().unwrap() = None;
+        self.state.lock().unwrap().partial.clear();
+        if let (Some((mut held, read)), Some(take)) = (unsaved.take(), self.take.lock().unwrap().clone()) {
+            held.extend(take.read_from(read));
+            let _ = self.history.append_audio(&held);
+        }
+    }
+
+    /// Cancel while a stop waits for the last words: it saves now with what is transcribed, and keeps the audio so
+    /// History can transcribe the rest. Returns once that is saved; with no stop waiting, at once.
+    pub fn finish_now(&self) {
+        if self.state.lock().unwrap().phase == Phase::Transcribing {
+            self.hurry.store(true, Ordering::SeqCst);
+        }
+        drop(self.finishing.lock().unwrap());
     }
 
     /// Quitting mid-recording: finish transcribing into the checkpoint and leave it there; the
@@ -648,7 +753,25 @@ impl App {
     /// Add to the recording while its phase is one of `live`. The phase is read under the items' lock, so an item is
     /// either in the copy a stop takes or refused.
     fn add(&self, item: Item, live: &[Phase]) -> Result<(), String> {
-        let mut v = self.items.lock().unwrap();
+        self.add_to(self.items.lock().unwrap(), item, live)
+    }
+
+    /// What the worker of recording `no` heard, with when the model heard each of its tokens. Refused, tokens and all, once
+    /// that recording is no longer the current one: a stop cut short let it go, so a piece it finishes late lands neither
+    /// in the saved recording nor in the next one.
+    fn add_heard(&self, no: u64, item: Item, tokens: Option<(u64, Vec<crate::anchor::Token>)>) -> Result<(), String> {
+        let v = self.items.lock().unwrap();
+        if self.take_no.load(Ordering::SeqCst) != no {
+            return Err(STOPPED.into());
+        }
+        if let Some(t) = tokens {
+            self.tokens.lock().unwrap().push(t);
+        }
+        // The words still being transcribed for a stop go in too: the stop waits for them before it copies.
+        self.add_to(v, item, &[Phase::Recording, Phase::Loading, Phase::Transcribing])
+    }
+
+    fn add_to(&self, mut v: MutexGuard<'_, Vec<Item>>, item: Item, live: &[Phase]) -> Result<(), String> {
         if !live.contains(&self.state.lock().unwrap().phase) {
             return Err(STOPPED.into());
         }
@@ -733,15 +856,21 @@ impl App {
         if self.retranscribing.swap(true, Ordering::SeqCst) {
             return Err(AGAIN_BUSY.into());
         }
+        self.again_stop.store(false, Ordering::SeqCst);
+        let stopped = || self.again_stop.load(Ordering::SeqCst);
         let run = || -> Result<(), String> {
             let mut x = self.history.audio(id)?;
             load()?;
             let piece = |s: &[f32], voiced: u64| match busy() {
+                Ok(()) if stopped() => Err(AGAIN_CANCELLED.into()),
                 Ok(()) => hear(s, voiced),
                 Err(_) => Err(INTERRUPTED.into()),
             };
             let boost = self.settings.lock().unwrap().voice_boost;
             let said = transcribe_all(&mut x, boost, piece, progress)?;
+            if stopped() {
+                return Err(AGAIN_CANCELLED.into());
+            }
             self.history.replace_speech(id, &said)?;
             let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
             if self.last_id.lock().unwrap().as_deref() == Some(id) {
@@ -751,11 +880,34 @@ impl App {
             Ok(())
         };
         let r = run();
+        self.again_stop.store(false, Ordering::SeqCst);
         self.retranscribing.store(false, Ordering::SeqCst);
         r
     }
 
+    /// Cancel on a History entry being transcribed again: it stops after the piece under way and the entry stays as it
+    /// was. False when none is being transcribed again.
+    pub fn again_cancel(&self) -> bool {
+        let on = self.retranscribing.load(Ordering::SeqCst);
+        if on {
+            self.again_stop.store(true, Ordering::SeqCst);
+        }
+        on
+    }
+
     fn worker(self: Arc<Self>, no: u64, take: Arc<Take>) {
+        // The audio goes to the recovery area about once a second, from the moment the microphone opened: a crash keeps
+        // it, and History can transcribe it again. Never for a practice run, nor with Keep audio off. Held from before
+        // the model loads, so a stop cut short meanwhile still keeps all of it.
+        let keep = self.settings.lock().unwrap().keep_audio && !self.practice.load(Ordering::SeqCst);
+        let lead = self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000;
+        {
+            let mut u = self.unsaved.lock().unwrap();
+            if self.take_no.load(Ordering::SeqCst) == no {
+                *u = keep.then(|| (vec![0.0; lead], 0));
+            }
+        }
+        *self.waiting.lock().unwrap() = (0, 0);
         if let Err(e) = self.ensure_engine() {
             // Screenshots still work; the transcript stays empty.
             self.state.lock().unwrap().error = Some(e);
@@ -770,11 +922,6 @@ impl App {
         // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
         // look than a short one and the microphone never waits behind a copy of all of it.
         let mut pos = 0;
-        // The audio goes to the recovery area about once a second, from the moment the microphone opened: a crash keeps
-        // it, and History can transcribe it again. Never for a practice run, nor with Keep audio off.
-        let keep = self.settings.lock().unwrap().keep_audio && !self.practice.load(Ordering::SeqCst);
-        let lead = self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000;
-        let mut unsaved = if keep { vec![0.0; lead] } else { vec![] };
         // The voice detector and the model hear the take through the front end when it is on; the kept audio stays as
         // it came. Only the part the pieces still to come are cut from is held.
         let mut boost = self.settings.lock().unwrap().voice_boost.then(audio::Boost::default);
@@ -787,65 +934,92 @@ impl App {
             }
             let mut new = take.read_from(pos);
             pos += new.len();
-            if keep {
-                unsaved.extend_from_slice(&new);
-                if unsaved.len() >= audio::RATE as usize {
-                    let _ = self.history.append_audio(&std::mem::take(&mut unsaved));
-                }
-            }
+            self.keep_audio(no, &new, false);
             if let Some(b) = boost.as_mut() {
                 b.process(&mut new);
             }
             heard.push(&new);
             let ranges = seg.feed_new(&new);
+            let open = seg.open_start().map_or(0, |s| pos.saturating_sub(s));
+            self.wait_on(no, Some((pos, open + ranges.iter().map(|r| r.len()).sum::<usize>())), 0);
             let note = match boost.as_ref() {
                 Some(b) => audio::boosted_note(&seg.recent(), seg.floor(), b.silent()),
                 None => audio::mic_note(&seg.recent(), seg.floor()),
             };
             self.state.lock().unwrap().quiet_mic = note.map(String::from);
-            self.decode_ranges(&take, &heard, &ranges, seg.floor(), pos);
+            self.decode_ranges(no, &take, &heard, &ranges, seg.floor(), pos);
             // A live caption only when one is due and nothing waits to be transcribed: the last few seconds of the open
             // sentence.
             let due = self.engine.lock().unwrap().as_ref().is_some_and(|e| e.wants_partial());
             if let Some(start) = seg.open_start().filter(|_| due && ranges.is_empty() && take.len() - pos < audio::RATE as usize / 2) {
                 let samples = heard.copy(start.max(pos.saturating_sub(PARTIAL_SPAN))..pos);
                 let live = self.engine.lock().unwrap().as_ref().and_then(|e| e.partial(&samples));
-                if let Some(t) = live {
+                if let Some(t) = live.filter(|_| self.take_no.load(Ordering::SeqCst) == no) {
                     self.state.lock().unwrap().partial = t;
                 }
+            }
+            // A stop cut short while the model was busy: nothing of this recording goes on the HUD any more.
+            if self.take_no.load(Ordering::SeqCst) != no {
+                break;
             }
             heard.drop_before(seg.keep_from());
             self.behind.store(take.len().saturating_sub(pos) as u64, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        // A stop cut short let this recording go: what is left of it waits in History, to transcribe again.
+        if self.take_no.load(Ordering::SeqCst) != no {
+            return;
         }
         if self.cancel.load(Ordering::SeqCst) {
             self.state.lock().unwrap().partial.clear();
             return;
         }
         let mut new = take.read_from(pos);
-        if keep {
-            unsaved.extend_from_slice(&new);
-            let _ = self.history.append_audio(&unsaved);
-        }
+        self.keep_audio(no, &new, true);
         if let Some(b) = boost.as_mut() {
             b.process(&mut new);
         }
         heard.push(&new);
         let mut rest = seg.feed_new(&new);
         rest.extend(seg.close());
-        self.decode_ranges(&take, &heard, &rest, seg.floor(), pos + new.len());
-        self.behind.store(0, Ordering::SeqCst);
-        self.state.lock().unwrap().partial.clear();
+        if let Some(p) = self.progress.lock().unwrap().as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) {
+            p.rest(rest.iter().map(|r| r.len() as u64 * 1000 / audio::RATE as u64).sum());
+        }
+        self.decode_ranges(no, &take, &heard, &rest, seg.floor(), pos + new.len());
+        if self.take_no.load(Ordering::SeqCst) == no {
+            self.behind.store(0, Ordering::SeqCst);
+            self.state.lock().unwrap().partial.clear();
+        }
     }
 
-    /// Transcribe pieces of the take, cut from what the worker `heard` against a room at `floor`; the worker has read the
-    /// take up to `pos`.
-    fn decode_ranges(&self, take: &Take, heard: &audio::Tail, ranges: &[std::ops::Range<usize>], floor: f32, pos: usize) {
+    /// Hold `new` from the take of recording `no` for the recovery area, and write what is held once there is a second of
+    /// it, or at once with `all`. Nothing once that recording is no longer the current one: a stop cut short wrote the rest.
+    fn keep_audio(&self, no: u64, new: &[f32], all: bool) {
+        let mut u = self.unsaved.lock().unwrap();
+        let Some((held, read)) = u.as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) else {
+            return;
+        };
+        held.extend_from_slice(new);
+        *read += new.len();
+        if all || held.len() >= audio::RATE as usize {
+            let _ = self.history.append_audio(&std::mem::take(held));
+        }
+    }
+
+    /// Transcribe pieces of the take for recording `no`, cut from what the worker `heard` against a room at `floor`; the
+    /// worker has read the take up to `pos`. Once that recording is no longer the current one, the pieces left are not.
+    fn decode_ranges(&self, no: u64, take: &Take, heard: &audio::Tail, ranges: &[std::ops::Range<usize>], floor: f32, pos: usize) {
+        let mine = || self.take_no.load(Ordering::SeqCst) == no;
         for (i, r) in ranges.iter().enumerate() {
+            if !mine() {
+                return;
+            }
             let waiting: usize = ranges[i..].iter().map(|r| r.len()).sum();
             self.behind.store((take.len().saturating_sub(pos) + waiting) as u64, Ordering::SeqCst);
             let samples = heard.copy(r.clone());
             let voiced = audio::voiced_ms(&samples, floor);
+            let heard_ms = r.len() as u64 * 1000 / audio::RATE as u64;
+            self.under_way(no, Some(heard_ms), 0);
             let began = std::time::Instant::now();
             let mut model = None;
             let heard = {
@@ -855,32 +1029,52 @@ impl App {
                     crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s))
                 })
             };
-            let (heard_ms, spent_ms) = (r.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
+            let spent_ms = began.elapsed().as_millis() as u64;
+            if let Some(m) = model {
+                self.timed(&m, heard_ms, spent_ms);
+            }
+            // Cut short while this piece was heard: its words, its pace and its place on the HUD belong to no recording.
+            if !mine() {
+                return;
+            }
+            self.under_way(no, None, spent_ms);
+            self.wait_on(no, None, r.len());
             {
                 let mut p = self.pace.lock().unwrap();
                 p.0 += heard_ms;
                 p.1 += spent_ms;
-            }
-            if let Some(m) = model {
-                self.timed(&m, heard_ms, spent_ms);
             }
             let Some(heard) = heard else { continue };
             let text = heard.text;
             let at = self.audio_at.load(Ordering::SeqCst);
             let t_ms = at + (r.start as u64) * 1000 / audio::RATE as u64;
             let end_ms = at + (r.end as u64) * 1000 / audio::RATE as u64;
-            if let Some(tok) = heard.tokens {
-                self.tokens.lock().unwrap().push((t_ms, tok));
-            }
-            // The words still being transcribed for a stop go in too: the stop waits for them before it copies.
-            let _ = self.add(
-                Item::Speech {
-                    t_ms,
-                    end_ms,
-                    text,
-                },
-                &[Phase::Recording, Phase::Loading, Phase::Transcribing],
-            );
+            let _ = self.add_heard(no, Item::Speech { t_ms, end_ms, text }, heard.tokens.map(|tok| (t_ms, tok)));
+        }
+    }
+
+    /// The worker of recording `no` cut what it read up to a point into pieces (`look`: that point, and the samples
+    /// before it still to transcribe), or finished `done` samples of them. Only while that recording is the current one.
+    fn wait_on(&self, no: u64, look: Option<(usize, usize)>, done: usize) {
+        let mut w = self.waiting.lock().unwrap();
+        if self.take_no.load(Ordering::SeqCst) == no {
+            *w = look.unwrap_or((w.0, w.1.saturating_sub(done)));
+        }
+    }
+
+    /// The worker of recording `no` starts a piece of `len_ms` (Some), or has finished the one it was on in `spent_ms`
+    /// (None): a stop waiting for it counts it.
+    fn under_way(&self, no: u64, len_ms: Option<u64>, spent_ms: u64) {
+        let mut g = self.progress.lock().unwrap();
+        let mut piece = self.piece.lock().unwrap();
+        if self.take_no.load(Ordering::SeqCst) != no {
+            return;
+        }
+        let was = std::mem::replace(&mut *piece, len_ms.map(|len| (len, steady_ms())));
+        match (g.as_mut(), *piece, was) {
+            (Some(p), Some((len, at)), _) => p.begin(len, at),
+            (Some(p), None, Some((len, _))) => p.end(len, spent_ms),
+            _ => {}
         }
     }
 }
@@ -910,11 +1104,13 @@ pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
     }
 }
 
-/// What the HUD says after a stop.
-pub fn notice(items: &[Item], mode: OutputMode, delivered: bool, audio_kept: bool) -> &'static str {
+/// What the HUD says after a stop. `cut` when Cancel saved it before every word was in: whether its audio was kept.
+pub fn notice(items: &[Item], mode: OutputMode, delivered: bool, audio_kept: bool, cut: Option<bool>) -> &'static str {
     match (items.is_empty(), mode, delivered) {
         (true, _, _) if audio_kept => "kept",
         (true, _, _) => "empty",
+        _ if cut == Some(true) => "partial",
+        _ if cut == Some(false) => "cut",
         (_, OutputMode::AutoPaste, true) => "pasted",
         (_, OutputMode::Folder, _) => "saved",
         _ => "copied",
@@ -927,6 +1123,106 @@ const JUDGED_MS: u64 = 5_000;
 /// Slower than real time, judged once 5 s of audio has been transcribed.
 pub fn slow(heard_ms: u64, spent_ms: u64) -> bool {
     heard_ms >= JUDGED_MS && spent_ms > heard_ms
+}
+
+/// A stop's wait counts as stalled once nothing it shows has moved for this long (20 s).
+const STALL_MS: u64 = 20_000;
+
+/// How far a stop is with the last words, as the HUD shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Shown {
+    pub done_ms: u64,
+    pub total_ms: u64,
+    /// 0 to 100, never back, and 100 only once every word is in.
+    pub percent: u8,
+    /// Nothing moved for 20 s while there is still audio to transcribe.
+    pub stalled: bool,
+    /// About how long the rest takes at the model's pace, once that pace is measured on 5 s of audio; none before
+    /// that, nor while stalled.
+    pub left_ms: Option<u64>,
+}
+
+/// A stop's wait for the last words: the audio still to transcribe when stop was pressed, the pieces finished since, and
+/// the piece under way, credited at the model's measured pace up to nine tenths of its share. The caller gives the
+/// clocks: a steady one for that credit, and the wall clock only to tell a stall, so a computer that slept never moves
+/// the bar.
+#[derive(Debug, Clone, Default)]
+pub struct Progress {
+    total_ms: u64,
+    done_ms: u64,
+    /// The piece under way: its length and when it began on the steady clock.
+    piece: Option<(u64, u64)>,
+    /// Audio the model transcribed and the time that took, both in ms.
+    pace: (u64, u64),
+    /// The most shown so far: what is shown never goes back.
+    shown_ms: u64,
+    percent: u8,
+    /// When, on the wall clock, what is shown last moved.
+    moved_at: u64,
+    finished: bool,
+}
+
+impl Progress {
+    pub fn new(total_ms: u64, pace: (u64, u64), wall_ms: u64) -> Self {
+        Progress { total_ms, pace, moved_at: wall_ms, ..Default::default() }
+    }
+
+    /// A piece of `len_ms` began at `at_ms` on the steady clock.
+    pub fn begin(&mut self, len_ms: u64, at_ms: u64) {
+        self.piece = Some((len_ms, at_ms));
+    }
+
+    /// A piece of `len_ms` is done; it took `spent_ms`.
+    pub fn end(&mut self, len_ms: u64, spent_ms: u64) {
+        self.piece = None;
+        self.done_ms += len_ms;
+        self.pace = (self.pace.0 + len_ms, self.pace.1 + spent_ms);
+    }
+
+    /// What is left is now known exactly: `ms` of pieces.
+    pub fn rest(&mut self, ms: u64) {
+        self.total_ms = self.done_ms + ms;
+    }
+
+    /// Every word is in.
+    pub fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    /// Every piece counted so far is done.
+    pub fn complete(&self) -> bool {
+        self.done_ms >= self.total_ms
+    }
+
+    pub fn view(&mut self, steady_ms: u64, wall_ms: u64) -> Shown {
+        let credit = match self.piece {
+            Some((len, at)) if self.pace.0 > 0 && self.pace.1 > 0 => (steady_ms.saturating_sub(at) * self.pace.0 / self.pace.1).min(len * 9 / 10),
+            _ => 0,
+        };
+        let total = self.total_ms;
+        let done = if self.finished { total } else { (self.done_ms + credit).min(total) };
+        let percent = match (self.finished, total) {
+            (true, _) => 100,
+            (_, 0) => 0,
+            _ => (done * 100 / total).min(99) as u8,
+        };
+        // A wall clock set back counts as a move, so a change of time never reads as a stall.
+        if done > self.shown_ms || percent > self.percent || wall_ms < self.moved_at {
+            self.moved_at = wall_ms;
+        }
+        self.shown_ms = self.shown_ms.max(done);
+        self.percent = self.percent.max(percent);
+        let stalled = !self.finished && !self.complete() && wall_ms.saturating_sub(self.moved_at) >= STALL_MS;
+        let left = total.saturating_sub(self.shown_ms);
+        let left_ms = (self.pace.0 >= JUDGED_MS && !stalled && !self.finished).then(|| left * self.pace.1 / self.pace.0);
+        Shown { done_ms: self.shown_ms, total_ms: total.max(self.shown_ms), percent: self.percent, stalled, left_ms }
+    }
+}
+
+/// Milliseconds on a clock that only goes forward, from the first time it is read.
+fn steady_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// A live caption covers at most this many samples (8 s) of the sentence being spoken.
@@ -986,6 +1282,8 @@ pub const RECORDING_NOW: &str = "Pointcast is recording. Transcribe again once t
 pub const AGAIN_BUSY: &str = "Pointcast is already transcribing a recording again.";
 
 pub const INTERRUPTED: &str = "A recording started, so transcribing again stopped. Try again once it has finished.";
+
+pub const AGAIN_CANCELLED: &str = "Transcribing again was cancelled. The prompt is as it was.";
 
 pub const UPDATING: &str = "Pointcast is updating; it reopens in a moment.";
 
@@ -1353,12 +1651,16 @@ mod tests {
     #[test]
     fn the_hud_says_where_the_prompt_went() {
         let words = vec![Item::Speech { t_ms: 0, end_ms: 10, text: "hi".into() }];
-        assert_eq!(notice(&[], OutputMode::AutoPaste, true, false), "empty");
-        assert_eq!(notice(&[], OutputMode::AutoPaste, true, true), "kept", "no words, but the audio waits in History");
-        assert_eq!(notice(&words, OutputMode::AutoPaste, true, true), "pasted");
-        assert_eq!(notice(&words, OutputMode::AutoPaste, false, true), "copied");
-        assert_eq!(notice(&words, OutputMode::Clipboard, true, true), "copied");
-        assert_eq!(notice(&words, OutputMode::Folder, true, true), "saved");
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true, false, None), "empty");
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true, true, None), "kept", "no words, but the audio waits in History");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, true, true, None), "pasted");
+        assert_eq!(notice(&words, OutputMode::AutoPaste, false, true, None), "copied");
+        assert_eq!(notice(&words, OutputMode::Clipboard, true, true, None), "copied");
+        assert_eq!(notice(&words, OutputMode::Folder, true, true, None), "saved");
+        // Cancel saved what was done: the rest waits in History when the audio is kept, and is lost when it is not.
+        assert_eq!(notice(&words, OutputMode::AutoPaste, true, true, Some(true)), "partial");
+        assert_eq!(notice(&words, OutputMode::Folder, true, true, Some(false)), "cut");
+        assert_eq!(notice(&[], OutputMode::AutoPaste, true, true, Some(true)), "kept");
     }
 
     #[test]
@@ -1409,7 +1711,7 @@ mod tests {
         let mut heard = audio::Tail::default();
         heard.push(&[0.0f32; 40_000]);
         // Read to 40 000; two pieces of 8 000 and 4 000 wait (no model here, so each is let go at once).
-        a.decode_ranges(&take, &heard, &[0..8_000, 8_000..12_000], 0.0, 40_000);
+        a.decode_ranges(0, &take, &heard, &[0..8_000, 8_000..12_000], 0.0, 40_000);
         assert_eq!(a.behind.load(Ordering::SeqCst), 4_000 + 8_000, "the last piece and what is unread");
         assert_eq!(a.ui().behind_ms, 750);
         assert!(!slow(4_000, 9_000), "too little heard to judge");
@@ -1712,6 +2014,240 @@ mod tests {
             assert_eq!(a.last_export().unwrap().plain, "piece 1 piece 2 piece 3");
         }
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_stop_shows_how_far_the_last_words_are_and_never_claims_done_early() {
+        // 40 s of audio waits; the model took 20 s for 10 s of this recording.
+        let mut p = Progress::new(40_000, (10_000, 20_000), 1_000);
+        let v = p.view(0, 1_000);
+        assert_eq!((v.done_ms, v.total_ms, v.percent, v.stalled, v.left_ms), (0, 40_000, 0, false, Some(80_000)));
+        // A 10 s piece under way is credited at that pace, and never past nine tenths of it.
+        p.begin(10_000, 100);
+        assert_eq!(p.view(10_100, 2_000).done_ms, 5_000);
+        assert_eq!(p.view(90_000, 3_000).done_ms, 9_000);
+        p.end(10_000, 30_000);
+        let v = p.view(90_100, 4_000);
+        assert_eq!((v.done_ms, v.percent), (10_000, 25));
+        // What is left turns out to be 10 s of pieces: the rest was quiet.
+        p.rest(10_000);
+        assert_eq!(p.view(90_200, 5_000).percent, 50);
+        // The last piece in: 99 until the stop has the words, then 100.
+        p.begin(10_000, 90_300);
+        p.end(10_000, 9_000);
+        let v = p.view(99_300, 6_000);
+        assert_eq!((v.done_ms, v.total_ms, v.percent, v.stalled), (20_000, 20_000, 99, false));
+        p.finish();
+        let v = p.view(99_400, 6_100);
+        assert_eq!((v.percent, v.left_ms), (100, None));
+        // More left than first counted: what is shown never goes back.
+        let mut p = Progress::new(10_000, (0, 0), 0);
+        p.begin(5_000, 0);
+        p.end(5_000, 5_000);
+        assert_eq!(p.view(0, 0).percent, 50);
+        p.rest(15_000);
+        let v = p.view(10, 10);
+        assert_eq!((v.percent, v.done_ms, v.total_ms), (50, 5_000, 20_000));
+        // Over a whole wait, the percent only ever rises and is never 100 before the finish.
+        let mut p = Progress::new(60_000, (5_000, 5_000), 0);
+        let mut seen = vec![];
+        for k in 0..6u64 {
+            p.begin(10_000, k * 20_000);
+            seen.extend((0..20).map(|t| p.view(k * 20_000 + t * 1_000, k * 20_000 + t * 1_000).percent));
+            p.end(10_000, 20_000);
+        }
+        seen.push(p.view(120_000, 120_000).percent);
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]) && seen.iter().all(|v| *v < 100), "{seen:?}");
+        p.finish();
+        assert_eq!(p.view(120_000, 120_000).percent, 100);
+    }
+
+    #[test]
+    fn a_stop_that_shows_no_progress_for_20_s_is_stalled_by_the_wall_clock_only() {
+        // No pace measured yet: the piece under way earns no credit, so only its end moves anything.
+        let mut p = Progress::new(30_000, (0, 0), 5_000);
+        p.begin(30_000, 0);
+        assert!(!p.view(19_999, 24_999).stalled);
+        let v = p.view(20_000, 25_000);
+        assert!(v.stalled && v.left_ms.is_none(), "{v:?}");
+        p.end(30_000, 26_000);
+        assert!(!p.view(26_000, 31_000).stalled, "a piece came back");
+        // With a pace, the piece is credited as it goes.
+        let mut p = Progress::new(30_000, (10_000, 10_000), 0);
+        p.begin(30_000, 0);
+        assert_eq!(p.view(5_000, 5_000).percent, 16);
+        // The computer sleeps for an hour: the steady clock stood still (as on macOS) and the bar with it; the wall
+        // clock did not, so Cancel is offered.
+        let v = p.view(5_000, 3_605_000);
+        assert_eq!((v.done_ms, v.percent, v.stalled), (5_000, 16, true));
+        assert!(!p.view(5_100, 3_605_100).stalled, "awake, it moves again");
+        // A steady clock that ran on through the sleep credits no more than nine tenths of the piece.
+        assert_eq!(p.view(3_605_100, 3_605_200).done_ms, 27_000);
+        // Credited as far as it may be and still not back: stalled 20 s after the bar stopped.
+        assert!(!p.view(3_615_000, 3_625_199).stalled);
+        assert!(p.view(3_625_000, 3_625_200).stalled);
+        assert!(!p.view(3_625_100, 25_000).stalled, "a wall clock set back is no stall");
+        // Nothing to transcribe: 0 % and never stalled, then 100 % once done.
+        let mut p = Progress::new(0, (0, 0), 0);
+        let v = p.view(0, 60_000);
+        assert_eq!((v.percent, v.stalled, v.done_ms, v.total_ms), (0, false, 0, 0));
+        p.finish();
+        assert_eq!(p.view(0, 60_000).percent, 100);
+    }
+
+    /// Saved to a folder only and keeping its audio: a stop in a test never touches the clipboard or pastes.
+    fn real(a: &App, out: &std::path::Path) {
+        a.practice.store(false, Ordering::SeqCst);
+        let mut s = a.settings.lock().unwrap();
+        (s.output, s.also_clipboard, s.export_dir, s.keep_audio) = (OutputMode::Folder, false, Some(out.to_string_lossy().into_owned()), true);
+    }
+
+    fn until(what: &str, ok: impl Fn() -> bool) {
+        let t = std::time::Instant::now();
+        while !ok() {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "waited too long for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn cancel_at_the_stop_saves_what_is_done_keeps_all_the_audio_and_nothing_late_reaches_the_next_recording() {
+        let out = std::env::temp_dir().join(format!("pc-session-cut-out-{}", std::process::id()));
+        let a = app("cut");
+        real(&a, &out);
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop.store(false, Ordering::SeqCst);
+        a.take_no.store(1, Ordering::SeqCst);
+        a.push(Item::Speech { t_ms: 1_000, end_ms: 3_000, text: "the first sentence".into() }).unwrap();
+        // The model is busy, as with a slow piece: the test holds it, so the worker waits with sentences unheard.
+        let busy = a.engine.lock().unwrap();
+        let x = bursts(8.5, &SPANS);
+        let take = Arc::new(Take::default());
+        take.samples.lock().unwrap().extend_from_slice(&x[..x.len() - 8_000]);
+        *a.take.lock().unwrap() = Some(take.clone());
+        let (ended, gone) = std::sync::mpsc::channel();
+        *a.worker.lock().unwrap() = Some({
+            let (me, take) = (a.clone(), take.clone());
+            std::thread::spawn(move || {
+                me.worker(1, take);
+                let _ = ended.send(());
+            })
+        });
+        // It wrote what it read to the recovery area; the last half second comes after, unread.
+        until("the audio so far", || a.history.kept_audio());
+        take.samples.lock().unwrap().extend_from_slice(&x[x.len() - 8_000..]);
+        let stopping = {
+            let a = a.clone();
+            std::thread::spawn(move || a.stop(false))
+        };
+        until("the stop to wait", || a.ui().phase == Phase::Transcribing);
+        let v = a.ui().progress.expect("how far it is, while it waits");
+        assert!(v.total_ms > 0 && v.percent < 100, "{v:?}");
+        a.finish_now();
+        let exp = stopping.join().unwrap().unwrap().unwrap();
+        assert_eq!(exp.plain, "the first sentence");
+        let st = a.ui();
+        assert_eq!((st.phase, st.notice, st.progress), (Phase::Ready, Some("partial"), None));
+        let l = a.history.list();
+        assert_eq!(l.len(), 1);
+        assert!(l[0].partial && l[0].has_audio, "{:?}", l[0]);
+        assert_eq!(a.history.audio(&l[0].id).unwrap().len(), x.len(), "all of it, the part the worker never read too");
+        assert!(a.history.recover().is_none(), "nothing left behind to recover");
+
+        // The next recording starts, as start() begins one, while the old worker is still on its piece.
+        let no = a.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        a.items.lock().unwrap().clear();
+        a.tokens.lock().unwrap().clear();
+        *a.unsaved.lock().unwrap() = None;
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.stop.store(false, Ordering::SeqCst);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        // A piece the old worker finishes now lands nowhere, its tokens neither.
+        let late = Item::Speech { t_ms: 4_000, end_ms: 6_000, text: "late".into() };
+        assert_eq!(a.add_heard(1, late, Some((4_000, vec![]))).unwrap_err(), STOPPED);
+        drop(busy);
+        gone.recv_timeout(std::time::Duration::from_secs(20)).expect("the old worker ends");
+        assert!(a.items.lock().unwrap().is_empty() && a.tokens.lock().unwrap().is_empty());
+        assert!(!a.history.kept_audio(), "it wrote no audio into the next recording's");
+        assert_eq!((a.behind.load(Ordering::SeqCst), a.ui().partial.as_str()), (0, ""));
+        assert_eq!(a.history.list().len(), 1);
+        // The new recording's own worker is heard as before.
+        a.add_heard(no, Item::Speech { t_ms: 0, end_ms: 900, text: "new".into() }, None).unwrap();
+        assert_eq!(a.ui().text, "new");
+        a.state.lock().unwrap().phase = Phase::Idle;
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn cancel_with_nothing_left_to_transcribe_is_a_stop_like_any_other_and_a_second_one_is_harmless() {
+        let out = std::env::temp_dir().join(format!("pc-session-cut-none-out-{}", std::process::id()));
+        let a = app("cut-none");
+        real(&a, &out);
+        a.finish_now();
+        for (no, said) in [(1, "all of it"), (2, "the next one")] {
+            *a.t0.lock().unwrap() = Some(now_ms());
+            a.state.lock().unwrap().phase = Phase::Recording;
+            a.stop.store(false, Ordering::SeqCst);
+            a.take_no.store(no, Ordering::SeqCst);
+            a.push(Item::Speech { t_ms: 0, end_ms: 900, text: said.into() }).unwrap();
+            *a.worker.lock().unwrap() = Some({
+                let me = a.clone();
+                std::thread::spawn(move || me.worker(no, Arc::new(Take::default())))
+            });
+            // A Cancel left over from the first stop never cuts the second.
+            a.hurry.store(no == 2, Ordering::SeqCst);
+            let stopping = {
+                let a = a.clone();
+                std::thread::spawn(move || a.stop(false))
+            };
+            until("the stop", || a.ui().phase != Phase::Recording);
+            // Twice, while it finishes or after.
+            if no == 1 {
+                a.finish_now();
+                a.finish_now();
+            }
+            assert_eq!(stopping.join().unwrap().unwrap().unwrap().plain, said);
+            if no == 2 {
+                assert_eq!(a.take_no.load(Ordering::SeqCst), 2, "the stop waited for its worker");
+            }
+            a.finish_now();
+            let st = a.ui();
+            assert_eq!((st.phase, st.notice), (Phase::Ready, Some("saved")), "{said}");
+            assert!(!a.history.list()[0].partial, "{said}");
+            a.items.lock().unwrap().clear();
+        }
+        assert_eq!(a.history.list().len(), 2);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn cancel_on_transcribing_again_stops_after_the_piece_under_way_and_leaves_the_entry_as_it_was() {
+        let a = app("again-cancel");
+        let (id, before) = kept(&a);
+        assert!(!a.again_cancel(), "nothing to cancel");
+        let mut calls = 0;
+        let hear = |_: &[f32], _: u64| {
+            calls += 1;
+            // Cancel comes while the first piece is heard.
+            assert!(a.again_cancel());
+            Ok(Some(Heard { text: "half".into(), tokens: None }))
+        };
+        assert_eq!(a.again(&id, || Ok(()), hear, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(calls, 1, "the piece under way finished and no other began");
+        assert_eq!(a.history.items(&id).unwrap(), before);
+        // Cancelled while the model loads: nothing is heard.
+        let never = |_: &[f32], _: u64| -> Result<Option<Heard>, String> { panic!("nothing is heard once cancelled") };
+        let load = || {
+            a.again_cancel();
+            Ok(())
+        };
+        assert_eq!(a.again(&id, load, never, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(a.history.items(&id).unwrap(), before);
+        assert!(!a.retranscribing.load(Ordering::SeqCst) && !a.again_cancel(), "and the next one may run");
+        let hear = counting();
+        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
     }
 
     /// Words of `s`, lower case, without punctuation.

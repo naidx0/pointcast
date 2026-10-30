@@ -37,6 +37,9 @@ pub struct Meta {
     /// The entry keeps its recording as `audio.wav`, so it can be transcribed again.
     #[serde(default)]
     pub has_audio: bool,
+    /// Saved before every word was transcribed: Cancel at the stop kept what was done. Transcribing it again clears it.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 pub struct Store {
@@ -58,16 +61,22 @@ impl Store {
 
     /// Keep a finished session. Returns its entry.
     pub fn save(&self, items: &[Item], created_ms: u64, duration_ms: u64) -> Result<Meta, String> {
-        self.save_with(items, created_ms, duration_ms, None)
+        self.save_with(items, created_ms, duration_ms, None, false)
     }
 
     /// Keep a finished recording with the audio the recovery area kept for it, if any.
     pub fn save_recorded(&self, items: &[Item], created_ms: u64, duration_ms: u64) -> Result<Meta, String> {
-        self.save_with(items, created_ms, duration_ms, self.recorded())
+        self.save_with(items, created_ms, duration_ms, self.recorded(), false)
     }
 
-    fn save_with(&self, items: &[Item], created_ms: u64, duration_ms: u64, audio: Option<Vec<u8>>) -> Result<Meta, String> {
+    /// Keep a recording whose stop was cut short: the words transcribed by then, marked as part of it, and all its audio.
+    pub fn save_partial(&self, items: &[Item], created_ms: u64, duration_ms: u64) -> Result<Meta, String> {
+        self.save_with(items, created_ms, duration_ms, self.recorded(), true)
+    }
+
+    fn save_with(&self, items: &[Item], created_ms: u64, duration_ms: u64, audio: Option<Vec<u8>>, partial: bool) -> Result<Meta, String> {
         let mut meta = meta_for(items, created_ms, duration_ms, false);
+        meta.partial = partial;
         let dir = self.history().join(&meta.id);
         let tmp = self.history().join(format!("{}.tmp", meta.id));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -137,6 +146,7 @@ impl Store {
         let mut files = vec![(dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?)];
         if let Some(mut meta) = std::fs::read(dir.join("meta.json")).ok().and_then(|b| serde_json::from_slice::<Meta>(&b).ok()) {
             meta.preview = meta_for(&items, meta.created_ms, meta.duration_ms, false).preview;
+            meta.partial = false;
             no_words(&mut meta);
             files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
         }
@@ -305,7 +315,7 @@ impl Store {
             Item::Image { t_ms, .. } => *t_ms,
         });
         let heard = audio.as_ref().map_or(0, |a| (a.len() as u64).saturating_sub(44) / 32);
-        let mut meta = self.save_with(&items, created, duration.max().unwrap_or(0).max(heard), audio).ok()?;
+        let mut meta = self.save_with(&items, created, duration.max().unwrap_or(0).max(heard), audio, false).ok()?;
         meta.recovered = true;
         let _ = std::fs::write(
             self.history().join(&meta.id).join("meta.json"),
@@ -338,6 +348,7 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         images: items.iter().filter(|i| matches!(i, Item::Image { .. })).count() as u32,
         recovered,
         has_audio: false,
+        partial: false,
     }
 }
 
@@ -718,6 +729,23 @@ mod tests {
         }
         let old = s.list().into_iter().find(|e| e.id == m.id).unwrap();
         assert!(!old.has_audio && old.preview.is_empty(), "{old:?}");
+    }
+
+    #[test]
+    fn a_recording_saved_part_way_says_so_until_it_is_transcribed_again() {
+        let s = store("partial");
+        s.append_audio(&tone(32_000)).unwrap();
+        let m = s.save_partial(&items()[..1], 1_793_000_000_000, 2_000).unwrap();
+        s.clear_checkpoint();
+        assert!(m.partial && m.has_audio && s.list()[0] == m, "{m:?}");
+        assert_eq!(s.audio(&m.id).unwrap().len(), 32_000);
+        let raw = std::fs::read(s.history().join(&m.id).join("meta.json")).unwrap();
+        let mut old: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        old.as_object_mut().unwrap().remove("partial");
+        assert!(!serde_json::from_value::<Meta>(old).unwrap().partial, "an entry from before it is whole");
+        s.replace_speech(&m.id, &[Item::Speech { t_ms: 0, end_ms: 1_900, text: "all of it now".into() }]).unwrap();
+        assert!(!s.list()[0].partial);
+        assert!(!s.save_recorded(&items(), 1_793_000_100_000, 2_000).unwrap().partial);
     }
 
     #[test]
