@@ -71,10 +71,11 @@ case "$os-$arch" in
     jobs=$(nproc)
     ;;
   macos-arm64 | macos-x64)
-    # One static program: Metal with its shader source embedded (no .metallib beside it), Accelerate for BLAS.
-    # Intel Macs get the Haswell instruction set (AVX2, FMA, F16C), which every Intel Mac that runs macOS 12 has
-    # except the 2013 Mac Pro.
-    flags+=(-DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_BLAS=ON
+    # One static program: Metal with its shader source embedded (no .metallib beside it). The BLAS backend stays
+    # off: ggml calls Accelerate's new LAPACK interface, which exists only from macOS 13.3, so on macOS 12 its first
+    # call would jump to a missing symbol. Intel Macs get the Haswell instruction set (AVX2, FMA, F16C), which every
+    # Intel Mac that runs macOS 12 has except the 2013 Mac Pro.
+    flags+=(-DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_BLAS=OFF
       -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0)
     if [ "$arch" = arm64 ]; then
       flags+=(-DCMAKE_OSX_ARCHITECTURES=arm64)
@@ -117,6 +118,10 @@ case "$os" in
     strip --strip-unneeded "$stage"/*
     ;;
   macos)
+    if grep -E "is only available on macOS [0-9.]+ or newer" "$work/build.log"; then
+      echo "the build calls an API newer than macOS 12 without a guard: it would crash there" >&2
+      exit 1
+    fi
     cp "$bin/whisper-server" "$stage/"
     strip "$stage/whisper-server"
     codesign --force --sign - --timestamp=none "$stage/whisper-server"

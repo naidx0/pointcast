@@ -119,7 +119,7 @@ class Server:
         if not self.log.closed:
             self.log.flush()
         with open(self.log_path, "rb") as f:
-            return f.read().decode("utf-8", "replace")
+            return f.read().decode("utf-8", "replace").replace("\r\n", "\n")
 
 
 def transcribe(srv, path, wav, what):
