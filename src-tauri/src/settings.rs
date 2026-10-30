@@ -142,6 +142,10 @@ pub struct Settings {
     /// The plain-text prompt names each picture's file, for agents in a terminal that cannot take pasted images.
     #[serde(default = "yes")]
     pub picture_paths: bool,
+    /// Clean up room noise and even out the volume before the voice detector and the model hear it, live and when a
+    /// recording is transcribed again; the kept audio stays as it came.
+    #[serde(default = "yes")]
+    pub voice_boost: bool,
 }
 
 fn default_model() -> String {
@@ -188,6 +192,7 @@ impl Default for Settings {
             granted: Granted::default(),
             keep_audio: true,
             picture_paths: true,
+            voice_boost: true,
         }
     }
 }
@@ -403,6 +408,16 @@ mod tests {
         assert!(Settings::default().keep_audio && Settings::default().picture_paths);
         let off: Settings = serde_json::from_str(r#"{"keep_audio":false,"picture_paths":false}"#).unwrap();
         assert!(!off.keep_audio && !off.picture_paths);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert_eq!(back, off);
+    }
+
+    #[test]
+    fn quieter_and_farther_speech_is_picked_up_unless_turned_off() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert!(old.voice_boost && Settings::default().voice_boost, "on for a file from before it, and for a new one");
+        let off: Settings = serde_json::from_str(r#"{"voice_boost":false}"#).unwrap();
+        assert!(!off.voice_boost);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert_eq!(back, off);
     }
