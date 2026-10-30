@@ -360,11 +360,7 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
 }
 
 fn installed_models<'a>(root: &std::path::Path, cat: &'a voice::models::Catalog) -> Vec<&'a str> {
-    cat.models
-        .iter()
-        .filter(|x| voice::models::model_installed(root, x))
-        .map(|x| x.id.as_str())
-        .collect()
+    voice::engine::installed(root, cat)
 }
 
 fn settings_view(svc: &App) -> Value {
@@ -421,7 +417,7 @@ fn settings_view(svc: &App) -> Value {
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
-        "speech": voice::models::view(&speech.0, &speech.1),
+        "speech": voice::engine::view(&speech.0, &speech.1),
         "speech_check": svc.speech_check().map(|r| json!({ "ok": r.is_ok(), "error": r.err() })),
         // The model a recording loads, which may not be the one picked (that one is not downloaded).
         "speech_in_use": voice::machine::route(&s.model, voice::machine::recommended(), &installed_models(&speech.0, &speech.1)),
@@ -435,7 +431,18 @@ fn settings_view(svc: &App) -> Value {
     v["picture_paths"] = json!(s.picture_paths);
     v["voice_boost"] = json!(s.voice_boost);
     mark_slow(&mut v["speech"], &svc.slow_models());
+    mark_backend(&mut v["speech"], &svc.backends());
     v
+}
+
+/// The model in memory gets `backend`: "gpu" when it runs on the graphics card, "cpu" on the processor, "unknown"
+/// while the GPU helper has not said.
+fn mark_backend(speech: &mut Value, on: &std::collections::HashMap<String, &'static str>) {
+    for m in speech["models"].as_array_mut().into_iter().flatten() {
+        if let Some(b) = m["id"].as_str().and_then(|id| on.get(id)) {
+            m["backend"] = json!(b);
+        }
+    }
 }
 
 /// Each model this run has judged gets `slow_engine`: whether it transcribes slower than real time on this computer.
@@ -864,7 +871,8 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
         if r.as_ref().err().map(String::as_str) == Some(voice::models::CANCELLED) {
             let root = voice::models::speech_dir();
             let cat = voice::models::catalog();
-            for part in cat.runtime_for_host().map(|r| r.id.as_str()).into_iter().chain([id.as_str()]) {
+            let parts = [cat.runtime_for_host(), cat.helper_for_host()].into_iter().flatten().map(|r| r.id.as_str());
+            for part in parts.chain(cat.gpu_variant(&id).map(|g| g.id.as_str())).chain([id.as_str()]) {
                 voice::models::drop_partial(&root, part);
             }
         }
@@ -879,11 +887,16 @@ fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
     use voice::models::{self as m, Progress};
     let root = m::speech_dir();
     let cat = m::catalog();
-    let rt = cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?;
     let model = cat.model(id).ok_or("That model isn't in the catalog.")?;
-    let need_rt = !m::runtime_installed(&root, rt);
+    // A model with a GPU version gets that and its helper where the helper is published (a development helper is
+    // not downloaded); sherpa's runtime and files otherwise.
+    let (rt, model) = match cat.gpu_variant(id).filter(|_| voice::engine::helper_available(&cat)) {
+        Some(g) => (cat.helper_for_host().filter(|_| voice::engine::dev_helper().is_none()), g),
+        None => (Some(cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?), model),
+    };
+    let rt = rt.filter(|r| !m::runtime_installed(&root, r));
     let need_model = !m::model_installed(&root, model);
-    let total = if need_rt { rt.bytes } else { 0 } + if need_model { model.bytes } else { 0 };
+    let total = rt.map_or(0, |r| r.bytes) + if need_model { model.bytes } else { 0 };
     if let Some(free) = m::free_bytes(&root) {
         let need = m::space_needed(total);
         if total > 0 && free < need {
@@ -908,11 +921,11 @@ fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
         }
     };
     speech_emit(app, json!({ "phase": "download", "part": "runtime", "received": 0, "total": total }));
-    if need_rt {
+    if let Some(rt) = rt {
         m::install_runtime(&root, rt, &step(0, "runtime"))?;
     }
     if need_model {
-        let done = if need_rt { rt.bytes } else { 0 };
+        let done = rt.map_or(0, |r| r.bytes);
         m::install_model(&root, model, &step(done, "model"))?;
     }
     speech_emit(app, json!({ "phase": "check" }));
@@ -952,6 +965,10 @@ fn speech_remove(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<Value, S
         return Err("That model is in use. Pick another one first.".into());
     }
     voice::models::remove_model(&root, m)?;
+    // Its GPU version goes with it.
+    if let Some(g) = cat.gpu_variant(&m.id) {
+        voice::models::remove_model(&root, g)?;
+    }
     Ok(settings_view(&svc))
 }
 
@@ -1422,6 +1439,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 if let Some(svc) = _app.try_state::<Arc<App>>() {
                     svc.flush_for_quit();
+                    svc.release_engine();
                 }
             }
             // Clicking the Dock icon (shown while a window is open) brings Settings forward.
@@ -1539,6 +1557,16 @@ mod tests {
         let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["slow_engine"].clone();
         assert_eq!((said("whisper-turbo"), said("moonshine-base-en")), (json!(true), json!(false)));
         assert!(said("moonshine-tiny-en").is_null(), "a model not judged yet says nothing");
+    }
+
+    #[test]
+    fn settings_say_where_the_model_in_memory_runs() {
+        let cat = voice::models::catalog();
+        let mut speech = voice::engine::view(&std::env::temp_dir().join("pc-no-speech"), &cat);
+        mark_backend(&mut speech, &[("whisper-turbo".to_string(), "gpu")].into_iter().collect());
+        let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["backend"].clone();
+        assert_eq!(said("whisper-turbo"), json!("gpu"));
+        assert!(said("moonshine-base-en").is_null(), "a model not in memory says nothing");
     }
 
     fn png(w: u32, v: u8) -> Vec<u8> {

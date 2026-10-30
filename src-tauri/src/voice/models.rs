@@ -41,6 +41,9 @@ pub struct ModelEntry {
     pub files: Vec<FileEntry>,
     #[serde(default)]
     pub bench: Value,
+    /// For a model file run by the GPU helper: the model whose card it belongs to.
+    #[serde(default)]
+    pub gpu_for: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +59,11 @@ pub struct RuntimeEntry {
     /// The libraries that get loaded, `lib` and the ones it pulls in, by their path in the install.
     #[serde(default)]
     pub files: Vec<FileEntry>,
+    /// Not published yet: no pins, so it is never downloaded.
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +71,10 @@ pub struct Catalog {
     pub version: u32,
     pub models: Vec<ModelEntry>,
     pub runtimes: Vec<RuntimeEntry>,
+    /// The GPU helper (whisper.cpp's whisper-server) per computer, installed and checked like a runtime; `lib` is its
+    /// executable.
+    #[serde(default)]
+    pub helpers: Vec<RuntimeEntry>,
     #[serde(default)]
     pub reference: Value,
 }
@@ -81,6 +93,14 @@ impl Catalog {
             .iter()
             .find(|r| r.target == t)
             .or_else(|| self.runtimes.iter().find(|r| r.target.split('-').next() == t.split('-').next()))
+    }
+    /// The GPU helper built for exactly this computer.
+    pub fn helper_for_host(&self) -> Option<&RuntimeEntry> {
+        self.helpers.iter().find(|r| r.target == target_triple())
+    }
+    /// The GPU version of model `id`.
+    pub fn gpu_variant(&self, id: &str) -> Option<&ModelEntry> {
+        self.models.iter().find(|m| m.gpu_for == id)
     }
 }
 
@@ -239,6 +259,7 @@ pub const DAMAGED: &str = "The download arrived damaged, so it was thrown away. 
 pub const OFFLINE: &str =
     "Pointcast can't reach GitHub to download the speech files. Check your internet connection, then try again.";
 pub const CHANGED: &str = "The speech engine files changed; set it up again in Settings > Speech.";
+pub const PENDING: &str = "The GPU speech engine for this computer is not published yet.";
 
 /// Fetch `urls` (tried in order) into `dest`, resuming a `.partial` left by an earlier try.
 /// `bytes` and `sha256`, when known, must match or the file is discarded.
@@ -286,6 +307,12 @@ fn partial(dest: &Path) -> PathBuf {
 /// A cancelled setup leaves nothing behind: the bytes a download for `id` had so far are deleted.
 pub fn drop_partial(root: &Path, id: &str) {
     let _ = std::fs::remove_file(partial(&root.join(format!("{id}.tar.bz2"))));
+    let dir = install_dir(root, id);
+    for p in std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()) {
+        if p.extension().is_some_and(|x| x == "partial") {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// A finished file is kept only if its size and hash are the pinned ones.
@@ -517,6 +544,13 @@ pub fn install_model(
         progress(Progress::Ready);
         return Ok(install_dir(root, &e.id));
     }
+    if bare(e) {
+        // One file, downloaded as it is into its folder: resumed, checked against its pins, then renamed into place.
+        let f = &e.files[0];
+        download(&e.urls, &install_dir(root, &e.id).join(&f.name), f.bytes, &f.sha256, progress)?;
+        progress(Progress::Ready);
+        return Ok(install_dir(root, &e.id));
+    }
     let archive = root.join(format!("{}.tar.bz2", e.id));
     download(&e.urls, &archive, e.bytes, &e.sha256, progress)?;
     progress(Progress::Unpacking);
@@ -546,11 +580,19 @@ pub fn install_model(
     Ok(install_dir(root, &e.id))
 }
 
+/// A model that is one file downloaded as it is, not an archive.
+pub fn bare(e: &ModelEntry) -> bool {
+    e.files.len() == 1 && e.urls.iter().all(|u| !u.ends_with(".tar.bz2"))
+}
+
 pub fn install_runtime(
     root: &Path,
     e: &RuntimeEntry,
     progress: &dyn Fn(Progress),
 ) -> Result<PathBuf, String> {
+    if e.pending {
+        return Err(PENDING.into());
+    }
     if runtime_installed(root, e) {
         progress(Progress::Ready);
         return find_lib(root, e).ok_or_else(|| DAMAGED.to_string());
@@ -584,7 +626,7 @@ pub fn view(root: &Path, c: &Catalog) -> Value {
         })),
         "models": c.models.iter().map(|m| serde_json::json!({
             "id": m.id, "name": m.name, "family": m.family, "license": m.license,
-            "bytes": m.bytes, "installed": model_installed(root, m), "bench": m.bench
+            "bytes": m.bytes, "installed": model_installed(root, m), "bench": m.bench, "gpu_for": m.gpu_for
         })).collect::<Vec<_>>(),
         "speech_dir": root,
         "target": target_triple(),
@@ -637,6 +679,17 @@ mod tests {
             assert!(names.iter().any(|n| n.trim_start_matches("lib").starts_with("onnxruntime.")), "{}", r.id);
             for f in &r.files {
                 assert!(pinned(f.bytes, &f.sha256), "{} {}", r.id, f.name);
+            }
+        }
+        // The GPU helpers: pinned the same way once published; until then never downloaded.
+        for h in &c.helpers {
+            assert!(h.id.starts_with("whisper-helper-"), "{}", h.id);
+            if !h.pending {
+                assert!(pinned(h.bytes, &h.sha256) && h.urls.iter().all(|u| u.starts_with("https://")), "{}", h.id);
+                assert_eq!(h.files.iter().filter(|f| f.name.rsplit('/').next() == Some(h.lib.as_str())).count(), 1, "{}", h.id);
+                for f in &h.files {
+                    assert!(pinned(f.bytes, &f.sha256), "{} {}", h.id, f.name);
+                }
             }
         }
         // The MD build needs the Visual C++ Redistributable, which a clean Windows lacks.
@@ -901,6 +954,50 @@ mod tests {
         assert!(io_text(&full, Path::new("x")).contains("disk is full"));
         assert!(free_bytes(&std::env::temp_dir()).is_some_and(|b| b > 0));
         assert!(space_needed(100) > 300);
+    }
+
+    #[test]
+    fn whisper_turbo_has_a_gpu_version_pinned_to_one_hugging_face_commit_and_a_helper_per_desktop_os() {
+        let c = catalog();
+        let g = c.gpu_variant("whisper-turbo").unwrap();
+        assert_eq!((g.id.as_str(), g.family.as_str(), g.gpu_for.as_str()), ("whisper-turbo-gpu", "whisper-ggml", "whisper-turbo"));
+        assert!(bare(g) && !bare(c.model("whisper-turbo").unwrap()));
+        assert_eq!((g.files[0].name.as_str(), g.files[0].bytes, g.bytes), ("ggml-large-v3-turbo-q5_0.bin", 574_041_195, 574_041_195));
+        assert_eq!(g.files[0].sha256, g.sha256);
+        let commit = g.urls[0].split("/resolve/").nth(1).and_then(|r| r.split('/').next()).unwrap();
+        assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()), "{commit}: a commit, never main");
+        let targets: Vec<&str> = c.helpers.iter().map(|h| h.target.as_str()).collect();
+        for t in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert!(targets.contains(&t), "{t}");
+        }
+        assert!(c.runtimes.iter().all(|r| !r.id.starts_with("whisper-helper")), "a helper is never taken for the sherpa runtime");
+    }
+
+    #[test]
+    fn a_bare_model_file_downloads_into_its_folder_checked_and_resumable() {
+        let (b, h) = body();
+        let s = serve(b.clone(), 200, Some(100_000));
+        let root = scratch("bare");
+        let m: ModelEntry = serde_json::from_value(serde_json::json!({
+            "id": "g", "family": "whisper-ggml", "gpu_for": "x", "urls": [s.url.clone().replace(".tar.bz2", ".bin")],
+            "bytes": b.len(), "sha256": h, "files": [{ "name": "model.bin", "role": "model", "bytes": b.len(), "sha256": h }]
+        }))
+        .unwrap();
+        assert!(bare(&m));
+        assert_eq!(install_model(&root, &m, &|_| {}).unwrap(), install_dir(&root, "g"));
+        assert_eq!(std::fs::read(install_dir(&root, "g").join("model.bin")).unwrap(), b);
+        assert!(model_installed(&root, &m));
+        assert_eq!(*s.ranges.lock().unwrap(), vec![None, Some(100_000)], "a cut connection resumes");
+        // The wrong pin: nothing kept. A cancelled one: its partial goes with drop_partial.
+        let mut wrong = m.clone();
+        wrong.id = "w".into();
+        wrong.files[0].sha256 = "0".repeat(64);
+        assert_eq!(install_model(&root, &wrong, &|_| {}).unwrap_err(), DAMAGED);
+        assert!(!model_installed(&root, &wrong));
+        let half = install_dir(&root, "w").join("model.partial");
+        std::fs::write(&half, b"half").unwrap();
+        drop_partial(&root, "w");
+        assert!(!half.exists());
     }
 
     /// Every model in the catalog through the real runtime: unpack each archive from a local folder

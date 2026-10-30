@@ -223,9 +223,17 @@ pub const SURE_VOICE_MS: u64 = 1_500;
 /// The text kept for a piece of clear voice the model could not make out, so the loss shows.
 pub const UNCLEAR: &str = "[unclear]";
 
-/// What a piece of a take says, through `hear`. A quiet piece is raised first. One with `SURE_VOICE_MS` of voice that
-/// comes back empty is heard once more at full level and, if still empty, kept as `UNCLEAR`; a shorter one is dropped.
+/// A piece with less voice than this (0.6 s) is never sent: every model, given a breath or a click at the end of a
+/// take, makes up words for it ("Thank you.", "I'm going to go.", "you").
+pub const MIN_VOICED_MS: u64 = 600;
+
+/// What a piece of a take says, through `hear`. One with under `MIN_VOICED_MS` of voice is dropped unheard. A quiet
+/// piece is raised first. One with `SURE_VOICE_MS` of voice that comes back empty is heard once more at full level and,
+/// if still empty, kept as `UNCLEAR`; a shorter one is dropped.
 pub fn hear_piece(samples: &[f32], voiced_ms: u64, hear: impl Fn(&[f32]) -> Heard) -> Option<Heard> {
+    if voiced_ms < MIN_VOICED_MS {
+        return None;
+    }
     let h = hear(&super::audio::louder(samples, false));
     if !h.text.is_empty() {
         return Some(h);
@@ -257,7 +265,15 @@ fn cs(p: &Path) -> Result<CString, String> {
     CString::new(p.to_string_lossy().as_bytes()).map_err(|e| e.to_string())
 }
 
+/// The path handed to the loader, in this system's separators. On Windows a forward slash makes
+/// LOAD_WITH_ALTERED_SEARCH_PATH search the usual places for the libraries it pulls in, and System32 has an
+/// onnxruntime.dll of another version.
+fn loader_path(lib: &Path) -> std::path::PathBuf {
+    lib.components().collect()
+}
+
 fn open(lib: &Path) -> Result<libloading::Library, String> {
+    let lib = &loader_path(lib);
     #[cfg(windows)]
     unsafe {
         const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
@@ -514,7 +530,28 @@ mod tests {
         let second = |s: &[f32]| Heard { text: if s[0] > 0.45 { "got it".into() } else { String::new() }, tokens: None };
         assert_eq!(hear_piece(&loud, SURE_VOICE_MS, second).unwrap().text, "got it", "the retry is at full level");
         let fine = |_: &[f32]| Heard { text: "hello".into(), tokens: None };
-        assert_eq!(hear_piece(&loud, 0, fine).unwrap().text, "hello");
+        assert_eq!(hear_piece(&loud, MIN_VOICED_MS, fine).unwrap().text, "hello");
+    }
+
+    #[test]
+    fn a_piece_with_almost_no_voice_is_never_sent_to_a_model() {
+        let made_up = |_: &[f32]| -> Heard { panic!("a breath at the end of a take was sent") };
+        let tail = vec![0.3f32; 17_600];
+        for voiced in [0, 200, MIN_VOICED_MS - 1] {
+            assert_eq!(hear_piece(&tail, voiced, made_up), None, "{voiced} ms of voice");
+        }
+        let said = |_: &[f32]| Heard { text: "Thank you.".into(), tokens: None };
+        assert!(hear_piece(&tail, MIN_VOICED_MS, said).is_some(), "a short word with enough voice is heard");
+    }
+
+    #[test]
+    fn the_library_handed_to_the_loader_has_no_forward_slashes_on_windows() {
+        let dir = std::env::temp_dir().to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        let p = loader_path(Path::new(&format!("{dir}/speech/runtime/pkg/lib/sherpa-onnx-c-api.dll")));
+        if cfg!(windows) {
+            assert!(!p.to_string_lossy().contains('/'), "{}", p.display());
+        }
+        assert!(p.ends_with("pkg/lib/sherpa-onnx-c-api.dll") && p.is_absolute(), "{}", p.display());
     }
 
     #[test]
