@@ -126,6 +126,8 @@ and you can hold the key while you talk instead of tapping it.
   click it and press new keys.
 - **Transcription is slow.** Pointcast says when a model is slower than real time on your computer.
   Pick **Moonshine Base** in **Settings → Speech**.
+- **Transcribing at the end takes long.** The capsule shows a progress bar; **Cancel** saves what is
+  done and keeps the audio so you can **Transcribe again**.
 - **macOS, after an update.** macOS asks again for Screen Recording and Accessibility. Turn them back on
   in **System Settings → Privacy & Security**, then reopen Pointcast.
 - **Run the setup again.** Menu bar or tray icon → **Setup Assistant…**
