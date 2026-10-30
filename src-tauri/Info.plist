@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Pointcast transcribes your voice locally to build the prompt. Audio stays on this computer and is dropped after transcription.</string>
+  <string>Pointcast turns what you say into text on this computer to build your prompt. Nothing is uploaded.</string>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>Pointcast transcribes your voice locally to build the prompt. Audio stays on this computer and is dropped after transcription.</string>
+  <string>Pointcast turns what you say into text on this computer to build your prompt. Nothing is uploaded.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Pointcast captures the screen you mark up so annotated screenshots can be inlined in the prompt. Password-manager windows are painted out.</string>
   <key>LSUIElement</key>

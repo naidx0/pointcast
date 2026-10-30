@@ -306,6 +306,9 @@ fn keep_com_apartment() {
 
 pub fn devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};
+    if !crate::permissions::may_list_microphones() {
+        return vec![];
+    }
     keep_com_apartment();
     let host = cpal::default_host();
     let def = host.default_input_device().and_then(|d| d.name().ok());

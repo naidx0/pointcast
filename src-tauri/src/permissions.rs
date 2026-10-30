@@ -42,6 +42,16 @@ pub fn probe() -> PermissionStatus {
     }
 }
 
+/// Whether the microphones may be listed now. On macOS listing them counts as using the microphone and brings up
+/// its permission prompt, so it waits until access is granted (asked for on the setup assistant's access step).
+pub fn may_list_microphones() -> bool {
+    lists_microphones(cfg!(target_os = "macos"), microphone())
+}
+
+fn lists_microphones(mac: bool, mic: Access) -> bool {
+    !mac || mic == Access::Granted
+}
+
 /// Whether a synthetic Cmd/Ctrl+V will reach other apps (macOS needs Accessibility for it).
 pub fn can_paste() -> bool {
     accessibility() == Access::Granted
@@ -315,6 +325,15 @@ fn windows_mic(all: Option<&str>, desktop: Option<&str>, device: Option<&str>, p
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn on_macos_microphones_are_listed_only_once_access_is_granted() {
+        use super::{lists_microphones, Access};
+        assert!(!lists_microphones(true, Access::Unknown), "listing would bring up the prompt before setup explains it");
+        assert!(!lists_microphones(true, Access::Denied));
+        assert!(lists_microphones(true, Access::Granted));
+        assert!(lists_microphones(false, Access::Unknown), "Windows and Linux list them freely");
+    }
+
     use super::*;
 
     #[test]
