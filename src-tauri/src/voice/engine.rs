@@ -71,7 +71,9 @@ impl Gpu {
         for attempt in 0..2 {
             let mut g = self.server.lock().unwrap();
             let Some(srv) = g.as_mut() else { break };
-            if attempt > 0 && srv.exited() {
+            // A helper that died (or is still dying, so it does not read as ended yet) or hangs is started again.
+            if attempt > 0 && (srv.exited() || !srv.answers()) {
+                srv.kill();
                 match srv.launch.clone().map(|l| Server::start(&l, READY_WITHIN)) {
                     Some(Ok(mut again)) => {
                         again.abort = self.abort.clone();
