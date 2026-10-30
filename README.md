@@ -11,6 +11,14 @@
   <a href="https://github.com/naidx0/pointcast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/naidx0/pointcast?color=555&label=release"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/naidx0/pointcast/releases/latest/download/Pointcast-macOS.dmg"><img alt="Download for macOS" src="https://img.shields.io/badge/Download%20for%20macOS-111111?style=for-the-badge&logo=apple&logoColor=white" height="40"></a>
+  &nbsp;
+  <a href="https://github.com/naidx0/pointcast/releases/latest/download/Pointcast-Windows-setup.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download%20for%20Windows-0067C0?style=for-the-badge&logo=windows11&logoColor=white" height="40"></a>
+</p>
+
+<p align="center">or paste one line: see <a href="#install">Install</a></p>
+
 <p align="center"><img src="docs/demo/pointcast.gif" width="760" alt="One shortcut starts a recording, a region of a checkout page is boxed with a pin, a label and an arrow, and the prompt with the annotated picture lands in a chat"></p>
 
 Press one shortcut, say what you see, and point at or mark up the screen. When you stop, Pointcast
@@ -22,19 +30,22 @@ computer. Nothing is uploaded.
 
 ## Install
 
-**macOS 12+**, in Terminal:
+The fastest way: copy one line, paste it, press Return. It downloads the latest version, checks it, installs it
+and opens it. No warnings, no files to open.
+
+**macOS 12+**: open Terminal (Spotlight: "Terminal") and paste:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash
 ```
 
-**Windows 10 or 11**, in PowerShell (no admin rights needed):
+**Windows 10 or 11**: open PowerShell (Start: "PowerShell") and paste (no admin rights needed):
 
 ```powershell
 irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 ```
 
-Or download the installer from [Releases](https://github.com/naidx0/pointcast/releases/latest).
+Or use the **Download** buttons above (every version is on [Releases](https://github.com/naidx0/pointcast/releases/latest)).
 Pointcast is not signed with a paid Apple or Microsoft certificate, so a downloaded installer gets a warning
 the one-line install avoids: on macOS, drag Pointcast to Applications, then right-click it and choose **Open**
 the first time (on macOS 15: **System Settings → Privacy & Security → Open Anyway**); on Windows, choose

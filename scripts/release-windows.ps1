@@ -78,6 +78,11 @@ if ($NoUpload) {
 Step "Uploading to GitHub release $tag"
 & gh release upload $tag $exe --clobber
 if ($LASTEXITCODE -ne 0) { Fail "the upload to release $tag failed. Create the release (a draft is fine) with that tag first." }
+# The same installer under a name that never changes, for the page's Download button.
+$fixed = Join-Path (Split-Path $exe) 'Pointcast-Windows-setup.exe'
+Copy-Item $exe $fixed -Force
+& gh release upload $tag $fixed --clobber
+if ($LASTEXITCODE -ne 0) { Fail "the upload of Pointcast-Windows-setup.exe failed." }
 
 Step "Confirming the uploaded file"
 $repo = & gh repo view --json nameWithOwner -q .nameWithOwner

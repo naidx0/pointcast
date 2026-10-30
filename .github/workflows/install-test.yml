@@ -1,0 +1,66 @@
+name: Install test
+
+# Runs the one-line installs exactly as the README gives them, on fresh macOS and Windows machines, then checks that
+# Pointcast is installed and running and keeps a screenshot of the screen. Needs a published release.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Install with the one-line command
+        run: curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash
+      - name: Pointcast is installed and running
+        run: |
+          test -d /Applications/Pointcast.app || test -d "$HOME/Applications/Pointcast.app"
+          for i in $(seq 1 30); do pgrep -x pointcast && break; sleep 1; done
+          pgrep -x pointcast
+          sleep 8
+          pgrep -x pointcast
+      - name: Screenshot
+        if: always()
+        run: screencapture -x macos.png || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: install-test-macos
+          path: macos.png
+          if-no-files-found: ignore
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Install with the one-line command
+        shell: powershell
+        run: irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
+      - name: Pointcast is installed and running
+        shell: powershell
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Pointcast\pointcast.exe'
+          if (-not (Test-Path $exe)) { throw "pointcast.exe is not installed" }
+          $p = $null
+          foreach ($i in 1..30) { $p = Get-Process pointcast -ErrorAction SilentlyContinue; if ($p) { break }; Start-Sleep 1 }
+          if (-not $p) { throw "Pointcast is not running" }
+          Start-Sleep 8
+          if (-not (Get-Process pointcast -ErrorAction SilentlyContinue)) { throw "Pointcast stopped" }
+      - name: Screenshot
+        if: always()
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("windows.png")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: install-test-windows
+          path: windows.png
+          if-no-files-found: ignore

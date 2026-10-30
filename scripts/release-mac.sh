@@ -97,6 +97,9 @@ fi
 
 step "Uploading to GitHub release $TAG"
 gh release upload "$TAG" "$DMG" --clobber || fail "the upload to release $TAG failed. Create the release (a draft is fine) with that tag first."
+# The same dmg under a name that never changes, for the page's Download button.
+FIXED="$(dirname "$DMG")/Pointcast-macOS.dmg"
+cp "$DMG" "$FIXED" && gh release upload "$TAG" "$FIXED" --clobber || fail "the upload of Pointcast-macOS.dmg failed."
 
 step "Confirming the uploaded file"
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || fail "could not read the repository name from gh."
