@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://github.com/naidx0/pointcast/releases/latest/download/Pointcast-macOS.dmg"><img alt="Download for macOS" src="https://img.shields.io/badge/Download%20for%20macOS-111111?style=for-the-badge&logo=apple&logoColor=white" height="40"></a>
   &nbsp;
-  <a href="https://github.com/naidx0/pointcast/releases/latest/download/Pointcast-Windows-setup.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download%20for%20Windows-0067C0?style=for-the-badge&logo=windows11&logoColor=white" height="40"></a>
+  <a href="https://github.com/naidx0/pointcast/releases/latest/download/Pointcast-Windows-setup.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download%20for%20Windows-0067C0?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIgMy41IDEwLjUgMi4zdjguMkgyek0xMS41IDIuMiAyMiAuOHY5LjdIMTEuNXpNMiAxMS41aDguNXY4LjJMMiAxOC41ek0xMS41IDExLjVIMjJ2OS44bC0xMC41LTEuNHoiLz48L3N2Zz4%3D" height="40"></a>
 </p>
 
 <p align="center">or paste one line: see <a href="#install">Install</a></p>
