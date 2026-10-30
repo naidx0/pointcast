@@ -28,6 +28,8 @@ export type UiState = {
   slow_engine?: boolean;
   /** While the last words are transcribed after a stop: how far that is. */
   progress?: Progress | null;
+  /** The GPU engine's first start on this computer: the graphics card is compiling its shaders. */
+  preparing_gpu?: boolean;
 };
 
 export type Progress = {
@@ -68,7 +70,18 @@ export type Permissions = Record<PermissionKind, Access> & { gated: Record<Permi
 export type Action = "session" | "full" | "region" | "zoom";
 export type HotkeyView = { label: string; keys: string[]; default: string };
 
-export type SpeechModel = { id: string; name: string; installed: boolean; bytes: number };
+/** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
+ * its download, and whether the processor version is on disk too. */
+export type GpuVersion = { available: boolean; installed: boolean; bytes: number; cpu_installed: boolean };
+export type SpeechModel = {
+  id: string;
+  name: string;
+  installed: boolean;
+  bytes: number;
+  gpu?: GpuVersion;
+  /** Where the model in memory runs: on the graphics card, on the processor, or not said yet. */
+  backend?: "gpu" | "cpu" | "unknown";
+};
 export type SpeechView = {
   runtime?: { id: string; installed: boolean; lib: string } | null;
   models?: SpeechModel[];

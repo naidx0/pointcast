@@ -77,8 +77,14 @@ and you can hold the key while you talk instead of tapping it.
   | Moonshine Base | 111 MB | Recommended. Fast and accurate English. |
   | Moonshine Tiny | 30 MB | The fastest, for short notes. |
   | Parakeet v2 | 482 MB | The most accurate English, with punctuation. |
-  | Whisper Turbo | 564 MB | Any of 99 languages, detected automatically. Slower on older computers. |
+  | Whisper Turbo | 574 MB | Any of 99 languages, detected automatically. Runs on your graphics card. |
   | Parakeet v3 | 487 MB | 25 European languages, detected automatically. |
+
+  Whisper Turbo runs on your graphics card through [whisper.cpp](https://github.com/ggml-org/whisper.cpp):
+  any Vulkan GPU on Windows and Linux, Metal on a Mac, with beam search for fewer wrong words than the
+  processor build. On an RTX 2060 Super it transcribes a 10-second sentence in under a second. Without a
+  usable graphics card it falls back to the processor, and Settings says which one it runs on. The
+  574 MB model and a small helper program download with it; there is nothing else to install.
 
 - **Mark-up tools.** The screen freezes; drag a box, then use pins with labels (P), arrows (A),
   rectangles (R), the highlighter (H), the pen (D), text (T) and a 2× magnifier (M). Five colors,

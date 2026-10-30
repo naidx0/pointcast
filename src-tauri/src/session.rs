@@ -9,7 +9,8 @@ use crate::settings::{MarkPoint, OutputMode, Settings, SpokenAnchors};
 use crate::voice::audio::{self, Mic, Take};
 use crate::voice::machine;
 use crate::voice::models;
-use crate::voice::stt::{Engine, Heard};
+use crate::voice::engine::{self, Engine};
+use crate::voice::stt::Heard;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -50,6 +51,8 @@ pub struct UiState {
     pub slow_engine: bool,
     /// While a stop waits for the last words (Transcribing): how far that is. None in every other phase.
     pub progress: Option<Shown>,
+    /// The GPU engine's first start on this computer: the graphics card compiles its shaders (up to a minute or two).
+    pub preparing_gpu: bool,
 }
 
 impl Default for UiState {
@@ -70,6 +73,7 @@ impl Default for UiState {
             quiet_mic: None,
             slow_engine: false,
             progress: None,
+            preparing_gpu: false,
         }
     }
 }
@@ -85,6 +89,12 @@ pub struct App {
     mic: Mutex<Option<Mic>>,
     take: Mutex<Option<Arc<Take>>>,
     engine: Mutex<Option<Engine>>,
+    /// Whether the engine in memory was loaded with the GPU version of its model here, so one set up since is loaded.
+    engine_gpu: AtomicBool,
+    /// Moved on to stop the piece the engine is on, for an engine that can (the GPU helper); reachable while it works.
+    aborter: Mutex<Option<Arc<AtomicU64>>>,
+    /// Where the engine in memory runs, by model: "gpu", "cpu" or "unknown".
+    backend: Mutex<Option<(String, &'static str)>>,
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
     /// How the last attempt to load the model and run it went; none before the first.
@@ -150,17 +160,7 @@ pub struct App {
 
 impl App {
     pub fn new(settings: Settings, settings_path: std::path::PathBuf) -> Arc<Self> {
-        let model_ready = {
-            let root = models::speech_dir();
-            let cat = models::catalog();
-            cat.runtime_for_host()
-                .map(|r| models::runtime_installed(&root, r))
-                .unwrap_or(false)
-                && cat
-                    .models
-                    .iter()
-                    .any(|m| models::model_installed(&root, m))
-        };
+        let model_ready = engine::usable(&models::speech_dir(), &models::catalog());
         Arc::new(App {
             settings: Mutex::new(settings),
             settings_path,
@@ -175,6 +175,9 @@ impl App {
             mic: Mutex::default(),
             take: Mutex::default(),
             engine: Mutex::default(),
+            engine_gpu: AtomicBool::new(false),
+            aborter: Mutex::default(),
+            backend: Mutex::default(),
             loading: Mutex::default(),
             checked: Mutex::default(),
             finishing: Mutex::default(),
@@ -266,30 +269,59 @@ impl App {
         let _one = self.loading.lock().unwrap();
         let root = models::speech_dir();
         let cat = models::catalog();
-        let rt = cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?;
-        let installed: Vec<&str> = cat
-            .models
-            .iter()
-            .filter(|m| models::model_installed(&root, m))
-            .map(|m| m.id.as_str())
-            .collect();
+        if cat.runtime_for_host().is_none() && cat.helper_for_host().is_none() {
+            return Err("Speech isn't available for this computer yet.".into());
+        }
+        let installed = engine::installed(&root, &cat);
         let chosen = self.settings.lock().unwrap().model.clone();
-        let id = match machine::route(&chosen, machine::recommended(), &installed) {
-            Some(id) if models::runtime_installed(&root, rt) => id,
-            _ => return Err(NO_MODEL.into()),
-        };
-        if self.engine.lock().unwrap().as_ref().is_some_and(|e| e.model == id) {
+        let id = machine::route(&chosen, machine::recommended(), &installed).ok_or(NO_MODEL)?;
+        let model = cat.model(id).ok_or(NO_MODEL)?;
+        let gpu = engine::gpu_ready(&root, &cat, model).is_some();
+        let same = |e: &Engine| e.model() == id && self.engine_gpu.load(Ordering::SeqCst) == gpu && e.failure().is_none();
+        if self.engine.lock().unwrap().as_ref().is_some_and(same) {
             self.state.lock().unwrap().model_ready = true;
             return Ok(());
         }
-        let model = cat.model(id).ok_or(NO_MODEL)?;
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get().min(4) as i32)
-            .unwrap_or(2);
-        let eng = crate::voice::stt::load(&root, rt, model, threads)?;
+        // The one in memory goes first: a GPU helper frees the graphics card before another starts.
+        self.engine.lock().unwrap().take();
+        let threads = std::thread::available_parallelism().map(|n| sherpa_threads(n.get())).unwrap_or(2);
+        let preparing = |on: bool| self.state.lock().unwrap().preparing_gpu = on;
+        let eng = engine::load(&root, &cat, model, threads, &preparing)?;
+        self.engine_gpu.store(gpu, Ordering::SeqCst);
+        *self.aborter.lock().unwrap() = eng.aborter();
+        *self.backend.lock().unwrap() = Some((id.to_string(), eng.backend()));
         *self.engine.lock().unwrap() = Some(eng);
         self.state.lock().unwrap().model_ready = true;
         Ok(())
+    }
+
+    /// Where the engine in memory runs, by model, for Settings: "gpu", "cpu" or "unknown".
+    pub fn backends(&self) -> std::collections::HashMap<String, &'static str> {
+        self.backend.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// The engine heard a piece: note where it runs now, and say it when it can hear nothing any more.
+    fn after_piece(&self, eng: &Engine) -> Option<String> {
+        *self.backend.lock().unwrap() = Some((eng.model().to_string(), eng.backend()));
+        let failed = eng.failure();
+        if let Some(e) = &failed {
+            self.state.lock().unwrap().error = Some(e.clone());
+        }
+        failed
+    }
+
+    /// Stop the piece the engine is on, where it can stop part way (the GPU helper closes its request).
+    fn abort_piece(&self) {
+        if let Some(a) = self.aborter.lock().unwrap().as_ref() {
+            a.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Let the engine go at quit, so a GPU helper ends with Pointcast on every system.
+    pub fn release_engine(&self) {
+        if let Ok(mut g) = self.engine.try_lock() {
+            g.take();
+        }
     }
 
     /// Free the model's memory while nothing is recording or transcribed again; the next recording loads it again
@@ -301,6 +333,8 @@ impl App {
         let _one = self.loading.lock().unwrap();
         if !self.retranscribing.load(Ordering::SeqCst) {
             *self.engine.lock().unwrap() = None;
+            *self.aborter.lock().unwrap() = None;
+            *self.backend.lock().unwrap() = None;
         }
     }
 
@@ -535,6 +569,8 @@ impl App {
         self.behind.store(0, Ordering::SeqCst);
         *self.waiting.lock().unwrap() = (0, 0);
         *self.piece.lock().unwrap() = None;
+        // Its words would land nowhere: an engine that can stops the piece it is on now.
+        self.abort_piece();
         self.state.lock().unwrap().partial.clear();
         if let (Some((mut held, read)), Some(take)) = (unsaved.take(), self.take.lock().unwrap().clone()) {
             held.extend(take.read_from(read));
@@ -820,8 +856,12 @@ impl App {
             let eng = g.as_ref().ok_or(NO_MODEL)?;
             let began = std::time::Instant::now();
             let heard = crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p));
-            self.timed(&eng.model, s.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
-            Ok(heard)
+            self.timed(eng.model(), s.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
+            // An engine that stopped working would leave the entry without words: it stays as it was.
+            match self.after_piece(eng) {
+                Some(e) => Err(e),
+                None => Ok(heard),
+            }
         };
         self.again(id, || self.ensure_engine(), hear, progress)
     }
@@ -891,6 +931,7 @@ impl App {
         let on = self.retranscribing.load(Ordering::SeqCst);
         if on {
             self.again_stop.store(true, Ordering::SeqCst);
+            self.abort_piece();
         }
         on
     }
@@ -1025,8 +1066,10 @@ impl App {
             let heard = {
                 let g = self.engine.lock().unwrap();
                 g.as_ref().and_then(|eng| {
-                    model = Some(eng.model.clone());
-                    crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s))
+                    model = Some(eng.model().to_string());
+                    let h = crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s));
+                    self.after_piece(eng);
+                    h
                 })
             };
             let spent_ms = began.elapsed().as_millis() as u64;
@@ -1115,6 +1158,11 @@ pub fn notice(items: &[Item], mode: OutputMode, delivered: bool, audio_kept: boo
         (_, OutputMode::Folder, _) => "saved",
         _ => "copied",
     }
+}
+
+/// Threads for sherpa on the processor: as many as there are cores, up to 8.
+pub fn sherpa_threads(cores: usize) -> i32 {
+    cores.clamp(1, 8) as i32
 }
 
 /// A model's pace is judged once this much audio (5 s) has been transcribed.
@@ -1840,8 +1888,8 @@ mod tests {
             .collect()
     }
 
-    /// Two sentences and a short sound.
-    const SPANS: [(f32, f32); 3] = [(1.0, 3.0), (4.0, 6.0), (7.0, 7.4)];
+    /// Two sentences and a short word: under `SURE_VOICE_MS` of voice, enough to be sent (`MIN_VOICED_MS`).
+    const SPANS: [(f32, f32); 3] = [(1.0, 3.0), (4.0, 6.0), (6.9, 7.6)];
 
     /// A model that says "piece 1", "piece 2" and so on, one a call.
     fn counting() -> impl Fn(&[f32]) -> Heard {
@@ -2250,6 +2298,43 @@ mod tests {
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
     }
 
+    #[test]
+    fn sherpa_uses_every_core_up_to_8() {
+        assert_eq!([0, 1, 4, 6, 8, 16, 32].map(sherpa_threads), [1, 1, 4, 6, 8, 8, 8]);
+    }
+
+    #[test]
+    fn a_cancel_at_the_stop_or_on_transcribing_again_closes_the_gpu_piece_under_way() {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Server};
+        let f = fake("/i-s", vec![Answer::Slow(std::time::Duration::from_secs(10))]);
+        let a = app("gpu-cancel");
+        let eng = Engine::Gpu(engine::Gpu::new("whisper-turbo", Server::at(f.port, "/i-s"), Box::new(|| Err("none".into()))));
+        *a.aborter.lock().unwrap() = eng.aborter();
+        *a.engine.lock().unwrap() = Some(eng);
+        let piece = |a: &Arc<App>| {
+            let a = a.clone();
+            std::thread::spawn(move || a.engine.lock().unwrap().as_ref().unwrap().hear(&[0.1; 16_000]))
+        };
+        for (n, cancel) in [(1, "stop"), (2, "again")] {
+            let t = std::time::Instant::now();
+            let worker = piece(&a);
+            until("the piece to be sent", || f.posts.lock().unwrap().len() == n);
+            f.hung_up.store(false, Ordering::SeqCst);
+            if cancel == "stop" {
+                a.cut();
+            } else {
+                a.retranscribing.store(true, Ordering::SeqCst);
+                assert!(a.again_cancel());
+                a.retranscribing.store(false, Ordering::SeqCst);
+            }
+            assert_eq!(worker.join().unwrap(), Heard::default(), "{cancel}");
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "{cancel}: {:?}", t.elapsed());
+            until("the helper to see the request closed", || f.hung_up.load(Ordering::SeqCst));
+            let g = a.engine.lock().unwrap();
+            assert!(g.as_ref().unwrap().failure().is_none(), "a cancel is no failure");
+        }
+    }
+
     /// Words of `s`, lower case, without punctuation.
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace()
@@ -2359,6 +2444,9 @@ mod tests {
     /// noise, dry) or `gain:noise:rt60` (room noise and echoes, see `long_take`); the default is `FAR_FIELD`.
     /// `POINTCAST_SPEECH_DIR=<speech dir> POINTCAST_MODEL=<id> POINTCAST_F32=<16 kHz mono f32le> POINTCAST_SCRIPT=<script.md>
     /// [POINTCAST_CASES=1:0,0.25:0.01:0.4] [POINTCAST_BOOST=0] cargo test --lib -- --ignored --nocapture real_audio_pipeline`
+    /// A case `@<file>.wav` is a real recording, heard once, its recall against the script once (a script `.json` holds
+    /// `items[].text`). With `POINTCAST_WHISPER_HELPER=<dir>` (a development build) and the GPU version of the model in
+    /// the speech dir, the GPU engine is used; `POINTCAST_OUT=<dir>` keeps each case's words as `<case>.json`.
     #[test]
     #[ignore]
     fn real_audio_pipeline() {
@@ -2367,6 +2455,10 @@ mod tests {
         let raw = std::fs::read(var("POINTCAST_F32")).unwrap();
         let voice: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
         let script = std::fs::read_to_string(var("POINTCAST_SCRIPT")).unwrap();
+        let script = match serde_json::from_str::<serde_json::Value>(&script) {
+            Ok(v) => v["items"].as_array().into_iter().flatten().map(|i| format!("| | s0 | {} | |", i["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n"),
+            Err(_) => script,
+        };
         let lines: Vec<&str> = script
             .lines()
             .filter_map(|l| {
@@ -2375,18 +2467,28 @@ mod tests {
                 (c.len() >= 5 && id.len() == 2 && id.starts_with(['n', 's'])).then(|| c[3])
             })
             .collect();
-        let want: Vec<String> = (0..4).flat_map(|_| words(&lines.join(" "))).collect();
+        let once = words(&lines.join(" "));
+        let want: Vec<String> = (0..4).flat_map(|_| once.clone()).collect();
         let a = app("real-audio");
         let model = var("POINTCAST_MODEL");
         a.settings.lock().unwrap().model = model.clone();
         // POINTCAST_BOOST=0 hears the takes without the front end.
         let boost = std::env::var("POINTCAST_BOOST").map_or(true, |v| v != "0");
         a.settings.lock().unwrap().voice_boost = boost;
+        let t = std::time::Instant::now();
         a.ensure_engine().unwrap();
+        eprintln!("LOAD model={} s={:.1} backend={:?}", var("POINTCAST_MODEL"), t.elapsed().as_secs_f64(), a.backends());
         let cases = std::env::var("POINTCAST_CASES").unwrap_or_else(|_| FAR_FIELD.into());
         for case in cases.split(',') {
             // `@<file>`: a whole take as made by `long_take`, read from a file (16 kHz mono f32le).
             let rec = match case.strip_prefix('@') {
+                Some(file) if file.ends_with(".wav") => {
+                    let (rate, ch, pcm) = audio::read_wav(&std::fs::read(file).unwrap()).unwrap();
+                    let (mut mono, mut at16) = (vec![], vec![]);
+                    audio::downmix(&pcm, ch, &mut mono);
+                    audio::Resampler::new(rate).push(&mono, &mut at16);
+                    at16
+                }
                 Some(file) => std::fs::read(file).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
                 None => {
                     let c: Vec<f32> = case.split(':').map(|v| v.parse().unwrap()).collect();
@@ -2432,6 +2534,12 @@ mod tests {
                 })
                 .collect();
             let got = words(&said.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" "));
+            let want = if case.starts_with('@') { once.clone() } else { want.clone() };
+            if let Ok(dir) = std::env::var("POINTCAST_OUT") {
+                let name = std::path::Path::new(case.trim_start_matches('@')).file_stem().map_or("case".into(), |s| s.to_string_lossy().into_owned());
+                let items: Vec<_> = said.iter().map(|s| serde_json::json!({ "t_ms": s.0, "end_ms": s.1, "text": s.2 })).collect();
+                std::fs::write(std::path::Path::new(&dir).join(format!("{name}.json")), serde_json::json!({ "items": items }).to_string()).unwrap();
+            }
             let total = rec.len() as u64 * 1000 / audio::RATE as u64;
             let mut edges = vec![0u64];
             for s in &said {
