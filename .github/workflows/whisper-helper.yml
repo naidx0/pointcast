@@ -13,14 +13,23 @@ on:
         type: choice
         options: [all, windows, linux, macos]
         default: all
+  # GitHub only dispatches a workflow whose file is on the default branch, so until this one is merged a push to its
+  # own branch runs it. The branch filter never matches on main: delete these lines once the file is there.
+  push:
+    branches: [feat/whisper-helper]
+    paths: [helper/**, .github/workflows/whisper-helper.yml]
 
 permissions:
   contents: read
 
+concurrency:
+  group: whisper-helper-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     name: Build Windows x64 (Vulkan, static C runtime)
-    if: inputs.targets == 'all' || inputs.targets == 'windows'
+    if: github.event_name != 'workflow_dispatch' || inputs.targets == 'all' || inputs.targets == 'windows'
     runs-on: windows-2025
     timeout-minutes: 120
     defaults:
@@ -67,7 +76,7 @@ jobs:
 
   build-linux:
     name: Build Linux x64 (Vulkan, Ubuntu 22.04 / glibc 2.35)
-    if: inputs.targets == 'all' || inputs.targets == 'linux'
+    if: github.event_name != 'workflow_dispatch' || inputs.targets == 'all' || inputs.targets == 'linux'
     runs-on: ubuntu-24.04
     # Built on the oldest glibc that still has a compiler for every CPU variant (GCC 11: AMX, AVX512-BF16) and runs
     # the LunarG SDK's glslc, so the result runs on Ubuntu 22.04, Debian 12, Fedora 36 and anything newer.
@@ -111,7 +120,7 @@ jobs:
 
   build-macos:
     name: Build macOS ${{ matrix.arch }} (Metal embedded)
-    if: inputs.targets == 'all' || inputs.targets == 'macos'
+    if: github.event_name != 'workflow_dispatch' || inputs.targets == 'all' || inputs.targets == 'macos'
     strategy:
       fail-fast: false
       matrix:
