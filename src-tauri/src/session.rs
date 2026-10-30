@@ -2444,6 +2444,9 @@ mod tests {
     /// noise, dry) or `gain:noise:rt60` (room noise and echoes, see `long_take`); the default is `FAR_FIELD`.
     /// `POINTCAST_SPEECH_DIR=<speech dir> POINTCAST_MODEL=<id> POINTCAST_F32=<16 kHz mono f32le> POINTCAST_SCRIPT=<script.md>
     /// [POINTCAST_CASES=1:0,0.25:0.01:0.4] [POINTCAST_BOOST=0] cargo test --lib -- --ignored --nocapture real_audio_pipeline`
+    /// A case `@<file>.wav` is a real recording, heard once, its recall against the script once (a script `.json` holds
+    /// `items[].text`). With `POINTCAST_WHISPER_HELPER=<dir>` (a development build) and the GPU version of the model in
+    /// the speech dir, the GPU engine is used; `POINTCAST_OUT=<dir>` keeps each case's words as `<case>.json`.
     #[test]
     #[ignore]
     fn real_audio_pipeline() {
@@ -2452,6 +2455,10 @@ mod tests {
         let raw = std::fs::read(var("POINTCAST_F32")).unwrap();
         let voice: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
         let script = std::fs::read_to_string(var("POINTCAST_SCRIPT")).unwrap();
+        let script = match serde_json::from_str::<serde_json::Value>(&script) {
+            Ok(v) => v["items"].as_array().into_iter().flatten().map(|i| format!("| | s0 | {} | |", i["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n"),
+            Err(_) => script,
+        };
         let lines: Vec<&str> = script
             .lines()
             .filter_map(|l| {
@@ -2460,18 +2467,28 @@ mod tests {
                 (c.len() >= 5 && id.len() == 2 && id.starts_with(['n', 's'])).then(|| c[3])
             })
             .collect();
-        let want: Vec<String> = (0..4).flat_map(|_| words(&lines.join(" "))).collect();
+        let once = words(&lines.join(" "));
+        let want: Vec<String> = (0..4).flat_map(|_| once.clone()).collect();
         let a = app("real-audio");
         let model = var("POINTCAST_MODEL");
         a.settings.lock().unwrap().model = model.clone();
         // POINTCAST_BOOST=0 hears the takes without the front end.
         let boost = std::env::var("POINTCAST_BOOST").map_or(true, |v| v != "0");
         a.settings.lock().unwrap().voice_boost = boost;
+        let t = std::time::Instant::now();
         a.ensure_engine().unwrap();
+        eprintln!("LOAD model={} s={:.1} backend={:?}", var("POINTCAST_MODEL"), t.elapsed().as_secs_f64(), a.backends());
         let cases = std::env::var("POINTCAST_CASES").unwrap_or_else(|_| FAR_FIELD.into());
         for case in cases.split(',') {
             // `@<file>`: a whole take as made by `long_take`, read from a file (16 kHz mono f32le).
             let rec = match case.strip_prefix('@') {
+                Some(file) if file.ends_with(".wav") => {
+                    let (rate, ch, pcm) = audio::read_wav(&std::fs::read(file).unwrap()).unwrap();
+                    let (mut mono, mut at16) = (vec![], vec![]);
+                    audio::downmix(&pcm, ch, &mut mono);
+                    audio::Resampler::new(rate).push(&mono, &mut at16);
+                    at16
+                }
                 Some(file) => std::fs::read(file).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
                 None => {
                     let c: Vec<f32> = case.split(':').map(|v| v.parse().unwrap()).collect();
@@ -2517,6 +2534,12 @@ mod tests {
                 })
                 .collect();
             let got = words(&said.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" "));
+            let want = if case.starts_with('@') { once.clone() } else { want.clone() };
+            if let Ok(dir) = std::env::var("POINTCAST_OUT") {
+                let name = std::path::Path::new(case.trim_start_matches('@')).file_stem().map_or("case".into(), |s| s.to_string_lossy().into_owned());
+                let items: Vec<_> = said.iter().map(|s| serde_json::json!({ "t_ms": s.0, "end_ms": s.1, "text": s.2 })).collect();
+                std::fs::write(std::path::Path::new(&dir).join(format!("{name}.json")), serde_json::json!({ "items": items }).to_string()).unwrap();
+            }
             let total = rec.len() as u64 * 1000 / audio::RATE as u64;
             let mut edges = vec![0u64];
             for s in &said {
