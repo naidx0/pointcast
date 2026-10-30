@@ -8,6 +8,7 @@ import {
   preview,
   regionBegin,
   sessionCancel,
+  sessionFinishNow,
   sessionState,
   sessionToggle,
   settingsGet,
@@ -50,18 +51,27 @@ export function Indicator() {
         .then((c) => setKeys(c.hotkeys))
         .catch(() => undefined);
     } else if (preview) {
-      // ?phase=transcribing&behind=40000 or ?quiet=silent|quiet to look at the other states.
+      // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1], ?phase=ready&notice=partial or
+      // ?quiet=silent|quiet to look at the other states.
       const q = new URLSearchParams(location.search);
       const quiet = q.get("quiet");
+      const phase = q.get("phase");
+      const pct = q.get("progress");
+      const stalled = q.get("stalled") === "1";
       setS({
         ...idle,
-        phase: q.get("phase") === "transcribing" ? "transcribing" : "recording",
+        phase: phase === "transcribing" || phase === "ready" ? phase : "recording",
         mic: true,
         duration_ms: 16_000,
         image_count: 2,
         level: 0.4,
+        notice: (q.get("notice") as UiState["notice"]) ?? null,
         behind_ms: Number(q.get("behind")) || 0,
         quiet_mic: quiet === "silent" || quiet === "quiet" ? quiet : null,
+        progress:
+          pct == null
+            ? null
+            : { done_ms: Number(pct) * 600, total_ms: 60_000, percent: Number(pct), stalled, left_ms: stalled ? null : 40_000 },
       });
       const id = setInterval(() => setLv((x) => [...x.slice(1), Math.random() * 0.9]), 110);
       return () => clearInterval(id);
@@ -85,7 +95,8 @@ export function Indicator() {
         .catch(() => undefined);
   }, [s.phase === "recording"]);
 
-  if (s.phase === "transcribing" || (s.phase === "ready" && s.notice)) return <Done s={s} />;
+  if (s.phase === "transcribing") return <Finishing s={s} />;
+  if (s.phase === "ready" && s.notice) return <Done s={s} />;
 
   const waiting = s.phase === "loading";
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
@@ -177,53 +188,103 @@ function MicNote({ notice }: { notice: ReturnType<typeof micNotice> }) {
   );
 }
 
-/** Seconds left on the part of the recording still to be written down, counted down between updates. */
-function useLeft(behind: number) {
-  const [left, setLeft] = useState(behind);
-  useEffect(() => {
-    const from = Date.now();
-    setLeft(behind);
-    if (behind <= 0) return;
-    const id = setInterval(() => setLeft(Math.max(0, behind - (Date.now() - from))), 500);
-    return () => clearInterval(id);
-  }, [behind]);
-  return left;
-}
+/** Rounded so it moves in steps, not every update: 5 s under a minute, whole minutes above. */
+const aboutLeft = (ms: number) =>
+  ms < 60_000 ? `about ${Math.max(5, Math.ceil(ms / 5000) * 5)} s left` : `about ${Math.ceil(ms / 60_000)} min left`;
 
-const leftText = (ms: number) => (ms <= 90_000 ? `${Math.max(1, Math.ceil(ms / 1000))} s left` : `${Math.ceil(ms / 60_000)} min left`);
+/** After stop, while the last words are transcribed: how far that is on a determinate bar, and Cancel to keep what is
+ * done. Cancel is offered quietly after 5 s and in the accent once nothing has moved for 20 s. */
+function Finishing({ s }: { s: UiState }) {
+  const p = s.progress ?? null;
+  const [waited, setWaited] = useState(false);
+  const [cutting, setCutting] = useState(false);
+  useEffect(() => {
+    const id = setTimeout(() => setWaited(true), 5000);
+    return () => clearTimeout(id);
+  }, []);
+  const pct = p ? Math.min(100, Math.max(0, Math.round(p.percent))) : null;
+  const stalled = !!p?.stalled;
+  const text = cutting
+    ? "Saving what's done…"
+    : pct == null
+      ? "Finishing…"
+      : stalled
+        ? `Still working… ${pct}%`
+        : `Transcribing ${pct}%${p?.left_ms ? ` · ${aboutLeft(p.left_ms)}` : ""}`;
+  const cancel = () => {
+    setCutting(true);
+    if (inTauri) sessionFinishNow().catch(() => setCutting(false));
+  };
+  return (
+    <div className="hud-wrap" data-tauri-drag-region>
+      <div className="hud finishing" data-tauri-drag-region>
+        <div className="fin-main" data-tauri-drag-region>
+          <span className="fin-text" role="status" data-tauri-drag-region>
+            {text}
+          </span>
+          <div
+            className={`progress on-hud ${pct == null ? "indet" : ""}`}
+            role="progressbar"
+            aria-label="Transcribing"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct ?? undefined}
+            data-tauri-drag-region
+          >
+            <i style={pct == null ? undefined : { width: `${pct}%` }} />
+          </div>
+        </div>
+        <button
+          type="button"
+          className={`fin-cancel ${stalled ? "accent" : ""}`}
+          style={{ visibility: waited || stalled ? "visible" : "hidden" }}
+          disabled={cutting}
+          title="Stop waiting: paste what is transcribed and keep the audio in History"
+          onClick={cancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /** After stop: a short pill that says where the prompt went, then the window hides itself. */
 function Done({ s }: { s: UiState }) {
   const paste = platform() === "mac" ? "⌘V" : "Ctrl+V";
-  const behind = s.phase === "transcribing" ? (s.behind_ms ?? 0) : 0;
-  const left = useLeft(behind);
+  if (s.notice === "partial")
+    return (
+      <div className="hud-wrap" data-tauri-drag-region>
+        <div className="hud done two" role="status" aria-live="polite" data-tauri-drag-region>
+          <span className="done-mark part">
+            <Check size={13} strokeWidth={3} />
+          </span>
+          <span className="lines" data-tauri-drag-region>
+            <b>Saved what's done · audio kept in History</b>
+            <span>Use Transcribe again for the rest.</span>
+          </span>
+        </div>
+      </div>
+    );
   const text =
-    s.phase === "transcribing"
-      ? behind > 0
-        ? left > 0
-          ? `Finishing the transcript · ${leftText(left)}`
-          : "Finishing the transcript"
-        : "Finishing…"
-      : s.notice === "pasted"
-        ? "Pasted"
-        : s.notice === "copied"
-          ? `Copied · ${paste} to paste`
-          : s.notice === "saved"
-            ? "Saved to your folder"
-            : s.notice === "kept"
-              ? "No words yet · audio kept in History"
+    s.notice === "pasted"
+      ? "Pasted"
+      : s.notice === "copied"
+        ? `Copied · ${paste} to paste`
+        : s.notice === "saved"
+          ? "Saved to your folder"
+          : s.notice === "kept"
+            ? "No words yet · audio kept in History"
+            : s.notice === "cut"
+              ? "Saved what's done · the rest was not transcribed"
               : s.error || "Nothing was recorded";
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud done" role="status" aria-live="polite" data-tauri-drag-region>
-        {s.phase === "transcribing" ? (
-          <span className="spinner on-hud" />
-        ) : (
-          <span className={`done-mark ${s.notice === "empty" || s.notice === "kept" ? "none" : ""}`}>
-            <Check size={13} strokeWidth={3} />
-          </span>
-        )}
-        <span style={{ fontVariantNumeric: "tabular-nums" }}>{text}</span>
+        <span className={`done-mark ${s.notice === "empty" || s.notice === "kept" ? "none" : s.notice === "cut" ? "part" : ""}`}>
+          <Check size={13} strokeWidth={3} />
+        </span>
+        <span>{text}</span>
       </div>
     </div>
   );

@@ -17,14 +17,28 @@ export type UiState = {
   image_count: number;
   model_ready: boolean;
   level: number;
-  /** After a stop: what happened to the prompt. */
-  notice: "pasted" | "copied" | "saved" | "kept" | "empty" | null;
+  /** After a stop: what happened to the prompt. "partial": Cancel saved what was done and kept the audio; "cut": the
+   * same with Keep audio off, so the rest is lost. */
+  notice: "pasted" | "copied" | "saved" | "kept" | "empty" | "partial" | "cut" | null;
   /** Audio recorded but not yet turned into text, in milliseconds of speech. */
   behind_ms?: number;
   /** The microphone is giving nothing ("silent") or very little ("quiet"). */
   quiet_mic?: "silent" | "quiet" | null;
   /** The speech model is slower than real time on this computer. */
   slow_engine?: boolean;
+  /** While the last words are transcribed after a stop: how far that is. */
+  progress?: Progress | null;
+};
+
+export type Progress = {
+  done_ms: number;
+  total_ms: number;
+  /** 0 to 100, never back, and 100 only once every word is in. */
+  percent: number;
+  /** Nothing moved for 20 s: offer Cancel. */
+  stalled: boolean;
+  /** About how long the rest takes, once the model's pace is measured. */
+  left_ms?: number | null;
 };
 
 export type Label = { n: number; text: string };
@@ -131,6 +145,8 @@ export const settingsPatch = (patch: Record<string, unknown>) => invoke<Config>(
 export const sessionToggle = () => invoke<UiState>("session_toggle");
 export const sessionState = () => invoke<UiState>("session_state");
 export const sessionCancel = () => invoke<void>("session_cancel");
+/** Stop waiting for the last words: save what is transcribed now and keep the audio for Transcribe again. */
+export const sessionFinishNow = () => invoke<void>("session_finish_now");
 export const captureFull = () => invoke<void>("capture_full");
 export const captureZoom = () => invoke<void>("capture_zoom");
 export const regionBegin = () => invoke<{ png_b64: string; width: number; height: number }>("region_begin");
@@ -194,6 +210,8 @@ export type HistoryMeta = {
   recovered: boolean;
   /** The recording's audio is still on this computer, so it can be transcribed again. */
   has_audio?: boolean;
+  /** Saved before every word was transcribed (Cancel at the end of a recording). */
+  partial?: boolean;
 };
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
@@ -205,6 +223,8 @@ export const historyCopy = (id: string) => invoke<void>("history_copy", { id });
 export const historyPaste = (id: string) => invoke<void>("history_paste", { id });
 /** Transcribe a kept recording again; `history://changed` fires when the new text is saved. */
 export const historyRetranscribe = (id: string) => invoke<void>("history_retranscribe", { id });
+/** Stop transcribing again after the piece under way; the prompt stays as it was. */
+export const historyRetranscribeCancel = () => invoke<boolean>("history_retranscribe_cancel");
 export const historyDelete = (id: string) => invoke<void>("history_delete", { id });
 export const historyClear = () => invoke<void>("history_clear");
 
