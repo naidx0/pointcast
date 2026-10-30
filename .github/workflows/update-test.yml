@@ -1,0 +1,69 @@
+name: Update test
+
+# On a fresh Mac: installs the previous release, waits for Pointcast's own update check, and reads what the menu bar
+# item offers. Run by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Release tag to install first"
+        default: v0.4.0
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the previous release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.from }}" -p 'Pointcast_*_universal.dmg' -D "$RUNNER_TEMP"
+          POINTCAST_DMG="$(ls "$RUNNER_TEMP"/Pointcast_*_universal.dmg | head -1)" bash install.sh
+      - name: Wait for the automatic check (60 s after launch plus a margin)
+        run: |
+          for i in $(seq 1 12); do pgrep -x pointcast >/dev/null && break; sleep 1; done
+          sleep 100
+          pgrep -x pointcast
+      - name: Read the menu bar item
+        continue-on-error: true
+        run: |
+          osascript <<'OSA' 2>&1 | tee menu.txt
+          tell application "System Events"
+            tell process "Pointcast"
+              set out to ""
+              repeat with b in (menu bars)
+                try
+                  repeat with i in (menu bar items of b)
+                    set out to out & "bar item: " & (name of i as text) & linefeed
+                  end repeat
+                end try
+              end repeat
+              try
+                click menu bar item 1 of menu bar 2
+                delay 1
+                repeat with m in (menu items of menu 1 of menu bar item 1 of menu bar 2)
+                  set out to out & "menu: " & (name of m as text) & linefeed
+                end repeat
+              end try
+              return out
+            end tell
+          end tell
+          OSA
+      - name: Screenshots
+        if: always()
+        run: |
+          screencapture -x menu-1.png || true
+          sleep 3
+          screencapture -x menu-2.png || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: update-test-macos
+          path: |
+            menu.txt
+            menu-*.png
+          if-no-files-found: ignore
