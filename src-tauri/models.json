@@ -307,46 +307,229 @@
     {
       "id": "whisper-helper-windows-x64",
       "target": "x86_64-pc-windows-msvc",
-      "pending": true,
-      "version": "",
-      "urls": [],
-      "bytes": 0,
-      "sha256": "",
+      "version": "v1.9.5",
+      "urls": [
+        "https://github.com/naidx0/pointcast/releases/download/v0.4.2/whisper-helper-v1.9.5-windows-x64.tar.bz2"
+      ],
+      "bytes": 15241443,
+      "sha256": "d55a1b4764d42f1fc746932042fa9d7b72ee58f0f22c4e122966ddf62cbf7187",
       "lib": "whisper-server.exe",
-      "files": []
+      "files": [
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-base.dll",
+          "bytes": 892928,
+          "sha256": "6d68d43a39c9ea007410dc115d54956da804c6171ae3b2854f7ae12c458bd84d"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-alderlake.dll",
+          "bytes": 1184256,
+          "sha256": "0ca72ea99e2a88bd3948ee7c7534ae4310516538b67b6546d29ef58779c85d71"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-cannonlake.dll",
+          "bytes": 1224192,
+          "sha256": "e3c8b33cb961f08df06666d8cbd0945dded799cf37292ee4d1e8edd3b73628de"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-cascadelake.dll",
+          "bytes": 1235968,
+          "sha256": "16856f8299554ff7bb33e14fbf5d2bc151354756e89f651597c95a50e681bc89"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-haswell.dll",
+          "bytes": 1185280,
+          "sha256": "5a2cffa5d0ce0a8be8aaf55926e4fbd3e21f70d13695b2d61f708d6bbb0857e3"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-icelake.dll",
+          "bytes": 1235968,
+          "sha256": "5c9953134939a021fd5edae77822843c2d1040cbe0966696440b367d4c6e3304"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-sandybridge.dll",
+          "bytes": 1200640,
+          "sha256": "8bc47d289ad58afc88a730a27b4f38c6d60b46fb4c675848424a34106ffa16ac"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-skylakex.dll",
+          "bytes": 1224192,
+          "sha256": "c6737aa0cd69a44665a8aa62268f5e83ca2a7c5837c37fb438054ac64b0f4e70"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-sse42.dll",
+          "bytes": 1037312,
+          "sha256": "75ae32c45f21a08b3d754ef6a5f74a5a3ac0172ea05bb1a99717ff1be1dd5e75"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-cpu-x64.dll",
+          "bytes": 1042432,
+          "sha256": "23b58caad26d42aa74367324972515e4d4c783af7228620cd012db7bc2cf04da"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml-vulkan.dll",
+          "bytes": 45598720,
+          "sha256": "415abc69bd02e5b453b73e28da8b733ddfc10d40d72ec38693b744efe308f56a"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/ggml.dll",
+          "bytes": 178176,
+          "sha256": "51faf9c645f7514a58f190eb9f45264b26681d432a95dc3409e082495272f40f"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/whisper-server.exe",
+          "bytes": 1064448,
+          "sha256": "2005987e7356d727baeef6453246f785c03aa0257b348ee95b866c318ca6dc05"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-windows-x64/whisper.dll",
+          "bytes": 1930752,
+          "sha256": "442a77a4d2bb731d3962b5cf5114db0fa6351d279a05009f0126cedf24392f44"
+        }
+      ]
     },
     {
       "id": "whisper-helper-linux-x64",
       "target": "x86_64-unknown-linux-gnu",
-      "pending": true,
-      "version": "",
-      "urls": [],
-      "bytes": 0,
-      "sha256": "",
+      "version": "v1.9.5",
+      "urls": [
+        "https://github.com/naidx0/pointcast/releases/download/v0.4.2/whisper-helper-v1.9.5-linux-x64.tar.bz2"
+      ],
+      "bytes": 16606410,
+      "sha256": "7e748fbf5b5afccef9ac88915ac51dbb6c1273751622aad6076db1f27ce5c0fd",
       "lib": "whisper-server",
-      "files": []
+      "files": [
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-base.so.0",
+          "bytes": 850776,
+          "sha256": "1d5f350a90729f023598ac1187f83c869d4c779e40d3d59caf16aac85ddd9299"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-alderlake.so",
+          "bytes": 1202576,
+          "sha256": "ba02096422c18db2300cf8660784fc97cc552a0915b3f54bd0ca5652d0ab63cc"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-cannonlake.so",
+          "bytes": 1276304,
+          "sha256": "7ca15be6bf0da32d0008fd687d6ce2701119857abf6fc6b395f6a2fc8f602bbe"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-cascadelake.so",
+          "bytes": 1288592,
+          "sha256": "18d9b4aedf747f059b10adc25bf279289adbd9b6e887a56846dd54b17b66ab39"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-cooperlake.so",
+          "bytes": 1288592,
+          "sha256": "8cc74810509a6b312de0a282eec92df7f14078c25a2214365deaef5da8b96de4"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-haswell.so",
+          "bytes": 1202576,
+          "sha256": "2dddb4f1b62342ce8af631893d51c7311a430eef50e86547e648685a94aff722"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-icelake.so",
+          "bytes": 1288592,
+          "sha256": "0694716861ca11f1e1cb602ae611fa8f92fdcc8470e5f91c28b17edef7f7f7c4"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-ivybridge.so",
+          "bytes": 1128944,
+          "sha256": "715cff5a9f2b3f53fde2595d78581130f5c2c6d2dba9146ae2eaf8212eb6490f"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-piledriver.so",
+          "bytes": 1124848,
+          "sha256": "c7cdaa5e83875eb02a79c48327d911a0decbc1cd66287fcdcde6a9592684e8bc"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-sandybridge.so",
+          "bytes": 1133040,
+          "sha256": "56c506412afe43657d90cc3fb6b110d1b41e671e8ed8105eeed7e5387f47f5eb"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-sapphirerapids.so",
+          "bytes": 1563336,
+          "sha256": "7cc4b7b6cd391b21316c1f0b2025e7d6393b460721cb12eb8d87ecd484aba3b8"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-skylakex.so",
+          "bytes": 1276304,
+          "sha256": "9046b22a78aa530846a7f0a8453bd8d21fc42e8a07eff62640791aa43b001bb3"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-sse42.so",
+          "bytes": 883216,
+          "sha256": "434e52d0dffea151fb7462ffa1541dc858bdd0e7918c8b958cf6c5e768899b5a"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-x64.so",
+          "bytes": 875056,
+          "sha256": "c7040210cb28bc3c1b41095a981411cb6948209f91c53f50df407b5b4d05f74d"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-cpu-zen4.so",
+          "bytes": 1288592,
+          "sha256": "02d3eab93e9ce9bfa0f778bf0aeec312ea88348fbddb99a1c193e6ab05fd48e6"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml-vulkan.so",
+          "bytes": 45645840,
+          "sha256": "167c5b1138895e53ea1d42881eb267b4203d3978fa3828b726a0d1161affacd9"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libggml.so.0",
+          "bytes": 47840,
+          "sha256": "42bbc774196ee4c86791f6225c7173b6245addc1629b593838924fc7f1e63215"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/libwhisper.so.1",
+          "bytes": 526936,
+          "sha256": "afc8dfe1adf6a97b91cf08ee5df202a49bf0bfca75e64509927a94bce614ba04"
+        },
+        {
+          "name": "whisper-helper-v1.9.5-linux-x64/whisper-server",
+          "bytes": 1081712,
+          "sha256": "39abf6455215513a963acbfda7e527dc0917c1ebf2c5ca75613ea2902033f353"
+        }
+      ]
     },
     {
       "id": "whisper-helper-macos-arm64",
       "target": "aarch64-apple-darwin",
-      "pending": true,
-      "version": "",
-      "urls": [],
-      "bytes": 0,
-      "sha256": "",
+      "version": "v1.9.5",
+      "urls": [
+        "https://github.com/naidx0/pointcast/releases/download/v0.4.2/whisper-helper-v1.9.5-macos-arm64.tar.bz2"
+      ],
+      "bytes": 1610959,
+      "sha256": "b15bd7f471ae918c992ae3eccc32fb3ffbc9b081c507e2828eb1ae794737519e",
       "lib": "whisper-server",
-      "files": []
+      "files": [
+        {
+          "name": "whisper-helper-v1.9.5-macos-arm64/whisper-server",
+          "bytes": 7909744,
+          "sha256": "8ba2c58341c6b66edb7183649f4c59a2c7592d1778e063fa7c85bcf20b429272"
+        }
+      ]
     },
     {
       "id": "whisper-helper-macos-x64",
       "target": "x86_64-apple-darwin",
-      "pending": true,
-      "version": "",
-      "urls": [],
-      "bytes": 0,
-      "sha256": "",
+      "version": "v1.9.5",
+      "urls": [
+        "https://github.com/naidx0/pointcast/releases/download/v0.4.2/whisper-helper-v1.9.5-macos-x64.tar.bz2"
+      ],
+      "bytes": 1842346,
+      "sha256": "c885a32564a63355778e8ce5c3cd977c0385a0605897b3d4773cf63633a781e7",
       "lib": "whisper-server",
-      "files": []
+      "files": [
+        {
+          "name": "whisper-helper-v1.9.5-macos-x64/whisper-server",
+          "bytes": 8763968,
+          "sha256": "6348403c02c7d548481a9d8087270bbe744b5463145bf1bf8eda7e9528ca006f"
+        }
+      ]
     }
   ]
 }
