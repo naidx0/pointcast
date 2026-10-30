@@ -45,7 +45,8 @@ pub fn probe() -> PermissionStatus {
 /// Whether the microphones may be listed now. On macOS listing them counts as using the microphone and brings up
 /// its permission prompt, so it waits until access is granted (asked for on the setup assistant's access step).
 pub fn may_list_microphones() -> bool {
-    lists_microphones(cfg!(target_os = "macos"), microphone())
+    // Off macOS the status is never read here: on Windows reading it lists the microphones, which would ask again.
+    !cfg!(target_os = "macos") || lists_microphones(true, microphone())
 }
 
 fn lists_microphones(mac: bool, mic: Access) -> bool {
