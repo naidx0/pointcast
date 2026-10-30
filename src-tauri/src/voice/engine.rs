@@ -31,10 +31,9 @@ pub type LoadBackup = Box<dyn Fn() -> Result<Box<dyn Backup>, String> + Send>;
 pub const GPU_FAILED: &str =
     "The GPU speech engine stopped working. Your audio is kept: open Settings › Speech and download Whisper Turbo again.";
 
-/// How long the helper may take to load the model and answer (a slow disk, a first start of the graphics driver).
+/// How long the helper may take to be ready, loading the model and answering a first second of audio: the first start
+/// ever compiles the graphics card's shaders (about 30 s on Metal and on Vulkan).
 const READY_WITHIN: Duration = Duration::from_secs(180);
-/// The first request compiles the graphics card's shaders: about 30 s on Vulkan and 90 s on CUDA the first time ever.
-const WARM_WITHIN: Duration = Duration::from_secs(600);
 
 /// Whisper through the helper. Each piece is sent once and, unanswered, once more (after starting the helper again if
 /// it died); twice without an answer, the processor engine takes over for good, or the failure is said.
@@ -298,24 +297,36 @@ fn start_gpu(root: &Path, cat: &Catalog, variant: &ModelEntry, preparing: &dyn F
         }
     };
     let file = variant.files.first().ok_or(crate::session::NO_MODEL)?;
-    let launch = Launch { dir, model: models::install_dir(root, &variant.id).join(&file.name), state: root.to_path_buf() };
-    let srv = Server::start(&launch, READY_WITHIN)?;
+    let model = models::install_dir(root, &variant.id).join(&file.name);
+    let launch = Launch { dir, model, state: root.to_path_buf(), allowed: allowed(cat) };
     let marker = root.join(WARMED);
     let first = std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str());
+    // Shown from before the start: on a Mac the shaders compile before the helper even listens.
     if first {
         preparing(true);
     }
-    let warm = srv.transcribe(&vec![0.0; super::audio::RATE as usize], "en", WARM_WITHIN);
+    let t = std::time::Instant::now();
+    let r = Server::start(&launch, READY_WITHIN).and_then(|srv| {
+        let left = READY_WITHIN.saturating_sub(t.elapsed()).max(Duration::from_secs(1));
+        match srv.transcribe(&vec![0.0; super::audio::RATE as usize], "en", left) {
+            Ok(_) => Ok(srv),
+            Err(_) if t.elapsed() >= READY_WITHIN => Err(ws::SLOW_START.to_string()),
+            Err(_) => Err("The GPU speech engine started but could not transcribe.".to_string()),
+        }
+    });
     if first {
         preparing(false);
     }
-    match warm {
-        Ok(_) => {
-            let _ = std::fs::write(&marker, &stamp);
-            Ok(srv)
-        }
-        Err(_) => Err("The GPU speech engine started but could not transcribe.".into()),
+    if r.is_ok() {
+        let _ = std::fs::write(&marker, &stamp);
     }
+    r
+}
+
+/// The libraries the helper for this computer comes with, by file name; none to check without a published one.
+fn allowed(cat: &Catalog) -> Vec<String> {
+    let files = cat.helper_for_host().filter(|h| !h.pending).map(|h| h.files.as_slice()).unwrap_or_default();
+    files.iter().filter_map(|f| f.name.rsplit('/').next().map(String::from)).collect()
 }
 
 #[cfg(test)]
@@ -397,6 +408,76 @@ mod tests {
         assert_eq!(e.hear(&[0.1; 16_000]), Heard::default());
         t.join().unwrap();
         assert_eq!((loads.load(Ordering::SeqCst), f.posts.lock().unwrap().len(), e.failure()), (0, 1, None));
+    }
+
+    /// The real helper on this computer, started as Pointcast starts it: it answers only under its secret paths, a
+    /// closed connection stops its decoding and the next piece is answered, and killed mid-run it is started again.
+    /// `POINTCAST_WHISPER_HELPER=<helper folder> POINTCAST_GGML=<ggml model> POINTCAST_WAV=<speech, 20 s or more> cargo
+    /// test --lib -- --ignored --nocapture real_helper`
+    #[test]
+    #[ignore]
+    fn real_helper_hides_its_routes_stops_on_cancel_and_comes_back_after_a_kill() {
+        use std::time::Instant;
+        let var = |k: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| panic!("set {k}")));
+        let state = std::env::temp_dir().join(format!("pc-real-helper-{}", std::process::id()));
+        let launch = Launch { dir: var("POINTCAST_WHISPER_HELPER"), model: var("POINTCAST_GGML"), state, allowed: allowed(&models::catalog()) };
+        let t = Instant::now();
+        let srv = Server::start(&launch, READY_WITHIN).unwrap();
+        eprintln!("READY s={:.1} backend={}", t.elapsed().as_secs_f64(), srv.backend());
+        // Nothing at upstream's default routes: /load (any file path), /inference, /health.
+        let raw = |head: &str| {
+            let never = AtomicU64::new(0);
+            ws::tests::raw(srv.port, head, &never).map(|r| r.0)
+        };
+        for head in ["POST /load HTTP/1.1\r\n", "POST /inference HTTP/1.1\r\n", "GET /health HTTP/1.1\r\n"] {
+            assert_eq!(raw(head), Ok(404), "{head}");
+        }
+        assert!(srv.answers(), "200 on the secret health path");
+        let (rate, ch, pcm) = super::super::audio::read_wav(&std::fs::read(var("POINTCAST_WAV")).unwrap()).unwrap();
+        let (mut mono, mut x) = (vec![], vec![]);
+        super::super::audio::downmix(&pcm, ch, &mut mono);
+        super::super::audio::Resampler::new(rate).push(&mono, &mut x);
+        let piece = &x[..x.len().min(20 * 16_000)];
+        let timed = |s: &Server| {
+            let t = Instant::now();
+            let r = s.transcribe(piece, "auto", Duration::from_secs(120));
+            (r, t.elapsed().as_millis())
+        };
+        let (first, ms) = timed(&srv);
+        eprintln!("PIECE ms={ms} text={:?}", first);
+        assert!(first.as_ref().is_ok_and(|t| t.split_whitespace().count() >= 5));
+        // Cancel 100 ms in: the helper says it stopped, and the next piece takes no longer than the first.
+        let abort = srv.abort.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            abort.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let (cancelled, cms) = timed(&srv);
+        canceller.join().unwrap();
+        assert_eq!(cancelled, Err(Fail::Aborted));
+        let seen = Instant::now();
+        while !srv.lines().iter().any(|l| l.contains("aborted processing")) {
+            assert!(seen.elapsed() < Duration::from_secs(20), "the helper never stopped: {:?}", srv.lines());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stopped_ms = seen.elapsed().as_millis() + cms;
+        let (next, nms) = timed(&srv);
+        eprintln!("CANCEL returned_ms={cms} helper_stopped_by_ms={stopped_ms} next_ms={nms} same_words={}", next == first);
+        assert!(next.is_ok() && nms < ms * 3 + 2_000);
+        // Killed mid-run: the next piece starts it again and is heard on the graphics card.
+        let e = Gpu::new("whisper-turbo", srv, Box::new(|| Err("none".into())));
+        let pid = e.server.lock().unwrap().as_ref().unwrap().pid().unwrap();
+        let killed = if cfg!(windows) {
+            std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output().unwrap().status.success()
+        } else {
+            std::process::Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success()
+        };
+        assert!(killed);
+        let t = Instant::now();
+        let h = e.hear(piece);
+        let again = e.server.lock().unwrap().as_ref().and_then(Server::pid);
+        eprintln!("KILL restarted_ms={} new_pid={again:?} backend={} failure={:?} text={:?}", t.elapsed().as_millis(), e.backend(), e.failure.lock().unwrap(), h.text);
+        assert!(again.is_some_and(|p| p != pid) && h.text.split_whitespace().count() >= 5 && e.failure.lock().unwrap().is_none());
     }
 
     fn catalog_with_helper(pending: bool) -> Catalog {

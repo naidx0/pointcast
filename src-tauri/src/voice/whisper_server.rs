@@ -168,6 +168,31 @@ pub struct Launch {
     pub model: PathBuf,
     /// Where the pid file of a running helper goes, so one left by a crash can be ended.
     pub state: PathBuf,
+    /// The libraries the helper's folder may hold, by file name: its pinned files. ggml loads every backend it finds
+    /// in the program's folder and the working directory, so any other one there stops the start. Empty: unchecked
+    /// (a development helper).
+    pub allowed: Vec<String>,
+}
+
+/// Whether ggml or the system loader could load `name` from the helper's folder.
+fn library(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("ggml") || n.starts_with("libggml") || n.ends_with(".dll") || n.ends_with(".so") || n.contains(".so.") || n.ends_with(".dylib")
+}
+
+/// The libraries in `dir` that are not `allowed`: what a start refuses to run beside.
+pub fn strays(dir: &Path, allowed: &[String]) -> Vec<String> {
+    let names = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok());
+    let mut out: Vec<String> = names.filter(|n| library(n) && !allowed.iter().any(|a| a == n)).collect();
+    out.sort();
+    out
+}
+
+/// A random path segment of 24 hex digits (96 bits), so nothing that finds the port can reach the helper.
+fn secret(prefix: &str) -> Result<String, String> {
+    let mut key = [0u8; 12];
+    getrandom::getrandom(&mut key).map_err(|e| e.to_string())?;
+    Ok(format!("/{prefix}{}", key.iter().map(|b| format!("{b:02x}")).collect::<String>()))
 }
 
 /// A running helper, or (in tests) any server on a loopback port speaking its protocol.
@@ -177,6 +202,8 @@ pub struct Server {
     job: Option<isize>,
     pub port: u16,
     path: String,
+    /// Where it answers whether the model is loaded.
+    health: String,
     /// The last lines the helper wrote to stderr.
     log: Arc<Mutex<VecDeque<String>>>,
     /// What it said it runs on while loading.
@@ -186,6 +213,9 @@ pub struct Server {
     pidfile: Option<PathBuf>,
     pub launch: Option<Launch>,
 }
+
+/// Said when the helper did not get ready in time.
+pub const SLOW_START: &str = "Your graphics card took more than 3 minutes to get ready for speech, so Pointcast stopped waiting. Try again; it is quicker after the first time.";
 
 /// Lines of the helper's stderr kept for an error message.
 const LOG_LINES: usize = 20;
@@ -199,6 +229,7 @@ impl Server {
             job: None,
             port,
             path: path.into(),
+            health: "/health".into(),
             log: Arc::default(),
             seen: Arc::new(Mutex::new("unknown")),
             abort: Arc::default(),
@@ -216,19 +247,26 @@ impl Server {
             .and_then(|s| s.local_addr())
             .map_err(|e| e.to_string())?
             .port();
-        let mut key = [0u8; 12];
-        getrandom::getrandom(&mut key).map_err(|e| e.to_string())?;
-        let path = format!("/i-{}", key.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        if !l.allowed.is_empty() {
+            let extra = strays(&l.dir, &l.allowed);
+            if !extra.is_empty() {
+                return Err(format!("The GPU engine's folder holds files it did not come with ({}); set it up again in Settings › Speech.", extra.join(", ")));
+            }
+        }
+        // Every route under a secret prefix: upstream answers POST /load (any file path) and allows any web page.
+        let (prefix, inference) = (secret("")?, secret("i-")?);
         let mut cmd = Command::new(&exe);
         cmd.arg("-m")
             .arg(&l.model)
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--inference-path", &path, "-t", "4"])
+            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", &prefix, "--inference-path", &inference, "-t", "4"])
             .current_dir(&l.dir)
+            .env_remove("GGML_BACKEND_PATH")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = spawn(cmd).map_err(|e| format!("The GPU engine did not start: {e}"))?;
-        let mut s = Server::at(port, &path);
+        let mut s = Server::at(port, &format!("{prefix}{inference}"));
+        s.health = format!("{prefix}/health");
         #[cfg(windows)]
         {
             s.job = job_for(&child);
@@ -260,17 +298,28 @@ impl Server {
                 return Err(format!("The GPU engine stopped while loading ({code}). {}", s.last_words()));
             }
             if t.elapsed() > ready_within {
-                return Err("The GPU engine took too long to load the model.".into());
+                return Err(SLOW_START.into());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         Ok(s)
     }
 
-    /// Whether it answers a GET of its home page.
+    /// Whether it says its model is loaded (the port opens only then).
     pub fn answers(&self) -> bool {
         let never = AtomicU64::new(0);
-        request(self.port, "GET / HTTP/1.1\r\n", &[], Instant::now() + Duration::from_secs(2), &never, 0).is_ok()
+        let head = format!("GET {} HTTP/1.1\r\n", self.health);
+        matches!(request(self.port, &head, &[], Instant::now() + Duration::from_secs(2), &never, 0), Ok((200, _)))
+    }
+
+    /// The helper's process id, while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
+    /// The last lines it wrote to stderr.
+    pub fn lines(&self) -> Vec<String> {
+        self.log.lock().unwrap().iter().cloned().collect()
     }
 
     /// Whether the helper process has ended (always false for a stand-in).
@@ -506,7 +555,7 @@ pub mod tests {
                 }
                 let mut body = vec![0u8; len];
                 let _ = r.read_exact(&mut body);
-                if first.starts_with("GET / ") {
+                if first.starts_with("GET /health ") {
                     let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
                     continue;
                 }
@@ -552,6 +601,23 @@ pub mod tests {
     }
 
     const PATH: &str = "/i-test";
+
+    /// One bodyless request as `head` (its request line), for what a route answers.
+    pub fn raw(port: u16, head: &str, abort: &AtomicU64) -> Result<(u16, Vec<u8>), Fail> {
+        request(port, head, &[], Instant::now() + Duration::from_secs(10), abort, abort.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn only_the_secret_paths_answer() {
+        let f = fake(PATH, vec![Answer::Json(r#"{"text":"x"}"#.into())]);
+        let never = AtomicU64::new(0);
+        assert_eq!(raw(f.port, "POST /inference HTTP/1.1\r\n", &never).map(|r| r.0), Ok(404));
+        assert_eq!(raw(f.port, "GET /health HTTP/1.1\r\n", &never).map(|r| r.0), Ok(200));
+        let mut s = Server::at(f.port, PATH);
+        assert!(s.answers());
+        s.health = "/elsewhere/health".into();
+        assert!(!s.answers(), "a 404 is not ready");
+    }
 
     #[test]
     fn a_piece_is_posted_as_a_wav_with_beam_5_at_temperature_0_and_its_words_come_back() {
@@ -632,6 +698,34 @@ pub mod tests {
         assert_eq!(backend_of(gpu), "gpu");
         assert_eq!(backend_of(["whisper_backend_init_gpu: no GPU found"]), "cpu");
         assert_eq!(backend_of(["whisper_model_load: loading model"]), "unknown");
+    }
+
+    #[test]
+    fn a_helper_folder_with_a_library_it_did_not_come_with_is_refused() {
+        let d = std::env::temp_dir().join(format!("pc-strays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["whisper-server.exe", "ggml-base.dll", "LICENSE.txt", "libggml-vulkan.so"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        let allowed: Vec<String> = ["whisper-server.exe", "ggml-base.dll", "libggml-vulkan.so"].map(String::from).to_vec();
+        assert!(strays(&d, &allowed).is_empty());
+        for f in ["ggml-cuda.dll", "libggml-hip.so", "vulkan-1.dll", "libfoo.so.1", "ggml-metal.dylib"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        assert_eq!(strays(&d, &allowed), ["ggml-cuda.dll", "ggml-metal.dylib", "libfoo.so.1", "libggml-hip.so", "vulkan-1.dll"]);
+        let l = Launch { dir: d.clone(), model: d.join("m.bin"), state: d.join("state"), allowed };
+        let e = Server::start(&l, Duration::from_secs(1)).err().unwrap();
+        assert!(e.contains("ggml-cuda.dll") && e.contains("did not come with"), "{e}");
+        assert!(!d.join("state").join("whisper-helper.pid").exists(), "nothing was started");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_secret_paths_are_96_bits_and_differ() {
+        let (a, b) = (secret("").unwrap(), secret("i-").unwrap());
+        assert_eq!((a.len(), b.len()), (25, 27));
+        assert!(a[1..].bytes().all(|c| c.is_ascii_hexdigit()) && b.starts_with("/i-") && a[1..] != b[3..]);
     }
 
     #[test]
