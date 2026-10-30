@@ -35,6 +35,10 @@ irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
 ```
 
 Or download the installer from [Releases](https://github.com/naidx0/pointcast/releases/latest).
+Pointcast is not signed with a paid Apple or Microsoft certificate, so a downloaded installer gets a warning
+the one-line install avoids: on macOS, drag Pointcast to Applications, then right-click it and choose **Open**
+the first time (on macOS 15: **System Settings → Privacy & Security → Open Anyway**); on Windows, choose
+**More info → Run anyway**.
 
 A setup assistant then takes about a minute: allow access, pick a speech model, try the shortcuts and
 make a practice recording. Pointcast opens at login from then on and updates itself from
