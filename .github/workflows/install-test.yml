@@ -41,14 +41,15 @@ jobs:
           pgrep -x pointcast
           sleep 8
           pgrep -x pointcast
-      - name: Screenshot
+      - name: Screenshots over 20 seconds
         if: always()
-        run: screencapture -x macos.png || true
+        run: |
+          for i in 1 2 3; do screencapture -x "macos-$i.png" || true; sleep 10; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: install-test-macos
-          path: macos.png
+          path: macos-*.png
           if-no-files-found: ignore
 
   windows:
