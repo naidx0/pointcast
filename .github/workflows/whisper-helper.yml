@@ -171,7 +171,8 @@ jobs:
           python helper/fetch.py "$WHISPER_SRC_URL" "$WHISPER_SRC_SHA256" src.tar.gz
           tar -xzf src.tar.gz --strip-components=2 "whisper.cpp-${WHISPER_TAG#v}/samples/jfk.wav"
       - name: What this runner offers for Vulkan
-        run: ls -l /c/Windows/System32/vulkan-1.dll 2>/dev/null || echo "no vulkan-1.dll: no Vulkan driver on this runner"
+        run: |
+          ls -l /c/Windows/System32/vulkan-1.dll 2>/dev/null || echo "no vulkan-1.dll, so no Vulkan driver on this runner"
       - name: Smoke test
         run: |
           python helper/smoke.py "dist/whisper-helper-$WHISPER_TAG-windows-x64.tar.bz2" \
