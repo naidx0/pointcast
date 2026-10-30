@@ -431,6 +431,7 @@ fn settings_view(svc: &App) -> Value {
     v["update_checked"] = update::checked();
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
+    v["voice_boost"] = json!(s.voice_boost);
     mark_slow(&mut v["speech"], &svc.slow_models());
     v
 }

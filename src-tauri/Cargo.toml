@@ -44,6 +44,8 @@ dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 mouse_position = "0.1.4"
 getrandom = "0.2"
+# RNNoise in pure Rust (BSD-3-Clause): the speech front end's noise suppression.
+nnnoiseless = { version = "0.5.2", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -61,3 +63,16 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The speech front end's denoiser and its FFT run at full speed in debug builds and tests too.
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.easyfft]
+opt-level = 3
