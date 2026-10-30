@@ -68,30 +68,41 @@
     } else {
         Say "Finding the latest version..."
         try {
-            $rel = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'pointcast-installer' } `
-                -Uri "https://api.github.com/repos/$repo/releases/latest"
+            $api = if ($env:POINTCAST_API) { $env:POINTCAST_API } else { "https://api.github.com/repos/$repo/releases/latest" }
+            $rel = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'pointcast-installer' } -Uri $api
         } catch {
             $code = 0
             try { $code = [int]$_.Exception.Response.StatusCode } catch { }
             if ($code -eq 404) { return Stop-Install "there is no published release yet. See https://github.com/$repo/releases." }
-            if ($code -eq 403 -or $code -eq 429) {
-                return Stop-Install "GitHub is limiting requests from your network. Try again in a few minutes, or download the setup from $releases."
+            if ($code -ne 403 -and $code -ne 429) {
+                return Stop-Install "can't reach GitHub. Check your internet connection and run this again."
             }
-            return Stop-Install "can't reach GitHub. Check your internet connection and run this again."
+            $rel = $null
         }
+        if (-not $rel) {
+            # Shared networks (offices, schools, VPNs) can use up GitHub's request allowance; the release's fixed
+            # download link is not counted against it. The listed SHA-256 needs that allowance: HTTPS only here.
+            Say "GitHub is busy on this network, so Pointcast downloads the latest version directly."
+            $name = 'Pointcast-Windows-setup.exe'
+            $url = "https://github.com/$repo/releases/latest/download/$name"
+            $want = ''
+        } else {
         $asset = $rel.assets | Where-Object { $_.name -like '*x64-setup.exe' } | Select-Object -First 1
         if (-not $asset) { return Stop-Install "the latest release ($($rel.tag_name)) has no Windows download yet. See $releases." }
         # GitHub lists a SHA-256 for every upload; without one the download cannot be checked.
         $want = if ("$($asset.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { $Matches[1] } else { '' }
         if (-not $want) { return Stop-Install "GitHub lists no SHA-256 for $($asset.name), so the download cannot be checked. See $releases." }
-        $setup = Join-Path $env:TEMP $asset.name
-        Say "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)..."
+        $name = $asset.name
+        $url = $asset.browser_download_url
+        }
+        $setup = Join-Path $env:TEMP $name
+        Say "Downloading $name..."
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $setup
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $setup
         } catch {
             return Stop-Install "the download did not finish. Check your connection and run this again."
         }
-        if ((Get-FileHash -Algorithm SHA256 -Path $setup).Hash -ne $want) {
+        if ($want -and (Get-FileHash -Algorithm SHA256 -Path $setup).Hash -ne $want) {
             Remove-Item $setup -ErrorAction SilentlyContinue
             return Stop-Install "the download does not match the SHA-256 GitHub lists for it, so it was deleted. Run this again, or download the setup from $releases."
         }

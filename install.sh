@@ -40,16 +40,23 @@ if [ -n "${POINTCAST_DMG:-}" ]; then
 else
   say "Finding the latest version..."
   resp=$(curl -sSL -H 'User-Agent: pointcast-installer' -w '\n%{http_code}' \
-    "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) ||
+    "${POINTCAST_API:-https://api.github.com/repos/$REPO/releases/latest}" 2>/dev/null) ||
     fail "can't reach GitHub. Check your internet connection and run this again."
   code=${resp##*$'\n'}
   json=${resp%$'\n'*}
   case $code in
   200) ;;
   404) fail "there is no published release yet. See https://github.com/$REPO/releases." ;;
-  403 | 429) fail "GitHub is limiting requests from your network. Try again in a few minutes, or download the .dmg from $RELEASES." ;;
+  403 | 429) limited=1 ;;
   *) fail "GitHub answered $code. Try again in a minute." ;;
   esac
+  if [ "${limited:-0}" = 1 ]; then
+    # Shared networks (offices, schools, VPNs) can use up GitHub's request allowance; the release's fixed download
+    # link is not counted against it. GitHub's listed SHA-256 needs that allowance, so this path checks over HTTPS only.
+    say "GitHub is busy on this network, so Pointcast downloads the latest version directly."
+    url="https://github.com/$REPO/releases/latest/download/Pointcast-macOS.dmg"
+    want=""
+  else
   # The first .dmg asset: its address, then the SHA-256 GitHub lists for it.
   pick=$(printf '%s' "$json" | tr ',{}' '\n\n\n' | awk '
     function flush() { if (u ~ /[.]dmg$/ && !done) { print u; print d; done = 1 } }
@@ -62,11 +69,14 @@ else
   [ -n "$url" ] || fail "the latest release has no macOS download yet. See $RELEASES."
   printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' ||
     fail "GitHub lists no SHA-256 for this download, so it cannot be checked. See $RELEASES."
+  fi
   say "Downloading $(basename "$url")..."
   curl -fL --progress-bar -o "$tmp/Pointcast.dmg" "$url" ||
     fail "the download did not finish. Check your connection and run this again."
-  got=$(shasum -a 256 "$tmp/Pointcast.dmg" | awk '{print $1}')
-  [ "$got" = "$want" ] || fail "the download does not match the SHA-256 GitHub lists for it. Run this again, or download the .dmg from $RELEASES."
+  if [ -n "$want" ]; then
+    got=$(shasum -a 256 "$tmp/Pointcast.dmg" | awk '{print $1}')
+    [ "$got" = "$want" ] || fail "the download does not match the SHA-256 GitHub lists for it. Run this again, or download the .dmg from $RELEASES."
+  fi
   dmg=$tmp/Pointcast.dmg
 fi
 
