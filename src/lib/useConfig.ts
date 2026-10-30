@@ -66,6 +66,7 @@ function previewConfig(): Config {
     talk_mode: "tap",
     model: "auto",
     device: null,
+    voice_boost: true,
     output: "auto_paste",
     also_clipboard: true,
     export_dir: null,

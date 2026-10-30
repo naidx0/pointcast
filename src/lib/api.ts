@@ -89,6 +89,8 @@ export type Config = {
   keep_audio?: boolean;
   /** Put the file path of each picture in the text, for terminal agents. Treated as on when absent. */
   picture_paths?: boolean;
+  /** Clean up room noise and even out the volume before transcribing. Treated as on when absent. */
+  voice_boost?: boolean;
   start_at_login: boolean;
   check_updates: boolean;
   /** A newer version the last check found. */

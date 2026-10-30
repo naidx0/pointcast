@@ -120,6 +120,8 @@ and you can hold the key while you talk instead of tapping it.
 - **Nothing or little is written down.** Pointcast says when the microphone is silent or very quiet.
   Check that it is not muted, that the right one is picked in **Settings → Speech → Microphone**, and
   raise its input volume in the system's Sound settings.
+- **Words go missing when you sit back or the room is noisy.** Keep **Settings → Speech → Pick up quieter
+  and farther speech** on. Turn it off if it ever makes your voice sound wrong.
 - **A shortcut does nothing.** Another app may own it. **Settings → Shortcuts** says which one is taken;
   click it and press new keys.
 - **Transcription is slow.** Pointcast says when a model is slower than real time on your computer.

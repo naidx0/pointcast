@@ -443,6 +443,16 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
           </select>
         </Row>
         <Row
+          label="Pick up quieter and farther speech"
+          sub="Cleans up room noise and evens out your volume before transcribing. Turn it off if it ever makes your voice sound wrong."
+        >
+          <Toggle
+            label="Pick up quieter and farther speech"
+            on={cfg.voice_boost !== false}
+            set={(v) => patch({ voice_boost: v })}
+          />
+        </Row>
+        <Row
           label="Keep my recordings so I can transcribe them again"
           sub="The newest 10 recordings keep their audio on this computer, deleted with the entry. Nothing is uploaded."
         >
