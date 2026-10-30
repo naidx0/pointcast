@@ -1000,6 +1000,29 @@ mod tests {
         assert!(!half.exists());
     }
 
+    /// The CI-built helper for this computer, downloaded from a loopback server as from the release (cut once, so it
+    /// resumes), unpacked, checked against every pin and with no library beside it that it did not come with. Keeps the
+    /// install and prints the helper's folder. `POINTCAST_HELPER_ARCHIVES=<folder holding the archives> cargo test --lib
+    /// -- --ignored --nocapture real_helper_archive`
+    #[test]
+    #[ignore]
+    fn real_helper_archive_installs_and_verifies() {
+        let dir = PathBuf::from(std::env::var("POINTCAST_HELPER_ARCHIVES").expect("set POINTCAST_HELPER_ARCHIVES"));
+        let c = catalog();
+        let mut h = c.helper_for_host().unwrap().clone();
+        let archive = find_named(&dir, h.urls[0].rsplit('/').next().unwrap()).expect("the archive for this computer");
+        let s = serve(std::fs::read(&archive).unwrap(), 200, Some(4_000_000));
+        h.urls = vec![s.url.clone()];
+        let root = scratch("real-helper");
+        let exe = install_runtime(&root, &h, &|_| {}).unwrap();
+        assert!(runtime_installed(&root, &h));
+        assert_eq!(verify_runtime(&root, &h).unwrap(), exe);
+        assert_eq!(*s.ranges.lock().unwrap(), vec![None, Some(4_000_000)]);
+        let names: Vec<String> = h.files.iter().map(|f| f.name.rsplit('/').next().unwrap().to_string()).collect();
+        assert!(crate::voice::whisper_server::strays(exe.parent().unwrap(), &names).is_empty());
+        eprintln!("HELPER_DIR {}", exe.parent().unwrap().display());
+    }
+
     /// Every model in the catalog through the real runtime: unpack each archive from a local folder
     /// (`POINTCAST_ARCHIVES`, holding the files named in the catalog URLs), install its pinned
     /// files, load it and transcribe the sample recording it ships with.
