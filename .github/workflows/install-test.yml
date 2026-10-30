@@ -1,20 +1,38 @@
 name: Install test
 
 # Runs the one-line installs exactly as the README gives them, on fresh macOS and Windows machines, then checks that
-# Pointcast is installed and running and keeps a screenshot of the screen. Needs a published release.
+# Pointcast is installed and running and keeps a screenshot of the screen. Run by hand with "draft" to try the
+# installers of the draft release (same scripts, given the downloaded file) before anything is published.
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        description: "Install the published release, or the draft one"
+        type: choice
+        options: [published, draft]
+        default: published
   release:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   macos:
     runs-on: macos-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: inputs.source == 'draft'
+      - name: Install the draft release's dmg with the install script
+        if: inputs.source == 'draft'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          gh release download "v$VERSION" -p Pointcast-macOS.dmg -D "$RUNNER_TEMP"
+          POINTCAST_DMG="$RUNNER_TEMP/Pointcast-macOS.dmg" bash install.sh
       - name: Install with the one-line command
+        if: inputs.source != 'draft'
         run: curl -fsSL https://raw.githubusercontent.com/naidx0/pointcast/main/install.sh | bash
       - name: Pointcast is installed and running
         run: |
@@ -36,7 +54,20 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: inputs.source == 'draft'
+      - name: Install the draft release's installer with the install script
+        if: inputs.source == 'draft'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = node -p "require('./src-tauri/tauri.conf.json').version"
+          gh release download "v$version" -p Pointcast-Windows-setup.exe -D $env:RUNNER_TEMP
+          $env:POINTCAST_SETUP = Join-Path $env:RUNNER_TEMP 'Pointcast-Windows-setup.exe'
+          & ./install.ps1
       - name: Install with the one-line command
+        if: inputs.source != 'draft'
         shell: powershell
         run: irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex
       - name: Pointcast is installed and running
