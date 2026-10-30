@@ -13,11 +13,6 @@ on:
         type: choice
         options: [all, windows, linux, macos]
         default: all
-  # GitHub only dispatches a workflow whose file is on the default branch, so until this one is merged a push to its
-  # own branch runs it. The branch filter never matches on main: delete these lines once the file is there.
-  push:
-    branches: [feat/whisper-helper]
-    paths: [helper/**, .github/workflows/whisper-helper.yml]
 
 permissions:
   contents: read
