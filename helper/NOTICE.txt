@@ -1,0 +1,55 @@
+Pointcast speech helper: what this folder is, and third-party notices
+=====================================================================
+
+whisper-server is the HTTP server example of whisper.cpp, built without changes from the whisper.cpp source release
+named in Pointcast's manifest.json, by Pointcast's CI (https://github.com/naidx0/pointcast, workflow
+.github/workflows/whisper-helper.yml; how to rebuild it is in helper/README.md there). Pointcast runs it on
+127.0.0.1 to turn speech into text on this computer. The files here contain code from the projects below.
+
+  whisper.cpp and ggml (whisper-server, whisper and ggml libraries, backends)
+      MIT License. Copyright (c) 2023-2026 The ggml authors. Full text in LICENSE.txt.
+      https://github.com/ggml-org/whisper.cpp
+
+  cpp-httplib 0.20.0 (compiled into whisper-server)
+      MIT License. Copyright (c) 2025 Yuji Hirose. All rights reserved.
+      https://github.com/yhirose/cpp-httplib
+
+  JSON for Modern C++ 3.11.2 (compiled into whisper-server)
+      MIT License. Copyright (c) 2013-2022 Niels Lohmann <https://nlohmann.me>
+      https://github.com/nlohmann/json
+
+  miniaudio 0.11.24 (audio decoding, compiled into whisper-server)
+      Public domain (Unlicense) or MIT No Attribution, at the user's choice. Copyright 2025 David Reid.
+      https://github.com/mackron/miniaudio
+
+  stb_vorbis 1.22 (audio decoding, compiled into whisper-server)
+      Public domain (Unlicense) or MIT License, at the user's choice. Copyright (c) 2017 Sean Barrett.
+      https://github.com/nothings/stb
+
+  Vulkan-Headers and Vulkan-Hpp (Windows and Linux builds: compiled into the ggml-vulkan library)
+      Apache License 2.0 or MIT License, at the user's choice; MIT is chosen here. Copyright The Khronos Group Inc.
+      (the exact lines of the headers this build used are at the end of this file).
+      https://github.com/KhronosGroup/Vulkan-Headers  https://github.com/KhronosGroup/Vulkan-Hpp
+
+  Microsoft C and C++ runtime (Windows build)
+      Linked statically into each .exe and .dll from Visual Studio's runtime libraries, as Visual Studio's licence
+      allows for distributable code, so the Visual C++ Redistributable is not needed.
+
+Not included: the Vulkan loader (vulkan-1.dll, libvulkan.so.1) comes with the GPU driver; on macOS, Metal and
+Accelerate are part of the system. Speech models are downloaded separately and carry their own licences.
+
+MIT License text, which applies to every MIT-licensed project above together with its copyright line:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+  the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+  THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.

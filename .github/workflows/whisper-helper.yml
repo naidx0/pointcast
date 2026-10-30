@@ -1,0 +1,280 @@
+name: Whisper helper
+
+# Run by hand (Actions > Whisper helper > Run workflow). Builds whisper.cpp's whisper-server, the speech helper Pointcast
+# runs on 127.0.0.1, for each desktop target from the source pinned in helper/versions.env: Vulkan and CPU on Windows
+# and Linux, Metal and CPU on macOS. Each archive is smoke-tested on a fresh runner of its OS, then manifest.json lists
+# every archive and every file in it with sizes and SHA-256. The results stay workflow artifacts: nothing is published.
+# helper/README.md explains the pins, the flags and how to bump them.
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Which targets to build"
+        type: choice
+        options: [all, windows, linux, macos]
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x64 (Vulkan, static C runtime)
+    if: inputs.targets == 'all' || inputs.targets == 'windows'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHON: python
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - name: Install the Vulkan SDK (to build only; never shipped)
+        shell: pwsh
+        run: |
+          $v = $env:VULKAN_SDK_VERSION
+          $exe = "$env:RUNNER_TEMP/vulkansdk-$v.exe"
+          python helper/fetch.py "https://sdk.lunarg.com/sdk/download/$v/windows/vulkansdk-windows-X64-$v.exe" $env:VULKAN_SDK_WINDOWS_SHA256 $exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $p = Start-Process -FilePath $exe -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install' -Wait -PassThru
+          if ($p.ExitCode) { throw "Vulkan SDK installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path "C:/VulkanSDK/$v/Bin/glslc.exe")) { throw "glslc.exe is not in C:/VulkanSDK/$v/Bin" }
+          "VULKAN_SDK=C:/VulkanSDK/$v" >> $env:GITHUB_ENV
+          "C:/VulkanSDK/$v/Bin" >> $env:GITHUB_PATH
+      - name: Find dumpbin
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $d = & $vswhere -latest -products * -find "VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Select-Object -First 1
+          if (-not $d) { throw "dumpbin.exe not found" }
+          "DUMPBIN=$($d.Replace([IO.Path]::DirectorySeparatorChar, '/'))" >> $env:GITHUB_ENV
+      - name: Build, check what it loads, pack
+        run: helper/build.sh windows x64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-windows-x64
+          path: dist/whisper-helper-${{ env.WHISPER_TAG }}-windows-x64.tar.bz2
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: report-windows-x64
+          path: dist/report-windows-x64.txt
+
+  build-linux:
+    name: Build Linux x64 (Vulkan, Ubuntu 22.04 / glibc 2.35)
+    if: inputs.targets == 'all' || inputs.targets == 'linux'
+    runs-on: ubuntu-24.04
+    # Built on the oldest glibc that still has a compiler for every CPU variant (GCC 11: AMX, AVX512-BF16) and runs
+    # the LunarG SDK's glslc, so the result runs on Ubuntu 22.04, Debian 12, Fedora 36 and anything newer.
+    container: ubuntu:22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates python3 xz-utils binutils file
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - name: Unpack the Vulkan SDK (to build only; never shipped)
+        run: |
+          v=$VULKAN_SDK_VERSION
+          python3 helper/fetch.py "https://sdk.lunarg.com/sdk/download/$v/linux/vulkansdk-linux-x86_64-$v.tar.xz" \
+            "$VULKAN_SDK_LINUX_SHA256" "$RUNNER_TEMP/vulkansdk-$v.tar.xz"
+          tar -xJf "$RUNNER_TEMP/vulkansdk-$v.tar.xz" -C "$RUNNER_TEMP" "$v/x86_64"
+          rm "$RUNNER_TEMP/vulkansdk-$v.tar.xz"
+          "$RUNNER_TEMP/$v/x86_64/bin/glslc" --version
+          echo "VULKAN_SDK=$RUNNER_TEMP/$v/x86_64" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/$v/x86_64/bin" >> "$GITHUB_PATH"
+      - name: Build, check what it loads, pack
+        run: helper/build.sh linux x64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-linux-x64
+          path: dist/whisper-helper-${{ env.WHISPER_TAG }}-linux-x64.tar.bz2
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: report-linux-x64
+          path: dist/report-linux-x64.txt
+
+  build-macos:
+    name: Build macOS ${{ matrix.arch }} (Metal embedded)
+    if: inputs.targets == 'all' || inputs.targets == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - name: Build, check what it loads, sign ad hoc, pack
+        run: helper/build.sh macos ${{ matrix.arch }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-macos-${{ matrix.arch }}
+          path: dist/whisper-helper-${{ env.WHISPER_TAG }}-macos-${{ matrix.arch }}.tar.bz2
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: report-macos-${{ matrix.arch }}
+          path: dist/report-macos-${{ matrix.arch }}.txt
+
+  smoke-windows:
+    name: Smoke test Windows x64 (fresh runner, no GPU)
+    needs: build-windows
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-windows-x64
+          path: dist
+      - name: Test model and speech sample
+        run: |
+          python helper/fetch.py "$TEST_MODEL_URL" "$TEST_MODEL_SHA256" models/ggml-tiny.en.bin
+          python helper/fetch.py "$WHISPER_SRC_URL" "$WHISPER_SRC_SHA256" src.tar.gz
+          tar -xzf src.tar.gz --strip-components=2 "whisper.cpp-${WHISPER_TAG#v}/samples/jfk.wav"
+      - name: What this runner offers for Vulkan
+        run: ls -l /c/Windows/System32/vulkan-1.dll 2>/dev/null || echo "no vulkan-1.dll: no Vulkan driver on this runner"
+      - name: Smoke test
+        run: |
+          python helper/smoke.py "dist/whisper-helper-$WHISPER_TAG-windows-x64.tar.bz2" \
+            --model models/ggml-tiny.en.bin --speech jfk.wav --expect-gpu none --logs smoke-logs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: smoke-windows-x64
+          path: smoke-logs
+
+  smoke-linux:
+    name: Smoke test Linux x64 (fresh runner, no GPU, then Mesa's software Vulkan)
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-linux-x64
+          path: dist
+      - name: Test model and speech sample
+        run: |
+          python3 helper/fetch.py "$TEST_MODEL_URL" "$TEST_MODEL_SHA256" models/ggml-tiny.en.bin
+          python3 helper/fetch.py "$WHISPER_SRC_URL" "$WHISPER_SRC_SHA256" src.tar.gz
+          tar -xzf src.tar.gz --strip-components=2 "whisper.cpp-${WHISPER_TAG#v}/samples/jfk.wav"
+      - name: What this runner offers for Vulkan
+        run: |
+          ldconfig -p | grep libvulkan || echo "no libvulkan.so.1 on this runner"
+          ls /usr/share/vulkan/icd.d 2>/dev/null || echo "no Vulkan drivers (ICDs) on this runner"
+      - name: Smoke test
+        run: |
+          python3 helper/smoke.py "dist/whisper-helper-$WHISPER_TAG-linux-x64.tar.bz2" \
+            --model models/ggml-tiny.en.bin --speech jfk.wav --expect-gpu none --logs smoke-logs/no-gpu
+      # Mesa's lavapipe is a Vulkan driver that runs on the CPU. ggml skips CPU-type Vulkan devices unless named, so
+      # GGML_VK_VISIBLE_DEVICES=0 makes it run every shader of the Vulkan backend for real. Informational only.
+      - name: Vulkan backend on a software GPU (lavapipe)
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-tools
+          vulkaninfo --summary || true
+          python3 helper/smoke.py "dist/whisper-helper-$WHISPER_TAG-linux-x64.tar.bz2" \
+            --model models/ggml-tiny.en.bin --speech jfk.wav --expect-gpu Vulkan --env GGML_VK_VISIBLE_DEVICES=0 \
+            --logs smoke-logs/lavapipe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: smoke-linux-x64
+          path: smoke-logs
+
+  smoke-macos:
+    name: Smoke test macOS ${{ matrix.arch }} (fresh runner)
+    needs: build-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: whisper-helper-${{ env.WHISPER_TAG }}-macos-${{ matrix.arch }}
+          path: dist
+      - name: Test model and speech sample
+        run: |
+          python3 helper/fetch.py "$TEST_MODEL_URL" "$TEST_MODEL_SHA256" models/ggml-tiny.en.bin
+          python3 helper/fetch.py "$WHISPER_SRC_URL" "$WHISPER_SRC_SHA256" src.tar.gz
+          tar -xzf src.tar.gz --strip-components=2 "whisper.cpp-${WHISPER_TAG#v}/samples/jfk.wav"
+      - name: Smoke test
+        run: |
+          python3 helper/smoke.py "dist/whisper-helper-$WHISPER_TAG-macos-${{ matrix.arch }}.tar.bz2" \
+            --model models/ggml-tiny.en.bin --speech jfk.wav --expect-gpu any --logs smoke-logs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: smoke-macos-${{ matrix.arch }}
+          path: smoke-logs
+
+  manifest:
+    name: Manifest
+    needs: [build-windows, build-linux, build-macos, smoke-windows, smoke-linux, smoke-macos]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Load the pins
+        run: grep -E '^[A-Z0-9_]+=' helper/versions.env >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: whisper-helper-${{ env.WHISPER_TAG }}-*
+          path: dist
+          merge-multiple: true
+      - name: Write manifest.json
+        run: |
+          python3 helper/manifest.py dist/*.tar.bz2 --out dist/manifest.json --commit "$GITHUB_SHA" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          cd dist && sha256sum *.tar.bz2 manifest.json | tee SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whisper-helper-manifest
+          path: |
+            dist/manifest.json
+            dist/SHA256SUMS
+          if-no-files-found: error
