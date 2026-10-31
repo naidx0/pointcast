@@ -86,6 +86,15 @@ and you can hold the key while you talk instead of tapping it.
   usable graphics card it falls back to the processor, and Settings says which one it runs on. The
   574 MB model and a small helper program download with it; there is nothing else to install.
 
+  The fast engine installs itself. If you use Whisper Turbo on the processor (from an earlier version, say),
+  Pointcast downloads the graphics card version in the background while you are not recording, checks once
+  that your graphics card runs it, and uses it from then on; the Whisper Turbo card in Settings › Speech
+  shows how far it is, with a Cancel. A computer whose graphics card cannot run it keeps the processor
+  version and is not asked again. To turn this off, switch off "Get the faster GPU version by itself" in
+  Settings › Speech. Each prompt in History says how it was transcribed: "Transcribed on your graphics card
+  (RTX 2060 SUPER) in 6 s · 20x real time" means Whisper ran on that card, at 20 times the speed of the
+  recording; "on your processor" means it did not, and a graphics card would be much faster.
+
 - **Mark-up tools.** The screen freezes; drag a box, then use pins with labels (P), arrows (A),
   rectangles (R), the highlighter (H), the pen (D), text (T) and a 2× magnifier (M). Five colors,
   undo and redo. **Return** captures, **Esc** steps back.

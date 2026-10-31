@@ -1050,7 +1050,11 @@ impl App {
             }
             heard.drop_before(seg.keep_from());
             self.behind.store(take.len().saturating_sub(pos) as u64, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            // The next look in 120 ms, or at once when stop is pressed: the stop waits only for the last words.
+            let looked = std::time::Instant::now();
+            while looked.elapsed() < std::time::Duration::from_millis(120) && !self.stop.load(Ordering::SeqCst) && self.take_no.load(Ordering::SeqCst) == no {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
         // A stop cut short let this recording go: what is left of it waits in History, to transcribe again.
         if self.take_no.load(Ordering::SeqCst) != no {
@@ -2375,6 +2379,114 @@ mod tests {
         let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!((m.engine.as_str(), m.device.as_str(), m.audio_ms), ("cpu-sherpa", "", 8_500));
         assert!(m.transcribe_ms >= 45 && m.transcribe_ms < 5_000, "three pieces of 15 ms or more: {}", m.transcribe_ms);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_stop_wakes_the_worker_at_once_rather_than_at_its_next_look() {
+        let a = app("wake");
+        let mut worst = std::time::Duration::ZERO;
+        for no in 1..=12u64 {
+            a.stop.store(false, Ordering::SeqCst);
+            a.take_no.store(no, Ordering::SeqCst);
+            a.state.lock().unwrap().phase = Phase::Recording;
+            let take = Arc::new(Take::default());
+            let w = {
+                let (me, take) = (a.clone(), take.clone());
+                std::thread::spawn(move || me.worker(no, take))
+            };
+            // Stopped at a different moment of its wait between looks each time.
+            std::thread::sleep(std::time::Duration::from_millis(150 + no * 9));
+            let t = std::time::Instant::now();
+            a.stop.store(true, Ordering::SeqCst);
+            w.join().unwrap();
+            worst = worst.max(t.elapsed());
+        }
+        assert!(worst < std::time::Duration::from_millis(60), "the worker waited out its look: {worst:?}");
+    }
+
+    /// Stop to text for a long recording on the GPU engine: the recording is fed five times faster than real time while
+    /// the worker runs, as live, then stop is pressed. Prints the audio still to transcribe at the stop, when the last
+    /// words were in and when the stop returned with the prompt saved, and the engine's pace over the recording. With
+    /// `POINTCAST_WHISPER_HELPER=<dir> POINTCAST_GGML=<model>` the real helper hears it; without, a stand-in that answers
+    /// each piece in 300 ms. `POINTCAST_WAV=<recording.wav> cargo test --lib -- --ignored --nocapture stop_to_text`
+    #[test]
+    #[ignore]
+    fn stop_to_text_on_the_gpu_engine() {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Launch, Server};
+        let wav = std::env::var("POINTCAST_WAV").expect("set POINTCAST_WAV");
+        let (rate, ch, pcm) = audio::read_wav(&std::fs::read(&wav).unwrap()).unwrap();
+        let (mut mono, mut rec) = (vec![], vec![]);
+        audio::downmix(&pcm, ch, &mut mono);
+        audio::Resampler::new(rate).push(&mono, &mut rec);
+        let out = std::env::temp_dir().join(format!("pc-stop-to-text-{}", std::process::id()));
+        let a = app("stop-to-text");
+        real(&a, &out);
+        let mut stand_in = None;
+        let srv = match (std::env::var_os("POINTCAST_WHISPER_HELPER"), std::env::var_os("POINTCAST_GGML")) {
+            (Some(dir), Some(model)) => {
+                let l = Launch { dir: dir.into(), model: model.into(), state: out.clone(), allowed: vec![] };
+                Server::start(&l, std::time::Duration::from_secs(180)).unwrap()
+            }
+            _ => {
+                let f = fake("/i-t", vec![Answer::Slow(std::time::Duration::from_millis(300))]);
+                let s = Server::at(f.port, "/i-t");
+                stand_in = Some(f);
+                s
+            }
+        };
+        let eng = Engine::Gpu(engine::Gpu::new("whisper-turbo", srv, Box::new(|| Err("none".into()))));
+        eng.hear(&vec![0.0; 16_000]);
+        *a.ran.lock().unwrap() = Some((eng.label(), eng.device()));
+        *a.aborter.lock().unwrap() = eng.aborter();
+        *a.engine.lock().unwrap() = Some(eng);
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.stop.store(false, Ordering::SeqCst);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let no = a.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        let take = Arc::new(Take::default());
+        *a.take.lock().unwrap() = Some(take.clone());
+        *a.worker.lock().unwrap() = Some({
+            let (me, take) = (a.clone(), take.clone());
+            std::thread::spawn(move || me.worker(no, take))
+        });
+        let began = std::time::Instant::now();
+        for (i, piece) in rec.chunks(1_600).enumerate() {
+            let due = began + std::time::Duration::from_millis(i as u64 * 20);
+            while std::time::Instant::now() < due {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            take.samples.lock().unwrap().extend_from_slice(piece);
+        }
+        let behind = a.ui().behind_ms;
+        let t = std::time::Instant::now();
+        let words_in = Arc::new(Mutex::new(None));
+        let watch = {
+            let (a, words_in) = (a.clone(), words_in.clone());
+            std::thread::spawn(move || {
+                while a.ui().phase != Phase::Ready {
+                    if a.ui().progress.is_some_and(|p| p.percent == 100) && words_in.lock().unwrap().is_none() {
+                        *words_in.lock().unwrap() = Some(t.elapsed().as_millis());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        let exp = a.stop(false).unwrap().unwrap();
+        let stop_ms = t.elapsed().as_millis();
+        watch.join().unwrap();
+        let m = a.history.list()[0].clone();
+        eprintln!(
+            "STOP audio_s={:.1} behind_at_stop_ms={behind} words_in_ms={:?} stop_ms={stop_ms} words={} engine={} device={:?} transcribe_ms={} realtime_x={:.1} stand_in={}",
+            rec.len() as f64 / 16_000.0,
+            words_in.lock().unwrap(),
+            exp.plain.split_whitespace().count(),
+            m.engine,
+            m.device,
+            m.transcribe_ms,
+            m.audio_ms as f64 / m.transcribe_ms.max(1) as f64,
+            stand_in.is_some()
+        );
         let _ = std::fs::remove_dir_all(&out);
     }
 

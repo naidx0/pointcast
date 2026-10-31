@@ -486,6 +486,110 @@ mod tests {
         (d.join("speech"), d.join("data"))
     }
 
+    /// The real thing on this computer, in a data folder of its own: the upgrade downloads the published helper and the
+    /// pinned GPU model (about 590 MB), paused once by a recording starting at 20 % and then resumed, checks the helper,
+    /// then a History entry made from a real recording (with the words sherpa heard, `<wav>`'s `.items.json`) is
+    /// transcribed again on the GPU engine; it prints what History recorded and how the words compare. Then, in a second
+    /// folder, a helper made to find no graphics card is noted as unusable and the model it downloaded goes.
+    /// `POINTCAST_DATA_DIR=<scratch> POINTCAST_WAV=<recording.wav> cargo test --lib -- --ignored --nocapture real_upgrade`
+    #[test]
+    #[ignore]
+    fn real_upgrade_end_to_end() {
+        let data = std::path::PathBuf::from(std::env::var_os("POINTCAST_DATA_DIR").expect("set POINTCAST_DATA_DIR to a scratch folder"));
+        let wav = std::path::PathBuf::from(std::env::var_os("POINTCAST_WAV").expect("set POINTCAST_WAV"));
+        let (root, cat) = (models::speech_dir(), models::catalog());
+        assert!(root.starts_with(&data) && crate::settings::data_dir() == data, "only the scratch folder is written");
+        let idle = || false;
+        let check = || crate::voice::engine::probe(&root, &cat, MODEL);
+        let paused = AtomicBool::new(false);
+        let report = |s: &Status| {
+            if s.state == "downloading" && s.percent >= 20 && !paused.swap(true, Ordering::SeqCst) {
+                eprintln!("PAUSE at {}%", s.percent);
+                pause();
+            }
+        };
+        let t = Instant::now();
+        let first = run(&root, &data, &cat, &Hooks { busy: &idle, check: &check, report: &report });
+        eprintln!("FIRST {first:?} s={:.1}", t.elapsed().as_secs_f64());
+        let t = Instant::now();
+        let out = run(&root, &data, &cat, &Hooks { busy: &idle, check: &check, report: &|_| {} });
+        eprintln!("UPGRADE {out:?} s={:.1} state={:?}", t.elapsed().as_secs_f64(), load_state(&data));
+        assert_eq!(first, Outcome::Paused);
+        assert!(matches!(out, Outcome::Gpu(_)));
+        // A History entry from a real recording, with sherpa's words, transcribed again on the GPU engine.
+        let (rate, ch, pcm) = crate::voice::audio::read_wav(&std::fs::read(&wav).unwrap()).unwrap();
+        let (mut mono, mut x) = (vec![], vec![]);
+        crate::voice::audio::downmix(&pcm, ch, &mut mono);
+        crate::voice::audio::Resampler::new(rate).push(&mono, &mut x);
+        let old: serde_json::Value = serde_json::from_slice(&std::fs::read(wav.with_extension("items.json")).unwrap()).unwrap();
+        let items: Vec<crate::prompt::Item> = serde_json::from_value(old.get("items").cloned().unwrap_or(old)).unwrap();
+        let settings = crate::settings::Settings { model: MODEL.into(), onboarded: true, ..Default::default() };
+        let a = crate::session::App::new(settings, data.join("settings.json"));
+        a.history.append_audio(&x).unwrap();
+        let m = a.history.save_recorded(&items, crate::session::now_ms(), x.len() as u64 / 16).unwrap();
+        a.history.clear_checkpoint();
+        let before = a.history.export(&m.id).unwrap().plain;
+        let t = Instant::now();
+        a.retranscribe(&m.id, |_, _| {}).unwrap();
+        let wall = t.elapsed().as_secs_f64();
+        let after = a.history.export(&m.id).unwrap().plain;
+        let e = a.history.list().into_iter().find(|e| e.id == m.id).unwrap();
+        let words = |s: &str| s.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect::<Vec<_>>();
+        let (b, g) = (words(&before), words(&after));
+        let shared = b.iter().filter(|w| g.contains(w)).count();
+        eprintln!(
+            "AGAIN engine={} device={:?} transcribe_ms={} audio_ms={} realtime_x={:.1} wall_s={wall:.1} words_sherpa={} words_gpu={} sherpa_words_in_gpu={:.2}",
+            e.engine,
+            e.device,
+            e.transcribe_ms,
+            e.audio_ms,
+            e.audio_ms as f64 / e.transcribe_ms.max(1) as f64,
+            b.len(),
+            g.len(),
+            shared as f64 / b.len().max(1) as f64
+        );
+        eprintln!("SHERPA {before}");
+        eprintln!("GPU {after}");
+        assert_eq!(e.engine, "gpu");
+        a.release_engine();
+        // A helper that finds no graphics card, as on a computer without one: noted, and the model it downloaded goes.
+        let root2 = data.join("no-gpu");
+        let h = cat.helper_for_host().unwrap();
+        let copy = |from: &Path, to: &Path| {
+            for f in walk(from) {
+                let dest = to.join(f.strip_prefix(from).unwrap());
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                std::fs::copy(&f, dest).unwrap();
+            }
+        };
+        copy(&models::install_dir(&root, &h.id), &models::install_dir(&root2, &h.id));
+        let mut c2 = cat.clone();
+        let local = std::fs::read(models::install_dir(&root, "whisper-turbo-gpu").join(&c2.gpu_variant(MODEL).unwrap().files[0].name)).unwrap();
+        let s = serve(local, 200, None);
+        c2.models.iter_mut().find(|m| m.gpu_for == MODEL).unwrap().urls = vec![s.url.replace(".tar.bz2", ".bin")];
+        std::env::set_var("POINTCAST_HELPER_NO_GPU", "1");
+        let data2 = data.join("no-gpu-data");
+        let check2 = || crate::voice::engine::probe(&root2, &c2, MODEL);
+        let out = run(&root2, &data2, &c2, &Hooks { busy: &idle, check: &check2, report: &|_| {} });
+        std::env::remove_var("POINTCAST_HELPER_NO_GPU");
+        let g2 = c2.gpu_variant(MODEL).unwrap();
+        eprintln!("NO_GPU {out:?} state={:?} model_kept={}", load_state(&data2), models::model_installed(&root2, g2));
+        assert_eq!(out, Outcome::Unusable(NO_GPU.into()));
+        assert!(load_state(&data2).gpu_unusable.is_some() && !models::model_installed(&root2, g2));
+    }
+
+    fn walk(d: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                out.extend(walk(&e.path()));
+            } else {
+                out.push(e.path());
+            }
+        }
+        out
+    }
+
     /// The whole run against loopback servers, as one test: the runs share the one upgrade a computer can have.
     #[test]
     fn the_upgrade_downloads_checks_and_keeps_what_it_found_and_a_recording_pauses_it() {
