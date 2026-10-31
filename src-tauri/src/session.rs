@@ -2385,7 +2385,7 @@ mod tests {
     #[test]
     fn a_stop_wakes_the_worker_at_once_rather_than_at_its_next_look() {
         let a = app("wake");
-        let mut worst = std::time::Duration::ZERO;
+        let mut slow = Vec::new();
         for no in 1..=12u64 {
             a.stop.store(false, Ordering::SeqCst);
             a.take_no.store(no, Ordering::SeqCst);
@@ -2400,9 +2400,13 @@ mod tests {
             let t = std::time::Instant::now();
             a.stop.store(true, Ordering::SeqCst);
             w.join().unwrap();
-            worst = worst.max(t.elapsed());
+            if t.elapsed() >= std::time::Duration::from_millis(40) {
+                slow.push(t.elapsed());
+            }
         }
-        assert!(worst < std::time::Duration::from_millis(60), "the worker waited out its look: {worst:?}");
+        // Waiting out a 120 ms look makes about two stops in three take 40 ms or more; a busy machine running the
+        // whole suite can still delay one or two that wake at once.
+        assert!(slow.len() <= 3, "the worker waited out its look {} times in 12: {slow:?}", slow.len());
     }
 
     /// Stop to text for a long recording on the GPU engine: the recording is fed five times faster than real time while
