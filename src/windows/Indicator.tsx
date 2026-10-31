@@ -71,7 +71,7 @@ export function Indicator() {
         progress:
           pct == null
             ? null
-            : { done_ms: Number(pct) * 600, total_ms: 60_000, percent: Number(pct), stalled, left_ms: stalled ? null : 40_000 },
+            : { done_ms: Number(pct) * 600, total_ms: 60_000, percent: Number(pct), stalled },
       });
       const id = setInterval(() => setLv((x) => [...x.slice(1), Math.random() * 0.9]), 110);
       return () => clearInterval(id);
@@ -188,10 +188,6 @@ function MicNote({ notice }: { notice: ReturnType<typeof micNotice> }) {
   );
 }
 
-/** Rounded so it moves in steps, not every update: 5 s under a minute, whole minutes above. */
-const aboutLeft = (ms: number) =>
-  ms < 60_000 ? `about ${Math.max(5, Math.ceil(ms / 5000) * 5)} s left` : `about ${Math.ceil(ms / 60_000)} min left`;
-
 /** After stop, while the last words are transcribed: how far that is on a determinate bar, and Cancel to keep what is
  * done. Cancel is offered quietly after 5 s and in the accent once nothing has moved for 20 s. */
 function Finishing({ s }: { s: UiState }) {
@@ -210,7 +206,7 @@ function Finishing({ s }: { s: UiState }) {
       ? "Finishing…"
       : stalled
         ? `Still working… ${pct}%`
-        : `Transcribing ${pct}%${p?.left_ms ? ` · ${aboutLeft(p.left_ms)}` : ""}`;
+        : `Transcribing ${pct}%`;
   const cancel = () => {
     setCutting(true);
     if (inTauri) sessionFinishNow().catch(() => setCutting(false));

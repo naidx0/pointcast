@@ -39,7 +39,7 @@ export type Progress = {
   percent: number;
   /** Nothing moved for 20 s: offer Cancel. */
   stalled: boolean;
-  /** About how long the rest takes, once the model's pace is measured. */
+  /** No longer sent: the time left was too often wrong, so only the bar and the percent are shown. */
   left_ms?: number | null;
 };
 

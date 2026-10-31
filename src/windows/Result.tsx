@@ -20,7 +20,6 @@ import {
   openTool,
   preview,
   sendToTool,
-  stamp,
   subscribe,
   type DetectedTool,
   type HistoryMeta,
@@ -350,7 +349,7 @@ function AudioBar({
                 ? "Stopping after this part…"
                 : pct == null
                   ? "Transcribing…"
-                  : `Transcribing ${pct}% · ${stamp(job.done_ms)} of ${stamp(job.total_ms)}`}
+                  : `Transcribing ${pct}%`}
             </>
           ) : audio ? (
             <>

@@ -1185,9 +1185,6 @@ pub struct Shown {
     pub percent: u8,
     /// Nothing moved for 20 s while there is still audio to transcribe.
     pub stalled: bool,
-    /// About how long the rest takes at the model's pace, once that pace is measured on 5 s of audio; none before
-    /// that, nor while stalled.
-    pub left_ms: Option<u64>,
 }
 
 /// A stop's wait for the last words: the audio still to transcribe when stop was pressed, the pieces finished since, and
@@ -1261,9 +1258,7 @@ impl Progress {
         self.shown_ms = self.shown_ms.max(done);
         self.percent = self.percent.max(percent);
         let stalled = !self.finished && !self.complete() && wall_ms.saturating_sub(self.moved_at) >= STALL_MS;
-        let left = total.saturating_sub(self.shown_ms);
-        let left_ms = (self.pace.0 >= JUDGED_MS && !stalled && !self.finished).then(|| left * self.pace.1 / self.pace.0);
-        Shown { done_ms: self.shown_ms, total_ms: total.max(self.shown_ms), percent: self.percent, stalled, left_ms }
+        Shown { done_ms: self.shown_ms, total_ms: total.max(self.shown_ms), percent: self.percent, stalled }
     }
 }
 
@@ -2069,7 +2064,10 @@ mod tests {
         // 40 s of audio waits; the model took 20 s for 10 s of this recording.
         let mut p = Progress::new(40_000, (10_000, 20_000), 1_000);
         let v = p.view(0, 1_000);
-        assert_eq!((v.done_ms, v.total_ms, v.percent, v.stalled, v.left_ms), (0, 40_000, 0, false, Some(80_000)));
+        assert_eq!((v.done_ms, v.total_ms, v.percent, v.stalled), (0, 40_000, 0, false));
+        // The bar and the percent only: no guess at the time left is sent, the pace measured or not.
+        let sent = serde_json::to_value(v).unwrap();
+        assert_eq!(sent.as_object().unwrap().keys().collect::<Vec<_>>(), ["done_ms", "percent", "stalled", "total_ms"]);
         // A 10 s piece under way is credited at that pace, and never past nine tenths of it.
         p.begin(10_000, 100);
         assert_eq!(p.view(10_100, 2_000).done_ms, 5_000);
@@ -2087,7 +2085,7 @@ mod tests {
         assert_eq!((v.done_ms, v.total_ms, v.percent, v.stalled), (20_000, 20_000, 99, false));
         p.finish();
         let v = p.view(99_400, 6_100);
-        assert_eq!((v.percent, v.left_ms), (100, None));
+        assert_eq!((v.percent, v.stalled), (100, false));
         // More left than first counted: what is shown never goes back.
         let mut p = Progress::new(10_000, (0, 0), 0);
         p.begin(5_000, 0);
@@ -2117,7 +2115,7 @@ mod tests {
         p.begin(30_000, 0);
         assert!(!p.view(19_999, 24_999).stalled);
         let v = p.view(20_000, 25_000);
-        assert!(v.stalled && v.left_ms.is_none(), "{v:?}");
+        assert!(v.stalled && v.percent == 0, "{v:?}");
         p.end(30_000, 26_000);
         assert!(!p.view(26_000, 31_000).stalled, "a piece came back");
         // With a pace, the piece is credited as it goes.
