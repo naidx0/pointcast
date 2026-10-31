@@ -17,17 +17,18 @@ SS = 4  # supersampling for the tile shapes
 INK = (10, 10, 10, 255)
 PAPER = (255, 255, 255, 255)
 
-# The glove, pointing straight up, in its own units (the fingertip's top edge is TIP).
-TIP = (470, 150)
+# The glove, pointing straight up, in its own units (the fingertip's top edge is TIP). Chubby cartoon proportions:
+# a short index finger tapering to a round tip, plump curled fingers, a full palm and thumb.
+TIP = (470, 246)
 PARTS = [
-    ("rect", 405, 150, 130, 470, 65),  # index finger
-    ("rect", 522, 410, 128, 260, 64),  # first curled finger
-    ("rect", 630, 452, 122, 220, 61),  # second curled finger
-    ("rect", 395, 540, 357, 300, 130),  # back of the hand
-    ("line", 452, 720, 330, 596, 118),  # thumb
+    ("taper", (474, 600), 76, (470, 314), 68),  # index finger: base, base radius, tip, tip radius
+    ("rect", 534, 420, 136, 252, 68),  # first curled finger
+    ("rect", 652, 462, 128, 214, 64),  # second curled finger
+    ("rect", 388, 540, 392, 306, 153),  # back of the hand
+    ("taper", (452, 726), 68, (326, 606), 60),  # thumb
 ]
 ANGLE = 12  # degrees anticlockwise: the finger leans to the upper left like a pointer
-OUTLINE, CREASE = 40, 26
+OUTLINE, CREASE = 44, 26
 SHADOW = 32  # hard sticker shadow, down and to the right
 SPARK_GAP, SPARK_LEN, SPARK_SPREAD = 40, 72, 50
 
@@ -43,9 +44,9 @@ def quad(p0, p1, p2, n=30):
 
 
 CREASES = [
-    cubic((528, 452), (522, 520), (524, 580), (532, 626)),  # index meets the curled fingers
-    cubic((640, 492), (634, 548), (636, 596), (642, 640)),  # between the curled fingers
-    quad((404, 640), (430, 668), (462, 690)),  # thumb
+    cubic((540, 462), (534, 522), (536, 582), (544, 628)),  # index meets the curled fingers
+    cubic((662, 500), (656, 552), (658, 600), (664, 642)),  # between the curled fingers
+    quad((398, 646), (426, 674), (460, 696)),  # thumb
 ]
 
 
@@ -56,9 +57,23 @@ def stroke(d, pts, width, fill):
         d.ellipse([x - r, y - r, x + r, y + r], fill=fill)
 
 
-def mark(weight=1.0, creases=True, spark=True, shadow=True, style="sticker", ink=INK, paper=PAPER):
+def taper(d, P, K, base, rb, tip, rt, e, fill):
+    """A capsule from a round base to a narrower round tip, grown by e on every side."""
+    (bx, by), (tx, ty) = base, tip
+    n = math.hypot(tx - bx, ty - by)
+    nx, ny = -(ty - by) / n, (tx - bx) / n
+    rb, rt = rb + e, rt + e
+    d.polygon([P(bx + nx * rb, by + ny * rb), P(tx + nx * rt, ty + ny * rt), P(tx - nx * rt, ty - ny * rt),
+               P(bx - nx * rb, by - ny * rb)], fill=fill)
+    for (cx, cy), r in ((base, rb), (tip, rt)):
+        x, y = P(cx, cy)
+        d.ellipse([x - r * K, y - r * K, x + r * K, y + r * K], fill=fill)
+
+
+def mark(weight=1.0, creases=True, spark=True, shadow=True, style="sticker", ink=INK, paper=PAPER, reach=0):
     """The glove at high resolution, cropped to what it draws. style: "sticker" (paper glove, ink line
-    and shadow), "line" (ink outline only, for a menu bar template) or "solid" (an ink silhouette)."""
+    and shadow), "line" (ink outline only, for a menu bar template) or "solid" (an ink silhouette).
+    `reach` lengthens the index finger: at 16 px the short chubby finger would be lost in its own line."""
     K = 3  # pixels per glove unit
     ox, oy = -260, -260  # glove units at pixel 0
     size = 1500 * K // 1
@@ -66,11 +81,16 @@ def mark(weight=1.0, creases=True, spark=True, shadow=True, style="sticker", ink
     w, c = OUTLINE * weight, CREASE * weight
     outer, inner, folds = (Image.new("L", (size, size), 0) for _ in range(3))
     do, di, df = ImageDraw.Draw(outer), ImageDraw.Draw(inner), ImageDraw.Draw(folds)
-    for p in PARTS:
+    parts = [("taper", PARTS[0][1], PARTS[0][2], (PARTS[0][3][0], PARTS[0][3][1] - reach), PARTS[0][4])] + PARTS[1:]
+    for p in parts:
         if p[0] == "rect":
             _, x, y, pw, ph, r = p
             for d, e in ((do, w), (di, 0)):
                 d.rounded_rectangle([*P(x - e, y - e), *P(x + pw + e, y + ph + e)], (r + e) * K, fill=255)
+        elif p[0] == "taper":
+            _, base, rb, tip, rt = p
+            for d, e in ((do, w), (di, 0)):
+                taper(d, P, K, base, rb, tip, rt, e, 255)
         else:
             _, x1, y1, x2, y2, lw = p
             for d, e in ((do, w), (di, 0)):
@@ -87,7 +107,7 @@ def mark(weight=1.0, creases=True, spark=True, shadow=True, style="sticker", ink
         glove.paste(ink, (0, 0), ImageChops.add(ImageChops.subtract(outer, inner), ImageChops.multiply(inner, folds)))
     else:
         glove.paste(ink, (0, 0), ImageChops.subtract(outer, folds))
-    tip = P(*TIP)
+    tip = P(TIP[0], TIP[1] - reach)
     glove = glove.rotate(ANGLE, resample=Image.Resampling.BICUBIC, center=tip)
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     if shadow:
@@ -119,8 +139,8 @@ def cut(px):
         key = dict(weight=1.2)
     elif px >= 28:
         key = dict(weight=1.55, creases=False)
-    else:  # 16-24 px: the spark would be noise, so the glove gets the whole tile
-        key = dict(weight=1.9, creases=False, spark=False)
+    else:  # 16-24 px: the spark would be noise, so the glove gets the whole tile and a longer finger
+        key = dict(weight=1.6, creases=False, spark=False, reach=56)
     k = tuple(sorted(key.items()))
     if k not in _cache:
         _cache[k] = mark(**key)
@@ -209,7 +229,7 @@ def tray():
     # 36 px is the 18 pt menu bar slot at 2x; the glove is drawn as a line, and solid while recording.
     for name, style in (("mac.png", "line"), ("mac-rec.png", "solid")):
         g = Image.new("RGBA", (36, 36), (0, 0, 0, 0))
-        centred(g, fit(mark(weight=1.6, creases=False, shadow=False, style=style, ink=(0, 0, 0, 255)), 34), 18, 18)
+        centred(g, fit(mark(weight=1.6, creases=False, shadow=False, style=style, ink=(0, 0, 0, 255), reach=40), 34), 18, 18)
         g.save(out / name)
     icon = win_icon(32, detail=16)
     icon.save(out / "win.png")
