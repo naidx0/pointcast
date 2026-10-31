@@ -261,6 +261,11 @@ impl App {
         Ok(())
     }
 
+    /// Recording, finishing a recording or transcribing a History entry again.
+    pub fn busy(&self) -> bool {
+        matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading | Phase::Transcribing) || self.retranscribing.load(Ordering::SeqCst)
+    }
+
     /// Whether the speech engine last loaded and ran here, or why not.
     pub fn speech_check(&self) -> Option<Result<(), String>> {
         self.checked.lock().unwrap().clone()
@@ -372,6 +377,8 @@ impl App {
             _ => {}
         }
         self.monitor_off();
+        // The background GPU upgrade never runs beside a recording: it stops where it is and goes on later.
+        crate::voice::upgrade::pause();
         self.bind_practice();
         // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
         if self.history.recover().is_none() {
@@ -870,6 +877,7 @@ impl App {
     /// when it is theirs. `progress(done_ms, total_ms)` as it goes. Refused while a recording runs, and stopped if one
     /// starts; a refusal or failure leaves the entry as it was.
     pub fn retranscribe(&self, id: &str, progress: impl FnMut(u64, u64)) -> Result<(), String> {
+        crate::voice::upgrade::pause();
         let hear = |s: &[f32], voiced: u64| -> Result<Option<Heard>, String> {
             let g = self.engine.lock().unwrap();
             let eng = g.as_ref().ok_or(NO_MODEL)?;

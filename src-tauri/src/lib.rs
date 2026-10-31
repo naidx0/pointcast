@@ -430,6 +430,13 @@ fn settings_view(svc: &App) -> Value {
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
     v["voice_boost"] = json!(s.voice_boost);
+    v["auto_gpu"] = json!(s.auto_gpu);
+    v["gpu_upgrade"] = json!(voice::upgrade::status());
+    if let Some(why) = voice::upgrade::unusable_here(&settings::data_dir(), &speech.1) {
+        for m in v["speech"]["models"].as_array_mut().into_iter().flatten().filter(|m| m["id"] == voice::upgrade::MODEL) {
+            m["gpu"]["unusable"] = json!(why);
+        }
+    }
     mark_slow(&mut v["speech"], &svc.slow_models());
     mark_backend(&mut v["speech"], &svc.backends(), svc.device());
     mark_speed(&mut v["speech"], &svc.speeds());
@@ -494,6 +501,18 @@ fn settings_patch(
         std::thread::spawn(move || {
             let _ = svc.ensure_engine();
         });
+    }
+    // Whisper Turbo picked, or the setting turned on: the faster GPU version is set up now, not in a while.
+    if next.model == voice::upgrade::MODEL && cur.model != next.model {
+        voice::upgrade::welcome(&settings::data_dir());
+        kick_upgrade(&app, svc.inner());
+    }
+    if cur.auto_gpu != next.auto_gpu {
+        if next.auto_gpu {
+            kick_upgrade(&app, svc.inner());
+        } else {
+            voice::upgrade::pause();
+        }
     }
     Ok(settings_view(&svc))
 }
@@ -878,8 +897,14 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
         return Ok(());
     }
     voice::models::CANCEL.store(false, Ordering::SeqCst);
+    // The background upgrade fetching the same files stops first; this setup goes on from what it has.
+    voice::upgrade::pause();
     let svc = svc.inner().clone();
     std::thread::spawn(move || {
+        let t = std::time::Instant::now();
+        while voice::upgrade::running() && t.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let r = speech_job(&app, &svc, &id);
         if r.as_ref().err().map(String::as_str) == Some(voice::models::CANCELLED) {
             let root = voice::models::speech_dir();
@@ -900,13 +925,8 @@ fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
     use voice::models::{self as m, Progress};
     let root = m::speech_dir();
     let cat = m::catalog();
-    let model = cat.model(id).ok_or("That model isn't in the catalog.")?;
-    // A model with a GPU version gets that and its helper where the helper is published (a development helper is
-    // not downloaded); sherpa's runtime and files otherwise.
-    let (rt, model) = match cat.gpu_variant(id).filter(|_| voice::engine::helper_available(&cat)) {
-        Some(g) => (cat.helper_for_host().filter(|_| voice::engine::dev_helper().is_none()), g),
-        None => (Some(cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?), model),
-    };
+    let gpu = voice::engine::helper_available(&cat) && voice::upgrade::unusable_here(&settings::data_dir(), &cat).is_none();
+    let (rt, model) = setup_parts(&cat, id, gpu, voice::engine::dev_helper().is_some())?;
     let rt = rt.filter(|r| !m::runtime_installed(&root, r));
     let need_model = !m::model_installed(&root, model);
     let total = rt.map_or(0, |r| r.bytes) + if need_model { model.bytes } else { 0 };
@@ -942,6 +962,8 @@ fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
         m::install_model(&root, model, &step(done, "model"))?;
     }
     speech_emit(app, json!({ "phase": "check" }));
+    // Set up because the person asked: its own check below starts the helper.
+    voice::upgrade::verified(&root);
     let mut s = svc.settings.lock().unwrap().clone();
     if s.model != id {
         s.model = id.to_string();
@@ -951,9 +973,79 @@ fn speech_job(app: &AppHandle, svc: &Arc<App>, id: &str) -> Result<(), String> {
         .map_err(|e| format!("The speech engine didn't start on this computer: {e}"))
 }
 
+/// What a setup of `id` downloads: a model with a GPU version gets that and its helper where `gpu` (the helper is
+/// published and was not found unusable here; a development helper, `dev`, is not downloaded); sherpa's runtime and
+/// files otherwise.
+fn setup_parts<'a>(
+    cat: &'a voice::models::Catalog,
+    id: &str,
+    gpu: bool,
+    dev: bool,
+) -> Result<(Option<&'a voice::models::RuntimeEntry>, &'a voice::models::ModelEntry), String> {
+    let model = cat.model(id).ok_or("That model isn't in the catalog.")?;
+    Ok(match cat.gpu_variant(id).filter(|_| gpu) {
+        Some(g) => (cat.helper_for_host().filter(|_| !dev), g),
+        None => (Some(cat.runtime_for_host().ok_or("Speech isn't available for this computer yet.")?), model),
+    })
+}
+
 #[tauri::command]
 fn speech_cancel() {
     voice::models::CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// Cancel on the Whisper Turbo card while the faster GPU version downloads by itself.
+#[tauri::command]
+fn gpu_upgrade_cancel() {
+    voice::upgrade::cancel(&settings::data_dir());
+}
+
+/// The background GPU upgrade as the Whisper Turbo card and the tray's tooltip show it.
+fn upgrade_report(app: &AppHandle, s: &voice::upgrade::Status) {
+    static TIP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let _ = app.emit("gpu://upgrade", s);
+    let tip = match s.state {
+        "downloading" => format!("Pointcast: getting the faster GPU version, {}%", s.percent),
+        "checking" => "Pointcast: checking your graphics card".to_string(),
+        _ => "Pointcast".to_string(),
+    };
+    let mut shown = TIP.lock().unwrap();
+    if *shown != tip {
+        if let Some(t) = app.tray_by_id("main") {
+            let _ = t.set_tooltip(Some(tip.as_str()));
+        }
+        *shown = tip;
+    }
+}
+
+/// Run the background GPU upgrade if it should run now, or show the note when something the person can fix stops it.
+/// Not before the setup assistant is done: it sets up a model of its own.
+fn try_upgrade(app: &AppHandle, svc: &Arc<App>) {
+    use voice::upgrade as up;
+    let s = svc.settings.lock().unwrap().clone();
+    if !s.onboarded {
+        return;
+    }
+    let (root, data, cat) = (voice::models::speech_dir(), settings::data_dir(), voice::models::catalog());
+    let busy = || svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst);
+    let report = |st: &up::Status| upgrade_report(app, st);
+    match up::decide(&up::facts(&root, &data, &cat, &s.model, s.auto_gpu, busy())) {
+        up::Decision::Skip(why) => up::noted(&why, &report),
+        up::Decision::Start => {
+            let check = || voice::engine::probe(&root, &cat, up::MODEL);
+            let out = up::run(&root, &data, &cat, &up::Hooks { busy: &busy, check: &check, report: &report });
+            eprintln!("Pointcast GPU upgrade: {out:?}");
+            // In memory now, so the next recording starts on the graphics card without waiting for it.
+            if matches!(out, up::Outcome::Gpu(_)) && !busy() {
+                let _ = svc.ensure_engine();
+            }
+        }
+    }
+}
+
+fn kick_upgrade(app: &AppHandle, svc: &Arc<App>) {
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || try_upgrade(&app, &svc));
 }
 
 #[tauri::command]
@@ -1151,6 +1243,7 @@ fn onboarding_finish(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<
     }
     s.onboarded = true;
     svc.save_settings(s)?;
+    kick_upgrade(&app, svc.inner());
     // Closed rather than hidden, so opening it again starts over at the first step that needs attention.
     if let Some(w) = app.get_webview_window("onboarding") {
         let _ = w.close();
@@ -1314,6 +1407,7 @@ pub fn run() {
             history_delete,
             history_clear,
             speech_cancel,
+            gpu_upgrade_cancel,
             speech_status,
             speech_remove,
             permissions_get,
@@ -1387,6 +1481,22 @@ pub fn run() {
                             }
                         }
                         std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
+                    }
+                });
+            }
+            // The faster GPU engine sets itself up once nothing was recorded for 30 s, and goes on after a recording.
+            {
+                let (handle, svc) = (handle.clone(), svc.clone());
+                std::thread::spawn(move || {
+                    let mut quiet_since = std::time::Instant::now();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        if svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst) {
+                            quiet_since = std::time::Instant::now();
+                        } else if quiet_since.elapsed() >= std::time::Duration::from_secs(30) {
+                            try_upgrade(&handle, &svc);
+                            quiet_since = std::time::Instant::now();
+                        }
                     }
                 });
             }
@@ -1570,6 +1680,20 @@ mod tests {
         let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["slow_engine"].clone();
         assert_eq!((said("whisper-turbo"), said("moonshine-base-en")), (json!(true), json!(false)));
         assert!(said("moonshine-tiny-en").is_null(), "a model not judged yet says nothing");
+    }
+
+    #[test]
+    fn setting_up_whisper_turbo_fetches_the_gpu_version_where_its_helper_can_run() {
+        let cat = voice::models::catalog();
+        let ids = |r: (Option<&voice::models::RuntimeEntry>, &voice::models::ModelEntry)| (r.0.map(|x| x.id.clone()), r.1.id.clone());
+        let helper = cat.helper_for_host().map(|h| h.id.clone());
+        let sherpa = cat.runtime_for_host().map(|r| r.id.clone());
+        assert_eq!(ids(setup_parts(&cat, "whisper-turbo", true, false).unwrap()), (helper, "whisper-turbo-gpu".into()));
+        // Found unusable here (or none published): sherpa's Whisper Turbo.
+        assert_eq!(ids(setup_parts(&cat, "whisper-turbo", false, false).unwrap()), (sherpa.clone(), "whisper-turbo".into()));
+        assert_eq!(ids(setup_parts(&cat, "whisper-turbo", true, true).unwrap()), (None, "whisper-turbo-gpu".into()), "a development helper is not downloaded");
+        assert_eq!(ids(setup_parts(&cat, "moonshine-base-en", true, false).unwrap()), (sherpa, "moonshine-base-en".into()));
+        assert!(setup_parts(&cat, "nope", true, false).is_err());
     }
 
     #[test]

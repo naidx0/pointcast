@@ -230,9 +230,9 @@ pub fn helper_installed(root: &Path, cat: &Catalog) -> bool {
     dev_helper().is_some() || cat.helper_for_host().is_some_and(|h| !h.pending && models::runtime_installed(root, h))
 }
 
-/// The GPU version of `m`, when it and the helper are both here.
+/// The GPU version of `m`, when it and the helper are both here, and not still to be tried by the background upgrade.
 pub fn gpu_ready<'a>(root: &Path, cat: &'a Catalog, m: &ModelEntry) -> Option<&'a ModelEntry> {
-    cat.gpu_variant(&m.id).filter(|v| models::model_installed(root, v) && helper_installed(root, cat))
+    cat.gpu_variant(&m.id).filter(|v| models::model_installed(root, v) && helper_installed(root, cat) && !super::upgrade::unverified(root))
 }
 
 /// The models a recording can use: those whose files are here, a model with a GPU version also when that is.
@@ -319,6 +319,14 @@ pub fn load(root: &Path, cat: &Catalog, model: &ModelEntry, threads: i32, prepar
         Err(e) if sherpa_here => sherpa().map(Engine::Sherpa).map_err(|_| e),
         Err(e) => Err(e),
     }
+}
+
+/// Start the helper on the GPU version of `model` as a recording would, warm it up, and say what it runs on ("gpu",
+/// "cpu" or "unknown") and on which graphics card; then stop it. The background upgrade's check.
+pub fn probe(root: &Path, cat: &Catalog, model: &str) -> Result<(&'static str, Option<String>), String> {
+    let variant = cat.gpu_variant(model).ok_or(crate::session::NO_MODEL)?;
+    let srv = start_gpu(root, cat, variant, &|_| {})?;
+    Ok((srv.backend(), srv.device()))
 }
 
 /// Marks that this helper has compiled its shaders on this computer once.

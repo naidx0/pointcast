@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import {
+  gpuUpgradeCancel,
   inTauri,
+  onGpuUpgrade,
   onSpeechDone,
   onSpeechProgress,
   onState,
@@ -14,6 +16,7 @@ import {
   speechStatus,
   subscribe,
   type Config,
+  type GpuUpgrade,
   type SpeechModel,
   type SpeechProgress,
 } from "@/lib/api";
@@ -66,7 +69,7 @@ function where(m: SpeechModel) {
   const speed = m.speed_x ? ` · ${m.speed_x >= 10 ? Math.round(m.speed_x) : m.speed_x}x real time` : "";
   if (m.backend === "gpu")
     return { text: `Runs on your graphics card${m.device ? ` (${shortDevice(m.device)})` : ""}${speed}`, warn: false };
-  if (m.backend === "cpu" && m.gpu)
+  if (m.backend === "cpu" && m.gpu && !m.gpu.unusable)
     return { text: `Runs on your processor${speed}. A graphics card makes it much faster.`, warn: true };
   if (m.backend === "cpu") return { text: `Runs on your processor${speed}`, warn: false };
   return null;
@@ -81,6 +84,31 @@ function usePreparingGpu() {
     return subscribe(onState((s) => setOn(!!s.preparing_gpu)));
   }, []);
   return on;
+}
+
+/** The faster GPU version setting itself up in the background, live; Settings is read again once it is in or found
+ * unusable. In the browser preview, `?upgrade=38` (or `checking`, `low_disk`, `failed`) shows its states. */
+function useGpuUpgrade(cfg: Config, refresh: () => void) {
+  const [up, setUp] = useState<GpuUpgrade | null>(cfg.gpu_upgrade ?? null);
+  useEffect(() => {
+    if (!inTauri && preview) {
+      const q = new URLSearchParams(location.search).get("upgrade");
+      if (q && /^[0-9]+$/.test(q)) setUp({ state: "downloading", percent: Number(q) });
+      else if (q === "low_disk")
+        setUp({ state: "low_disk", percent: 0, note: "The faster GPU version needs about 2.6 GB free and 1.2 GB are. Free some space and it is set up by itself." });
+      else if (q) setUp({ state: q as GpuUpgrade["state"], percent: 100, note: q === "failed" ? "Pointcast can't reach GitHub to download the speech files." : undefined });
+    }
+    return subscribe(
+      onGpuUpgrade((u) => {
+        setUp(u);
+        if (u.state === "done" || u.state === "unusable") refresh();
+      }),
+    );
+  }, [refresh]);
+  useEffect(() => {
+    if (inTauri) setUp(cfg.gpu_upgrade ?? null);
+  }, [cfg.gpu_upgrade?.state]);
+  return up;
 }
 
 /** The one setup job (engine + model) as every window sees it, including one started elsewhere. */
@@ -154,6 +182,8 @@ export function ModelPicker({
   const busyId = job ? (job.id ?? chosen) : null;
   const slow = useSlowEngine(active);
   const preparing = usePreparingGpu();
+  const upgrade = useGpuUpgrade(cfg, refresh);
+  const auto = cfg.auto_gpu !== false;
   // The model to suggest instead: the fast, accurate one, or the smallest when that is already the one in use.
   const faster = models.find((m) => m.id === (active === "moonshine-base-en" ? "moonshine-tiny-en" : "moonshine-base-en"));
   // A model is on disk but the engine did not load or run it: say so instead of "Ready".
@@ -165,9 +195,13 @@ export function ModelPicker({
         const o = offer(m);
         const on = m.id === active;
         const ready = runnable(m, engine);
-        // The processor version is here and the faster GPU one can be set up: offer the switch.
-        const upgrade = !!m.gpu?.available && m.gpu.cpu_installed && !m.gpu.installed;
-        const device = on && ready ? where(m) : null;
+        // The processor version is here and the faster GPU one can be set up: it sets itself up, or (turned off, or
+        // after a failed try) the switch is offered.
+        const switchable = !!m.gpu?.available && m.gpu.cpu_installed && !m.gpu.installed && !m.gpu.unusable;
+        const bg = m.gpu && upgrade && upgrade.state !== "idle" && upgrade.state !== "done" ? upgrade : null;
+        const fetching = !!bg && (bg.state === "downloading" || bg.state === "checking");
+        const offerSwitch = switchable && !fetching && (!auto || bg?.state === "failed");
+        const device = on && ready && !fetching ? where(m) : null;
         const mine = busyId === m.id;
         const pct = mine && job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
         const err =
@@ -221,7 +255,32 @@ export function ModelPicker({
                   Preparing your graphics card. This happens once and takes a minute or two.
                 </div>
               ) : null}
-              {ready && upgrade && !mine ? (
+              {fetching && !mine ? (
+                <div className="model-progress">
+                  <div
+                    className={`progress ${bg!.state === "checking" ? "indet" : ""}`}
+                    role="progressbar"
+                    aria-label="Getting the faster GPU version"
+                    aria-valuenow={bg!.state === "checking" ? undefined : bg!.percent}
+                  >
+                    <i style={bg!.state === "checking" ? undefined : { width: `${bg!.percent}%` }} />
+                  </div>
+                  <span className="t-small">
+                    {bg!.state === "checking" ? "Checking your graphics card…" : `Getting the faster GPU version… ${bg!.percent}%`}
+                  </span>
+                </div>
+              ) : null}
+              {bg && !fetching && bg.note && bg.state !== "unusable" && !mine ? (
+                <div className="t-small" style={{ marginTop: 4, color: "var(--orange-ink)" }}>
+                  {bg.note}
+                </div>
+              ) : null}
+              {m.gpu?.unusable && on && !mine ? (
+                <div className="t-small" style={{ marginTop: 4 }}>
+                  Your graphics card can't run the faster version, so Whisper Turbo runs on your processor.
+                </div>
+              ) : null}
+              {ready && offerSwitch && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   <button
                     type="button"
@@ -262,7 +321,24 @@ export function ModelPicker({
                 </div>
               ) : null}
             </div>
-            {mine ? (
+            {fetching && !mine ? (
+              bg!.state === "downloading" ? (
+                <button
+                  type="button"
+                  className="btn"
+                  title="Stop downloading the faster GPU version; Whisper Turbo stays on your processor"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (inTauri) gpuUpgradeCancel().catch(() => undefined);
+                    else setTimeout(refresh, 0);
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : (
+                <span className="spinner" />
+              )
+            ) : mine ? (
               job?.phase === "download" ? (
                 <button type="button" className="btn" onClick={(e) => (e.stopPropagation(), cancel())}>
                   Cancel

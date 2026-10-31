@@ -248,6 +248,20 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 /// Set to stop an install between chunks; cleared when the next one starts.
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    static STOP: std::cell::Cell<Option<&'static AtomicBool>> = const { std::cell::Cell::new(None) };
+}
+
+/// This thread's downloads stop on `flag` instead of `CANCEL` (the background GPU upgrade has a Cancel of its own), or
+/// on `CANCEL` again with None.
+pub fn stop_on(flag: Option<&'static AtomicBool>) {
+    STOP.with(|s| s.set(flag));
+}
+
+fn cancelled() -> bool {
+    STOP.with(|s| s.get()).unwrap_or(&CANCEL).load(Ordering::SeqCst)
+}
+
 /// One request streams for at most this long, then the next resumes where it stopped, so a
 /// stalled connection costs a minute, never the whole download.
 const WINDOW: Duration = Duration::from_secs(60);
@@ -337,7 +351,7 @@ fn fetch(
     let mut stalls = 0u32;
     let mut tick = Instant::now() - Duration::from_secs(1);
     loop {
-        if CANCEL.load(Ordering::SeqCst) {
+        if cancelled() {
             return Err(CANCELLED.into());
         }
         let have = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
@@ -431,7 +445,7 @@ fn stream(
     let mut received = if resumed { have } else { 0 };
     let mut buf = vec![0u8; 256 * 1024];
     loop {
-        if CANCEL.load(Ordering::SeqCst) {
+        if cancelled() {
             return Err(fatal(CANCELLED.into()));
         }
         let n = match resp.read(&mut buf) {
@@ -634,7 +648,7 @@ pub fn view(root: &Path, c: &Catalog) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -699,14 +713,14 @@ mod tests {
 
     /// A loopback server for one file. It honours `Range`, can cut the first response short, and
     /// records every Range it was asked for.
-    struct Serve {
-        url: String,
-        ranges: Arc<Mutex<Vec<Option<u64>>>>,
+    pub struct Serve {
+        pub url: String,
+        pub ranges: Arc<Mutex<Vec<Option<u64>>>>,
     }
 
     use std::sync::{Arc, Mutex};
 
-    fn serve(body: Vec<u8>, status: u16, cut_first_at: Option<usize>) -> Serve {
+    pub fn serve(body: Vec<u8>, status: u16, cut_first_at: Option<usize>) -> Serve {
         use std::io::{BufRead, BufReader};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}/file.tar.bz2", l.local_addr().unwrap().port());
@@ -850,7 +864,7 @@ mod tests {
         assert!(!runtime_installed(&d, rt), "a different build is replaced");
     }
 
-    fn pin(name: &str, body: &[u8]) -> FileEntry {
+    pub fn pin(name: &str, body: &[u8]) -> FileEntry {
         FileEntry { name: name.into(), role: None, bytes: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) }
     }
 

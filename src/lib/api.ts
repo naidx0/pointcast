@@ -74,7 +74,20 @@ export type HotkeyView = { label: string; keys: string[]; default: string };
 
 /** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
  * its download, and whether the processor version is on disk too. */
-export type GpuVersion = { available: boolean; installed: boolean; bytes: number; cpu_installed: boolean };
+export type GpuVersion = {
+  available: boolean;
+  installed: boolean;
+  bytes: number;
+  cpu_installed: boolean;
+  /** Why the helper cannot run on this computer, once it was tried and found no graphics card. */
+  unusable?: string;
+};
+/** The faster GPU version setting itself up in the background. */
+export type GpuUpgrade = {
+  state: "idle" | "downloading" | "checking" | "done" | "unusable" | "low_disk" | "metered" | "failed";
+  percent: number;
+  note?: string;
+};
 export type SpeechModel = {
   id: string;
   name: string;
@@ -124,6 +137,9 @@ export type Config = {
   picture_paths?: boolean;
   /** Clean up room noise and even out the volume before transcribing. Treated as on when absent. */
   voice_boost?: boolean;
+  /** Get the faster GPU version of Whisper Turbo by itself. Treated as on when absent. */
+  auto_gpu?: boolean;
+  gpu_upgrade?: GpuUpgrade;
   start_at_login: boolean;
   check_updates: boolean;
   /** A newer version the last check found. */
@@ -199,6 +215,8 @@ export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
 export const speechCancel = () => invoke<void>("speech_cancel");
 export const speechStatus = () => invoke<SpeechProgress | null>("speech_status");
 export const speechRemove = (id: string) => invoke<Config>("speech_remove", { id });
+/** Stop the faster GPU version downloading by itself; it is not tried again until Whisper Turbo is picked again. */
+export const gpuUpgradeCancel = () => invoke<void>("gpu_upgrade_cancel");
 export const permissionsGet = () => invoke<Permissions>("permissions_get");
 export const permissionRequest = (kind: PermissionKind) => invoke<Permissions>("permission_request", { kind });
 export const permissionOpen = (kind: PermissionKind) => invoke<void>("permission_open", { kind });
@@ -294,6 +312,7 @@ export const onHistoryChanged = on<{ id: string }>("history://changed");
 export const onTranscribeProgress = on<{ id: string; done_ms: number; total_ms: number }>("transcribe://progress");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
+export const onGpuUpgrade = on<GpuUpgrade>("gpu://upgrade");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
 export const onUpdateChecked = on<string | null>("update://checked");
