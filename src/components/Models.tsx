@@ -23,7 +23,7 @@ import {
 
 /** How each model is offered: plain names, what it is best at, and what it costs. */
 const OFFER: Record<string, { name: string; tag: string; blurb: string; order: number }> = {
-  "moonshine-base-en": { name: "Moonshine Base", tag: "Recommended", blurb: "Fast and accurate. English.", order: 0 },
+  "moonshine-base-en": { name: "Moonshine Base", tag: "Accurate", blurb: "Fast and accurate. English.", order: 0 },
   "moonshine-tiny-en": { name: "Moonshine Tiny", tag: "Fastest", blurb: "Smallest and quickest. English.", order: 1 },
   "parakeet-tdt-v2-en": {
     name: "Parakeet v2",
@@ -62,7 +62,18 @@ export function speechReady(cfg: Config) {
 }
 
 /** What a download of `m` fetches: its GPU version where that can be set up here. */
-const download = (m: SpeechModel) => (m.gpu?.available && !m.gpu.installed ? m.gpu.bytes : m.bytes);
+const download = (m: SpeechModel) => (gpuFirst(m) ? m.gpu!.bytes : m.bytes);
+
+/** The GPU version is what a download of `m` sets up: its helper is published here and was not found unusable. */
+const gpuFirst = (m: SpeechModel) => !!m.gpu?.available && !m.gpu.installed && !m.gpu.unusable;
+
+/** "574 MB + 15 MB": the GPU model and its helper, when both are still to download. */
+const sizeText = (m: SpeechModel, ready: boolean) => {
+  if (m.gpu?.installed) return mbText(m.gpu.model_bytes ?? m.gpu.bytes);
+  if (ready || !gpuFirst(m)) return mbText(m.bytes);
+  const helper = m.gpu!.helper_bytes ?? 0;
+  return helper ? `${mbText(m.gpu!.bytes - helper)} + ${mbText(helper)}` : mbText(m.gpu!.bytes);
+};
 
 /** Where the model in use runs, once the engine has said, and how fast it was here once measured. */
 function where(m: SpeechModel) {
@@ -178,7 +189,10 @@ export function ModelPicker({
   // Marked is the model recordings really use; picking one that is not downloaded yet does not change that.
   const active = cfg.speech_in_use ?? chosen;
   const engine = cfg.speech.runtime?.installed ?? false;
-  const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
+  // The model recommended for this computer first, the rest in their order (`?recommended=` in the browser preview).
+  const recommended = (!inTauri && preview && new URLSearchParams(location.search).get("recommended")) || cfg.recommended;
+  const rank = (m: SpeechModel) => (m.id === recommended ? -1 : offer(m).order);
+  const models = withPreview(cfg.speech.models ?? []).sort((a, b) => rank(a) - rank(b));
   const busyId = job ? (job.id ?? chosen) : null;
   const slow = useSlowEngine(active);
   const preparing = usePreparingGpu();
@@ -221,11 +235,15 @@ export function ModelPicker({
             <div className="grow">
               <div className="ttl">
                 {o.name}
-                {o.tag ? <span className={`badge ${o.tag === "Recommended" ? "rec" : ""}`}>{o.tag}</span> : null}
+                {m.id === recommended ? (
+                  <span className="badge rec">Recommended</span>
+                ) : o.tag ? (
+                  <span className="badge">{o.tag}</span>
+                ) : null}
               </div>
               <div className="sub">
-                {m.gpu?.available ? "OpenAI's large-v3-turbo. 99 languages. Fast on your graphics card." : o.blurb} ·{" "}
-                {mbText(m.gpu?.installed ? m.gpu.bytes : ready ? m.bytes : download(m))}
+                {m.gpu?.available && !m.gpu.unusable ? "OpenAI's large-v3-turbo. 99 languages. Runs on your graphics card." : o.blurb} ·{" "}
+                {sizeText(m, ready)}
               </div>
               {mine ? (
                 <div className="model-progress">
@@ -412,7 +430,14 @@ function withPreview(list: SpeechModel[]): SpeechModel[] {
     const turbo = (m: SpeechModel): SpeechModel => ({
       ...m,
       installed: gpu !== "offer",
-      gpu: { available: true, installed: gpu !== "switch" && gpu !== "offer", bytes: 574_041_195, cpu_installed: gpu === "switch" },
+      gpu: {
+        available: true,
+        installed: gpu !== "switch" && gpu !== "offer",
+        bytes: gpu === "offer" || gpu === "switch" ? 589_282_638 : 574_041_195,
+        model_bytes: 574_041_195,
+        helper_bytes: gpu === "offer" || gpu === "switch" ? 15_241_443 : 0,
+        cpu_installed: gpu === "switch",
+      },
       backend: gpu === "cpu" ? "cpu" : gpu === "switch" ? "cpu" : "gpu",
       device: gpu === "gpu" ? "NVIDIA GeForce RTX 2060 SUPER via Vulkan" : undefined,
       speed_x: gpu === "gpu" ? 19.8 : gpu === "cpu" ? 1.6 : undefined,

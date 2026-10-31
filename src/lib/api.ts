@@ -79,6 +79,9 @@ export type GpuVersion = {
   installed: boolean;
   bytes: number;
   cpu_installed: boolean;
+  /** `bytes` in two: the GPU model, and the helper while it is still to download. */
+  model_bytes?: number;
+  helper_bytes?: number;
   /** Why the helper cannot run on this computer, once it was tried and found no graphics card. */
   unusable?: string;
 };

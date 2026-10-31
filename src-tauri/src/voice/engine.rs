@@ -270,6 +270,8 @@ pub fn view(root: &Path, cat: &Catalog) -> Value {
                     "available": available,
                     "installed": ready,
                     "bytes": g.bytes + if ready { 0 } else { helper },
+                    "model_bytes": g.bytes,
+                    "helper_bytes": if ready { 0 } else { helper },
                     "cpu_installed": models::model_installed(root, e),
                 });
             }
