@@ -146,6 +146,9 @@ pub struct Settings {
     /// recording is transcribed again; the kept audio stays as it came.
     #[serde(default = "yes")]
     pub voice_boost: bool,
+    /// Get the faster GPU version of Whisper Turbo by itself, in the background, where a graphics card can run it.
+    #[serde(default = "yes")]
+    pub auto_gpu: bool,
 }
 
 fn default_model() -> String {
@@ -193,6 +196,7 @@ impl Default for Settings {
             keep_audio: true,
             picture_paths: true,
             voice_boost: true,
+            auto_gpu: true,
         }
     }
 }
@@ -408,6 +412,8 @@ mod tests {
         assert!(Settings::default().keep_audio && Settings::default().picture_paths);
         let off: Settings = serde_json::from_str(r#"{"keep_audio":false,"picture_paths":false}"#).unwrap();
         assert!(!off.keep_audio && !off.picture_paths);
+        assert!(old.auto_gpu && Settings::default().auto_gpu, "the faster engine sets itself up unless turned off");
+        assert!(!serde_json::from_str::<Settings>(r#"{"auto_gpu":false}"#).unwrap().auto_gpu);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert_eq!(back, off);
     }

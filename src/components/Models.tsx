@@ -1,25 +1,29 @@
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import {
+  gpuUpgradeCancel,
   inTauri,
+  onGpuUpgrade,
   onSpeechDone,
   onSpeechProgress,
   onState,
   preview,
   sessionState,
+  shortDevice,
   speechCancel,
   speechRemove,
   speechSetup,
   speechStatus,
   subscribe,
   type Config,
+  type GpuUpgrade,
   type SpeechModel,
   type SpeechProgress,
 } from "@/lib/api";
 
 /** How each model is offered: plain names, what it is best at, and what it costs. */
 const OFFER: Record<string, { name: string; tag: string; blurb: string; order: number }> = {
-  "moonshine-base-en": { name: "Moonshine Base", tag: "Recommended", blurb: "Fast and accurate. English.", order: 0 },
+  "moonshine-base-en": { name: "Moonshine Base", tag: "Accurate", blurb: "Fast and accurate. English.", order: 0 },
   "moonshine-tiny-en": { name: "Moonshine Tiny", tag: "Fastest", blurb: "Smallest and quickest. English.", order: 1 },
   "parakeet-tdt-v2-en": {
     name: "Parakeet v2",
@@ -58,13 +62,27 @@ export function speechReady(cfg: Config) {
 }
 
 /** What a download of `m` fetches: its GPU version where that can be set up here. */
-const download = (m: SpeechModel) => (m.gpu?.available && !m.gpu.installed ? m.gpu.bytes : m.bytes);
+const download = (m: SpeechModel) => (gpuFirst(m) ? m.gpu!.bytes : m.bytes);
 
-/** Where the model in use runs, once the engine has said. */
+/** The GPU version is what a download of `m` sets up: its helper is published here and was not found unusable. */
+const gpuFirst = (m: SpeechModel) => !!m.gpu?.available && !m.gpu.installed && !m.gpu.unusable;
+
+/** "574 MB + 15 MB": the GPU model and its helper, when both are still to download. */
+const sizeText = (m: SpeechModel, ready: boolean) => {
+  if (m.gpu?.installed) return mbText(m.gpu.model_bytes ?? m.gpu.bytes);
+  if (ready || !gpuFirst(m)) return mbText(m.bytes);
+  const helper = m.gpu!.helper_bytes ?? 0;
+  return helper ? `${mbText(m.gpu!.bytes - helper)} + ${mbText(helper)}` : mbText(m.gpu!.bytes);
+};
+
+/** Where the model in use runs, once the engine has said, and how fast it was here once measured. */
 function where(m: SpeechModel) {
-  if (m.backend === "gpu") return { text: "Running on your GPU.", warn: false };
-  if (m.backend === "cpu" && m.gpu)
-    return { text: "Running on your processor: it is slower; a graphics card makes it much faster.", warn: true };
+  const speed = m.speed_x ? ` · ${m.speed_x >= 10 ? Math.round(m.speed_x) : m.speed_x}x real time` : "";
+  if (m.backend === "gpu")
+    return { text: `Runs on your graphics card${m.device ? ` (${shortDevice(m.device)})` : ""}${speed}`, warn: false };
+  if (m.backend === "cpu" && m.gpu && !m.gpu.unusable)
+    return { text: `Runs on your processor${speed}. A graphics card makes it much faster.`, warn: true };
+  if (m.backend === "cpu") return { text: `Runs on your processor${speed}`, warn: false };
   return null;
 }
 
@@ -77,6 +95,31 @@ function usePreparingGpu() {
     return subscribe(onState((s) => setOn(!!s.preparing_gpu)));
   }, []);
   return on;
+}
+
+/** The faster GPU version setting itself up in the background, live; Settings is read again once it is in or found
+ * unusable. In the browser preview, `?upgrade=38` (or `checking`, `low_disk`, `failed`) shows its states. */
+function useGpuUpgrade(cfg: Config, refresh: () => void) {
+  const [up, setUp] = useState<GpuUpgrade | null>(cfg.gpu_upgrade ?? null);
+  useEffect(() => {
+    if (!inTauri && preview) {
+      const q = new URLSearchParams(location.search).get("upgrade");
+      if (q && /^[0-9]+$/.test(q)) setUp({ state: "downloading", percent: Number(q) });
+      else if (q === "low_disk")
+        setUp({ state: "low_disk", percent: 0, note: "The faster GPU version needs about 2.6 GB free and 1.2 GB are. Free some space and it is set up by itself." });
+      else if (q) setUp({ state: q as GpuUpgrade["state"], percent: 100, note: q === "failed" ? "Pointcast can't reach GitHub to download the speech files." : undefined });
+    }
+    return subscribe(
+      onGpuUpgrade((u) => {
+        setUp(u);
+        if (u.state === "done" || u.state === "unusable") refresh();
+      }),
+    );
+  }, [refresh]);
+  useEffect(() => {
+    if (inTauri) setUp(cfg.gpu_upgrade ?? null);
+  }, [cfg.gpu_upgrade?.state]);
+  return up;
 }
 
 /** The one setup job (engine + model) as every window sees it, including one started elsewhere. */
@@ -146,10 +189,15 @@ export function ModelPicker({
   // Marked is the model recordings really use; picking one that is not downloaded yet does not change that.
   const active = cfg.speech_in_use ?? chosen;
   const engine = cfg.speech.runtime?.installed ?? false;
-  const models = withPreview(cfg.speech.models ?? []).sort((a, b) => offer(a).order - offer(b).order);
+  // The model recommended for this computer first, the rest in their order (`?recommended=` in the browser preview).
+  const recommended = (!inTauri && preview && new URLSearchParams(location.search).get("recommended")) || cfg.recommended;
+  const rank = (m: SpeechModel) => (m.id === recommended ? -1 : offer(m).order);
+  const models = withPreview(cfg.speech.models ?? []).sort((a, b) => rank(a) - rank(b));
   const busyId = job ? (job.id ?? chosen) : null;
   const slow = useSlowEngine(active);
   const preparing = usePreparingGpu();
+  const upgrade = useGpuUpgrade(cfg, refresh);
+  const auto = cfg.auto_gpu !== false;
   // The model to suggest instead: the fast, accurate one, or the smallest when that is already the one in use.
   const faster = models.find((m) => m.id === (active === "moonshine-base-en" ? "moonshine-tiny-en" : "moonshine-base-en"));
   // A model is on disk but the engine did not load or run it: say so instead of "Ready".
@@ -161,9 +209,13 @@ export function ModelPicker({
         const o = offer(m);
         const on = m.id === active;
         const ready = runnable(m, engine);
-        // The processor version is here and the faster GPU one can be set up: offer the switch.
-        const upgrade = !!m.gpu?.available && m.gpu.cpu_installed && !m.gpu.installed;
-        const device = on && ready ? where(m) : null;
+        // The processor version is here and the faster GPU one can be set up: it sets itself up, or (turned off, or
+        // after a failed try) the switch is offered.
+        const switchable = !!m.gpu?.available && m.gpu.cpu_installed && !m.gpu.installed && !m.gpu.unusable;
+        const bg = m.gpu && upgrade && upgrade.state !== "idle" && upgrade.state !== "done" ? upgrade : null;
+        const fetching = !!bg && (bg.state === "downloading" || bg.state === "checking");
+        const offerSwitch = switchable && !fetching && (!auto || bg?.state === "failed");
+        const device = on && ready && !fetching ? where(m) : null;
         const mine = busyId === m.id;
         const pct = mine && job?.phase === "download" && job.total ? Math.min(100, ((job.received ?? 0) / job.total) * 100) : null;
         const err =
@@ -183,11 +235,15 @@ export function ModelPicker({
             <div className="grow">
               <div className="ttl">
                 {o.name}
-                {o.tag ? <span className={`badge ${o.tag === "Recommended" ? "rec" : ""}`}>{o.tag}</span> : null}
+                {m.id === recommended ? (
+                  <span className="badge rec">Recommended</span>
+                ) : o.tag ? (
+                  <span className="badge">{o.tag}</span>
+                ) : null}
               </div>
               <div className="sub">
-                {m.gpu?.available ? "OpenAI's large-v3-turbo. 99 languages. Fast on your graphics card." : o.blurb} ·{" "}
-                {mbText(m.gpu?.installed ? m.gpu.bytes : ready ? m.bytes : download(m))}
+                {m.gpu?.available && !m.gpu.unusable ? "OpenAI's large-v3-turbo. 99 languages. Runs on your graphics card." : o.blurb} ·{" "}
+                {sizeText(m, ready)}
               </div>
               {mine ? (
                 <div className="model-progress">
@@ -217,7 +273,32 @@ export function ModelPicker({
                   Preparing your graphics card. This happens once and takes a minute or two.
                 </div>
               ) : null}
-              {ready && upgrade && !mine ? (
+              {fetching && !mine ? (
+                <div className="model-progress">
+                  <div
+                    className={`progress ${bg!.state === "checking" ? "indet" : ""}`}
+                    role="progressbar"
+                    aria-label="Getting the faster GPU version"
+                    aria-valuenow={bg!.state === "checking" ? undefined : bg!.percent}
+                  >
+                    <i style={bg!.state === "checking" ? undefined : { width: `${bg!.percent}%` }} />
+                  </div>
+                  <span className="t-small">
+                    {bg!.state === "checking" ? "Checking your graphics card…" : `Getting the faster GPU version… ${bg!.percent}%`}
+                  </span>
+                </div>
+              ) : null}
+              {bg && !fetching && bg.note && bg.state !== "unusable" && !mine ? (
+                <div className="t-small" style={{ marginTop: 4, color: "var(--orange-ink)" }}>
+                  {bg.note}
+                </div>
+              ) : null}
+              {m.gpu?.unusable && on && !mine ? (
+                <div className="t-small" style={{ marginTop: 4 }}>
+                  Your graphics card can't run the faster version, so Whisper Turbo runs on your processor.
+                </div>
+              ) : null}
+              {ready && offerSwitch && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   <button
                     type="button"
@@ -258,7 +339,24 @@ export function ModelPicker({
                 </div>
               ) : null}
             </div>
-            {mine ? (
+            {fetching && !mine ? (
+              bg!.state === "downloading" ? (
+                <button
+                  type="button"
+                  className="btn"
+                  title="Stop downloading the faster GPU version; Whisper Turbo stays on your processor"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (inTauri) gpuUpgradeCancel().catch(() => undefined);
+                    else setTimeout(refresh, 0);
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : (
+                <span className="spinner" />
+              )
+            ) : mine ? (
               job?.phase === "download" ? (
                 <button type="button" className="btn" onClick={(e) => (e.stopPropagation(), cancel())}>
                   Cancel
@@ -332,8 +430,17 @@ function withPreview(list: SpeechModel[]): SpeechModel[] {
     const turbo = (m: SpeechModel): SpeechModel => ({
       ...m,
       installed: gpu !== "offer",
-      gpu: { available: true, installed: gpu !== "switch" && gpu !== "offer", bytes: 574_041_195, cpu_installed: gpu === "switch" },
+      gpu: {
+        available: true,
+        installed: gpu !== "switch" && gpu !== "offer",
+        bytes: gpu === "offer" || gpu === "switch" ? 589_282_638 : 574_041_195,
+        model_bytes: 574_041_195,
+        helper_bytes: gpu === "offer" || gpu === "switch" ? 15_241_443 : 0,
+        cpu_installed: gpu === "switch",
+      },
       backend: gpu === "cpu" ? "cpu" : gpu === "switch" ? "cpu" : "gpu",
+      device: gpu === "gpu" ? "NVIDIA GeForce RTX 2060 SUPER via Vulkan" : undefined,
+      speed_x: gpu === "gpu" ? 19.8 : gpu === "cpu" ? 1.6 : undefined,
     });
     return lineup(list).map((m) => (m.id === "whisper-turbo" ? turbo(m) : m));
   }

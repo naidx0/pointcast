@@ -453,6 +453,16 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
           />
         </Row>
         <Row
+          label="Get the faster GPU version by itself"
+          sub="With Whisper Turbo, Pointcast downloads the version for your graphics card in the background (about 590 MB) and uses it once it works here."
+        >
+          <Toggle
+            label="Get the faster GPU version by itself"
+            on={cfg.auto_gpu !== false}
+            set={(v) => patch({ auto_gpu: v })}
+          />
+        </Row>
+        <Row
           label="Keep my recordings so I can transcribe them again"
           sub="The newest 10 recordings keep their audio on this computer, deleted with the entry. Nothing is uploaded."
         >

@@ -30,6 +30,8 @@ export type UiState = {
   progress?: Progress | null;
   /** The GPU engine's first start on this computer: the graphics card is compiling its shaders. */
   preparing_gpu?: boolean;
+  /** Where the engine transcribes: "your graphics card" or "your processor"; null before a model is loaded. */
+  engine_label?: string | null;
 };
 
 export type Progress = {
@@ -39,7 +41,7 @@ export type Progress = {
   percent: number;
   /** Nothing moved for 20 s: offer Cancel. */
   stalled: boolean;
-  /** About how long the rest takes, once the model's pace is measured. */
+  /** No longer sent: the time left was too often wrong, so only the bar and the percent are shown. */
   left_ms?: number | null;
 };
 
@@ -72,7 +74,23 @@ export type HotkeyView = { label: string; keys: string[]; default: string };
 
 /** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
  * its download, and whether the processor version is on disk too. */
-export type GpuVersion = { available: boolean; installed: boolean; bytes: number; cpu_installed: boolean };
+export type GpuVersion = {
+  available: boolean;
+  installed: boolean;
+  bytes: number;
+  cpu_installed: boolean;
+  /** `bytes` in two: the GPU model, and the helper while it is still to download. */
+  model_bytes?: number;
+  helper_bytes?: number;
+  /** Why the helper cannot run on this computer, once it was tried and found no graphics card. */
+  unusable?: string;
+};
+/** The faster GPU version setting itself up in the background. */
+export type GpuUpgrade = {
+  state: "idle" | "downloading" | "checking" | "done" | "unusable" | "low_disk" | "metered" | "failed";
+  percent: number;
+  note?: string;
+};
 export type SpeechModel = {
   id: string;
   name: string;
@@ -81,6 +99,10 @@ export type SpeechModel = {
   gpu?: GpuVersion;
   /** Where the model in memory runs: on the graphics card, on the processor, or not said yet. */
   backend?: "gpu" | "cpu" | "unknown";
+  /** The graphics card it runs on, as "NVIDIA GeForce RTX 2060 SUPER via Vulkan". */
+  device?: string;
+  /** How many times faster than real time it transcribed here, once measured. */
+  speed_x?: number;
 };
 export type SpeechView = {
   runtime?: { id: string; installed: boolean; lib: string } | null;
@@ -118,6 +140,9 @@ export type Config = {
   picture_paths?: boolean;
   /** Clean up room noise and even out the volume before transcribing. Treated as on when absent. */
   voice_boost?: boolean;
+  /** Get the faster GPU version of Whisper Turbo by itself. Treated as on when absent. */
+  auto_gpu?: boolean;
+  gpu_upgrade?: GpuUpgrade;
   start_at_login: boolean;
   check_updates: boolean;
   /** A newer version the last check found. */
@@ -193,6 +218,8 @@ export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
 export const speechCancel = () => invoke<void>("speech_cancel");
 export const speechStatus = () => invoke<SpeechProgress | null>("speech_status");
 export const speechRemove = (id: string) => invoke<Config>("speech_remove", { id });
+/** Stop the faster GPU version downloading by itself; it is not tried again until Whisper Turbo is picked again. */
+export const gpuUpgradeCancel = () => invoke<void>("gpu_upgrade_cancel");
 export const permissionsGet = () => invoke<Permissions>("permissions_get");
 export const permissionRequest = (kind: PermissionKind) => invoke<Permissions>("permission_request", { kind });
 export const permissionOpen = (kind: PermissionKind) => invoke<void>("permission_open", { kind });
@@ -225,7 +252,39 @@ export type HistoryMeta = {
   has_audio?: boolean;
   /** Saved before every word was transcribed (Cancel at the end of a recording). */
   partial?: boolean;
+  /** How it was last transcribed: "gpu", "cpu-whisper", "cpu-sherpa", "moonshine" or "parakeet"; empty when not known. */
+  engine?: string;
+  /** The graphics card it ran on. */
+  device?: string;
+  /** The engine's time on it and the length of its audio, in ms. */
+  transcribe_ms?: number;
+  audio_ms?: number;
 };
+
+/** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
+export function shortDevice(d: string) {
+  return d
+    .replace(/ via .*$/, "")
+    .replace(/^(NVIDIA |AMD |Intel[(]R[)] |Intel )/, "")
+    .replace(/^GeForce /, "")
+    .trim();
+}
+
+/** "20x real time" (whole numbers from 10 up, one decimal below). */
+export function realTime(audioMs: number, spentMs: number) {
+  const x = audioMs / Math.max(1, spentMs);
+  return `${x >= 10 ? Math.round(x) : Math.round(x * 10) / 10}x real time`;
+}
+
+/** How a History entry was transcribed, as a quiet line under it; empty for an entry from before this was kept. */
+export function ranText(m: Pick<HistoryMeta, "engine" | "device" | "transcribe_ms" | "audio_ms">) {
+  if (!m.engine || !m.transcribe_ms || !m.audio_ms) return "";
+  const s = m.transcribe_ms < 10_000 ? Math.max(1, Math.round(m.transcribe_ms / 100) / 10) : Math.round(m.transcribe_ms / 1000);
+  const speed = `in ${s} s · ${realTime(m.audio_ms, m.transcribe_ms)}`;
+  if (m.engine === "gpu") return `Transcribed on your graphics card${m.device ? ` (${shortDevice(m.device)})` : ""} ${speed}`;
+  const hint = m.engine === "cpu-sherpa" || m.engine === "cpu-whisper" ? ". A graphics card is much faster: Settings > Speech." : "";
+  return `Transcribed on your processor ${speed}${hint}`;
+}
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
 /** Reopen picture n (as `[image n]` numbers it) of a past prompt in the overlay to mark it up again. */
@@ -256,6 +315,7 @@ export const onHistoryChanged = on<{ id: string }>("history://changed");
 export const onTranscribeProgress = on<{ id: string; done_ms: number; total_ms: number }>("transcribe://progress");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
+export const onGpuUpgrade = on<GpuUpgrade>("gpu://upgrade");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
 export const onUpdateChecked = on<string | null>("update://checked");
