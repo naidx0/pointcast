@@ -7,6 +7,7 @@ import {
   onState,
   preview,
   sessionState,
+  shortDevice,
   speechCancel,
   speechRemove,
   speechSetup,
@@ -60,11 +61,14 @@ export function speechReady(cfg: Config) {
 /** What a download of `m` fetches: its GPU version where that can be set up here. */
 const download = (m: SpeechModel) => (m.gpu?.available && !m.gpu.installed ? m.gpu.bytes : m.bytes);
 
-/** Where the model in use runs, once the engine has said. */
+/** Where the model in use runs, once the engine has said, and how fast it was here once measured. */
 function where(m: SpeechModel) {
-  if (m.backend === "gpu") return { text: "Running on your GPU.", warn: false };
+  const speed = m.speed_x ? ` · ${m.speed_x >= 10 ? Math.round(m.speed_x) : m.speed_x}x real time` : "";
+  if (m.backend === "gpu")
+    return { text: `Runs on your graphics card${m.device ? ` (${shortDevice(m.device)})` : ""}${speed}`, warn: false };
   if (m.backend === "cpu" && m.gpu)
-    return { text: "Running on your processor: it is slower; a graphics card makes it much faster.", warn: true };
+    return { text: `Runs on your processor${speed}. A graphics card makes it much faster.`, warn: true };
+  if (m.backend === "cpu") return { text: `Runs on your processor${speed}`, warn: false };
   return null;
 }
 
@@ -334,6 +338,8 @@ function withPreview(list: SpeechModel[]): SpeechModel[] {
       installed: gpu !== "offer",
       gpu: { available: true, installed: gpu !== "switch" && gpu !== "offer", bytes: 574_041_195, cpu_installed: gpu === "switch" },
       backend: gpu === "cpu" ? "cpu" : gpu === "switch" ? "cpu" : "gpu",
+      device: gpu === "gpu" ? "NVIDIA GeForce RTX 2060 SUPER via Vulkan" : undefined,
+      speed_x: gpu === "gpu" ? 19.8 : gpu === "cpu" ? 1.6 : undefined,
     });
     return lineup(list).map((m) => (m.id === "whisper-turbo" ? turbo(m) : m));
   }

@@ -112,6 +112,27 @@ impl Gpu {
         }
         self.server.lock().unwrap().as_ref().map_or("unknown", Server::backend)
     }
+
+    /// The graphics card the helper runs on, once it said; none after the processor took over.
+    pub fn device(&self) -> Option<String> {
+        if self.backup.lock().unwrap().is_some() {
+            return None;
+        }
+        self.server.lock().unwrap().as_ref().and_then(Server::device)
+    }
+}
+
+/// How a recording was transcribed, as History records it: "gpu" (Whisper through the helper on the graphics card),
+/// "cpu-whisper" (the helper found no graphics card), "cpu-sherpa" (Whisper through sherpa on the processor),
+/// "moonshine" or "parakeet" (sherpa's quick models, on the processor).
+pub fn label(model: &str, gpu: bool, backend: &str) -> &'static str {
+    match (gpu, backend) {
+        (true, "cpu") => "cpu-whisper",
+        (true, _) => "gpu",
+        _ if model.starts_with("moonshine") => "moonshine",
+        _ if model.starts_with("parakeet") => "parakeet",
+        _ => "cpu-sherpa",
+    }
 }
 
 impl Engine {
@@ -150,6 +171,22 @@ impl Engine {
         match self {
             Engine::Sherpa(_) => "cpu",
             Engine::Gpu(g) => g.backend(),
+        }
+    }
+
+    /// How it transcribes, as `label` names it. The helper's engine that handed over to sherpa is sherpa's.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Engine::Gpu(g) if g.backup.lock().unwrap().is_some() => "cpu-sherpa",
+            e => label(e.model(), e.is_gpu(), e.backend()),
+        }
+    }
+
+    /// The graphics card it runs on, when it does and the helper named it.
+    pub fn device(&self) -> Option<String> {
+        match self {
+            Engine::Gpu(g) => g.device(),
+            Engine::Sherpa(_) => None,
         }
     }
 
@@ -383,6 +420,19 @@ mod tests {
         assert_eq!(e.hear(&[0.1; 8_000]).text, "from the processor", "for good: the helper is not asked again");
         assert_eq!((f.posts.lock().unwrap().len(), loads.load(Ordering::SeqCst)), (3, 1));
         assert_eq!((e.backend(), e.failure()), ("cpu", None));
+        assert_eq!((e.label(), e.device()), ("cpu-sherpa", None), "History says sherpa heard it");
+    }
+
+    #[test]
+    fn each_engine_is_named_as_history_records_it() {
+        assert_eq!(label("whisper-turbo", true, "gpu"), "gpu");
+        assert_eq!(label("whisper-turbo", true, "unknown"), "gpu");
+        assert_eq!(label("whisper-turbo", true, "cpu"), "cpu-whisper");
+        assert_eq!(label("whisper-turbo", false, "cpu"), "cpu-sherpa");
+        assert_eq!(label("moonshine-base-en", false, "cpu"), "moonshine");
+        assert_eq!(label("parakeet-tdt-v3", false, "cpu"), "parakeet");
+        let f = fake(PATH, vec![Answer::Json(r#"{"text":"x"}"#.into())]);
+        assert_eq!(gpu(f.port, None, Arc::default()).label(), "gpu");
     }
 
     #[test]

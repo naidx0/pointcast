@@ -19,6 +19,7 @@ import {
   onTranscribeProgress,
   openTool,
   preview,
+  ranText,
   sendToTool,
   subscribe,
   type DetectedTool,
@@ -54,7 +55,15 @@ export function Result() {
   const load = useCallback(async (pick?: string | null, latest = false) => {
     if (!inTauri) {
       if (preview) {
-        setEntries(PREVIEW_ENTRIES);
+        // ?engine=gpu|cpu: the first entry says it was transcribed on the graphics card or on the processor.
+        const engine = new URLSearchParams(location.search).get("engine");
+        const ran =
+          engine === "gpu"
+            ? { engine: "gpu", device: "NVIDIA GeForce RTX 2060 SUPER via Vulkan", transcribe_ms: 6_100, audio_ms: 121_000 }
+            : engine === "cpu"
+              ? { engine: "cpu-sherpa", transcribe_ms: 24_000, audio_ms: 121_000 }
+              : {};
+        setEntries(PREVIEW_ENTRIES.map((e, i) => (i === 0 ? { ...e, ...ran } : e)));
         setSel((s) => pick ?? s ?? PREVIEW_ENTRIES[0].id);
         setExp(PREVIEW_EXPORT);
       }
@@ -268,6 +277,11 @@ export function Result() {
             {cur?.recovered ? (
               <p className="t-caption" style={{ margin: "0 0 14px", color: "var(--orange-ink)" }}>
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
+              </p>
+            ) : null}
+            {cur && ranText(cur) ? (
+              <p className="t-small ran-line" style={{ margin: "0 0 10px" }}>
+                {ranText(cur)}
               </p>
             ) : null}
             {cur ? (

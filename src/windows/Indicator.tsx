@@ -51,13 +51,14 @@ export function Indicator() {
         .then((c) => setKeys(c.hotkeys))
         .catch(() => undefined);
     } else if (preview) {
-      // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1], ?phase=ready&notice=partial or
+      // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1][&engine=gpu|cpu], ?phase=ready&notice=partial or
       // ?quiet=silent|quiet to look at the other states.
       const q = new URLSearchParams(location.search);
       const quiet = q.get("quiet");
       const phase = q.get("phase");
       const pct = q.get("progress");
       const stalled = q.get("stalled") === "1";
+      const engine = q.get("engine");
       setS({
         ...idle,
         phase: phase === "transcribing" || phase === "ready" ? phase : "recording",
@@ -68,6 +69,7 @@ export function Indicator() {
         notice: (q.get("notice") as UiState["notice"]) ?? null,
         behind_ms: Number(q.get("behind")) || 0,
         quiet_mic: quiet === "silent" || quiet === "quiet" ? quiet : null,
+        engine_label: engine === "gpu" ? "your graphics card" : engine === "cpu" ? "your processor" : null,
         progress:
           pct == null
             ? null
@@ -206,7 +208,9 @@ function Finishing({ s }: { s: UiState }) {
       ? "Finishing…"
       : stalled
         ? `Still working… ${pct}%`
-        : `Transcribing ${pct}%`;
+        : s.engine_label
+          ? `Transcribing on ${s.engine_label} · ${pct}%`
+          : `Transcribing ${pct}%`;
   const cancel = () => {
     setCutting(true);
     if (inTauri) sessionFinishNow().catch(() => setCutting(false));

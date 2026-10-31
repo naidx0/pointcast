@@ -431,16 +431,29 @@ fn settings_view(svc: &App) -> Value {
     v["picture_paths"] = json!(s.picture_paths);
     v["voice_boost"] = json!(s.voice_boost);
     mark_slow(&mut v["speech"], &svc.slow_models());
-    mark_backend(&mut v["speech"], &svc.backends());
+    mark_backend(&mut v["speech"], &svc.backends(), svc.device());
+    mark_speed(&mut v["speech"], &svc.speeds());
     v
 }
 
 /// The model in memory gets `backend`: "gpu" when it runs on the graphics card, "cpu" on the processor, "unknown"
-/// while the GPU helper has not said.
-fn mark_backend(speech: &mut Value, on: &std::collections::HashMap<String, &'static str>) {
+/// while the GPU helper has not said; and `device`, the graphics card it runs on.
+fn mark_backend(speech: &mut Value, on: &std::collections::HashMap<String, &'static str>, device: Option<String>) {
     for m in speech["models"].as_array_mut().into_iter().flatten() {
         if let Some(b) = m["id"].as_str().and_then(|id| on.get(id)) {
             m["backend"] = json!(b);
+            if let Some(d) = device.as_ref().filter(|_| *b == "gpu") {
+                m["device"] = json!(d);
+            }
+        }
+    }
+}
+
+/// Each model this run has measured gets `speed_x`: how many times faster than real time it transcribes here.
+fn mark_speed(speech: &mut Value, speeds: &std::collections::HashMap<String, f64>) {
+    for m in speech["models"].as_array_mut().into_iter().flatten() {
+        if let Some(x) = m["id"].as_str().and_then(|id| speeds.get(id)) {
+            m["speed_x"] = json!((x * 10.0).round() / 10.0);
         }
     }
 }
@@ -1563,10 +1576,13 @@ mod tests {
     fn settings_say_where_the_model_in_memory_runs() {
         let cat = voice::models::catalog();
         let mut speech = voice::engine::view(&std::env::temp_dir().join("pc-no-speech"), &cat);
-        mark_backend(&mut speech, &[("whisper-turbo".to_string(), "gpu")].into_iter().collect());
-        let said = |id: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()["backend"].clone();
-        assert_eq!(said("whisper-turbo"), json!("gpu"));
-        assert!(said("moonshine-base-en").is_null(), "a model not in memory says nothing");
+        mark_backend(&mut speech, &[("whisper-turbo".to_string(), "gpu")].into_iter().collect(), Some("Apple M2 via Metal".into()));
+        mark_speed(&mut speech, &[("whisper-turbo".to_string(), 19.96)].into_iter().collect());
+        let said = |id: &str, k: &str| speech["models"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap()[k].clone();
+        assert_eq!(said("whisper-turbo", "backend"), json!("gpu"));
+        assert_eq!((said("whisper-turbo", "device"), said("whisper-turbo", "speed_x")), (json!("Apple M2 via Metal"), json!(20.0)));
+        assert!(said("moonshine-base-en", "backend").is_null(), "a model not in memory says nothing");
+        assert!(said("moonshine-base-en", "speed_x").is_null() && said("moonshine-base-en", "device").is_null());
     }
 
     fn png(w: u32, v: u8) -> Vec<u8> {

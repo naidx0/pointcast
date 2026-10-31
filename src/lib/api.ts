@@ -30,6 +30,8 @@ export type UiState = {
   progress?: Progress | null;
   /** The GPU engine's first start on this computer: the graphics card is compiling its shaders. */
   preparing_gpu?: boolean;
+  /** Where the engine transcribes: "your graphics card" or "your processor"; null before a model is loaded. */
+  engine_label?: string | null;
 };
 
 export type Progress = {
@@ -81,6 +83,10 @@ export type SpeechModel = {
   gpu?: GpuVersion;
   /** Where the model in memory runs: on the graphics card, on the processor, or not said yet. */
   backend?: "gpu" | "cpu" | "unknown";
+  /** The graphics card it runs on, as "NVIDIA GeForce RTX 2060 SUPER via Vulkan". */
+  device?: string;
+  /** How many times faster than real time it transcribed here, once measured. */
+  speed_x?: number;
 };
 export type SpeechView = {
   runtime?: { id: string; installed: boolean; lib: string } | null;
@@ -225,7 +231,39 @@ export type HistoryMeta = {
   has_audio?: boolean;
   /** Saved before every word was transcribed (Cancel at the end of a recording). */
   partial?: boolean;
+  /** How it was last transcribed: "gpu", "cpu-whisper", "cpu-sherpa", "moonshine" or "parakeet"; empty when not known. */
+  engine?: string;
+  /** The graphics card it ran on. */
+  device?: string;
+  /** The engine's time on it and the length of its audio, in ms. */
+  transcribe_ms?: number;
+  audio_ms?: number;
 };
+
+/** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
+export function shortDevice(d: string) {
+  return d
+    .replace(/ via .*$/, "")
+    .replace(/^(NVIDIA |AMD |Intel[(]R[)] |Intel )/, "")
+    .replace(/^GeForce /, "")
+    .trim();
+}
+
+/** "20x real time" (whole numbers from 10 up, one decimal below). */
+export function realTime(audioMs: number, spentMs: number) {
+  const x = audioMs / Math.max(1, spentMs);
+  return `${x >= 10 ? Math.round(x) : Math.round(x * 10) / 10}x real time`;
+}
+
+/** How a History entry was transcribed, as a quiet line under it; empty for an entry from before this was kept. */
+export function ranText(m: Pick<HistoryMeta, "engine" | "device" | "transcribe_ms" | "audio_ms">) {
+  if (!m.engine || !m.transcribe_ms || !m.audio_ms) return "";
+  const s = m.transcribe_ms < 10_000 ? Math.max(1, Math.round(m.transcribe_ms / 100) / 10) : Math.round(m.transcribe_ms / 1000);
+  const speed = `in ${s} s · ${realTime(m.audio_ms, m.transcribe_ms)}`;
+  if (m.engine === "gpu") return `Transcribed on your graphics card${m.device ? ` (${shortDevice(m.device)})` : ""} ${speed}`;
+  const hint = m.engine === "cpu-sherpa" || m.engine === "cpu-whisper" ? ". A graphics card is much faster: Settings > Speech." : "";
+  return `Transcribed on your processor ${speed}${hint}`;
+}
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
 /** Reopen picture n (as `[image n]` numbers it) of a past prompt in the overlay to mark it up again. */

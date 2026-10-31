@@ -40,6 +40,29 @@ pub struct Meta {
     /// Saved before every word was transcribed: Cancel at the stop kept what was done. Transcribing it again clears it.
     #[serde(default)]
     pub partial: bool,
+    /// How it was last transcribed (`engine::label`): "gpu", "cpu-whisper", "cpu-sherpa", "moonshine" or "parakeet";
+    /// empty for an entry from before this was kept.
+    #[serde(default)]
+    pub engine: String,
+    /// The graphics card it ran on, as the helper named it ("NVIDIA GeForce RTX 2060 SUPER via Vulkan"); empty on the
+    /// processor.
+    #[serde(default)]
+    pub device: String,
+    /// The time the engine spent on it, in ms.
+    #[serde(default)]
+    pub transcribe_ms: u64,
+    /// How long its audio is, in ms.
+    #[serde(default)]
+    pub audio_ms: u64,
+}
+
+/// How an entry was transcribed, for `Store::note_run`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Run {
+    pub engine: String,
+    pub device: String,
+    pub transcribe_ms: u64,
+    pub audio_ms: u64,
 }
 
 pub struct Store {
@@ -151,6 +174,15 @@ impl Store {
             files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
         }
         write_together(&files)
+    }
+
+    /// Note how an entry was just transcribed: by which engine, on which device, and how long that took for how much
+    /// audio. The rest of its summary stays as it is.
+    pub fn note_run(&self, id: &str, run: &Run) -> Result<(), String> {
+        let path = self.entry_dir(id)?.join("meta.json");
+        let mut meta: Meta = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("no such prompt")?;
+        (meta.engine, meta.device, meta.transcribe_ms, meta.audio_ms) = (run.engine.clone(), run.device.clone(), run.transcribe_ms, run.audio_ms);
+        write_atomic(&path, &serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
     }
 
     /// Newest first.
@@ -349,6 +381,10 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         recovered,
         has_audio: false,
         partial: false,
+        engine: String::new(),
+        device: String::new(),
+        transcribe_ms: 0,
+        audio_ms: 0,
     }
 }
 
@@ -707,6 +743,23 @@ mod tests {
         for bad in ["", "..", "../settings", "nope"] {
             assert!(s.replace_speech(bad, &new).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn how_an_entry_was_transcribed_is_kept_with_it_and_survives_new_words() {
+        let s = store("ran");
+        let m = s.save(&[Item::Speech { t_ms: 0, end_ms: 900, text: "first".into() }], 1_793_000_000_000, 900).unwrap();
+        assert_eq!((m.engine.as_str(), m.transcribe_ms, m.audio_ms), ("", 0, 0), "nothing said yet");
+        let run = Run { engine: "gpu".into(), device: "Apple M2 Pro via Metal".into(), transcribe_ms: 310, audio_ms: 6_200 };
+        s.note_run(&m.id, &run).unwrap();
+        s.replace_speech(&m.id, &[Item::Speech { t_ms: 0, end_ms: 900, text: "again".into() }]).unwrap();
+        let l = s.list();
+        assert_eq!((l[0].engine.as_str(), l[0].device.as_str(), l[0].transcribe_ms, l[0].audio_ms), ("gpu", "Apple M2 Pro via Metal", 310, 6_200));
+        assert_eq!(l[0].preview, "again");
+        // An entry from an earlier version reads with none of it.
+        let old: Meta = serde_json::from_str(r#"{"id":"x","created_ms":1,"duration_ms":2,"preview":"","images":0}"#).unwrap();
+        assert_eq!((old.engine, old.device, old.transcribe_ms, old.audio_ms), (String::new(), String::new(), 0, 0));
+        assert!(s.note_run("nope", &run).is_err());
     }
 
     #[test]

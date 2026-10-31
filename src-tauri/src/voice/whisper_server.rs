@@ -35,6 +35,46 @@ pub fn backend_of<'a>(lines: impl IntoIterator<Item = &'a str>) -> &'static str 
     seen
 }
 
+/// Whether a stderr line can name the device: the lines `device_of` reads.
+fn about_device(l: &str) -> bool {
+    ["ggml_vulkan: ", "Device ", "GPU name:", "found device: ", "whisper_backend_init_gpu: using "].iter().any(|k| l.contains(k))
+}
+
+/// The graphics card the helper chose and how it drives it, as "NVIDIA GeForce RTX 2060 SUPER via Vulkan", from what
+/// it said while loading: the backend it uses (`using Vulkan0 backend`) and the name its library gave that device
+/// (Vulkan and CUDA list every card by number, Metal names its one). None before it chose one or with none.
+pub fn device_of<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut names: Vec<(String, String)> = vec![];
+    let mut using = None;
+    for l in lines {
+        if let Some((i, rest)) = l.split("ggml_vulkan: ").nth(1).and_then(|r| r.split_once(" = ")) {
+            if let Ok(i) = i.trim().parse::<u32>() {
+                let name = rest.split(" | ").next().unwrap_or(rest);
+                names.push((format!("Vulkan{i}"), name.rsplit_once(" (").map_or(name, |(n, _)| n).trim().into()));
+            }
+        } else if let Some((i, rest)) = l.trim_start().strip_prefix("Device ").and_then(|r| r.split_once(": ")) {
+            if let Ok(i) = i.trim().parse::<u32>() {
+                names.push((format!("CUDA{i}"), rest.split(", compute").next().unwrap_or(rest).trim().into()));
+            }
+        } else if let Some(r) = l.split("GPU name:").nth(1).or_else(|| l.split("found device: ").nth(1)) {
+            names.push(("Metal".into(), r.trim().into()));
+        }
+        if let Some(r) = l.split("whisper_backend_init_gpu: using ").nth(1) {
+            using = Some(r.trim().trim_end_matches("backend").trim().to_string());
+        }
+    }
+    let dev = using?;
+    let api = match dev.trim_end_matches(|c: char| c.is_ascii_digit()) {
+        "MTL" => "Metal",
+        a => a,
+    };
+    let name = names.iter().find(|(k, _)| *k == dev).or_else(|| names.iter().find(|(k, _)| k.starts_with(api))).map(|(_, n)| n);
+    Some(match name {
+        Some(n) if !n.is_empty() => format!("{n} via {api}"),
+        _ => api.to_string(),
+    })
+}
+
 /// Words whisper.cpp gives for what is not speech, in brackets or parentheses.
 const NOT_SPEECH: &[&str] = &[
     "blank_audio", "blank audio", "silence", "music", "applause", "laughter", "laughs", "laughing", "noise", "inaudible",
@@ -208,6 +248,8 @@ pub struct Server {
     log: Arc<Mutex<VecDeque<String>>>,
     /// What it said it runs on while loading.
     seen: Arc<Mutex<&'static str>>,
+    /// The lines it said about its devices while loading, which name the graphics card it chose.
+    devices: Arc<Mutex<Vec<String>>>,
     /// Moved on by a cancel: the request under way closes its connection.
     pub abort: Arc<AtomicU64>,
     pidfile: Option<PathBuf>,
@@ -232,6 +274,7 @@ impl Server {
             health: "/health".into(),
             log: Arc::default(),
             seen: Arc::new(Mutex::new("unknown")),
+            devices: Arc::default(),
             abort: Arc::default(),
             pidfile: None,
             launch: None,
@@ -260,7 +303,12 @@ impl Server {
             .arg(&l.model)
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", &prefix, "--inference-path", &inference, "-t", "4"])
             .current_dir(&l.dir)
-            .env_remove("GGML_BACKEND_PATH")
+            .env_remove("GGML_BACKEND_PATH");
+        // A development build can make the helper find no graphics card, as on a computer without one.
+        if cfg!(debug_assertions) && std::env::var_os("POINTCAST_HELPER_NO_GPU").is_some() {
+            cmd.arg("-ng");
+        }
+        cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -272,12 +320,15 @@ impl Server {
             s.job = job_for(&child);
         }
         if let Some(err) = child.stderr.take() {
-            let (log, seen) = (s.log.clone(), s.seen.clone());
+            let (log, seen, devices) = (s.log.clone(), s.seen.clone(), s.devices.clone());
             std::thread::spawn(move || {
                 for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
                     match backend_of([line.as_str()]) {
                         "unknown" => {}
                         b => *seen.lock().unwrap() = b,
+                    }
+                    if about_device(&line) {
+                        devices.lock().unwrap().push(line.clone());
                     }
                     let mut g = log.lock().unwrap();
                     if g.len() >= LOG_LINES {
@@ -330,6 +381,11 @@ impl Server {
     /// What it runs on: "gpu", "cpu" or "unknown".
     pub fn backend(&self) -> &'static str {
         *self.seen.lock().unwrap()
+    }
+
+    /// The graphics card it runs on, as `device_of` names it.
+    pub fn device(&self) -> Option<String> {
+        device_of(self.devices.lock().unwrap().iter().map(String::as_str))
     }
 
     /// The helper's last few lines, for an error message.
@@ -698,6 +754,27 @@ pub mod tests {
         assert_eq!(backend_of(gpu), "gpu");
         assert_eq!(backend_of(["whisper_backend_init_gpu: no GPU found"]), "cpu");
         assert_eq!(backend_of(["whisper_model_load: loading model"]), "unknown");
+    }
+
+    #[test]
+    fn the_device_is_the_card_the_helper_chose_named_as_its_library_named_it() {
+        let vulkan = [
+            "ggml_vulkan: Found 2 Vulkan devices:",
+            "ggml_vulkan: 0 = Intel(R) UHD Graphics 630 (Intel Corporation) | uma: 1 | fp16: 1 | warp size: 32",
+            "ggml_vulkan: 1 = NVIDIA GeForce RTX 2060 SUPER (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | warp size: 32 | matrix cores: NV_coopmat2",
+            "whisper_backend_init_gpu: device 1: Vulkan1 (type: 1)",
+            "whisper_backend_init_gpu: using Vulkan1 backend",
+        ];
+        assert_eq!(device_of(vulkan).as_deref(), Some("NVIDIA GeForce RTX 2060 SUPER via Vulkan"));
+        let cuda = ["ggml_cuda_init: found 1 CUDA devices:", "  Device 0: NVIDIA GeForce RTX 3080, compute capability 8.6, VMM: yes", "whisper_backend_init_gpu: using CUDA0 backend"];
+        assert_eq!(device_of(cuda).as_deref(), Some("NVIDIA GeForce RTX 3080 via CUDA"));
+        let metal = ["ggml_metal_device_init: GPU name:   Apple M2 Pro", "whisper_backend_init_gpu: using MTL0 backend"];
+        assert_eq!(device_of(metal).as_deref(), Some("Apple M2 Pro via Metal"));
+        assert_eq!(device_of(["whisper_backend_init_gpu: using Metal backend"]).as_deref(), Some("Metal"));
+        // Listed but not chosen, or no graphics card at all: none.
+        assert_eq!(device_of(vulkan[..3].iter().copied()), None);
+        assert_eq!(device_of(["whisper_backend_init_gpu: no GPU found"]), None);
+        assert!(vulkan.iter().all(|l| about_device(l) || l.contains("device 1")) && !about_device("whisper_model_load: n_mels = 128"));
     }
 
     #[test]

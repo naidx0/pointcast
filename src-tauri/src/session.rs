@@ -53,6 +53,9 @@ pub struct UiState {
     pub progress: Option<Shown>,
     /// The GPU engine's first start on this computer: the graphics card compiles its shaders (up to a minute or two).
     pub preparing_gpu: bool,
+    /// Where the engine in memory transcribes, for the HUD: "your graphics card" or "your processor". None before a
+    /// model is loaded.
+    pub engine_label: Option<&'static str>,
 }
 
 impl Default for UiState {
@@ -74,6 +77,7 @@ impl Default for UiState {
             slow_engine: false,
             progress: None,
             preparing_gpu: false,
+            engine_label: None,
         }
     }
 }
@@ -95,6 +99,8 @@ pub struct App {
     aborter: Mutex<Option<Arc<AtomicU64>>>,
     /// Where the engine in memory runs, by model: "gpu", "cpu" or "unknown".
     backend: Mutex<Option<(String, &'static str)>>,
+    /// How the engine in memory transcribes (`engine::label`) and the graphics card it runs on, for History.
+    ran: Mutex<Option<(&'static str, Option<String>)>>,
     /// One model load at a time (launch preload, a session, a model switch).
     loading: Mutex<()>,
     /// How the last attempt to load the model and run it went; none before the first.
@@ -178,6 +184,7 @@ impl App {
             engine_gpu: AtomicBool::new(false),
             aborter: Mutex::default(),
             backend: Mutex::default(),
+            ran: Mutex::default(),
             loading: Mutex::default(),
             checked: Mutex::default(),
             finishing: Mutex::default(),
@@ -228,6 +235,7 @@ impl App {
             Phase::Transcribing => self.progress.lock().unwrap().as_mut().map(|p| p.view(steady_ms(), now_ms())),
             _ => None,
         };
+        s.engine_label = self.ran.lock().unwrap().as_ref().map(|r| if r.0 == "gpu" { "your graphics card" } else { "your processor" });
         s.text = prompt::compose(&self.items.lock().unwrap()).0;
         s.image_count = self
             .items
@@ -290,9 +298,16 @@ impl App {
         self.engine_gpu.store(gpu, Ordering::SeqCst);
         *self.aborter.lock().unwrap() = eng.aborter();
         *self.backend.lock().unwrap() = Some((id.to_string(), eng.backend()));
+        *self.ran.lock().unwrap() = Some((eng.label(), eng.device()));
         *self.engine.lock().unwrap() = Some(eng);
         self.state.lock().unwrap().model_ready = true;
         Ok(())
+    }
+
+    /// How the engine in memory transcribed `audio_ms` of audio in `transcribe_ms`, for History.
+    fn run(&self, transcribe_ms: u64, audio_ms: u64) -> crate::history::Run {
+        let (engine, device) = self.ran.lock().unwrap().clone().unwrap_or(("", None));
+        crate::history::Run { engine: engine.into(), device: device.unwrap_or_default(), transcribe_ms, audio_ms }
     }
 
     /// Where the engine in memory runs, by model, for Settings: "gpu", "cpu" or "unknown".
@@ -303,6 +318,7 @@ impl App {
     /// The engine heard a piece: note where it runs now, and say it when it can hear nothing any more.
     fn after_piece(&self, eng: &Engine) -> Option<String> {
         *self.backend.lock().unwrap() = Some((eng.model().to_string(), eng.backend()));
+        *self.ran.lock().unwrap() = Some((eng.label(), eng.device()));
         let failed = eng.failure();
         if let Some(e) = &failed {
             self.state.lock().unwrap().error = Some(e.clone());
@@ -335,6 +351,7 @@ impl App {
             *self.engine.lock().unwrap() = None;
             *self.aborter.lock().unwrap() = None;
             *self.backend.lock().unwrap() = None;
+            *self.ran.lock().unwrap() = None;
         }
     }
 
@@ -460,6 +477,7 @@ impl App {
         if let Some(p) = self.progress.lock().unwrap().as_mut() {
             p.finish();
         }
+        let audio_ms = self.take.lock().unwrap().as_ref().map_or(0, |t| t.len() as u64 * 1000 / audio::RATE as u64);
         *self.take.lock().unwrap() = None;
         if cancel {
             self.items.lock().unwrap().clear();
@@ -494,6 +512,7 @@ impl App {
             let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
             let save = if partial { crate::history::Store::save_partial } else { crate::history::Store::save_recorded };
             if let Ok(m) = save(&self.history, &items, t0, now_ms().saturating_sub(t0)) {
+                let _ = self.history.note_run(&m.id, &self.run(self.pace.lock().unwrap().1, audio_ms));
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
                 saved = Some(m.id);
@@ -879,6 +898,17 @@ impl App {
         paces.iter().filter(|(_, p)| p.0 >= JUDGED_MS).map(|(m, p)| (m.clone(), slow(p.0, p.1))).collect()
     }
 
+    /// For each model this run has heard enough from, how many times faster than real time it transcribes here.
+    pub fn speeds(&self) -> std::collections::HashMap<String, f64> {
+        let paces = self.paces.lock().unwrap();
+        paces.iter().filter(|(_, p)| p.0 >= JUDGED_MS).map(|(m, p)| (m.clone(), p.0 as f64 / p.1.max(1) as f64)).collect()
+    }
+
+    /// The graphics card the engine in memory runs on, as the helper named it.
+    pub fn device(&self) -> Option<String> {
+        self.ran.lock().unwrap().as_ref().and_then(|r| r.1.clone())
+    }
+
     /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`.
     fn again(
         &self,
@@ -901,9 +931,15 @@ impl App {
         let run = || -> Result<(), String> {
             let mut x = self.history.audio(id)?;
             load()?;
+            let mut spent = 0u64;
             let piece = |s: &[f32], voiced: u64| match busy() {
                 Ok(()) if stopped() => Err(AGAIN_CANCELLED.into()),
-                Ok(()) => hear(s, voiced),
+                Ok(()) => {
+                    let began = std::time::Instant::now();
+                    let h = hear(s, voiced);
+                    spent += began.elapsed().as_millis() as u64;
+                    h
+                }
                 Err(_) => Err(INTERRUPTED.into()),
             };
             let boost = self.settings.lock().unwrap().voice_boost;
@@ -912,6 +948,7 @@ impl App {
                 return Err(AGAIN_CANCELLED.into());
             }
             self.history.replace_speech(id, &said)?;
+            let _ = self.history.note_run(id, &self.run(spent, x.len() as u64 * 1000 / audio::RATE as u64));
             let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
             if self.last_id.lock().unwrap().as_deref() == Some(id) {
                 *self.last_export.lock().unwrap() = Some(exp.clone());
@@ -2294,6 +2331,43 @@ mod tests {
         let hear = counting();
         a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
+    }
+
+    #[test]
+    fn history_records_how_each_recording_was_transcribed_and_transcribe_again_records_its_own_run() {
+        let out = std::env::temp_dir().join(format!("pc-session-ran-out-{}", std::process::id()));
+        let a = app("ran");
+        assert_eq!(a.ui().engine_label, None, "no model loaded yet");
+        real(&a, &out);
+        *a.ran.lock().unwrap() = Some(("gpu", Some("NVIDIA GeForce RTX 2060 SUPER via Vulkan".into())));
+        assert_eq!(a.ui().engine_label, Some("your graphics card"));
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(Item::Speech { t_ms: 0, end_ms: 1_900, text: "make it sticky".into() }).unwrap();
+        *a.pace.lock().unwrap() = (1_900, 95);
+        let take = Arc::new(Take::default());
+        take.samples.lock().unwrap().extend_from_slice(&vec![0.0; 32_000]);
+        *a.take.lock().unwrap() = Some(take);
+        a.stop(false).unwrap().unwrap();
+        let m = a.history.list()[0].clone();
+        assert_eq!(
+            (m.engine.as_str(), m.device.as_str(), m.transcribe_ms, m.audio_ms),
+            ("gpu", "NVIDIA GeForce RTX 2060 SUPER via Vulkan", 95, 2_000)
+        );
+        // Transcribed again on the processor: that run is what the entry says now.
+        let (id, _) = kept(&a);
+        a.history.note_run(&id, &a.run(1, 1)).unwrap();
+        *a.ran.lock().unwrap() = Some(("cpu-sherpa", None));
+        assert_eq!(a.ui().engine_label, Some("your processor"));
+        let slow = |s: &[f32], v: u64| {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            Ok(crate::voice::stt::hear_piece(s, v, counting()))
+        };
+        a.again(&id, || Ok(()), slow, |_, _| {}).unwrap();
+        let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!((m.engine.as_str(), m.device.as_str(), m.audio_ms), ("cpu-sherpa", "", 8_500));
+        assert!(m.transcribe_ms >= 45 && m.transcribe_ms < 5_000, "three pieces of 15 ms or more: {}", m.transcribe_ms);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
