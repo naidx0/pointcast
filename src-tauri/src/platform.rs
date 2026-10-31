@@ -16,7 +16,74 @@ pub fn ensure(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
     if matches!(label, "indicator" | "overlay") {
         let _ = w.set_content_protected(PROTECT.load(Ordering::SeqCst));
     }
+    #[cfg(windows)]
+    if let Ok(h) = w.hwnd() {
+        icons::apply(windows::Win32::Foundation::HWND(h.0 as _));
+    }
     Some(w)
+}
+
+/// Windows: the taskbar, Alt+Tab and Task Manager draw a window's big icon, and Tauri sets only the small one, so they
+/// fell back to whatever Windows had cached for Pointcast (the old icon after an update). Both are set from the icon
+/// built into the executable, at the sizes the window's display asks for.
+#[cfg(windows)]
+pub mod icons {
+    use std::sync::Mutex;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LR_LOADFROMFILE, SM_CXICON, SM_CXSMICON,
+        WM_SETICON,
+    };
+
+    /// Where tauri-build puts the app icon in the executable.
+    const APP_ICON: u16 = 32512;
+
+    /// The executable's icon drawn at `px`, loaded once per size and kept for the life of the app.
+    fn load(px: i32) -> Option<usize> {
+        static LOADED: Mutex<Vec<(i32, usize)>> = Mutex::new(Vec::new());
+        let mut loaded = LOADED.lock().unwrap();
+        if let Some(&(_, h)) = loaded.iter().find(|(s, _)| *s == px) {
+            return Some(h);
+        }
+        let module = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok()?;
+        let name = PCWSTR(APP_ICON as usize as *const u16);
+        let h = unsafe { LoadImageW(HINSTANCE::from(module), name, IMAGE_ICON, px, px, LR_DEFAULTCOLOR) }.ok()?.0 as usize;
+        loaded.push((px, h));
+        Some(h)
+    }
+
+    /// The (big, small) sizes in pixels for a window: 32 and 16 at 100 %, 48 and 24 at 150 %.
+    pub fn sizes(hwnd: HWND) -> (i32, i32) {
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        unsafe { (GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CXSMICON, dpi)) }
+    }
+
+    /// An .ico file drawn at `px`, for tests: the app icon is linked into the app's executable, not the test one.
+    pub fn load_file(path: &std::path::Path, px: i32) -> Option<usize> {
+        let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect();
+        let h = unsafe { LoadImageW(HINSTANCE::default(), PCWSTR(wide.as_ptr()), IMAGE_ICON, px, px, LR_LOADFROMFILE) };
+        h.ok().map(|h| h.0 as usize)
+    }
+
+    /// Give a window both icons; false when the executable has no icon to give.
+    pub fn apply(hwnd: HWND) -> bool {
+        apply_with(hwnd, load)
+    }
+
+    pub fn apply_with(hwnd: HWND, load: impl Fn(i32) -> Option<usize>) -> bool {
+        let (big, small) = sizes(hwnd);
+        let (Some(b), Some(s)) = (load(big), load(small)) else {
+            return false;
+        };
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(b as isize));
+            SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(s as isize));
+        }
+        true
+    }
 }
 
 /// The windows a person works in (not the HUD or overlay).
@@ -378,6 +445,44 @@ pub fn chime(start: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: a window gets the big icon the taskbar, Alt+Tab and Task Manager draw, and the small one, both from the
+    /// executable and both sized for its display; until it does, Windows shows whatever it cached for the app.
+    #[cfg(windows)]
+    #[test]
+    fn a_window_gets_the_big_icon_the_taskbar_draws_and_a_small_one_sized_for_its_display() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetIconInfo, SendMessageW, HICON, HMENU, ICONINFO, ICON_BIG, ICON_SMALL,
+            WINDOW_EX_STYLE, WM_GETICON, WS_OVERLAPPEDWINDOW,
+        };
+        use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP};
+        let hwnd = unsafe {
+            CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!("icon test"), WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                HWND::default(), HMENU::default(), HINSTANCE::default(), None)
+        }
+        .unwrap();
+        let get = |kind: u32| unsafe { SendMessageW(hwnd, WM_GETICON, WPARAM(kind as usize), LPARAM(0)) }.0;
+        let width = |h: isize| unsafe {
+            let mut info = ICONINFO::default();
+            GetIconInfo(HICON(h as _), &mut info).unwrap();
+            let mut bm = BITMAP::default();
+            GetObjectW(info.hbmColor, std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _));
+            let _ = DeleteObject(info.hbmColor);
+            let _ = DeleteObject(info.hbmMask);
+            bm.bmWidth
+        };
+        assert_eq!(get(ICON_BIG), 0, "a new window has no big icon of its own");
+        let ico = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons").join("icon.ico");
+        assert!(icons::apply_with(hwnd, |px| icons::load_file(&ico, px)), "the app icon loads");
+        let (big, small) = icons::sizes(hwnd);
+        assert!(big > small && small >= 16, "{big} {small}");
+        assert_eq!((width(get(ICON_BIG)), width(get(ICON_SMALL))), (big, small));
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
 
     #[test]
     fn pointcast_in_front_keeps_the_app_it_came_from() {
