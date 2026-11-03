@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Draw every Pointcast icon from code: the pointing glove with its sticker shadow and click spark.
+"""Draw every Pointcast icon from code: a cursor landing in the middle of an orange click spark, as a sticker with a hard shadow.
 
 The macOS app icon sits on Apple's grid (824 px body on a 1024 canvas, continuous corners, soft
 shadow); Windows gets a full-bleed rounded tile; the tray gets a monochrome template for the macOS
 menu bar and a colour icon for the Windows tray. Small sizes are drawn heavier, not just shrunk:
-thin lines vanish at 16 px, so each size class has its own line weight and detail."""
+thin lines vanish at 16 px, so each size class has its own line weight. Every size is centred by the
+weight of the drawing, not only its bounding box, so the mark does not read as off-centre when it is small."""
 import math
 from pathlib import Path
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
@@ -16,26 +17,14 @@ SS = 4  # supersampling for the tile shapes
 
 INK = (10, 10, 10, 255)
 PAPER = (255, 255, 255, 255)
+ORANGE = (255, 138, 31, 255)
 
-# The glove, pointing straight up, in its own units (the fingertip's top edge is TIP). Chubby cartoon proportions:
-# a short index finger tapering to a round tip, plump curled fingers, a full palm and thumb.
-TIP = (470, 246)
-PARTS = [
-    ("taper", (474, 600), 76, (470, 314), 68),  # index finger: base, base radius, tip, tip radius
-    ("rect", 534, 420, 136, 252, 68),  # first curled finger
-    ("rect", 652, 462, 128, 214, 64),  # second curled finger
-    ("rect", 388, 540, 392, 306, 153),  # back of the hand
-    ("taper", (452, 726), 68, (326, 606), 60),  # thumb
-]
-ANGLE = 12  # degrees anticlockwise: the finger leans to the upper left like a pointer
-OUTLINE, CREASE = 44, 26
-SHADOW = 32  # hard sticker shadow, down and to the right
-SPARK_GAP, SPARK_LEN, SPARK_SPREAD = 40, 72, 50
-
-
-def cubic(p0, p1, p2, p3, n=40):
-    return [tuple((1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t * t * c + t ** 3 * d
-                  for a, b, c, d in zip(p0, p1, p2, p3)) for t in (i / n for i in range(n + 1))]
+# The mark in its own units: a four-point spark centred on (400, 400) and a cursor whose tip sits at its centre.
+SPARK_AT, SPARK_R, SPARK_PINCH = (400, 400), 360, 0.13
+ARROW = [(0, 0), (0, 520), (150, 400), (250, 610), (340, 566), (238, 358), (430, 358)]
+ARROW_AT, ARROW_SCALE = (400, 400), 0.8
+SPARK_LINE, ARROW_LINE = 18, 32  # outline growth on every side
+SPARK_SHADOW, ARROW_SHADOW = 30, 24  # hard sticker shadow, down and to the right
 
 
 def quad(p0, p1, p2, n=30):
@@ -43,88 +32,60 @@ def quad(p0, p1, p2, n=30):
             for t in (i / n for i in range(n + 1))]
 
 
-CREASES = [
-    cubic((540, 462), (534, 522), (536, 582), (544, 628)),  # index meets the curled fingers
-    cubic((662, 500), (656, 552), (658, 600), (664, 642)),  # between the curled fingers
-    quad((398, 646), (426, 674), (460, 696)),  # thumb
-]
+def spark_points():
+    (cx, cy), r = SPARK_AT, SPARK_R
+    a = r * SPARK_PINCH
+    tips = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    bends = [(cx + a, cy - a), (cx + a, cy + a), (cx - a, cy + a), (cx - a, cy - a)]
+    pts = []
+    for i in range(4):
+        pts += quad(tips[i], bends[i], tips[(i + 1) % 4])[:-1]
+    return pts
 
 
-def stroke(d, pts, width, fill):
-    d.line(pts, fill=fill, width=round(width), joint="curve")
-    r = width / 2
-    for x, y in (pts[0], pts[-1]):
-        d.ellipse([x - r, y - r, x + r, y + r], fill=fill)
+def arrow_points():
+    return [(ARROW_AT[0] + x * ARROW_SCALE, ARROW_AT[1] + y * ARROW_SCALE) for x, y in ARROW]
 
 
-def taper(d, P, K, base, rb, tip, rt, e, fill):
-    """A capsule from a round base to a narrower round tip, grown by e on every side."""
-    (bx, by), (tx, ty) = base, tip
-    n = math.hypot(tx - bx, ty - by)
-    nx, ny = -(ty - by) / n, (tx - bx) / n
-    rb, rt = rb + e, rt + e
-    d.polygon([P(bx + nx * rb, by + ny * rb), P(tx + nx * rt, ty + ny * rt), P(tx - nx * rt, ty - ny * rt),
-               P(bx - nx * rb, by - ny * rb)], fill=fill)
-    for (cx, cy), r in ((base, rb), (tip, rt)):
-        x, y = P(cx, cy)
-        d.ellipse([x - r * K, y - r * K, x + r * K, y + r * K], fill=fill)
+def shape_mask(size, pts, grow, K, P, shift=0):
+    """A polygon grown by `grow` on every side with round joins, shifted down and right by `shift`."""
+    m = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(m)
+    q = [P(x + shift, y + shift) for x, y in pts]
+    d.polygon(q, fill=255)
+    if grow:
+        r = grow * K
+        d.line(q + [q[0]], fill=255, width=round(2 * r), joint="curve")
+        for x, y in q:
+            d.ellipse([x - r, y - r, x + r, y + r], fill=255)
+    return m
 
 
-def mark(weight=1.0, creases=True, spark=True, shadow=True, style="sticker", ink=INK, paper=PAPER, reach=0):
-    """The glove at high resolution, cropped to what it draws. style: "sticker" (paper glove, ink line
-    and shadow), "line" (ink outline only, for a menu bar template) or "solid" (an ink silhouette).
-    `reach` lengthens the index finger: at 16 px the short chubby finger would be lost in its own line."""
-    K = 3  # pixels per glove unit
-    ox, oy = -260, -260  # glove units at pixel 0
-    size = 1500 * K // 1
-    P = lambda x, y: ((x - ox) * K, (y - oy) * K)  # noqa: E731
-    w, c = OUTLINE * weight, CREASE * weight
-    outer, inner, folds = (Image.new("L", (size, size), 0) for _ in range(3))
-    do, di, df = ImageDraw.Draw(outer), ImageDraw.Draw(inner), ImageDraw.Draw(folds)
-    parts = [("taper", PARTS[0][1], PARTS[0][2], (PARTS[0][3][0], PARTS[0][3][1] - reach), PARTS[0][4])] + PARTS[1:]
-    for p in parts:
-        if p[0] == "rect":
-            _, x, y, pw, ph, r = p
-            for d, e in ((do, w), (di, 0)):
-                d.rounded_rectangle([*P(x - e, y - e), *P(x + pw + e, y + ph + e)], (r + e) * K, fill=255)
-        elif p[0] == "taper":
-            _, base, rb, tip, rt = p
-            for d, e in ((do, w), (di, 0)):
-                taper(d, P, K, base, rb, tip, rt, e, 255)
-        else:
-            _, x1, y1, x2, y2, lw = p
-            for d, e in ((do, w), (di, 0)):
-                stroke(d, [P(x1, y1), P(x2, y2)], (lw + 2 * e) * K, 255)
-    if creases:
-        for pts in CREASES:
-            stroke(df, [P(*q) for q in pts], c * K, 255)
-    face = ImageChops.subtract(inner, folds)
-    glove = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    if style == "sticker":
-        glove.paste(ink, (0, 0), outer)
-        glove.paste(paper, (0, 0), face)
-    elif style == "line":
-        glove.paste(ink, (0, 0), ImageChops.add(ImageChops.subtract(outer, inner), ImageChops.multiply(inner, folds)))
-    else:
-        glove.paste(ink, (0, 0), ImageChops.subtract(outer, folds))
-    tip = P(TIP[0], TIP[1] - reach)
-    glove = glove.rotate(ANGLE, resample=Image.Resampling.BICUBIC, center=tip)
+def mark(weight=1.0, shadow=True, style="sticker", ink=INK, paper=PAPER, accent=ORANGE):
+    """The mark at high resolution, cropped to what it draws. style: "sticker" (orange spark, paper
+    cursor, ink line and shadow), "line" (ink outline only, for a menu bar template) or "solid" (as
+    "line" with the cursor filled in, for the recording state)."""
+    K = 3  # pixels per mark unit
+    size = 1000 * K
+    P = lambda x, y: (x * K, y * K)  # noqa: E731
+    sg, ag = SPARK_LINE * weight, ARROW_LINE * weight
+    spark, arrow = spark_points(), arrow_points()
+    mask = lambda pts, grow, shift=0: shape_mask(size, pts, grow, K, P, shift)  # noqa: E731
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    if shadow:
-        sil = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        sil.paste(ink, (0, 0), outer)
-        sil = sil.rotate(ANGLE, resample=Image.Resampling.BICUBIC, center=tip)
-        off = round(SHADOW * math.sqrt(weight) * K)
-        out.alpha_composite(sil, (off, off))
-    if spark:
-        d = ImageDraw.Draw(out)
-        start, length = w + SPARK_GAP, SPARK_LEN * (0.75 + weight / 4)
-        for a in (-SPARK_SPREAD, 0, SPARK_SPREAD):
-            t = math.radians(-ANGLE + a)
-            dx, dy = math.sin(t), -math.cos(t)
-            stroke(d, [(tip[0] + dx * start * K, tip[1] + dy * start * K),
-                       (tip[0] + dx * (start + length) * K, tip[1] + dy * (start + length) * K)], w * K, ink)
-    out.alpha_composite(glove)
+    if style == "sticker":
+        off = math.sqrt(weight)
+        out.paste(ink, (0, 0), mask(spark, sg, SPARK_SHADOW * off) if shadow else Image.new("L", (size, size), 0))
+        out.paste(ink, (0, 0), mask(spark, sg))
+        out.paste(accent, (0, 0), mask(spark, 0))
+        if shadow:
+            out.paste(ink, (0, 0), mask(arrow, ag, ARROW_SHADOW * off))
+        out.paste(ink, (0, 0), mask(arrow, ag))
+        out.paste(paper, (0, 0), mask(arrow, 0))
+    else:
+        arrow_outer = mask(arrow, ag)
+        spark_ring = ImageChops.subtract(ImageChops.subtract(mask(spark, sg), mask(spark, 0)), arrow_outer)
+        arrow_ring = arrow_outer if style == "solid" else ImageChops.subtract(arrow_outer, mask(arrow, 0))
+        out.paste(ink, (0, 0), ImageChops.add(spark_ring, arrow_ring))
     return out.crop(out.getbbox())
 
 
@@ -132,19 +93,11 @@ _cache = {}
 
 
 def cut(px):
-    """The glove drawn for a target size in pixels: heavier lines and less detail as it shrinks."""
-    if px >= 96:
-        key = dict(weight=1.0)
-    elif px >= 48:
-        key = dict(weight=1.2)
-    elif px >= 28:
-        key = dict(weight=1.55, creases=False)
-    else:  # 16-24 px: the spark would be noise, so the glove gets the whole tile and a longer finger
-        key = dict(weight=1.6, creases=False, spark=False, reach=56)
-    k = tuple(sorted(key.items()))
-    if k not in _cache:
-        _cache[k] = mark(**key)
-    return _cache[k]
+    """The mark drawn for a target size in pixels: heavier lines as it shrinks."""
+    weight = 1.0 if px >= 96 else 1.2 if px >= 48 else 1.55 if px >= 28 else 1.6
+    if weight not in _cache:
+        _cache[weight] = mark(weight=weight)
+    return _cache[weight]
 
 
 def fit(im, box):
@@ -153,8 +106,20 @@ def fit(im, box):
     return im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))), Image.Resampling.LANCZOS)
 
 
+def optical_centre(im):
+    """Halfway between the drawing's box centre and its centre of mass, so a heavy side does not read as off-centre."""
+    n = 64
+    a = im.getchannel("A").resize((n, n), Image.Resampling.BOX).point(lambda v: 255 if v > 127 else 0)
+    px = a.load()
+    pts = [(x, y) for y in range(n) for x in range(n) if px[x, y]]
+    mx = sum(x + 0.5 for x, _ in pts) / len(pts) / n
+    my = sum(y + 0.5 for _, y in pts) / len(pts) / n
+    return im.width * (0.5 + mx) / 2, im.height * (0.5 + my) / 2
+
+
 def centred(canvas, im, cx, cy):
-    canvas.alpha_composite(im, (round(cx - im.width / 2), round(cy - im.height / 2)))
+    ox, oy = optical_centre(im)
+    canvas.alpha_composite(im, (round(cx - ox), round(cy - oy)))
 
 
 def squircle(size, n=5.0):
@@ -199,14 +164,14 @@ def mac_icon(size=1024):
     inner = Image.new("L", (body, body), 0)
     inner.paste(squircle(body - 2 * e), (e, e))
     face.paste((0, 0, 0, 34), (0, 0), ImageChops.subtract(mask, inner))
-    centred(face, fit(cut(size), body * (0.66 if size >= 48 else 0.72 if size >= 28 else 0.80)), body / 2, body / 2)
+    centred(face, fit(cut(size), body * (0.70 if size >= 48 else 0.74 if size >= 28 else 0.82)), body / 2, body / 2)
     canvas.alpha_composite(face, at)
     return canvas
 
 
 def win_icon(size=256, detail=None):
     """Windows draws icons full bleed: a rounded white tile edge to edge, a thin grey rim, no shadow.
-    `detail` draws the glove as for another size (the tray icon is 32 px but shown at 16)."""
+    `detail` draws the mark as for another size (the tray icon is 32 px but shown at 16)."""
     big = size * SS
     m = Image.new("L", (big, big), 0)
     ImageDraw.Draw(m).rounded_rectangle([0, 0, big - 1, big - 1], big * 0.22, fill=255)
@@ -226,10 +191,10 @@ def tray():
     out = OUT / "tray"
     out.mkdir(exist_ok=True)
     # macOS template: black with alpha only; the menu bar tints it for light, dark and selected.
-    # 36 px is the 18 pt menu bar slot at 2x; the glove is drawn as a line, and solid while recording.
+    # 36 px is the 18 pt menu bar slot at 2x; the mark is drawn as a line, and with the cursor filled while recording.
     for name, style in (("mac.png", "line"), ("mac-rec.png", "solid")):
         g = Image.new("RGBA", (36, 36), (0, 0, 0, 0))
-        centred(g, fit(mark(weight=1.6, creases=False, shadow=False, style=style, ink=(0, 0, 0, 255), reach=40), 34), 18, 18)
+        centred(g, fit(mark(weight=1.6, shadow=False, style=style, ink=(0, 0, 0, 255)), 34), 18, 18)
         g.save(out / name)
     icon = win_icon(32, detail=16)
     icon.save(out / "win.png")

@@ -1,4 +1,4 @@
-<p align="center"><img src="src-tauri/icons/128x128@2x.png" width="112" height="112" alt="Pointcast icon: a pointing glove with a click spark"></p>
+<p align="center"><img src="src-tauri/icons/128x128@2x.png" width="112" height="112" alt="Pointcast icon: a cursor landing in an orange click spark"></p>
 
 <h1 align="center">Pointcast</h1>
 
