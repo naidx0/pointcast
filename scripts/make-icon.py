@@ -20,11 +20,14 @@ PAPER = (255, 255, 255, 255)
 ORANGE = (255, 138, 31, 255)
 
 # The mark in its own units: a four-point spark centred on (400, 400) and a cursor whose tip sits at its centre.
-SPARK_AT, SPARK_R, SPARK_PINCH = (400, 400), 360, 0.13
+SPARK_AT, SPARK_R, SPARK_PINCH = (400, 400), 360, 0.26
 ARROW = [(0, 0), (0, 520), (150, 400), (250, 610), (340, 566), (238, 358), (430, 358)]
 ARROW_AT, ARROW_SCALE = (400, 400), 0.8
-SPARK_LINE, ARROW_LINE = 18, 32  # outline growth on every side
-SPARK_SHADOW, ARROW_SHADOW = 30, 24  # hard sticker shadow, down and to the right
+SPARK_LINE, ARROW_LINE = 32, 48  # outline growth on every side
+SPARK_SHADOW, ARROW_SHADOW = 40, 34  # hard sticker shadow, down and to the right
+SOFT = 14  # rounds every corner of every shape by about this many units (0 keeps them sharp)
+GLINTS = [(740, 120, 74), (90, 800, 52)]  # two small extra sparks (x, y, radius), drawn behind the cursor like the big one
+MAC_FRAC = 0.78  # how much of the macOS icon body the mark's longer side fills at 48 px and up
 
 
 def quad(p0, p1, p2, n=30):
@@ -32,8 +35,9 @@ def quad(p0, p1, p2, n=30):
             for t in (i / n for i in range(n + 1))]
 
 
-def spark_points():
-    (cx, cy), r = SPARK_AT, SPARK_R
+def spark_points(cx=None, cy=None, r=None):
+    if cx is None:
+        (cx, cy), r = SPARK_AT, SPARK_R
     a = r * SPARK_PINCH
     tips = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
     bends = [(cx + a, cy - a), (cx + a, cy + a), (cx - a, cy + a), (cx - a, cy - a)]
@@ -61,6 +65,13 @@ def shape_mask(size, pts, grow, K, P, shift=0):
     return m
 
 
+def soften(m, radius):
+    """Round the corners of a mask: blur it, then cut it back to a hard edge."""
+    if not radius:
+        return m
+    return m.filter(ImageFilter.GaussianBlur(radius)).point(lambda v: 255 if v > 127 else 0)
+
+
 def mark(weight=1.0, shadow=True, style="sticker", ink=INK, paper=PAPER, accent=ORANGE):
     """The mark at high resolution, cropped to what it draws. style: "sticker" (orange spark, paper
     cursor, ink line and shadow), "line" (ink outline only, for a menu bar template) or "solid" (as
@@ -70,13 +81,17 @@ def mark(weight=1.0, shadow=True, style="sticker", ink=INK, paper=PAPER, accent=
     P = lambda x, y: (x * K, y * K)  # noqa: E731
     sg, ag = SPARK_LINE * weight, ARROW_LINE * weight
     spark, arrow = spark_points(), arrow_points()
-    mask = lambda pts, grow, shift=0: shape_mask(size, pts, grow, K, P, shift)  # noqa: E731
+    mask = lambda pts, grow, shift=0: soften(shape_mask(size, pts, grow, K, P, shift), SOFT * K)  # noqa: E731
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     if style == "sticker":
         off = math.sqrt(weight)
         out.paste(ink, (0, 0), mask(spark, sg, SPARK_SHADOW * off) if shadow else Image.new("L", (size, size), 0))
         out.paste(ink, (0, 0), mask(spark, sg))
         out.paste(accent, (0, 0), mask(spark, 0))
+        for gx, gy, gr in GLINTS if weight < 1.5 else []:  # at 16 to 24 px the glints would be noise
+            glint = spark_points(gx, gy, gr)
+            out.paste(ink, (0, 0), mask(glint, sg * 0.8))
+            out.paste(accent, (0, 0), mask(glint, 0))
         if shadow:
             out.paste(ink, (0, 0), mask(arrow, ag, ARROW_SHADOW * off))
         out.paste(ink, (0, 0), mask(arrow, ag))
@@ -164,7 +179,7 @@ def mac_icon(size=1024):
     inner = Image.new("L", (body, body), 0)
     inner.paste(squircle(body - 2 * e), (e, e))
     face.paste((0, 0, 0, 34), (0, 0), ImageChops.subtract(mask, inner))
-    centred(face, fit(cut(size), body * (0.70 if size >= 48 else 0.74 if size >= 28 else 0.82)), body / 2, body / 2)
+    centred(face, fit(cut(size), body * (MAC_FRAC if size >= 48 else MAC_FRAC + 0.04 if size >= 28 else MAC_FRAC + 0.12)), body / 2, body / 2)
     canvas.alpha_composite(face, at)
     return canvas
 
