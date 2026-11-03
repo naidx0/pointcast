@@ -31,8 +31,14 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use voice::ptt::TalkMode;
 
-/// Minutes without recording before the HUD, overlay and speech model are released.
+/// Quiet time before the floating windows (HUD, overlay) are released. The speech model has its own setting, free_memory_minutes.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Whether the speech model should be let go now: it has been quiet for the `minutes` the person chose (0 means never),
+/// and it has not been let go already in this quiet spell.
+fn free_due(quiet: std::time::Duration, minutes: u32, already: bool) -> bool {
+    !already && minutes > 0 && quiet >= std::time::Duration::from_secs(u64::from(minutes) * 60)
+}
 
 /// A hold shorter than this is a tap: the session keeps recording until the next press.
 const HOLD_MS: u64 = 350;
@@ -431,6 +437,7 @@ fn settings_view(svc: &App) -> Value {
     v["picture_paths"] = json!(s.picture_paths);
     v["voice_boost"] = json!(s.voice_boost);
     v["auto_gpu"] = json!(s.auto_gpu);
+    v["free_memory_minutes"] = json!(s.free_memory_minutes);
     v["gpu_upgrade"] = json!(voice::upgrade::status());
     if let Some(why) = voice::upgrade::unusable_here(&settings::data_dir(), &speech.1) {
         for m in v["speech"]["models"].as_array_mut().into_iter().flatten().filter(|m| m["id"] == voice::upgrade::MODEL) {
@@ -1505,21 +1512,31 @@ pub fn run() {
             let svc2 = svc.clone();
             std::thread::spawn(move || {
                 let mut busy_at = std::time::Instant::now();
+                let mut reaped_at = busy_at;
+                let mut freed = false;
                 loop {
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
                         emit_state(&handle, &svc2);
                         busy_at = std::time::Instant::now();
+                        reaped_at = busy_at;
+                        freed = false;
                         // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
                         // click on the HUD's Stop can bring Pointcast forward on macOS.
                         #[cfg(target_os = "macos")]
                         if recording(&svc2) && !handle.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
                             platform::remember_front();
                         }
-                    } else if busy_at.elapsed() >= IDLE && !SPEECH_BUSY.load(Ordering::SeqCst) {
-                        platform::reap(&handle);
-                        svc2.unload_engine();
-                        busy_at = std::time::Instant::now();
+                    } else if !SPEECH_BUSY.load(Ordering::SeqCst) {
+                        if busy_at.elapsed() >= IDLE && reaped_at.elapsed() >= IDLE {
+                            platform::reap(&handle);
+                            reaped_at = std::time::Instant::now();
+                        }
+                        let minutes = svc2.settings.lock().unwrap().free_memory_minutes;
+                        if free_due(busy_at.elapsed(), minutes, freed) && !svc2.busy() {
+                            svc2.unload_engine();
+                            freed = true;
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
                 }
@@ -1575,6 +1592,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_speech_model_is_freed_once_per_quiet_spell_at_the_time_chosen() {
+        use std::time::Duration;
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert!(!free_due(min(4), 5, false), "not before the chosen time");
+        assert!(free_due(min(5), 5, false), "at it");
+        assert!(free_due(min(30), 5, false), "and after it, if it was missed");
+        assert!(!free_due(min(30), 5, true), "but only once, until the next recording");
+        assert!(!free_due(min(600), 0, false), "0 keeps the model loaded however long it is quiet");
+        assert!(free_due(min(2), 2, false) && !free_due(min(1), 2, false), "the shortest choice");
+    }
 
     #[test]
     fn a_tap_keeps_recording_and_a_hold_stops_on_release() {
