@@ -463,6 +463,24 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
           />
         </Row>
         <Row
+          label="Free the speech model from memory when idle"
+          sub="The model takes several hundred MB while loaded. After this long without a recording it is let go, and the next recording loads it again."
+        >
+          <select
+            className="field"
+            style={{ maxWidth: 160 }}
+            value={cfg.free_memory_minutes ?? 10}
+            onChange={(e) => patch({ free_memory_minutes: Number(e.target.value) })}
+          >
+            {[2, 5, 10, 30].map((m) => (
+              <option key={m} value={m}>
+                After {m} minutes
+              </option>
+            ))}
+            <option value={0}>Never</option>
+          </select>
+        </Row>
+        <Row
           label="Keep my recordings so I can transcribe them again"
           sub="The newest 10 recordings keep their audio on this computer, deleted with the entry. Nothing is uploaded."
         >

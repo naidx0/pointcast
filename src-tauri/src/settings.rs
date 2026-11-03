@@ -149,6 +149,10 @@ pub struct Settings {
     /// Get the faster GPU version of Whisper Turbo by itself, in the background, where a graphics card can run it.
     #[serde(default = "yes")]
     pub auto_gpu: bool,
+    /// Minutes with no recording before the speech model is let go and its memory (hundreds of MB) returned to the
+    /// system. The next recording loads it again. 0 keeps it loaded.
+    #[serde(default = "default_free_minutes")]
+    pub free_memory_minutes: u32,
 }
 
 fn default_model() -> String {
@@ -159,6 +163,9 @@ fn yes() -> bool {
 }
 fn default_zoom_px() -> u32 {
     512
+}
+fn default_free_minutes() -> u32 {
+    10
 }
 fn default_mcp() -> String {
     "127.0.0.1:47821".into()
@@ -197,6 +204,7 @@ impl Default for Settings {
             picture_paths: true,
             voice_boost: true,
             auto_gpu: true,
+            free_memory_minutes: default_free_minutes(),
         }
     }
 }
@@ -403,6 +411,15 @@ mod tests {
         let s = Settings { granted: g, ..Settings::default() };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.granted, g);
+    }
+
+    #[test]
+    fn the_speech_model_is_freed_after_ten_quiet_minutes_unless_told_otherwise() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert_eq!(old.free_memory_minutes, 10, "a file from before this keeps today's behaviour");
+        assert_eq!(Settings::default().free_memory_minutes, 10);
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":2}"#).unwrap().free_memory_minutes, 2);
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":0}"#).unwrap().free_memory_minutes, 0);
     }
 
     #[test]
