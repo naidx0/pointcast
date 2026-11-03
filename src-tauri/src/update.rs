@@ -155,14 +155,22 @@ pub fn checked() -> serde_json::Value {
 }
 
 fn check_at(url: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
+    check_with(url, current, os, None)
+}
+
+/// `check_at`, signed in with `token` when there is one. The app never has a token; the live test in CI does, because
+/// GitHub gives a shared runner address only a handful of unsigned requests an hour and answers the rest with 403.
+fn check_with(url: &str, current: &str, os: &str, token: Option<&str>) -> Result<Option<Offer>, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("Pointcast/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
+    let mut req = client.get(url).header("Accept", "application/vnd.github+json");
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .map_err(|_| "Can't reach GitHub. Check your connection and try again.".to_string())?;
     match resp.status().as_u16() {
@@ -518,7 +526,8 @@ mod tests {
     #[test]
     #[ignore]
     fn live_the_published_release_is_offered_to_the_one_before_it() {
-        let got = check_at(LATEST, "0.0.1", std::env::consts::OS);
+        let token = std::env::var("GITHUB_TOKEN").ok();
+        let got = check_with(LATEST, "0.0.1", std::env::consts::OS, token.as_deref());
         eprintln!("LIVE os={} -> {:?}", std::env::consts::OS, got.as_ref().map(|o| o.as_ref().map(|o| (&o.version, &o.url))));
         let offer = got.expect("the check reached GitHub").expect("a release is offered to an older version");
         assert!(offer.url.starts_with("https://github.com/naidx0/pointcast/releases/download/"), "{}", offer.url);
