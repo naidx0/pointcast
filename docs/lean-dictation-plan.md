@@ -2,7 +2,7 @@
 
 Base: `main` ca3e772 (v0.4.7). Program branch: `program/lean-dictation`. Written 2026-11-09 from five
 investigations on the owner's PC (idle footprint, word audit on 8 real recordings, screenshot handoff,
-UX review, formatting model).
+UX review, formatting on 10 real transcripts).
 
 ## End state
 
@@ -24,6 +24,7 @@ recording Pointcast is one 25 MB process again.
 | Lean | Two loops wake forever: 400 ms (idle) and 5 s (GPU setup, already final on a set-up PC) | code |
 | Handoff | Over MCP the model never sees the pictures: one 3.5 MB text block with base64 twice | mcp.rs, client limits |
 | Handoff | Picture files are numbered in storage order, the prompt in time order; they live deep in app data (a path with a space on every Mac); sandboxed agents cannot read there | prompt.rs, history.rs |
+| Formatting | Every piece is joined with one space, so a 15-minute dictation pastes as one block; rules kept 100% of words and every marker; small models (1.2B and under) summarise, repeat or answer the text | 10 transcripts, 5 models |
 | UX | Setup blocks on the model download; the capsule never says the engine is loading; end notices cannot be clicked; Delete has no undo; credits miss Whisper, whisper.cpp, Parakeet | preview walk |
 
 ## Slices
@@ -41,13 +42,15 @@ Each slice is one branch off the program branch, gated on its own, merged back w
 | 7 | First run without a wait | The recommended model starts downloading at Get Started; Continue is never disabled; keys and practice become one "Try it" step; credits complete | `Onboarding.tsx`, `Models.tsx`, `Settings.tsx` (About) | Preview walk on both skins; a fresh-machine install test reaches the practice step while the download runs |
 | 8 | Notices you can act on | End notices open History on that entry and stay while hovered; "Paste what's done" from the start of transcribing; Delete has a 5 s Undo; Discard asks once | `Indicator.tsx`, `Result.tsx`, `lib.rs` (hide timing) | Preview walk; tests on the undo window |
 | 9 | Short pieces heard in context | A piece under 2.5 s, or one that is only "Thank you." / "you" / "Um...", is decoded joined to the audio before it and only its new words kept; language is detected once per recording | `session.rs` (decode_ranges), `voice/stt.rs`, `voice/engine.rs` | The 11 suspect pieces from the audit: 2 of 2 made-up gone, 7 of 7 real kept; no new differences on the 8 recordings |
-| 10 | Formatting | Pending the formatting-model measurements: a rule-based formatter first (paragraphs from pauses, fillers, lists), a small local model only if it keeps every word | to be set | to be set |
+| 10 | Paragraphs, not one block | A rule-based formatter where the prompt is composed: a new paragraph at a pause of 1.2 s after a sentence end or any pause of 2.5 s, repeats of 1 to 3 words collapsed, a short filler list removed, first/second/third runs as a list; markers never touched; on by default | `prompt.rs`, `settings.rs`, `Settings.tsx` | On the 10 real transcripts: every content word kept in order, none added, every marker kept; unit tests on each rule |
+| 11 | Tidy with a local model (opt-in) | A History action, never before the paste: Qwen3.5-2B (1.19 GiB, Apache-2.0) through a CI-built `llama-server` helper started on demand and killed after; markers stripped before the model and put back; each chunk checked (words kept 0.90 or more, at most 2 new words, length 0.85 to 1.05) or the rule text stays | `voice/` (helper), `models.json`, `Result.tsx`, a helper workflow | The 26 measured chunks pass the check; a summarising model is rejected; nothing of it runs when the action is not used |
 
 ## Order
 
 1, 2, 3 touch different files and land first (1 is the smallest and the largest gain for dictation).
 4 follows 3 (both change the capsule's lifecycle). 5 then 6. 7 and 8 are front-end and can run beside
-5 and 6. 9 after 1 (it is measured against repeatable decoding). 10 last.
+5 and 6. 9 after 1 (it is measured against repeatable decoding). 10 after 5 (both change how the prompt is
+composed). 11 last: models of 1.2B and under were worse than the rules alone, and the 2B model's gain is modest.
 
 First shippable slice: **1**, started in the same session as this plan.
 
