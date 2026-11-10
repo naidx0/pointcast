@@ -205,7 +205,7 @@ struct Piece {
 /// formatted by `tidy_pieces`.
 fn compose_marked(items: &[Item], short: bool, tidy: bool) -> (String, Vec<Capture>) {
     let (pieces, captures) = pieces_of(items, short);
-    let text = if tidy && false {
+    let text = if tidy {
         tidy_pieces(&pieces).0
     } else {
         pieces.iter().flat_map(|p| p.toks.iter().map(Tok::text)).collect::<Vec<_>>().join(" ")
