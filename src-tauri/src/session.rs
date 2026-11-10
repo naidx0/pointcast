@@ -82,6 +82,15 @@ impl Default for UiState {
     }
 }
 
+/// Notes the engine used when it goes out of scope, on every way out of a stop.
+struct Used<'a>(&'a App);
+
+impl Drop for Used<'_> {
+    fn drop(&mut self) {
+        self.0.note_use();
+    }
+}
+
 pub struct App {
     pub settings: Mutex<Settings>,
     settings_path: std::path::PathBuf,
@@ -105,6 +114,9 @@ pub struct App {
     loading: Mutex<()>,
     /// How the last attempt to load the model and run it went; none before the first.
     checked: Mutex<Option<Result<(), String>>>,
+    /// When the engine was last loaded or heard a piece, or a recording or a Transcribe again ended: the idle loop frees
+    /// the engine a while after it.
+    used: Mutex<Option<std::time::Instant>>,
     /// Held for the whole of a stop, so a second stop or a Quit waits for it instead of racing it.
     finishing: Mutex<()>,
     /// Set by Discard: the worker skips transcribing what is left.
@@ -187,6 +199,7 @@ impl App {
             ran: Mutex::default(),
             loading: Mutex::default(),
             checked: Mutex::default(),
+            used: Mutex::default(),
             finishing: Mutex::default(),
             cancel: AtomicBool::new(false),
             audio_at: AtomicU64::new(0),
@@ -275,7 +288,22 @@ impl App {
     pub fn ensure_engine(&self) -> Result<(), String> {
         let r = self.load_engine();
         *self.checked.lock().unwrap() = Some(r.clone());
+        self.note_use();
         r
+    }
+
+    /// The engine was just used: the time to free it counts from now.
+    fn note_use(&self) {
+        *self.used.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    /// When the engine in memory was last used; none when none is in memory. One at work right now is used now.
+    pub fn engine_used(&self) -> Option<std::time::Instant> {
+        match self.engine.try_lock() {
+            Ok(g) if g.is_none() => None,
+            Ok(_) => Some(self.used.lock().unwrap().unwrap_or_else(std::time::Instant::now)),
+            Err(_) => Some(std::time::Instant::now()),
+        }
     }
 
     fn load_engine(&self) -> Result<(), String> {
@@ -322,6 +350,7 @@ impl App {
 
     /// The engine heard a piece: note where it runs now, and say it when it can hear nothing any more.
     fn after_piece(&self, eng: &Engine) -> Option<String> {
+        self.note_use();
         *self.backend.lock().unwrap() = Some((eng.model().to_string(), eng.backend()));
         *self.ran.lock().unwrap() = Some((eng.label(), eng.device()));
         let failed = eng.failure();
@@ -455,6 +484,8 @@ impl App {
         if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
             return Ok(None);
         }
+        // However the stop ends, the engine's free time counts from its end.
+        let _used = Used(self);
         self.cancel.store(cancel, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         // A Cancel can only be meant for this stop once it waits.
@@ -965,6 +996,7 @@ impl App {
             Ok(())
         };
         let r = run();
+        self.note_use();
         self.again_stop.store(false, Ordering::SeqCst);
         self.retranscribing.store(false, Ordering::SeqCst);
         r
@@ -1516,6 +1548,35 @@ mod tests {
         a.state.lock().unwrap().phase = Phase::Recording;
         a.commit_region(png(), vec![], None).unwrap();
         assert!(a.history.recover().is_some());
+    }
+
+    #[test]
+    fn a_stop_a_transcribe_again_and_a_load_push_back_when_the_engine_is_freed() {
+        let a = app("engine-used");
+        let long_ago = || Some(std::time::Instant::now() - std::time::Duration::from_secs(3_600));
+        assert_eq!(a.engine_used(), None, "nothing in memory, nothing to free");
+        // A stop, by any way out.
+        *a.used.lock().unwrap() = long_ago();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop(false).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a recording's end");
+        *a.used.lock().unwrap() = long_ago();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop(true).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a discarded one too");
+        // Transcribe again, finished or failed.
+        let (id, _) = kept(&a);
+        let hear = |_: &[f32], _: u64| -> Result<Option<Heard>, String> { Ok(None) };
+        *a.used.lock().unwrap() = long_ago();
+        a.again(&id, || Ok(()), hear, |_, _| {}).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a Transcribe again's end");
+        *a.used.lock().unwrap() = long_ago();
+        let _ = a.again(&id, || Err("the speech model did not load".into()), hear, |_, _| {});
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "and one that failed");
+        // A load outside a recording (a model change, Settings' check, the GPU version set up).
+        *a.used.lock().unwrap() = long_ago();
+        let _ = a.ensure_engine();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a load");
     }
 
     #[test]
