@@ -295,6 +295,7 @@ impl App {
     /// The engine was just used: the time to free it counts from now.
     fn note_use(&self) {
         *self.used.lock().unwrap() = Some(std::time::Instant::now());
+        crate::wake();
     }
 
     /// When the engine in memory was last used; none when none is in memory. One at work right now is used now.
@@ -427,6 +428,8 @@ impl App {
             st.mic = false;
             st.screen = true;
         }
+        // The idle scheduler pulses the HUD while the session runs.
+        crate::wake();
         let settings = self.settings.lock().unwrap().clone();
         let take = Arc::new(Take::default());
         match Mic::open(settings.device.clone(), take.clone()) {
