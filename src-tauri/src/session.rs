@@ -197,7 +197,13 @@ impl App {
             take_no: AtomicU64::new(0),
             stop: AtomicBool::new(true),
             mic: Mutex::default(),
+            #[cfg(not(test))]
             open_mic: Mic::open,
+            // A test never opens the machine's microphone: a test owns its specimen, and many opens at once from
+            // parallel tests crash the audio library on Linux. It hears silence; the measurements that want the real
+            // one ask for it.
+            #[cfg(test)]
+            open_mic: |_, take| Ok(Mic::from_samples(Vec::new(), take)),
             mic_tried: AtomicU64::new(0),
             loaded: AtomicU64::new(0),
             take: Mutex::default(),
@@ -1748,7 +1754,8 @@ mod tests {
     #[test]
     #[ignore]
     fn start_to_first_audio_on_this_machine() {
-        let a = app("real-mic");
+        let mut a = app("real-mic");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = Mic::open;
         let mut firsts = vec![];
         for i in 0..10 {
             let began = std::time::Instant::now();
