@@ -24,13 +24,15 @@ use std::time::{Duration, Instant};
 pub struct Library {
     pub data_dir: PathBuf,
     pub handoff_root: PathBuf,
+    /// Whether the text is tidied as the person's pastes are (Settings › Output).
+    pub tidy: bool,
 }
 
 impl Library {
     /// The app's own: its data folder and the handoff folder its settings name (tests get temp folders).
     pub fn app() -> Self {
         let s = crate::settings::Settings::load(&crate::settings::settings_path());
-        Library { data_dir: crate::settings::data_dir(), handoff_root: crate::prompt::handoff_root(&s) }
+        Library { data_dir: crate::settings::data_dir(), handoff_root: crate::prompt::handoff_root(&s), tidy: s.tidy }
     }
 }
 
@@ -469,6 +471,8 @@ struct Pic {
 
 /// A prompt as the tools hand it out.
 struct Prompt {
+    /// Whether its text is tidied (the library's setting when it was read).
+    tidy: bool,
     /// The History entry; none for a prompt History did not keep.
     id: Option<String>,
     created: Option<String>,
@@ -545,13 +549,14 @@ fn from_library(lib: &Library, id: &str) -> Result<Prompt, String> {
         .collect();
     let files: Vec<String> = pics.iter().filter_map(|p| p.file.clone()).collect();
     let files = if files.len() == pics.len() { files } else { vec![] };
-    let plain = crate::prompt::assemble_clipboard_files(&items, &files).plain;
+    let plain = crate::prompt::assemble_clipboard_files(&items, &files, lib.tidy).plain;
     let created_ms = meta.as_ref().map(|m| m.created_ms);
     let stamp = match &handoff {
         Some((dir, _)) => dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         None => local_time(created_ms.unwrap_or(0)).format("%Y-%m-%d_%H%M").to_string(),
     };
     Ok(Prompt {
+        tidy: lib.tidy,
         id: Some(id.to_string()),
         created: created_ms.map(|ms| local_time(ms).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)),
         stamp,
@@ -579,6 +584,7 @@ fn from_export(id: Option<String>, exp: SessionExport) -> Prompt {
         })
         .collect();
     Prompt {
+        tidy: false,
         id,
         created: None,
         stamp: chrono::Local::now().format("%Y-%m-%d_%H%M").to_string(),
@@ -740,7 +746,7 @@ fn copy_out(p: &mut Prompt, to: &str) -> Result<String, String> {
     let width = if p.pics.len() >= 100 { 3 } else { 2 };
     let files: Vec<String> = p.pics.iter().map(|pic| format!("{}/{:0width$}.png", slashes(&dir), pic.n)).collect();
     let plain = match &p.items {
-        Some(items) => crate::prompt::assemble_clipboard_files(items, &files).plain,
+        Some(items) => crate::prompt::assemble_clipboard_files(items, &files, p.tidy).plain,
         None => {
             let mut t = p.plain.clone();
             let mut named = !p.pics.is_empty();
@@ -1006,7 +1012,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("pc-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let lib = Library { data_dir: root.join("data"), handoff_root: root.join("handoff") };
+        let lib = Library { data_dir: root.join("data"), handoff_root: root.join("handoff"), tidy: false };
         Lab { root, lib }
     }
 
@@ -1054,10 +1060,10 @@ mod tests {
         let store = crate::history::Store::new(&lab.lib.data_dir);
         let id = store.save(items, created, 5_000).unwrap().id;
         if handoff {
-            crate::prompt::write_handoff(&lab.lib.handoff_root, &id, created, items, created).unwrap();
+            crate::prompt::write_handoff(&lab.lib.handoff_root, &id, created, items, created, lab.lib.tidy).unwrap();
         }
         let latest = Latest::default().with_library(lab.lib.clone());
-        latest.set(Some(id.clone()), store.export_with(&id, true).unwrap());
+        latest.set(Some(id.clone()), store.export_with(&id, true, lab.lib.tidy).unwrap());
         (latest, id)
     }
 
