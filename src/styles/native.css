@@ -1786,3 +1786,77 @@ html.win select.field {
 .prompt-doc .pd-remove:focus-visible {
   background: rgba(196, 43, 28, 0.9);
 }
+
+/* —— History: a delete waits 5 seconds behind an Undo bar —— */
+.result {
+  position: relative;
+}
+.result-del {
+  flex: none;
+  margin-left: 4px;
+}
+.result.has-undo .hist-list,
+.result.has-undo .result-body {
+  padding-bottom: 64px;
+}
+.undo-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px 0 14px;
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.94);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: var(--fs-caption);
+  font-weight: 500;
+  white-space: nowrap;
+  animation: undo-in 0.16s ease-out;
+}
+html.win .undo-bar {
+  border-radius: 6px;
+}
+@keyframes undo-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+.undo-dot {
+  opacity: 0.55;
+}
+.undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #7cc0ff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+html.win .undo-btn {
+  border-radius: 4px;
+}
+.undo-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.undo-btn:focus-visible {
+  outline: 2px solid #7cc0ff;
+  outline-offset: 1px;
+}
+.undo-btn kbd {
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.6);
+}
