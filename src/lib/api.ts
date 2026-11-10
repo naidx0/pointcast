@@ -142,7 +142,7 @@ export type Config = {
   voice_boost?: boolean;
   /** Get the faster GPU version of Whisper Turbo by itself. Treated as on when absent. */
   auto_gpu?: boolean;
-  /** Minutes with no recording before the speech model is freed from memory; 0 keeps it loaded. Treated as 10 when absent. */
+  /** Minutes after the speech model's last use before it is freed from memory; 0 keeps it loaded. Treated as 1 when absent. */
   free_memory_minutes?: number;
   gpu_upgrade?: GpuUpgrade;
   start_at_login: boolean;

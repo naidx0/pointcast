@@ -149,10 +149,13 @@ pub struct Settings {
     /// Get the faster GPU version of Whisper Turbo by itself, in the background, where a graphics card can run it.
     #[serde(default = "yes")]
     pub auto_gpu: bool,
-    /// Minutes with no recording before the speech model is let go and its memory (hundreds of MB) returned to the
-    /// system. The next recording loads it again. 0 keeps it loaded.
+    /// Minutes after the speech model's last use before it is let go and its memory (about 0.9 GB of graphics memory and
+    /// 1.5 GB of RAM) returned to the system. The next recording loads it again. 0 keeps it loaded.
     #[serde(default = "default_free_minutes")]
     pub free_memory_minutes: u32,
+    /// Which default `free_memory_minutes` was written under: 0 before 1 minute was (every file then held 10), 1 since.
+    #[serde(default)]
+    pub free_default: u8,
 }
 
 fn default_model() -> String {
@@ -165,7 +168,7 @@ fn default_zoom_px() -> u32 {
     512
 }
 fn default_free_minutes() -> u32 {
-    10
+    1
 }
 fn default_mcp() -> String {
     "127.0.0.1:47821".into()
@@ -205,16 +208,25 @@ impl Default for Settings {
             voice_boost: true,
             auto_gpu: true,
             free_memory_minutes: default_free_minutes(),
+            free_default: 1,
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        let mut s: Self = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // The old default, 10, becomes the new one once; 10 picked after that is kept.
+        if s.free_default < 1 {
+            if s.free_memory_minutes == 10 {
+                s.free_memory_minutes = default_free_minutes();
+            }
+            s.free_default = 1;
+        }
+        s
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(d) = path.parent() {
@@ -414,12 +426,35 @@ mod tests {
     }
 
     #[test]
-    fn the_speech_model_is_freed_after_ten_quiet_minutes_unless_told_otherwise() {
-        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
-        assert_eq!(old.free_memory_minutes, 10, "a file from before this keeps today's behaviour");
-        assert_eq!(Settings::default().free_memory_minutes, 10);
-        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":2}"#).unwrap().free_memory_minutes, 2);
-        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":0}"#).unwrap().free_memory_minutes, 0);
+    fn the_speech_model_is_freed_a_minute_after_its_last_use_unless_told_otherwise() {
+        let d = std::env::temp_dir().join(format!("pc-settings-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("settings.json");
+        let load = |json: &str| {
+            std::fs::write(&file, json).unwrap();
+            Settings::load(&file)
+        };
+        assert_eq!(Settings::default().free_memory_minutes, 1);
+        assert_eq!(load(r#"{"onboarded":true}"#).free_memory_minutes, 1, "a file from before the setting");
+        // Every file written before held the old default, 10: it becomes the new one, once.
+        let old = load(r#"{"onboarded":true,"free_memory_minutes":10}"#);
+        assert_eq!(old.free_memory_minutes, 1, "the old default moves to the new one");
+        old.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 1);
+        // 10 picked after that is the person's choice: it stays through a save and a load.
+        let chosen = Settings { free_memory_minutes: 10, ..Settings::load(&file) };
+        chosen.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "an explicit 10 survives");
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "and every later load");
+        let fresh = Settings { free_memory_minutes: 10, ..Settings::default() };
+        fresh.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "on a file made with the new default too");
+        // Any other stored choice is kept as it was.
+        for m in [0, 2, 5, 30] {
+            assert_eq!(load(&format!(r#"{{"free_memory_minutes":{m}}}"#)).free_memory_minutes, m);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
