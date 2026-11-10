@@ -156,6 +156,9 @@ pub struct Settings {
     /// Which default `free_memory_minutes` was written under: 0 before 1 minute was (every file then held 10), 1 since.
     #[serde(default)]
     pub free_default: u8,
+    /// Where each recording's pictures are copied for agents, one folder per recording; none is `~/Pointcast`.
+    #[serde(default)]
+    pub handoff_dir: Option<String>,
 }
 
 fn default_model() -> String {
@@ -209,6 +212,7 @@ impl Default for Settings {
             auto_gpu: true,
             free_memory_minutes: default_free_minutes(),
             free_default: 1,
+            handoff_dir: None,
         }
     }
 }
