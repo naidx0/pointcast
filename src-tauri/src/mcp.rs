@@ -1240,7 +1240,7 @@ mod tests {
     #[test]
     fn images_none_returns_only_text_and_links_returns_only_links() {
         let lab = lab("modes");
-        let items = [words(0, 4_000, "two shots"), pic(1_000, &noisy_png(40, 30, 6), vec![]), pic(2_000, &noisy_png(30, 40, 7), vec![])];
+        let items = [words(0, 500, "two shots"), pic(1_000, &noisy_png(40, 30, 6), vec![]), pic(2_000, &noisy_png(30, 40, 7), vec![])];
         let (latest, _) = saved(&lab, &items, CREATED, true);
         let r = call(&latest, "pointcast_latest", json!({ "images": "none" }));
         assert_eq!(kinds(&r), ["text"]);
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn copy_to_writes_only_under_the_projects_pointcast_folder() {
         let lab = lab("copy");
-        let items = [words(0, 4_000, "copy these"), pic(1_000, &noisy_png(40, 30, 11), vec![]), pic(2_000, &noisy_png(30, 40, 12), vec![])];
+        let items = [words(0, 500, "copy these"), pic(1_000, &noisy_png(40, 30, 11), vec![]), pic(2_000, &noisy_png(30, 40, 12), vec![])];
         let (latest, _) = saved(&lab, &items, CREATED, true);
         let project = lab.root.join("project");
         std::fs::create_dir_all(&project).unwrap();
