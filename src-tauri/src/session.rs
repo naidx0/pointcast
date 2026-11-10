@@ -56,6 +56,11 @@ pub struct UiState {
     /// Where the engine in memory transcribes, for the HUD: "your graphics card" or "your processor". None before a
     /// model is loaded.
     pub engine_label: Option<&'static str>,
+    /// After a stop, the History entry the prompt was saved as, so the capsule's notice can open it. None when nothing
+    /// was saved.
+    pub entry: Option<String>,
+    /// Auto-paste was chosen but the OS would not take it (macOS without Accessibility), so the prompt was copied.
+    pub paste_blocked: bool,
 }
 
 impl Default for UiState {
@@ -78,6 +83,8 @@ impl Default for UiState {
             progress: None,
             preparing_gpu: false,
             engine_label: None,
+            entry: None,
+            paste_blocked: false,
         }
     }
 }
@@ -432,6 +439,8 @@ impl App {
             st.error = None;
             st.partial.clear();
             st.notice = None;
+            st.entry = None;
+            st.paste_blocked = false;
             st.text.clear();
             st.mic = false;
             st.screen = true;
@@ -632,6 +641,7 @@ impl App {
         let exp = prompt::assemble_export_files(&items, &files);
         *self.last_export.lock().unwrap() = Some(exp.clone());
         let audio_kept = saved.is_some();
+        let entry = saved.clone();
         self.latest.set(saved, exp.clone());
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
@@ -641,10 +651,13 @@ impl App {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
             }
         }
-        let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
+        let can_paste = crate::permissions::can_paste();
+        let mode = paste_or_copy(settings.output, can_paste);
         let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
         let mut st = self.state.lock().unwrap();
         st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
+        st.entry = entry;
+        st.paste_blocked = paste_blocked(settings.output, can_paste);
         st.phase = Phase::Ready;
         Ok(Some(exp))
     }
@@ -1314,6 +1327,11 @@ pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
     } else {
         mode
     }
+}
+
+/// The prompt was copied only because auto-paste lacked the OS permission: the capsule then offers to turn it on.
+pub fn paste_blocked(mode: OutputMode, can_paste: bool) -> bool {
+    mode == OutputMode::AutoPaste && !can_paste
 }
 
 /// What the HUD says after a stop. `cut` when Cancel saved it before every word was in: whether its audio was kept.
@@ -2050,6 +2068,14 @@ mod tests {
         assert_eq!(paste_or_copy(OutputMode::AutoPaste, false), OutputMode::Clipboard);
         assert_eq!(paste_or_copy(OutputMode::AutoPaste, true), OutputMode::AutoPaste);
         assert_eq!(paste_or_copy(OutputMode::Folder, false), OutputMode::Folder);
+    }
+
+    #[test]
+    fn only_auto_paste_without_the_permission_offers_to_turn_it_on() {
+        assert!(paste_blocked(OutputMode::AutoPaste, false));
+        assert!(!paste_blocked(OutputMode::AutoPaste, true));
+        assert!(!paste_blocked(OutputMode::Clipboard, false), "copying was the choice, not a fallback");
+        assert!(!paste_blocked(OutputMode::Folder, false));
     }
 
     #[test]
