@@ -1449,7 +1449,8 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let mut a = App::new(Settings::default(), d.join("settings.json"));
+        // The text as said: tidying has its own tests (prompt.rs) and one here.
+        let mut a = App::new(Settings { tidy: false, ..Settings::default() }, d.join("settings.json"));
         // History and the recovery checkpoint live in the test's own folder, never the real app's.
         Arc::get_mut(&mut a).expect("not shared yet").history = crate::history::Store::new(&d);
         // A practice run checkpoints nothing and delivers nowhere: a stop never pastes into the desktop.
@@ -1699,6 +1700,19 @@ mod tests {
         // A real recording is never turned into one, nor discarded.
         a.state.lock().unwrap().phase = Phase::Recording;
         assert!(!a.practice_off());
+    }
+
+    #[test]
+    fn history_composes_the_tidy_text_when_the_setting_is_on_and_keeps_the_words_as_said() {
+        let a = app("tidy");
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 900, text: "um, the the header".into() }];
+        let m = a.history.save(&items, 1_000, 9).unwrap();
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off: the words as said");
+        a.settings.lock().unwrap().tidy = true;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "The header");
+        assert_eq!(a.history.items(&m.id).unwrap(), items, "History keeps what was said");
+        a.settings.lock().unwrap().tidy = false;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off again: the raw joining");
     }
 
     #[test]
