@@ -753,9 +753,18 @@ function About({ cfg }: { cfg: Config }) {
           Report a Problem
         </button>
       </div>
-      <p className="t-small" style={{ marginTop: 28, maxWidth: 380 }}>
-        Speech recognition by Moonshine (MIT) running on sherpa-onnx (Apache 2.0). Both are downloaded, not bundled.
-      </p>
+      <div className="t-small about-credits">
+        <div className="about-credits-head">Speech recognition</div>
+        <ul>
+          <li>Whisper by OpenAI (MIT)</li>
+          <li>whisper.cpp (MIT)</li>
+          <li>Moonshine by Useful Sensors (MIT)</li>
+          <li>Parakeet TDT by NVIDIA, used under CC-BY-4.0</li>
+          <li>sherpa-onnx (Apache-2.0)</li>
+          <li>Noise reduction by nnnoiseless, a port of RNNoise (BSD-3-Clause)</li>
+        </ul>
+        <div>Speech models are downloaded at setup, not bundled.</div>
+      </div>
     </div>
   );
 }
