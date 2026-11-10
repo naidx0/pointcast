@@ -1686,14 +1686,6 @@ mod tests {
         Ok(Mic::from_samples((1..=32_000).map(|i| i as f32 / 32_000.0).collect(), take))
     }
 
-    fn until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
-        let began = std::time::Instant::now();
-        while !ok() {
-            assert!(began.elapsed().as_secs() < secs, "{what} within {secs} s");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
     #[test]
     fn the_start_never_waits_for_a_slow_microphone_and_keeps_every_sample_from_the_first() {
         let mut a = app("slow-mic");
@@ -1714,8 +1706,8 @@ mod tests {
         assert!(!ui.mic, "no samples yet, so the microphone is not live");
         assert_eq!(ui.phase, Phase::Loading, "not shown as recording before audio flows");
         assert_eq!(ui.duration_ms, 0, "the clock waits for the first audio");
-        until("the microphone goes live", 5, || a.ui().mic);
-        until("the HUD says it records", 5, || a.ui().phase == Phase::Recording);
+        until("the microphone goes live", || a.ui().mic);
+        until("the HUD says it records", || a.ui().phase == Phase::Recording);
         let at = a.audio_at.load(Ordering::SeqCst);
         assert!((1_450..1_900).contains(&at), "the audio starts {at} ms after the press");
         assert!(a.ui().duration_ms < 1_000, "the clock counts from the first audio, not the press: {}", a.ui().duration_ms);
@@ -1728,7 +1720,7 @@ mod tests {
         let read = || {
             std::fs::read(&pcm).unwrap_or_default().chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()
         };
-        until("the kept audio reaches past the first sample", 5, || read().len() > lead + 200);
+        until("the kept audio reaches past the first sample", || read().len() > lead + 200);
         let kept = read();
         assert!(kept[..lead].iter().all(|v| *v == 0), "silence up to the first sample");
         let ramp = |i: usize| (i as f32 / 32_000.0 * 32767.0).round() as i16;
@@ -1762,9 +1754,9 @@ mod tests {
             let began = std::time::Instant::now();
             a.start().unwrap();
             let start_ms = began.elapsed().as_secs_f64() * 1000.0;
-            until("the first sample", 5, || a.take.lock().unwrap().as_ref().is_some_and(|t| t.first_at().is_some()));
+            until("the first sample", || a.take.lock().unwrap().as_ref().is_some_and(|t| t.first_at().is_some()));
             let first = a.take.lock().unwrap().as_ref().and_then(|t| t.first_at()).unwrap() - a.t0.lock().unwrap().unwrap();
-            until("the HUD says the microphone is live", 5, || a.ui().mic);
+            until("the HUD says the microphone is live", || a.ui().mic);
             let live_ms = began.elapsed().as_secs_f64() * 1000.0;
             std::thread::sleep(std::time::Duration::from_millis(300));
             let at = a.audio_at.load(Ordering::SeqCst);
