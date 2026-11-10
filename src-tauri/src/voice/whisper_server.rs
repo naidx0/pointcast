@@ -82,8 +82,27 @@ const NOT_SPEECH: &[&str] = &[
     "pause", "clears throat", "typing", "clicking", "keyboard clicking",
 ];
 
+/// A word that makes a short `(...)` a described sound, as `(sad music)`.
+const SOUND: &[&str] = &[
+    "music", "noise", "noises", "sniff", "sniffs", "sniffing", "sniffles", "laughter", "laughs", "laughing", "applause",
+    "sigh", "sighs", "sighing", "cough", "coughs", "coughing", "beep", "beeps", "static", "silence", "breathing",
+    "typing", "clicking", "click", "clicks",
+];
+
+/// Whether what stands between two marks is a sound the model described and not words the person said.
+fn described_sound(open: u8, inner: &str) -> bool {
+    let words: Vec<&str> = inner.split_whitespace().collect();
+    match open {
+        b'[' => true,
+        // `*sniff*`, `*sad music*`: a few words and no number, so `3 * 4 * 5` stays.
+        b'*' => !words.is_empty() && words.len() <= 4 && !inner.chars().any(|c| c.is_ascii_digit()),
+        // `(sad music)` ends on the sound; `(music settings)` does not.
+        _ => NOT_SPEECH.contains(&inner) || (words.len() <= 3 && words.last().is_some_and(|w| SOUND.contains(w))),
+    }
+}
+
 /// The words of a piece without whisper.cpp's marks for what is not speech: every `[...]`, and `(...)` or `*...*`
-/// around a sound, as `[BLANK_AUDIO]`, `[Music]`, `(silence)`.
+/// around a sound, as `[BLANK_AUDIO]`, `[Music]`, `(silence)`, `*sniff*`.
 pub fn clean(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -96,7 +115,7 @@ pub fn clean(text: &str) -> String {
         };
         let Some(j) = rest[i + 1..].find(close).map(|j| i + 1 + j) else { break };
         let inner = rest[i + 1..j].trim().trim_matches(['-', ' ', '.']).to_lowercase();
-        let drop = open == b'[' || NOT_SPEECH.contains(&inner.as_str());
+        let drop = described_sound(open, &inner);
         out.push_str(&rest[..i]);
         if !drop {
             out.push_str(&rest[i..=j]);
@@ -105,6 +124,14 @@ pub fn clean(text: &str) -> String {
     }
     out.push_str(rest);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What the helper is started with, after its model.
+fn launch_args(port: u16, prefix: &str, inference: &str) -> Vec<String> {
+    // -nfa: with flash attention the GPU gives a different transcript for the same audio on each run.
+    ["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", prefix, "--inference-path", inference, "-t", "4", "-nfa"]
+        .map(String::from)
+        .to_vec()
 }
 
 /// 16 kHz mono samples as a 16-bit PCM WAV file in memory.
@@ -301,7 +328,7 @@ impl Server {
         let mut cmd = Command::new(&exe);
         cmd.arg("-m")
             .arg(&l.model)
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", &prefix, "--inference-path", &inference, "-t", "4"])
+            .args(launch_args(port, &prefix, &inference))
             .current_dir(&l.dir)
             .env_remove("GGML_BACKEND_PATH");
         // A development build can make the helper find no graphics card, as on a computer without one.
@@ -698,8 +725,26 @@ pub mod tests {
         assert_eq!(clean(" Open the (settings) page [BLANK_AUDIO]"), "Open the (settings) page");
         assert_eq!(clean("Done. (laughs) Next"), "Done. Next");
         assert_eq!(clean("a [unclosed"), "a [unclosed");
+        // A sound whisper.cpp describes in its own words is not something the person said.
+        for t in ["*sniff*", "*sad music*", " *Loud noise* ", "(sad music)", "(loud noise)", "(sniffs)", "*sighs deeply*"] {
+            assert_eq!(clean(t), "", "{t:?}");
+        }
+        assert_eq!(clean("So the fix *sniff* is in the header."), "So the fix is in the header.");
+        assert_eq!(clean("Multiply 3 * 4 * 5 here"), "Multiply 3 * 4 * 5 here", "arithmetic is speech");
+        assert_eq!(clean("Open the (music settings) page"), "Open the (music settings) page", "a real aside is kept");
         let f = fake(PATH, vec![Answer::Json(r#"{"text":" [BLANK_AUDIO]\n"}"#.into())]);
         assert_eq!(Server::at(f.port, PATH).transcribe(&[0.0; 8_000], "auto", Duration::from_secs(5)), Ok(String::new()));
+    }
+
+    /// Flash attention on the GPU gives a different transcript for the same audio from one run to the next (133 of
+    /// 1,342 words between two identical runs on real dictation); without it every run is the same.
+    #[test]
+    fn the_helper_is_started_so_that_the_same_audio_gives_the_same_words() {
+        let args = launch_args(4321, "/p", "/i-x");
+        assert!(args.iter().any(|a| a == "-nfa"), "{args:?}");
+        for pair in [["--host", "127.0.0.1"], ["--port", "4321"], ["--request-path", "/p"], ["--inference-path", "/i-x"], ["-t", "4"]] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
     }
 
     #[test]
