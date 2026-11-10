@@ -884,6 +884,53 @@ pub fn prune_handoff(root: &Path, now_ms: u64, spare: Option<&Path>) {
     }
 }
 
+/// The newest handoff folder written for History entry `id`, with its manifest.
+pub fn find_handoff(root: &Path, id: &str) -> Option<(std::path::PathBuf, Manifest)> {
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let m: Manifest = serde_json::from_slice(&std::fs::read(e.path().join("manifest.json")).ok()?).ok()?;
+            (m.id == id).then(|| (e.path(), m))
+        })
+        .max_by(|a, b| a.1.created_ms.cmp(&b.1.created_ms).then(a.0.cmp(&b.0)))
+}
+
+/// Picture `c`'s file in the handoff folder `dir` (with manifest `m`) while it still holds the same picture, with
+/// forward slashes.
+pub fn handoff_copy(dir: &Path, m: &Manifest, c: &Capture) -> Option<String> {
+    let f = dir.join(&m.pictures.iter().find(|p| p.n == c.id)?.file);
+    (std::fs::read(&f).ok()? == c.png).then(|| f.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+/// The files of the handoff folder for entry `id` whose pictures are exactly `items`' pictures, in prompt order; none
+/// when there is no such folder, or a picture was edited, added or taken out since it was written.
+pub fn handoff_files(root: &Path, id: &str, items: &[Item]) -> Option<Vec<String>> {
+    let (_, captures) = compose(items);
+    let (dir, m) = find_handoff(root, id)?;
+    if captures.is_empty() || m.pictures.len() != captures.len() {
+        return None;
+    }
+    captures.iter().map(|c| handoff_copy(&dir, &m, c)).collect()
+}
+
+/// Remove every handoff folder Pointcast wrote for entry `id` (named like one, with a manifest that says so).
+pub fn remove_handoffs(root: &Path, id: &str) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !is_handoff_name(&name) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Some(m) = std::fs::read(e.path().join("manifest.json")).ok().and_then(|b| serde_json::from_slice::<Manifest>(&b).ok()) else {
+            continue;
+        };
+        if m.app == HANDOFF_APP && m.id == id {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Write `prompt.md` and `images/NN-kind.png` under `dir`. Returns the markdown path.
 pub fn export_folder(items: &[Item], dir: &Path, tidy: bool) -> Result<std::path::PathBuf, String> {
     let (md, captures) = assemble_markdown(items, tidy);

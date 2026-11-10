@@ -852,7 +852,7 @@ fn region_commit(
     close_overlay(&app);
     let last = match edited {
         Some(id) => {
-            let exp = svc.set_last(&id)?;
+            let exp = svc.copy_from_history(&id)?;
             let _ = app.emit("history://changed", json!({ "id": id }));
             Some(exp)
         }
@@ -912,12 +912,12 @@ fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExp
 /// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.
 #[tauri::command]
 fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    copy_export(&svc.set_last(&id)?)
+    copy_export(&svc.copy_from_history(&id)?)
 }
 
 #[tauri::command]
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    copy_export(&svc.set_last(&id)?)?;
+    copy_export(&svc.copy_from_history(&id)?)?;
     paste_from_history(&app)
 }
 
@@ -968,7 +968,7 @@ fn paste() -> Result<(), String> {
 #[tauri::command]
 fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n: usize) -> Result<SessionExport, String> {
     svc.history.remove(&id, n)?;
-    let exp = svc.set_last(&id)?;
+    let exp = svc.copy_from_history(&id)?;
     let _ = app.emit("history://changed", json!({ "id": id }));
     copy_export(&exp)?;
     Ok(exp)

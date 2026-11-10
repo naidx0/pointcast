@@ -215,6 +215,41 @@ impl Store {
         Ok(prompt::assemble_export_files(&items, &files, tidy))
     }
 
+    /// The export a copy, paste or send from History uses. With a handoff `root` (picture paths on), its plain text
+    /// names the entry's handoff folder (`agent_files`); without, no files, as `export_with` without paths.
+    pub fn export_for_agents(&self, id: &str, root: Option<&Path>, tidy: bool, now_ms: u64) -> Result<SessionExport, String> {
+        let items = self.items(id)?;
+        let files = match root {
+            Some(root) => self.agent_files(id, &items, root, tidy, now_ms),
+            None => vec![],
+        };
+        Ok(prompt::assemble_export_files(&items, &files, tidy))
+    }
+
+    /// The files the prompt of entry `id` (whose session is `items`) lists for agents, in prompt order: its handoff
+    /// folder under `root` while that holds the same pictures; else the folder written again (named by the entry's
+    /// time, any older folder of the entry removed first so none is left stale) and the root pruned; History's own
+    /// files when it cannot be written.
+    pub fn agent_files(&self, id: &str, items: &[Item], root: &Path, tidy: bool, now_ms: u64) -> Vec<String> {
+        if let Some(files) = prompt::handoff_files(root, id, items) {
+            return files;
+        }
+        if prompt::compose(items).1.is_empty() {
+            return vec![];
+        }
+        let created_ms = self
+            .entry_dir(id)
+            .ok()
+            .and_then(|d| std::fs::read(d.join("meta.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Meta>(&b).ok())
+            .map_or(now_ms, |m| m.created_ms);
+        prompt::remove_handoffs(root, id);
+        match prompt::write_handoff(root, id, created_ms, items, now_ms, tidy) {
+            Ok(h) => h.files,
+            Err(_) => self.prompt_files(id),
+        }
+    }
+
     /// Where an entry's pictures are, in the order the prompt numbers them (`[image 1]` first), with forward slashes.
     /// Pictures whose file never landed are left out, as `items` leaves them out.
     pub fn prompt_files(&self, id: &str) -> Vec<String> {
@@ -632,6 +667,122 @@ mod tests {
         let plain = s.export_with(&m.id, true, false).unwrap().plain;
         assert!(plain.contains(&format!("[image 1] `{}`  region 1x1", files[0])), "{plain}");
         assert!(plain.ends_with(&format!("[image 2] `{}`  region 1x1", files[1])), "{plain}");
+    }
+
+    /// A History store under `<tmp>/pc-agents-<name>/data` and a handoff root beside it, `.../handoff`.
+    fn agents_lab(name: &str) -> (PathBuf, Store, PathBuf) {
+        let base = std::env::temp_dir().join(format!("pc-agents-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        (base.clone(), Store::new(&base.join("data")), base.join("handoff"))
+    }
+
+    /// `items()` with a second picture at 1.5 s.
+    fn two() -> Vec<Item> {
+        let mut v = items();
+        let Item::Image { capture, .. } = v[1].clone() else { panic!() };
+        v.insert(2, Item::Image { t_ms: 1500, capture: Capture { t_ms: 1500, png: png(90), labels: vec![], element: None, ..capture } });
+        v
+    }
+
+    /// Every file under `dir`, relative, with its bytes.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push((e.path().strip_prefix(dir).unwrap().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn folders(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(root).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    const AT: u64 = 1_793_000_000_000;
+
+    #[test]
+    fn a_copy_from_history_names_the_handoff_folder_that_still_holds_its_pictures() {
+        let (base, s, root) = agents_lab("kept");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let h = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        let data = snapshot(&base.join("data"));
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT + 1000).unwrap().plain;
+        let dir = h.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert!(plain.contains(&format!("[image 1] `{dir}/01.png`")), "{plain}");
+        assert!(plain.contains(&format!("[image 2] `{dir}/02.png`")), "{plain}");
+        assert!(!plain.contains("image-0.png"), "not History's own files: {plain}");
+        assert_eq!(folders(&root).len(), 1, "the folder is used as it is, no second one");
+        assert_eq!(snapshot(&base.join("data")), data, "History is left as it was");
+        assert_eq!(folders(&base), ["data", "handoff"], "nothing written beside the root");
+        // Picture paths off: no files named, nothing written.
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!s.export_for_agents(&m.id, None, false, AT).unwrap().plain.contains(".png"));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_copy_from_history_writes_the_handoff_folder_again_when_it_is_gone() {
+        let (base, s, root) = agents_lab("gone");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let first = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        std::fs::remove_dir_all(&first.dir).unwrap();
+        let files = s.agent_files(&m.id, &s.items(&m.id).unwrap(), &root, false, AT + 1000);
+        assert_eq!(files.len(), 2);
+        let dir = first.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert_eq!(files, [format!("{dir}/01.png"), format!("{dir}/02.png")], "named by the entry's time, as at stop");
+        assert_eq!((std::fs::read(&files[0]).unwrap(), std::fs::read(&files[1]).unwrap()), (png(200), png(90)));
+        assert!(Path::new(&format!("{dir}/manifest.json")).is_file());
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT + 2000).unwrap().plain;
+        assert!(plain.contains(&format!("`{dir}/02.png`")), "{plain}");
+        assert_eq!(folders(&root).len(), 1, "the second copy reuses the folder just written");
+        assert_eq!(folders(&base), ["data", "handoff"]);
+    }
+
+    #[test]
+    fn after_a_picture_is_edited_in_history_the_copy_points_at_fresh_files_and_the_old_folder_is_gone() {
+        let (base, s, root) = agents_lab("edited");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let old = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        // Another entry's folder stays untouched.
+        let other = s.save(&items(), AT + 60_000, 2000).unwrap();
+        let theirs = prompt::write_handoff(&root, &other.id, AT + 60_000, &s.items(&other.id).unwrap(), AT, false).unwrap();
+        s.replace(&m.id, 2, &png(77), vec![]).unwrap();
+        let files = s.agent_files(&m.id, &s.items(&m.id).unwrap(), &root, false, AT + 1000);
+        assert_eq!((std::fs::read(&files[0]).unwrap(), std::fs::read(&files[1]).unwrap()), (png(200), png(77)), "the files match History now");
+        let ids: Vec<String> = folders(&root)
+            .iter()
+            .map(|f| serde_json::from_slice::<prompt::Manifest>(&std::fs::read(root.join(f).join("manifest.json")).unwrap()).unwrap().id)
+            .collect();
+        assert_eq!(ids.iter().filter(|i| **i == m.id).count(), 1, "one folder for the edited entry: {ids:?}");
+        assert_eq!(ids.len(), 2, "and the other entry's");
+        assert!(old.dir.join("manifest.json").is_file() && files[1].starts_with(&old.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")), "the old folder was replaced in place, not left stale beside a new one");
+        assert_eq!(std::fs::read(theirs.dir.join("01.png")).unwrap(), png(200));
+        assert_eq!(folders(&base), ["data", "handoff"]);
+    }
+
+    #[test]
+    fn a_copy_from_history_whose_handoff_folder_cannot_be_written_names_historys_own_files() {
+        let (base, s, _) = agents_lab("unwritable");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        // The root is a file: no folder can be made in it.
+        let root = base.join("blocked");
+        std::fs::write(&root, b"not a folder").unwrap();
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT).unwrap().plain;
+        let kept = s.prompt_files(&m.id);
+        assert_eq!(kept.len(), 2);
+        assert!(plain.contains(&format!("[image 1] `{}`", kept[0])) && plain.contains(&format!("[image 2] `{}`", kept[1])), "{plain}");
+        assert_eq!(std::fs::read(&root).unwrap(), b"not a folder");
+        assert_eq!(folders(&base), ["blocked", "data"]);
     }
 
     #[test]

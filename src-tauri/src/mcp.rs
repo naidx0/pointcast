@@ -1,8 +1,8 @@
 //! Tiny local HTTP + JSON-RPC MCP server (protocol 2025-06-18) handing coding agents Pointcast prompts.
 //! Binds loopback only. Tools: `pointcast_latest`, `pointcast_get`, `pointcast_list`, `pointcast_shot`, and
 //! `get_latest_session` (the same as `pointcast_latest`, for setups made before). A prompt comes back as its text,
-//! then each picture's caption and the picture as an image block (downscaled, within a token budget; the rest as
-//! file links), never as base64 inside text.
+//! then each picture's caption and the picture as an image block (downscaled, a JPEG when its PNG is large, within a
+//! token and byte budget; the rest as file links), never as base64 inside text.
 //!
 //! The session holds screenshots, so only a local MCP client may read it: every request must
 //! carry this install's token as `Authorization: Bearer <token>`. Anything a browser sends is
@@ -392,6 +392,12 @@ const OLD_PROTOCOL: &str = "2025-03-26";
 pub const MAX_EDGE: u32 = 1568;
 /// Images inlined in one result, in estimated tokens (width * height / 750 after downscaling); the rest are links.
 pub const IMAGE_BUDGET: u64 = 18_000;
+/// Inline images in one result, in bytes of base64; the rest are links. The first picture within the token budget is
+/// inlined whatever its size, so a result shows at least one.
+pub const INLINE_BYTES: usize = 1_500_000;
+/// An inline picture whose PNG is larger than this is sent as a JPEG of `JPEG_QUALITY` (when that is smaller).
+const JPEG_OVER: usize = 256 * 1024;
+const JPEG_QUALITY: u8 = 82;
 /// The prompt text in a result is cut past this many bytes (clients set long text results aside as files).
 const TEXT_MAX: usize = 16_000;
 
@@ -408,7 +414,7 @@ fn tools() -> Value {
         "type": "string",
         "enum": ["inline", "links", "none"],
         "default": "inline",
-        "description": "inline: each picture as an image (downscaled to 1568 px, about 18,000 tokens in all; the rest as file links). links: file links only. none: text only."
+        "description": "inline: each picture as an image (downscaled to 1568 px, JPEG when large; about 18,000 tokens and 1.5 MB in all; the rest as file links). links: file links only. none: text only."
     });
     let copy_to = json!({
         "type": "string",
@@ -506,19 +512,6 @@ fn element_name(e: &crate::element::ElementMark) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// The newest handoff folder written for History entry `id`, with its manifest.
-fn find_handoff(root: &Path, id: &str) -> Option<(PathBuf, crate::prompt::Manifest)> {
-    std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| {
-            let m: crate::prompt::Manifest = serde_json::from_slice(&std::fs::read(e.path().join("manifest.json")).ok()?).ok()?;
-            (m.id == id).then(|| (e.path(), m))
-        })
-        .max_by(|a, b| a.1.created_ms.cmp(&b.1.created_ms).then(a.0.cmp(&b.0)))
-}
-
 /// History entry `id`. Each picture's file is its handoff copy while that still holds the same picture, else History's own.
 fn from_library(lib: &Library, id: &str) -> Result<Prompt, String> {
     let store = crate::history::Store::new(&lib.data_dir);
@@ -526,15 +519,12 @@ fn from_library(lib: &Library, id: &str) -> Result<Prompt, String> {
     let meta = store.list().into_iter().find(|m| m.id == id);
     let (_, caps) = crate::prompt::compose(&items);
     let kept = store.prompt_files(id);
-    let handoff = find_handoff(&lib.handoff_root, id);
+    let handoff = crate::prompt::find_handoff(&lib.handoff_root, id);
     let pics: Vec<Pic> = caps
         .into_iter()
         .enumerate()
         .map(|(j, c)| {
-            let copy = handoff.as_ref().and_then(|(dir, m)| {
-                let f = dir.join(&m.pictures.iter().find(|p| p.n == c.id)?.file);
-                (std::fs::read(&f).ok()? == c.png).then(|| slashes(&f))
-            });
+            let copy = handoff.as_ref().and_then(|(dir, m)| crate::prompt::handoff_copy(dir, m, &c));
             Pic {
                 n: c.id,
                 kind: c.kind,
@@ -643,25 +633,52 @@ fn image_tokens(w: u32, h: u32) -> u64 {
     (w as u64 * h as u64).div_ceil(750)
 }
 
-/// A picture as an image block's PNG: as it is when small enough, else downscaled to `fit`.
-fn inline_png(png: &[u8]) -> Result<Vec<u8>, String> {
+fn decoded(png: &[u8]) -> Result<image::RgbaImage, String> {
+    let (rgba, w, h) = crate::image_ops::decode_rgba(png)?;
+    image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| "a picture did not decode".to_string())
+}
+
+/// A picture as an image block's PNG: as it is when small enough, else downscaled to `fit` (with its pixels).
+fn inline_png(png: &[u8]) -> Result<(Vec<u8>, Option<image::RgbaImage>), String> {
     let (w, h) = crate::image_ops::png_size(png).ok_or("a picture is not a PNG")?;
     let (tw, th) = fit(w, h);
     if (tw, th) == (w, h) {
-        return Ok(png.to_vec());
+        return Ok((png.to_vec(), None));
     }
-    let (rgba, w, h) = crate::image_ops::decode_rgba(png)?;
-    let img = image::RgbaImage::from_raw(w, h, rgba).ok_or("a picture did not decode")?;
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-    crate::image_ops::encode_png(small.as_raw(), tw, th)
+    let small = image::imageops::resize(&decoded(png)?, tw, th, image::imageops::FilterType::Triangle);
+    Ok((crate::image_ops::encode_png(small.as_raw(), tw, th)?, Some(small)))
 }
 
-fn image_block(png: &[u8]) -> Value {
+/// A picture as an inline image block's bytes and type: the PNG of `inline_png`, or when that is larger than
+/// `JPEG_OVER`, a JPEG of the same pixels if it is smaller still. The files on disk stay PNG.
+fn inline_image(png: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
+    let (small, pixels) = inline_png(png)?;
+    if small.len() <= JPEG_OVER {
+        return Ok((small, "image/png"));
+    }
+    let pixels = match pixels {
+        Some(p) => p,
+        None => decoded(png)?,
+    };
+    let rgb = image::DynamicImage::ImageRgba8(pixels).to_rgb8();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
+        .encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .map_err(|e| e.to_string())?;
+    Ok(if jpeg.len() < small.len() { (jpeg, "image/jpeg") } else { (small, "image/png") })
+}
+
+fn image_block(bytes: &[u8], mime: &str) -> Value {
     json!({
         "type": "image",
-        "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png),
-        "mimeType": "image/png"
+        "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+        "mimeType": mime
     })
+}
+
+/// The length of `n` bytes in base64.
+fn b64_len(n: usize) -> usize {
+    n.div_ceil(3) * 4
 }
 
 /// `file:///C:/Users/max/Pointcast/2026-11-09_1432/01.png`, with anything unusual percent-encoded.
@@ -791,8 +808,10 @@ fn prompt_result(mut p: Prompt, images: Images, copy_to: Option<&str>) -> Result
     let mut content = vec![];
     let mut notes = vec![];
     let mut spent = 0u64;
+    let mut spent_bytes = 0usize;
     let mut linked = vec![];
-    let mut inlined = vec![false; p.pics.len()];
+    // Each picture's inline image size in bytes (before base64); 0 when it is not inlined.
+    let mut inlined = vec![0usize; p.pics.len()];
     if images != Images::None {
         let mut room = images == Images::Inline;
         for (k, pic) in p.pics.iter().enumerate() {
@@ -801,11 +820,15 @@ fn prompt_result(mut p: Prompt, images: Images, copy_to: Option<&str>) -> Result
             let (fw, fh) = fit(w, h);
             let t = image_tokens(fw, fh);
             if room && spent + t <= IMAGE_BUDGET {
-                if let Ok(png) = inline_png(&pic.png) {
-                    spent += t;
-                    inlined[k] = true;
-                    content.push(image_block(&png));
-                    continue;
+                if let Ok((bytes, mime)) = inline_image(&pic.png) {
+                    let b = b64_len(bytes.len());
+                    if spent_bytes == 0 || spent_bytes + b <= INLINE_BYTES {
+                        spent += t;
+                        spent_bytes += b;
+                        inlined[k] = bytes.len();
+                        content.push(image_block(&bytes, mime));
+                        continue;
+                    }
                 }
             }
             if images == Images::Inline {
@@ -856,7 +879,8 @@ fn prompt_result(mut p: Prompt, images: Images, copy_to: Option<&str>) -> Result
                 "height": pic.height,
                 "labels": pic.labels,
                 "pointing_at": pic.pointing_at,
-                "inline": inl
+                "inline": *inl > 0,
+                "inline_bytes": inl
             })
         })
         .collect();
@@ -920,7 +944,7 @@ fn shot_result(latest: &Latest, args: &Value) -> Result<Value, String> {
     Ok(json!({
         "content": [
             { "type": "text", "text": format!("[image {}] {}", pic.n, caption(pic)) },
-            image_block(&pic.png)
+            image_block(&pic.png, "image/png")
         ]
     }))
 }
@@ -1082,20 +1106,58 @@ mod tests {
         r["content"].as_array().unwrap().iter().filter_map(|c| c["text"].as_str().map(String::from)).collect()
     }
 
-    /// The width and height of each image block, after decoding its base64 to a PNG.
-    fn image_sizes(r: &Value) -> Vec<(u32, u32)> {
+    /// Each image block's type and bytes, decoded from base64.
+    fn image_blocks(r: &Value) -> Vec<(String, Vec<u8>)> {
         r["content"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|c| c["type"] == "image")
             .map(|c| {
-                assert_eq!(c["mimeType"], "image/png", "{c}");
-                let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, c["data"].as_str().unwrap()).unwrap();
-                let (_, w, h) = crate::image_ops::decode_rgba(&png).unwrap();
-                (w, h)
+                let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, c["data"].as_str().unwrap()).unwrap();
+                (c["mimeType"].as_str().unwrap().to_string(), bytes)
             })
             .collect()
+    }
+
+    /// The width and height of each image block, after decoding it as the type it says (PNG or JPEG).
+    fn image_sizes(r: &Value) -> Vec<(u32, u32)> {
+        image_blocks(r)
+            .into_iter()
+            .map(|(mime, bytes)| {
+                let format = match mime.as_str() {
+                    "image/png" => image::ImageFormat::Png,
+                    "image/jpeg" => image::ImageFormat::Jpeg,
+                    other => panic!("an image block of type {other}"),
+                };
+                let img = image::load_from_memory_with_format(&bytes, format).unwrap();
+                (img.width(), img.height())
+            })
+            .collect()
+    }
+
+    /// A full screen as a screenshot looks: flat panels and soft gradients with a little sensor-like grain, so its
+    /// PNG is large and a JPEG of it is not.
+    fn screen_png(w: u32, h: u32, seed: u32) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(2_654_435_761).max(1);
+        let mut buf = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for xx in 0..w {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                let grain = (x % 17) as i32 - 8;
+                let panel = if (xx / 240 + y / 160) % 2 == 0 { 40 } else { 0 };
+                let base = [(xx * 200 / w) as i32 + panel, (y * 200 / h) as i32, 160 + panel / 2];
+                let px = |k: usize| (base[k] + grain).clamp(0, 255) as u8;
+                buf.extend_from_slice(&[px(0), px(1), px(2), 255]);
+            }
+        }
+        crate::image_ops::encode_png(&buf, w, h).unwrap()
+    }
+
+    fn base64_total(r: &Value) -> usize {
+        r["content"].as_array().unwrap().iter().filter(|c| c["type"] == "image").map(|c| c["data"].as_str().unwrap().len()).sum()
     }
 
     /// No text block carries picture bytes or runs long enough for a client to set it aside as a file.
@@ -1244,6 +1306,92 @@ mod tests {
             15 - sizes.len(),
             text_chars / 4
         );
+    }
+
+    #[test]
+    fn a_large_picture_comes_back_as_a_jpeg_and_pointcast_shot_and_the_files_stay_png() {
+        let _alone = crate::test_support::alone();
+        let lab = lab("jpeg");
+        let screen = screen_png(1920, 1080, 11);
+        assert!(screen.len() > 1_000_000, "the fixture is a heavy PNG: {} bytes", screen.len());
+        let (latest, id) = saved(&lab, &[words(0, 2_000, "this screen"), pic(500, &screen, vec![])], CREATED, true);
+        let r = call(&latest, "pointcast_latest", json!({}));
+        let blocks = image_blocks(&r);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "image/jpeg");
+        assert!(blocks[0].1.len() < 500_000, "a JPEG of {} bytes", blocks[0].1.len());
+        assert_eq!(image_sizes(&r), [(1568, 882)]);
+        let pics = r["structuredContent"]["pictures"].as_array().unwrap();
+        assert_eq!(pics[0]["inline_bytes"].as_u64(), Some(blocks[0].1.len() as u64));
+        assert_eq!(pics[0]["inline"], true);
+        let file = pics[0]["file"].as_str().unwrap();
+        assert_eq!(std::fs::read(file).unwrap(), screen, "the file on disk is the PNG");
+        // copy_to copies stay PNG.
+        let project = lab.root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let r = call(&latest, "pointcast_latest", json!({ "copy_to": project.to_string_lossy() }));
+        let copied = r["structuredContent"]["pictures"][0]["file"].as_str().unwrap().to_string();
+        assert!(copied.ends_with(".png"), "{copied}");
+        assert_eq!(std::fs::read(&copied).unwrap(), screen);
+        // pointcast_shot: one picture at full size, PNG.
+        let r = call(&latest, "pointcast_shot", json!({ "id": id, "n": 1 }));
+        let blocks = image_blocks(&r);
+        assert_eq!(blocks[0].0, "image/png");
+        assert_eq!(blocks[0].1, screen);
+    }
+
+    #[test]
+    fn a_small_picture_stays_png() {
+        let lab = lab("small-png");
+        let small = noisy_png(120, 80, 12);
+        assert!(small.len() < 256 * 1024);
+        let (latest, _) = saved(&lab, &[words(0, 500, "small"), pic(100, &small, vec![])], CREATED, true);
+        let r = call(&latest, "pointcast_latest", json!({}));
+        let blocks = image_blocks(&r);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], ("image/png".to_string(), small.clone()), "sent as it is");
+        assert_eq!(r["structuredContent"]["pictures"][0]["inline_bytes"].as_u64(), Some(small.len() as u64));
+    }
+
+    #[test]
+    fn two_full_screen_pictures_give_a_response_under_1_6_mb() {
+        let _alone = crate::test_support::alone();
+        let lab = lab("two-screens");
+        let (a, b) = (screen_png(1920, 1080, 13), screen_png(1920, 1080, 14));
+        let items = [words(0, 4_000, "two screens"), pic(1_000, &a, vec![]), pic(3_000, &b, vec![])];
+        let (latest, _) = saved(&lab, &items, CREATED, true);
+        let r = call(&latest, "pointcast_latest", json!({}));
+        let bytes = r.to_string().len();
+        assert_eq!(image_sizes(&r), [(1568, 882), (1568, 882)], "both inlined");
+        // What the same result weighed with PNG image blocks.
+        let png_b64: usize = [&a, &b].iter().map(|p| b64_len(inline_png(p).unwrap().0.len())).sum();
+        let before = bytes - base64_total(&r) + png_b64;
+        assert!(bytes < 1_600_000, "{bytes} bytes of JSON (with PNG blocks it was {before})");
+        assert!(before > bytes, "PNG blocks: {before} bytes, JPEG: {bytes}");
+        eprintln!("TWO SCREENS: {bytes} bytes of JSON; with PNG blocks {before}");
+    }
+
+    #[test]
+    fn the_byte_budget_turns_the_overflow_into_links() {
+        let _alone = crate::test_support::alone();
+        let lab = lab("bytes");
+        // Pure noise at 800x600: few tokens each (640), many bytes even as a JPEG.
+        let mut items = vec![words(0, 9_000, "noise")];
+        items.extend((0..6).map(|k| pic(1_000 + k * 1_000, &noisy_png(800, 600, 20 + k as u32), vec![])));
+        let (latest, _) = saved(&lab, &items, CREATED, true);
+        let r = call(&latest, "pointcast_latest", json!({}));
+        let sizes = image_sizes(&r);
+        let tokens: u64 = sizes.iter().map(|(w, h)| (*w as u64 * *h as u64).div_ceil(750)).sum();
+        let links = r["content"].as_array().unwrap().iter().filter(|c| c["type"] == "resource_link").count();
+        assert!(!sizes.is_empty() && links > 0, "{} images, {links} links", sizes.len());
+        assert_eq!(sizes.len() + links, 6);
+        assert!(6 * 640 < IMAGE_BUDGET && tokens < IMAGE_BUDGET, "the token budget did not bind");
+        assert!(base64_total(&r) <= INLINE_BYTES, "{} bytes of base64", base64_total(&r));
+        let pics = r["structuredContent"]["pictures"].as_array().unwrap();
+        let inline: Vec<bool> = pics.iter().map(|p| p["inline_bytes"].as_u64().unwrap() > 0).collect();
+        assert_eq!(inline.iter().filter(|i| **i).count(), sizes.len());
+        assert!(inline.windows(2).all(|w| w[0] || !w[1]), "the first pictures inline, the rest links: {inline:?}");
+        assert!(texts(&r)[0].contains("past the image budget"), "{}", texts(&r)[0]);
     }
 
     #[test]
