@@ -31,8 +31,120 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use voice::ptt::TalkMode;
 
-/// Quiet time before the floating windows (HUD, overlay) are released. The speech model has its own setting, free_memory_minutes.
-const IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How long the hidden floating windows (HUD, overlay) are kept after they were last hidden or a session last ended.
+/// The speech model has its own setting, free_memory_minutes.
+const REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The pulse to the HUD and the menu bar clock while a session runs.
+const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// When the idle scheduler looks again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// A session runs: pulse again after this long.
+    Tick(std::time::Duration),
+    /// Nothing runs: sleep until then, or until something wakes the loop.
+    At(std::time::Instant),
+    /// Nothing is held: sleep until something wakes the loop.
+    Never,
+}
+
+/// What the idle scheduler sees.
+#[derive(Debug, Clone, Copy, Default)]
+struct Quiet {
+    /// A session records, loads or finishes.
+    busy: bool,
+    /// A speech setup the person started runs: nothing is let go meanwhile, and its end wakes the loop.
+    hold: bool,
+    /// When the HUD or overlay was last hidden, or a session last ended.
+    hidden: Option<std::time::Instant>,
+    /// `App::engine_used`: when the model in memory was last used, none when none is.
+    used: Option<std::time::Instant>,
+    /// free_memory_minutes.
+    minutes: u32,
+    /// `App::busy`: also a History entry transcribed again; its end notes a use, which wakes the loop.
+    engine_busy: bool,
+}
+
+/// What is due `now`, and when to look again. The next time is never already past, so the loop cannot spin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Due {
+    reap: bool,
+    free: bool,
+    next: Next,
+}
+
+fn due(now: std::time::Instant, q: &Quiet) -> Due {
+    if q.busy {
+        return Due { reap: false, free: false, next: Next::Tick(TICK) };
+    }
+    if q.hold {
+        return Due { reap: false, free: false, next: Next::Never };
+    }
+    let reap_at = q.hidden.map(|h| h + REAP_AFTER);
+    let reap = reap_at.is_some_and(|t| now >= t);
+    let free = free_due(now, q.used, q.minutes, q.engine_busy);
+    // The time `free_due` turns true, from the same inputs.
+    let after = std::time::Duration::from_secs(u64::from(q.minutes) * 60);
+    let free_at = q.used.filter(|_| !q.engine_busy && q.minutes > 0).map(|u| u + after);
+    let next = [reap_at.filter(|_| !reap), free_at.filter(|_| !free)].into_iter().flatten().min();
+    Due { reap, free, next: next.map_or(Next::Never, Next::At) }
+}
+
+/// Wakes the idle scheduler: a session phase changed, the engine was used, a window hid, a setting changed.
+struct Waker {
+    seen: std::sync::Mutex<u64>,
+    cv: std::sync::Condvar,
+}
+
+impl Waker {
+    const fn new() -> Self {
+        Self { seen: std::sync::Mutex::new(0), cv: std::sync::Condvar::new() }
+    }
+
+    fn gen(&self) -> u64 {
+        *self.seen.lock().unwrap()
+    }
+
+    fn wake(&self) {
+        *self.seen.lock().unwrap() += 1;
+        self.cv.notify_all();
+    }
+
+    /// Sleep as `next` says, cut short by a wake after `gen` was read. True when woken.
+    fn wait(&self, gen: u64, next: Next) -> bool {
+        let g = self.seen.lock().unwrap();
+        match next {
+            Next::Tick(d) => {
+                drop(g);
+                std::thread::sleep(d);
+                false
+            }
+            Next::At(t) => {
+                let left = t.saturating_duration_since(std::time::Instant::now());
+                !self.cv.wait_timeout_while(g, left, |s| *s == gen).unwrap().1.timed_out()
+            }
+            Next::Never => {
+                drop(self.cv.wait_while(g, |s| *s == gen).unwrap());
+                true
+            }
+        }
+    }
+}
+
+static WAKE: Waker = Waker::new();
+static HIDDEN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Something the idle scheduler decides on changed: it looks again now.
+pub(crate) fn wake() {
+    WAKE.wake();
+}
+
+/// The HUD or overlay just hid (or a session ended): it is let go REAP_AFTER from now unless shown again.
+fn note_hidden() {
+    *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+    wake();
+}
 
 /// Whether the speech model should be let go `now`: one is in memory, last `used` at least the `minutes` the person chose
 /// ago (0 means never), and nothing is recording, finishing or transcribed again. However it was loaded.
@@ -73,6 +185,9 @@ fn hide_window(app: &AppHandle, label: &str) {
         let _ = w.hide();
         if platform::DESK.contains(&label) {
             platform::dock(app, Some(label));
+        }
+        if matches!(label, "indicator" | "overlay") {
+            note_hidden();
         }
     }
 }
@@ -498,6 +613,10 @@ fn settings_patch(
     let cur = svc.settings.lock().unwrap().clone();
     let next = merge(&cur, patch)?;
     svc.save_settings(next.clone())?;
+    // A new free_memory_minutes moves the time the model goes.
+    if cur.free_memory_minutes != next.free_memory_minutes {
+        wake();
+    }
     if keys_changed(&cur, &next) {
         rebind(&app, &svc);
     }
@@ -924,6 +1043,11 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
         }
         *SPEECH.lock().unwrap() = None;
         SPEECH_BUSY.store(false, Ordering::SeqCst);
+        wake();
+        // What is installed decides which model recordings use: an upgrade found "not Whisper Turbo" may now start.
+        if r.is_ok() {
+            kick_upgrade(&app, &svc);
+        }
         let _ = app.emit("speech://done", json!({ "id": id, "ok": r.is_ok(), "error": r.err() }));
     });
     Ok(())
@@ -1027,18 +1151,22 @@ fn upgrade_report(app: &AppHandle, s: &voice::upgrade::Status) {
 }
 
 /// Run the background GPU upgrade if it should run now, or show the note when something the person can fix stops it.
-/// Not before the setup assistant is done: it sets up a model of its own.
-fn try_upgrade(app: &AppHandle, svc: &Arc<App>) {
+/// Not before the setup assistant is done: it sets up a model of its own. True when the answer is final until
+/// `kick_upgrade` asks again (leaving the setup assistant does).
+fn try_upgrade(app: &AppHandle, svc: &Arc<App>) -> bool {
     use voice::upgrade as up;
     let s = svc.settings.lock().unwrap().clone();
     if !s.onboarded {
-        return;
+        return true;
     }
     let (root, data, cat) = (voice::models::speech_dir(), settings::data_dir(), voice::models::catalog());
     let busy = || svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst);
     let report = |st: &up::Status| upgrade_report(app, st);
     match up::decide(&up::facts(&root, &data, &cat, &s.model, s.auto_gpu, busy())) {
-        up::Decision::Skip(why) => up::noted(&why, &report),
+        up::Decision::Skip(why) => {
+            up::noted(&why, &report);
+            up::settled(&why)
+        }
         up::Decision::Start => {
             let check = || voice::engine::probe(&root, &cat, up::MODEL);
             let out = up::run(&root, &data, &cat, &up::Hooks { busy: &busy, check: &check, report: &report });
@@ -1047,13 +1175,55 @@ fn try_upgrade(app: &AppHandle, svc: &Arc<App>) {
             if matches!(out, up::Outcome::Gpu(_)) && !busy() {
                 let _ = svc.ensure_engine();
             }
+            up::finished(&out)
         }
     }
 }
 
+static UPGRADE_LOOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static UPGRADE_KICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ask now, and keep asking in the background while the answer can change by itself.
 fn kick_upgrade(app: &AppHandle, svc: &Arc<App>) {
+    UPGRADE_KICKS.fetch_add(1, Ordering::SeqCst);
     let (app, svc) = (app.clone(), svc.clone());
-    std::thread::spawn(move || try_upgrade(&app, &svc));
+    std::thread::spawn(move || {
+        if !try_upgrade(&app, &svc) {
+            upgrade_loop(&app, &svc);
+        }
+    });
+}
+
+/// The faster GPU engine sets itself up once nothing was recorded for 30 s, and goes on after a recording. The loop
+/// ends once the answer is final; `kick_upgrade` starts it again. One at a time.
+fn upgrade_loop(app: &AppHandle, svc: &Arc<App>) {
+    if UPGRADE_LOOP.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        let mut quiet_since = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst) {
+                quiet_since = std::time::Instant::now();
+                continue;
+            }
+            if quiet_since.elapsed() < std::time::Duration::from_secs(30) {
+                continue;
+            }
+            let kicks = UPGRADE_KICKS.load(Ordering::SeqCst);
+            let settled = try_upgrade(&app, &svc);
+            quiet_since = std::time::Instant::now();
+            if settled {
+                UPGRADE_LOOP.store(false, Ordering::SeqCst);
+                // A kick meanwhile may have found the loop still running: go on for it, unless another loop took over.
+                if UPGRADE_KICKS.load(Ordering::SeqCst) == kicks || UPGRADE_LOOP.swap(true, Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1492,51 +1662,54 @@ pub fn run() {
                     }
                 });
             }
-            // The faster GPU engine sets itself up once nothing was recorded for 30 s, and goes on after a recording.
-            {
-                let (handle, svc) = (handle.clone(), svc.clone());
-                std::thread::spawn(move || {
-                    let mut quiet_since = std::time::Instant::now();
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        if svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst) {
-                            quiet_since = std::time::Instant::now();
-                        } else if quiet_since.elapsed() >= std::time::Duration::from_secs(30) {
-                            try_upgrade(&handle, &svc);
-                            quiet_since = std::time::Instant::now();
-                        }
-                    }
-                });
-            }
-            // Pulse live state to the HUD and the menu bar clock while a session runs. After
-            // IDLE without one, the floating windows are let go; the speech model, the chosen time after its last use.
+            // The faster GPU engine sets itself up once nothing was recorded for 30 s, until its answer is final.
+            upgrade_loop(&handle, &svc);
+            // Pulse live state to the HUD and the menu bar clock while a session runs. Otherwise sleep until something
+            // wakes the loop or the next deadline: the hidden floating windows go REAP_AFTER after they hid or the
+            // session ended; the speech model, the chosen time after its last use.
             let svc2 = svc.clone();
             std::thread::spawn(move || {
-                let mut busy_at = std::time::Instant::now();
-                let mut reaped_at = busy_at;
+                // Windows made hidden at launch go too.
+                *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+                let mut was_busy = false;
                 loop {
+                    let gen = WAKE.gen();
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
                         emit_state(&handle, &svc2);
-                        busy_at = std::time::Instant::now();
-                        reaped_at = busy_at;
+                        was_busy = true;
                         // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
                         // click on the HUD's Stop can bring Pointcast forward on macOS.
                         #[cfg(target_os = "macos")]
                         if recording(&svc2) && !handle.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
                             platform::remember_front();
                         }
-                    } else if !SPEECH_BUSY.load(Ordering::SeqCst) {
-                        if busy_at.elapsed() >= IDLE && reaped_at.elapsed() >= IDLE {
-                            platform::reap(&handle);
-                            reaped_at = std::time::Instant::now();
-                        }
-                        let minutes = svc2.settings.lock().unwrap().free_memory_minutes;
-                        if free_due(std::time::Instant::now(), svc2.engine_used(), minutes, svc2.busy()) {
-                            svc2.unload_engine();
+                    } else if was_busy {
+                        was_busy = false;
+                        *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+                    }
+                    let hidden = *HIDDEN.lock().unwrap();
+                    let q = Quiet {
+                        busy,
+                        hold: SPEECH_BUSY.load(Ordering::SeqCst),
+                        hidden,
+                        used: svc2.engine_used(),
+                        minutes: svc2.settings.lock().unwrap().free_memory_minutes,
+                        engine_busy: svc2.busy(),
+                    };
+                    let d = due(std::time::Instant::now(), &q);
+                    if d.reap {
+                        platform::reap(&handle);
+                        let mut h = HIDDEN.lock().unwrap();
+                        // A hide since the look counts from then.
+                        if *h == hidden {
+                            *h = None;
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
+                    if d.free {
+                        svc2.unload_engine();
+                    }
+                    WAKE.wait(gen, d.next);
                 }
             });
             Ok(())
@@ -1610,6 +1783,80 @@ mod tests {
         assert!(!free_due(at(36_000), loaded, 0, false), "0 keeps the model loaded however long it is quiet");
         assert!(!free_due(at(3_600), None, 1, false), "nothing in memory, nothing to free");
         assert!(free_due(at(300), loaded, 5, false) && !free_due(at(299), loaded, 5, false), "a longer choice");
+    }
+
+    #[test]
+    fn the_idle_scheduler_sleeps_until_the_next_deadline_and_ticks_only_while_a_session_runs() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let quiet = Quiet { minutes: 1, ..Default::default() };
+        // Nothing loaded, no window hidden: nothing to wake for.
+        assert_eq!(due(at(0), &quiet), Due { reap: false, free: false, next: Next::Never });
+        assert_eq!(due(at(86_400), &quiet).next, Next::Never, "however long it is quiet");
+        // The HUD hid at 10 s: it goes at 70 s, not ten minutes later.
+        let hid = Quiet { hidden: Some(at(10)), ..quiet };
+        assert_eq!(due(at(11), &hid), Due { reap: false, free: false, next: Next::At(at(70)) });
+        assert_eq!(due(at(69), &hid).next, Next::At(at(70)));
+        assert_eq!(due(at(70), &hid), Due { reap: true, free: false, next: Next::Never }, "and then nothing is left");
+        assert!(due(at(600), &hid).reap, "a late look still lets it go");
+        // The engine, at its own time: the chosen minutes after its last use.
+        let loaded = Quiet { used: Some(at(5)), ..quiet };
+        assert_eq!(due(at(6), &loaded), Due { reap: false, free: false, next: Next::At(at(65)) });
+        assert_eq!(due(at(65), &loaded), Due { reap: false, free: true, next: Next::Never });
+        let five = Quiet { minutes: 5, ..loaded };
+        assert_eq!(due(at(6), &five).next, Next::At(at(305)));
+        assert_eq!(due(at(6), &Quiet { minutes: 0, ..loaded }).next, Next::Never, "0 keeps it loaded: no deadline");
+        // Both: the earlier first, then the other.
+        let both = Quiet { hidden: Some(at(10)), used: Some(at(30)), ..quiet };
+        assert_eq!(due(at(11), &both).next, Next::At(at(70)));
+        assert_eq!(due(at(70), &both), Due { reap: true, free: false, next: Next::At(at(90)) });
+        assert_eq!(due(at(90), &Quiet { hidden: None, ..both }), Due { reap: false, free: true, next: Next::Never });
+        let early = Quiet { hidden: Some(at(50)), used: Some(at(0)), ..quiet };
+        assert_eq!(due(at(1), &early).next, Next::At(at(60)));
+        assert_eq!(due(at(60), &early), Due { reap: false, free: true, next: Next::At(at(110)) });
+        // A session runs: the 100 ms pulse, and nothing is let go meanwhile.
+        let busy = Quiet { busy: true, engine_busy: true, ..both };
+        assert_eq!(due(at(3_600), &busy), Due { reap: false, free: false, next: Next::Tick(Duration::from_millis(100)) });
+        assert_eq!(due(at(0), &Quiet { busy: true, ..quiet }).next, Next::Tick(Duration::from_millis(100)));
+        // A History entry transcribed again or a speech setup: nothing goes, and their end wakes the loop.
+        assert_eq!(due(at(3_600), &Quiet { engine_busy: true, ..loaded }), Due { reap: false, free: false, next: Next::Never });
+        assert_eq!(due(at(3_600), &Quiet { hold: true, ..both }), Due { reap: false, free: false, next: Next::Never });
+        // Never a deadline already past (the loop would spin), over a spread of inputs.
+        for now in (0..200).step_by(7) {
+            for q in [quiet, hid, loaded, five, both, early] {
+                if let Next::At(t) = due(at(now), &q).next {
+                    assert!(t > at(now), "{q:?} at {now}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wake_cuts_the_idle_sleep_short_and_a_deadline_ends_it() {
+        use std::time::{Duration, Instant};
+        let w = Arc::new(Waker::new());
+        // Woken while asleep with no deadline.
+        let gen = w.gen();
+        let w2 = w.clone();
+        let t = Instant::now();
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            w2.wake();
+        });
+        assert!(w.wait(gen, Next::Never));
+        waker.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(5));
+        // A wake between the look and the sleep is not lost.
+        let gen = w.gen();
+        w.wake();
+        assert!(w.wait(gen, Next::Never), "returns at once");
+        // A deadline with no wake ends the sleep, not woken.
+        let gen = w.gen();
+        let t = Instant::now();
+        assert!(!w.wait(gen, Next::At(t + Duration::from_millis(30))));
+        assert!(t.elapsed() >= Duration::from_millis(30));
+        assert!(!w.wait(w.gen(), Next::Tick(Duration::from_millis(1))));
     }
 
     #[test]
