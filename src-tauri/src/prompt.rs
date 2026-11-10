@@ -428,6 +428,7 @@ fn is_handoff_name(name: &str) -> bool {
 
 /// A folder only its owner can open (0700 on Unix). Fails when it already exists.
 fn create_private(p: &Path) -> std::io::Result<()> {
+    #[allow(unused_mut)] // set only on Unix
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
