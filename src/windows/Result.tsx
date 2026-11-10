@@ -199,11 +199,20 @@ export function Result() {
       if (r.commit) void commit(r.commit);
       pendingRef.current = r.pending;
       setPending(r.pending);
-      setSel(r.next);
+      if (id === selRef.current) setSel(r.next);
       setNote("");
     },
     [commit],
   );
+
+  // Browser preview: ?delete=b shows that entry already deleted, with the bar up (add undo=hold to keep it).
+  const previewDeleted = useRef(false);
+  useEffect(() => {
+    const id = preview && !inTauri ? new URLSearchParams(location.search).get("delete") : null;
+    if (!id || previewDeleted.current || !entries.some((e) => e.id === id)) return;
+    previewDeleted.current = true;
+    removeEntry(id);
+  }, [entries, removeEntry]);
 
   const undoEntry = useCallback(() => {
     const r = undoDelete(pendingRef.current);
@@ -576,50 +585,96 @@ export function PromptDoc({
   onEdit?: (n: number) => void;
   onRemove?: (n: number) => void;
 }) {
+  const uid = useId();
+  // The picture a chip was just clicked for, lit for a moment.
+  const [lit, setLit] = useState<number | null>(null);
+  const litTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(litTimer.current), []);
+  const figId = (n: number) => `pd-${uid}-${n}`;
+  const show = (n: number) => {
+    document.getElementById(figId(n))?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    setLit(n);
+    clearTimeout(litTimer.current);
+    litTimer.current = setTimeout(() => setLit(null), 1400);
+  };
+
+  const figure = (n: number) => {
+    const img = exp.images[n - 1];
+    return (
+      <figure key={`f${n}`} id={figId(n)} className={`pd-fig${lit === n ? " lit" : ""}`}>
+        {onEdit && img ? (
+          <span className="pd-frame">
+            <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${n}`} onClick={() => onEdit(n)}>
+              <img src={img.data_url} alt={`Image ${n}`} />
+              <span className="pd-edit" aria-hidden="true">
+                <Pencil size={12} strokeWidth={2} />
+                Edit picture
+              </span>
+            </button>
+            {img.auto ? (
+              <span className="pd-auto" title="Pointcast picked this moment from your recording">
+                Auto
+              </span>
+            ) : null}
+            {img.auto && onRemove ? (
+              <button
+                type="button"
+                className="pd-remove"
+                title="Take this picture out of the prompt"
+                aria-label={`Remove picture ${n}`}
+                onClick={() => onRemove(n)}
+              >
+                <X size={12} strokeWidth={2} />
+                Remove
+              </button>
+            ) : null}
+          </span>
+        ) : (
+          <img src={img?.data_url} alt={`Image ${n}`} />
+        )}
+        <figcaption>
+          [image {n}]
+          {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
+        </figcaption>
+      </figure>
+    );
+  };
+
+  // Paragraphs are the tidied text's blank lines. A picture shows once, after the first paragraph that names it.
+  const placed = new Set<number>();
   return (
     <div className="prompt-doc">
-      {splitMarkers(exp.plain).map((p, i) => {
-        if (p.kind === "text") return <span key={i}>{p.value}</span>;
-        const img = exp.images[p.n - 1];
-        return (
-          <figure key={i}>
-            {onEdit && img ? (
-              <span className="pd-frame">
-                <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${p.n}`} onClick={() => onEdit(p.n)}>
-                  <img src={img.data_url} alt={p.value} />
-                  <span className="pd-edit" aria-hidden="true">
-                    <Pencil size={12} strokeWidth={2} />
-                    Edit picture
-                  </span>
-                </button>
-                {img.auto ? (
-                  <span className="pd-auto" title="Pointcast picked this moment from your recording">
-                    Auto
-                  </span>
-                ) : null}
-                {img.auto && onRemove ? (
-                  <button
-                    type="button"
-                    className="pd-remove"
-                    title="Take this picture out of the prompt"
-                    aria-label={`Remove picture ${p.n}`}
-                    onClick={() => onRemove(p.n)}
-                  >
-                    <X size={12} strokeWidth={2} />
-                    Remove
-                  </button>
-                ) : null}
-              </span>
-            ) : (
-              <img src={img?.data_url} alt={p.value} />
-            )}
-            <figcaption>
-              Image {p.n}
-              {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
-            </figcaption>
-          </figure>
-        );
-      })}
+      {exp.plain
+        .split(/\n[ \t]*\n+/)
+        .filter((para) => para.trim())
+        .map((para, k) => {
+          const parts = splitMarkers(para);
+          const pics = parts.filter((p) => p.kind === "img" && !placed.has(p.n)).map((p) => p.n);
+          pics.forEach((n) => placed.add(n));
+          const onlyPics = parts.every((p) => p.kind === "img" || !p.value.trim());
+          return (
+            <div key={k} className="pd-block">
+              {onlyPics ? null : (
+                <p>
+                  {parts.map((p, i) =>
+                    p.kind === "text" ? (
+                      <span key={i}>{p.value}</span>
+                    ) : exp.images[p.n - 1] ? (
+                      <button key={i} type="button" className="pd-chip" title={`Go to image ${p.n}`} onClick={() => show(p.n)}>
+                        [image {p.n}]
+                      </button>
+                    ) : (
+                      <span key={i} className="pd-chip">
+                        [image {p.n}]
+                      </span>
+                    ),
+                  )}
+                </p>
+              )}
+              {Array.from(new Set(pics)).map(figure)}
+            </div>
+          );
+        })}
     </div>
   );
 }
