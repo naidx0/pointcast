@@ -830,7 +830,8 @@ fn history_list(svc: tauri::State<'_, Arc<App>>) -> Value {
 
 #[tauri::command]
 fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExport, String> {
-    svc.history.export_with(&id, svc.settings.lock().unwrap().picture_paths)
+    let s = svc.settings.lock().unwrap().clone();
+    svc.history.export_with(&id, s.picture_paths, s.tidy)
 }
 
 /// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.

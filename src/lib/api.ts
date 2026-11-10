@@ -138,6 +138,8 @@ export type Config = {
   keep_audio?: boolean;
   /** Put the file path of each picture in the text, for terminal agents. Treated as on when absent. */
   picture_paths?: boolean;
+  /** Paragraphs at the pauses, no ums and no repeated words when the prompt is composed. Treated as on when absent. */
+  tidy?: boolean;
   /** Clean up room noise and even out the volume before transcribing. Treated as on when absent. */
   voice_boost?: boolean;
   /** Get the faster GPU version of Whisper Turbo by itself. Treated as on when absent. */

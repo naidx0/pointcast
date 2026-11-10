@@ -204,14 +204,15 @@ impl Store {
     }
 
     pub fn export(&self, id: &str) -> Result<SessionExport, String> {
-        self.export_with(id, false)
+        self.export_with(id, false, false)
     }
 
-    /// The export of an entry; with `paths`, its plain text names each picture's file.
-    pub fn export_with(&self, id: &str, paths: bool) -> Result<SessionExport, String> {
+    /// The export of an entry; with `paths`, its plain text names each picture's file; with `tidy`, it is in paragraphs.
+    /// The stored items stay as they were said: formatting happens here, each time.
+    pub fn export_with(&self, id: &str, paths: bool, tidy: bool) -> Result<SessionExport, String> {
         let items = self.items(id)?;
         let files = if paths { self.prompt_files(id) } else { vec![] };
-        Ok(prompt::assemble_export_files(&items, &files))
+        Ok(prompt::assemble_export_files(&items, &files, tidy))
     }
 
     /// Where an entry's pictures are, in the order the prompt numbers them (`[image 1]` first), with forward slashes.
@@ -628,7 +629,7 @@ mod tests {
         let files = s.prompt_files(&m.id);
         assert!(files[0].ends_with("/image-1.png") && files[1].ends_with("/image-0.png"), "{files:?}");
         assert_eq!(std::fs::read(&files[0]).unwrap(), png(200), "[image 1] is the picture taken first");
-        let plain = s.export_with(&m.id, true).unwrap().plain;
+        let plain = s.export_with(&m.id, true, false).unwrap().plain;
         assert!(plain.contains(&format!("[image 1] `{}`  region 1x1", files[0])), "{plain}");
         assert!(plain.ends_with(&format!("[image 2] `{}`  region 1x1", files[1])), "{plain}");
     }

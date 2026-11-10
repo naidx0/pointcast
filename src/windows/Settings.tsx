@@ -659,6 +659,9 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
             <Toggle label="Also copy to the clipboard" on={cfg.also_clipboard} set={(v) => patch({ also_clipboard: v })} />
           </Row>
         ) : null}
+        <Row label="Tidy the text" sub="Paragraphs at your pauses, no ums and no repeated words. Nothing is summarized or reworded.">
+          <Toggle label="Tidy the text" on={cfg.tidy !== false} set={(v) => patch({ tidy: v })} />
+        </Row>
         <Row label="Save folder" sub={cfg.export_dir || "Documents › Pointcast, one folder per recording"}>
           {cfg.export_dir ? (
             <button type="button" className="btn plain" onClick={() => patch({ export_dir: null })}>
