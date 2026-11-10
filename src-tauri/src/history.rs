@@ -210,8 +210,28 @@ impl Store {
     /// The export of an entry; with `paths`, its plain text names each picture's file.
     pub fn export_with(&self, id: &str, paths: bool) -> Result<SessionExport, String> {
         let items = self.items(id)?;
-        let files = if paths { self.files(id) } else { vec![] };
+        let files = if paths { self.prompt_files(id) } else { vec![] };
         Ok(prompt::assemble_export_files(&items, &files))
+    }
+
+    /// Where an entry's pictures are, in the order the prompt numbers them (`[image 1]` first), with forward slashes.
+    /// Pictures whose file never landed are left out, as `items` leaves them out.
+    pub fn prompt_files(&self, id: &str) -> Vec<String> {
+        let Ok(dir) = self.entry_dir(id) else { return vec![] };
+        let Ok(items) = stored(&dir) else { return vec![] };
+        let mut k = 0;
+        let mut kept = vec![];
+        for it in &items {
+            if let Item::Image { t_ms, .. } = it {
+                let p = dir.join(format!("image-{k}.png"));
+                if std::fs::metadata(&p).is_ok_and(|m| m.len() > 0) {
+                    kept.push((*t_ms, p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")));
+                }
+                k += 1;
+            }
+        }
+        kept.sort_by_key(|x| x.0);
+        kept.into_iter().map(|x| x.1).collect()
     }
 
     /// Where an entry's pictures are, in the order its session holds them, with forward slashes.
@@ -594,6 +614,23 @@ mod tests {
         assert_eq!(s.list(), vec![m.clone()]);
         s.delete(&m.id).unwrap();
         assert!(s.list().is_empty());
+    }
+
+    #[test]
+    fn history_paths_follow_the_prompts_numbers_when_a_key_frame_was_stored_first() {
+        let s = store("prompt-files");
+        // A key frame taken at 1.5 s, added after the stop, is stored before the person's picture from 1 s.
+        let mut v = items();
+        let Item::Image { capture, .. } = v[1].clone() else { panic!() };
+        let key = Capture { t_ms: 1500, png: png(90), auto: true, labels: vec![], element: None, ..capture };
+        v.insert(1, Item::Image { t_ms: 1500, capture: key });
+        let m = s.save(&v, 1_793_000_000_000, 2000).unwrap();
+        let files = s.prompt_files(&m.id);
+        assert!(files[0].ends_with("/image-1.png") && files[1].ends_with("/image-0.png"), "{files:?}");
+        assert_eq!(std::fs::read(&files[0]).unwrap(), png(200), "[image 1] is the picture taken first");
+        let plain = s.export_with(&m.id, true).unwrap().plain;
+        assert!(plain.contains(&format!("[image 1] `{}`  region 1x1", files[0])), "{plain}");
+        assert!(plain.ends_with(&format!("[image 2] `{}`  region 1x1", files[1])), "{plain}");
     }
 
     #[test]

@@ -543,6 +543,7 @@ impl App {
         // the next launch to recover. A recording that came back with no words keeps its audio there, to transcribe
         // again; only one with neither is let go.
         let mut saved = None;
+        let mut created_ms = 0;
         let mut has_audio = false;
         if items.is_empty() && !self.history.kept_audio() {
             self.history.clear_checkpoint();
@@ -553,14 +554,16 @@ impl App {
                 let _ = self.history.note_run(&m.id, &self.run(self.pace.lock().unwrap().1, audio_ms));
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
+                created_ms = m.created_ms;
                 saved = Some(m.id);
                 self.history.clear_checkpoint();
             }
         }
-        // Saved, the prompt can name its pictures' files for agents in a terminal; unsaved, it marks them as before.
+        // Saved, the pictures are copied to a handoff folder and the prompt lists their files for agents in a terminal;
+        // unsaved, it marks them as before.
         let files = match &saved {
-            Some(id) if settings.picture_paths => self.history.files(id),
-            _ => vec![],
+            Some(id) => agent_files(&self.history, &prompt::handoff_root(&settings), id, created_ms, &items, settings.picture_paths),
+            None => vec![],
         };
         let exp = prompt::assemble_export_files(&items, &files);
         *self.last_export.lock().unwrap() = Some(exp.clone());
@@ -1204,6 +1207,17 @@ impl App {
 }
 
 /// One new folder per recording, named by when it was saved, in the chosen folder or Documents › Pointcast.
+/// Copy a saved recording's pictures to a handoff folder under `root` and return the files its prompt lists, in prompt
+/// order: the handoff copies, or History's own when the folder could not be written; none when `paths` is off.
+fn agent_files(history: &crate::history::Store, root: &std::path::Path, id: &str, created_ms: u64, items: &[Item], paths: bool) -> Vec<String> {
+    let handoff = prompt::write_handoff(root, id, created_ms, items, now_ms());
+    match handoff {
+        _ if !paths => vec![],
+        Ok(h) => h.files,
+        Err(_) => history.prompt_files(id),
+    }
+}
+
 fn export_dir(s: &Settings, stamp: &str) -> std::path::PathBuf {
     let base = match &s.export_dir {
         Some(d) => std::path::PathBuf::from(d),
@@ -1739,10 +1753,10 @@ mod tests {
         // A picture in it marked up again: agents read the new one.
         a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
         a.set_last(&rec.id).unwrap();
-        // Their plain text names the picture's file in History, and ends with its folder.
+        // Their plain text closes with the list of pictures: its folder, then the picture's file in History.
         let file = a.history.files(&rec.id)[0].clone();
-        let folder = std::path::Path::new(&file).parent().unwrap().to_string_lossy().into_owned();
-        let named = format!("look [image 1: {file}; 1=this one]\n\nPictures: {folder}");
+        let folder = file.rsplit_once('/').unwrap().0;
+        let named = format!("look [image 1]\n\nPictures (1), in `{folder}/`:\n[image 1] `{file}`  region 1x1 · pins: 1=this one");
         assert_eq!(served(&a), Some(named.clone()));
         // Copying the older prompt makes it the last one; agents still read the recording.
         a.set_last(&older.id).unwrap();
@@ -1761,6 +1775,58 @@ mod tests {
         a.history.clear().unwrap();
         a.forget(None);
         assert_eq!(served(&a), None);
+    }
+
+    #[test]
+    fn a_handoff_folder_that_cannot_be_written_leaves_the_prompt_on_history_paths() {
+        let a = app("handoff");
+        let pic = |t: u64| Item::Image {
+            t_ms: t,
+            capture: Capture {
+                id: 0,
+                kind: CaptureKind::Full,
+                t_ms: t,
+                png: png(),
+                width: 1,
+                height: 1,
+                labels: vec![],
+                pointer: None,
+                trail: vec![],
+                element: None,
+                place: None,
+                anchors: vec![],
+                auto: false,
+            },
+        };
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() }, pic(10)];
+        let rec = a.history.save(&items, now_ms(), 9).unwrap();
+        // The root is a file: no folder can be made there, and the prompt names History's copies instead.
+        let base = std::env::temp_dir().join(format!("pc-handoff-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let blocked = base.join("a-file");
+        std::fs::write(&blocked, b"not a folder").unwrap();
+        let files = agent_files(&a.history, &blocked, &rec.id, rec.created_ms, &items, true);
+        assert_eq!(files, a.history.prompt_files(&rec.id));
+        assert!(files.len() == 1 && files[0].contains("/history/"), "{files:?}");
+        let plain = prompt::assemble_export_files(&items, &files).plain;
+        assert!(plain.starts_with("look [image 1]\n\nPictures (1), in `"), "{plain}");
+        assert!(plain.ends_with(&format!("[image 1] `{}`  full 1x1", files[0])), "{plain}");
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"not a folder", "the file is left as it was");
+        // A root that works: the prompt names the handoff copies, numbered as the prompt numbers them.
+        let root = base.join("Pointcast");
+        let files = agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, true);
+        let root_fwd = root.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert!(files.len() == 1 && files[0].starts_with(&root_fwd) && files[0].ends_with("/01.png"), "{files:?}");
+        assert_eq!(std::fs::read(&files[0]).unwrap(), png());
+        // Paths off: the folder is still written for agents, and the prompt names no file.
+        assert!(agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, false).is_empty());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        // The setting picks the root; unset, tests never reach the real home folder.
+        let mine = Settings { handoff_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
+        assert_eq!(prompt::handoff_root(&mine), root);
+        assert!(prompt::handoff_root(&Settings::default()).starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
