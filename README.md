@@ -105,16 +105,53 @@ and you can hold the key while you talk instead of tapping it.
 - **History and Transcribe again.** The last 100 prompts are kept on this computer. Click a picture to
   mark it up again. **Transcribe again** writes a recording down afresh, for example after switching to
   a larger model.
-- **Pastes anywhere.** Chat apps get the pictures inline; plain text with `[image n]` markers is the
-  fallback. A recording with no pictures is plain dictation. You can also copy only, or save a
-  `prompt.md` with PNGs (**Settings → Output**).
+- **Pastes anywhere.** The prompt is pasted as plain text with `[image n]` markers. The pictures are
+  also on the clipboard as HTML; apps differ in whether they take them. A recording with no pictures is
+  plain dictation. You can also copy only, or save a `prompt.md` with PNGs (**Settings → Output**).
 - **Pictures as file paths.** The prompt names each picture's file, so terminal agents such as Claude
   Code can open the screenshots.
-- **Coding agents over MCP.** A local server lets Claude Code, Cursor and Codex fetch the latest prompt
-  themselves. **Settings → Output → Agent setup** copies the setup for each one.
+- **Coding agents over MCP.** A local server hands Claude Code, Cursor and Codex the prompt with its
+  pictures as images. **Settings → Output → Agent setup** copies the setup for each one. See below.
 - **Native on each OS.** System Settings layout and system fonts on macOS; Mica, Segoe UI Variable and
   a Windows 11 Settings layout on Windows. Light and dark follow the system.
 - **Private by default.** See below.
+
+## Coding agents over MCP
+
+With **Share over MCP** on, Pointcast runs an MCP server on this computer (`http://127.0.0.1:47821/mcp`,
+protocol 2025-06-18). **Agent setup** copies the command for Claude Code or the entry for Cursor, with
+this computer's key. Four tools:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `pointcast_latest` | `images?`, `copy_to?` | The last prompt with its pictures |
+| `pointcast_get` | `id`, `images?`, `copy_to?` | A prompt from History |
+| `pointcast_list` | `limit?` (10) | The newest prompts: id, when, length, first words, picture count |
+| `pointcast_shot` | `id`, `n` | Picture `n` at full size |
+
+`get_latest_session` still works and is the same as `pointcast_latest`. Ask your agent, for example,
+"get my latest Pointcast prompt", and it calls:
+
+```json
+{ "name": "pointcast_latest", "arguments": { "images": "inline" } }
+```
+
+The result is the prompt's text (as a paste gives it), then for each picture a caption such as
+`[image 1] region 933x73 · pins: 1=too far left` followed by the picture as an image. Structured content
+lists every picture's file, kind, size and pins. Pictures are scaled down to 1568 px on the long side,
+and about 18,000 tokens of images go in one result; the rest come as file links, and `pointcast_shot`
+shows any one of them. `images: "links"` gives only links, `"none"` only text.
+
+`copy_to` takes your project's absolute path and copies the pictures and `prompt.md` into
+`<project>/.pointcast/<time>/`, for agents that read only files inside the project. Pointcast writes
+nothing else there. Add `.pointcast/` to your `.gitignore`.
+
+Agents that limit file reads to the project can also be allowed to read `~/Pointcast`, where the
+pictures are kept:
+
+- Claude Code: `"permissions": { "additionalDirectories": ["~/Pointcast"] }` in `~/.claude/settings.json`.
+- Gemini CLI: `gemini --include-directories ~/Pointcast`.
+- OpenCode: `"permission": { "external_directory": "allow" }` in `opencode.json`.
 
 ## Privacy
 
