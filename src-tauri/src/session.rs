@@ -1751,6 +1751,32 @@ mod tests {
         assert_eq!(ui.phase, Phase::Idle);
     }
 
+    /// Ten recordings started on this machine's real microphone (settings' default device): how long `start` took, and
+    /// from the press to the first audio. `cargo test --lib start_to_first_audio -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn start_to_first_audio_on_this_machine() {
+        let a = app("real-mic");
+        let mut firsts = vec![];
+        for i in 0..10 {
+            let began = std::time::Instant::now();
+            a.start().unwrap();
+            let start_ms = began.elapsed().as_secs_f64() * 1000.0;
+            until("the first sample", 5, || a.take.lock().unwrap().as_ref().is_some_and(|t| t.first_at().is_some()));
+            let first = a.take.lock().unwrap().as_ref().and_then(|t| t.first_at()).unwrap() - a.t0.lock().unwrap().unwrap();
+            until("the HUD says the microphone is live", 5, || a.ui().mic);
+            let live_ms = began.elapsed().as_secs_f64() * 1000.0;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let at = a.audio_at.load(Ordering::SeqCst);
+            a.stop(true).unwrap();
+            println!("#{i:>2}: start() returned in {start_ms:.1} ms | first sample {first} ms after the press | audio_at {at} ms | HUD live at {live_ms:.1} ms");
+            firsts.push(first);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        firsts.sort();
+        println!("press to first audio: median {} ms, worst {} ms", (firsts[4] + firsts[5]) / 2, firsts[9]);
+    }
+
     static NEVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     /// Stands in for the screen: a key frame must never come from the real one in a test.
