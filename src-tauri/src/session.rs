@@ -100,6 +100,12 @@ pub struct App {
     take_no: AtomicU64,
     stop: AtomicBool,
     mic: Mutex<Option<Mic>>,
+    /// How a recording opens the microphone (`Mic::open`; tests put a slow one in its place).
+    open_mic: fn(Option<String>, Arc<Take>) -> Result<Mic, String>,
+    /// The recording whose microphone has opened or failed to, and the one whose model has loaded or failed to: the HUD
+    /// says it records only once both have.
+    mic_tried: AtomicU64,
+    loaded: AtomicU64,
     take: Mutex<Option<Arc<Take>>>,
     engine: Mutex<Option<Engine>>,
     /// Whether the engine in memory was loaded with the GPU version of its model here, so one set up since is loaded.
@@ -191,6 +197,9 @@ impl App {
             take_no: AtomicU64::new(0),
             stop: AtomicBool::new(true),
             mic: Mutex::default(),
+            open_mic: Mic::open,
+            mic_tried: AtomicU64::new(0),
+            loaded: AtomicU64::new(0),
             take: Mutex::default(),
             engine: Mutex::default(),
             engine_gpu: AtomicBool::new(false),
@@ -238,8 +247,11 @@ impl App {
         if let Some(t) = self.take.lock().unwrap().as_ref() {
             s.level = t.level();
         }
+        // The clock runs from the first audio: before the microphone is live a recording has recorded nothing.
         if let Some(t0) = *self.t0.lock().unwrap() {
-            s.duration_ms = now_ms().saturating_sub(t0);
+            let getting_ready = matches!(s.phase, Phase::Recording | Phase::Loading) && !s.mic;
+            let from = t0 + self.audio_at.load(Ordering::SeqCst);
+            s.duration_ms = if getting_ready { 0 } else { now_ms().saturating_sub(from) };
         }
         s.behind_ms = self.behind.load(Ordering::SeqCst) * 1000 / audio::RATE as u64;
         let (heard, spent) = *self.pace.lock().unwrap();
@@ -406,18 +418,14 @@ impl App {
             Phase::Transcribing => return Err(BUSY.into()),
             _ => {}
         }
-        self.monitor_off();
-        // The background GPU upgrade never runs beside a recording: it stops where it is and goes on later.
-        crate::voice::upgrade::pause();
-        self.bind_practice();
-        // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
-        if self.history.recover().is_none() {
-            self.history.clear_checkpoint();
-        }
+        // The microphone opens first, on its own thread, before anything that touches the disk: every word after the
+        // press is kept, and the start never waits for the device. It says it records once the first samples arrive.
         self.cancel.store(false, Ordering::SeqCst);
         self.stop.store(false, Ordering::SeqCst);
+        let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         self.items.lock().unwrap().clear();
         *self.t0.lock().unwrap() = Some(now_ms());
+        self.audio_at.store(0, Ordering::SeqCst);
         {
             let mut st = self.state.lock().unwrap();
             st.phase = Phase::Loading;
@@ -428,29 +436,22 @@ impl App {
             st.mic = false;
             st.screen = true;
         }
-        // The idle scheduler pulses the HUD while the session runs.
-        crate::wake();
         let settings = self.settings.lock().unwrap().clone();
         let take = Arc::new(Take::default());
-        match Mic::open(settings.device.clone(), take.clone()) {
-            Ok(mic) => {
-                let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
-                self.audio_at.store(now_ms().saturating_sub(t0), Ordering::SeqCst);
-                *self.mic.lock().unwrap() = Some(mic);
-                *self.take.lock().unwrap() = Some(take.clone());
-                self.state.lock().unwrap().mic = true;
-            }
-            Err(e) => {
-                let mut st = self.state.lock().unwrap();
-                st.error = Some(format!("Microphone: {e}"));
-            }
+        *self.take.lock().unwrap() = Some(take.clone());
+        let me = Arc::clone(self);
+        let (device, t2) = (settings.device.clone(), take.clone());
+        std::thread::spawn(move || me.open_for(no, device, t2));
+        // The idle scheduler pulses the HUD while the session runs.
+        crate::wake();
+        self.monitor_off();
+        // The background GPU upgrade never runs beside a recording: it stops where it is and goes on later.
+        crate::voice::upgrade::pause();
+        self.bind_practice();
+        // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
+        if self.history.recover().is_none() {
+            self.history.clear_checkpoint();
         }
-        // The worker loads the model if it is not in memory yet; audio waits in the take meanwhile. A model busy with a
-        // piece of a History entry transcribed again is in memory: the start never waits for that piece.
-        if self.engine.try_lock().map_or(true, |e| e.is_some()) {
-            self.state.lock().unwrap().phase = Phase::Recording;
-        }
-        let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         self.trail.lock().unwrap().clear();
         self.tokens.lock().unwrap().clear();
         // Nothing of the last recording's audio is written for this one; its worker says what it keeps.
@@ -461,6 +462,66 @@ impl App {
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
+    }
+
+    /// Whether recording `no` is still the one under way.
+    fn current(&self, no: u64) -> bool {
+        !self.stop.load(Ordering::SeqCst) && self.take_no.load(Ordering::SeqCst) == no
+    }
+
+    /// Open the microphone for recording `no` into `take`, and say it records once the first samples arrive. The audio
+    /// starts `audio_at` into the session: from the press to when the first sample was heard. A microphone that opens
+    /// after its recording stopped is closed at once.
+    fn open_for(&self, no: u64, device: Option<String>, take: Arc<Take>) {
+        match (self.open_mic)(device, take.clone()) {
+            Ok(mic) => {
+                {
+                    // A stop sets its flag before it takes the microphone under this lock: one of the two closes it.
+                    let mut m = self.mic.lock().unwrap();
+                    if !self.current(no) {
+                        return;
+                    }
+                    *m = Some(mic);
+                }
+                while take.first_at().is_none() {
+                    if !self.current(no) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let mut st = self.state.lock().unwrap();
+                if !self.current(no) {
+                    return;
+                }
+                self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+                st.mic = true;
+            }
+            Err(e) => {
+                if self.current(no) {
+                    self.state.lock().unwrap().error = Some(format!("Microphone: {e}"));
+                }
+            }
+        }
+        self.mic_tried.store(no, Ordering::SeqCst);
+        self.settle(no);
+    }
+
+    /// Milliseconds from the press to the first sample of `take`; 0 before audio flows. Fixed by the take, so whoever
+    /// reads it first (the microphone's thread, the worker, a stop cut short) gets the same.
+    fn lead_in(&self, take: &Take) -> u64 {
+        let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        take.first_at().map_or(0, |f| f.saturating_sub(t0))
+    }
+
+    /// Recording `no` records, on the HUD, once its microphone has opened (or failed to, which the HUD says) and the
+    /// model is in memory (or failed to load). A model busy with a piece of a History entry transcribed again is in
+    /// memory: the start never waits for that piece.
+    fn settle(&self, no: u64) {
+        let mut st = self.state.lock().unwrap();
+        let model = self.loaded.load(Ordering::SeqCst) == no || self.engine.try_lock().map_or(true, |e| e.is_some());
+        if self.current(no) && st.phase == Phase::Loading && self.mic_tried.load(Ordering::SeqCst) == no && model {
+            st.phase = Phase::Recording;
+        }
     }
 
     /// Only the recording started while onboarding asked for practice is a practice run.
@@ -636,7 +697,11 @@ impl App {
         self.abort_piece();
         self.state.lock().unwrap().partial.clear();
         if let (Some((mut held, read)), Some(take)) = (unsaved.take(), self.take.lock().unwrap().clone()) {
-            held.extend(take.read_from(read));
+            let rest = take.read_from(read);
+            if read == 0 && !rest.is_empty() {
+                held.resize(self.lead_in(&take) as usize * audio::RATE as usize / 1000, 0.0);
+            }
+            held.extend(rest);
             let _ = self.history.append_audio(&held);
         }
     }
@@ -1024,11 +1089,11 @@ impl App {
         // it, and History can transcribe it again. Never for a practice run, nor with Keep audio off. Held from before
         // the model loads, so a stop cut short meanwhile still keeps all of it.
         let keep = self.settings.lock().unwrap().keep_audio && !self.practice.load(Ordering::SeqCst);
-        let lead = self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000;
+        // It starts at the press: the silence up to the microphone's first sample goes in ahead of that sample.
         {
             let mut u = self.unsaved.lock().unwrap();
             if self.take_no.load(Ordering::SeqCst) == no {
-                *u = keep.then(|| (vec![0.0; lead], 0));
+                *u = keep.then(|| (vec![], 0));
             }
         }
         *self.waiting.lock().unwrap() = (0, 0);
@@ -1036,12 +1101,8 @@ impl App {
             // Screenshots still work; the transcript stays empty.
             self.state.lock().unwrap().error = Some(e);
         }
-        {
-            let mut st = self.state.lock().unwrap();
-            if st.phase == Phase::Loading {
-                st.phase = Phase::Recording;
-            }
-        }
+        self.loaded.store(no, Ordering::SeqCst);
+        self.settle(no);
         let mut seg = segmenter();
         // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
         // look than a short one and the microphone never waits behind a copy of all of it.
@@ -1057,6 +1118,10 @@ impl App {
                 break;
             }
             let mut new = take.read_from(pos);
+            if pos == 0 && !new.is_empty() {
+                // Speech times count from the press, whether or not the microphone's thread has said it is live yet.
+                self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+            }
             pos += new.len();
             self.keep_audio(no, &new, false);
             if let Some(b) = boost.as_mut() {
@@ -1103,6 +1168,9 @@ impl App {
             return;
         }
         let mut new = take.read_from(pos);
+        if pos == 0 && !new.is_empty() {
+            self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+        }
         self.keep_audio(no, &new, true);
         if let Some(b) = boost.as_mut() {
             b.process(&mut new);
@@ -1127,6 +1195,9 @@ impl App {
         let Some((held, read)) = u.as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) else {
             return;
         };
+        if *read == 0 && !new.is_empty() {
+            held.resize(self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000, 0.0);
+        }
         held.extend_from_slice(new);
         *read += new.len();
         if all || held.len() >= audio::RATE as usize {
@@ -1607,6 +1678,77 @@ mod tests {
         assert!(a.history.list().is_empty(), "and saves nothing twice");
         a.state.lock().unwrap().phase = Phase::Transcribing;
         assert_eq!(a.start().unwrap_err(), BUSY, "a start while finishing is refused");
+    }
+
+    /// A microphone that takes 1.5 s to open, then plays a ramp whose every sample can be told apart.
+    fn slow_mic(_: Option<String>, take: Arc<Take>) -> Result<Mic, String> {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        Ok(Mic::from_samples((1..=32_000).map(|i| i as f32 / 32_000.0).collect(), take))
+    }
+
+    fn until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
+        let began = std::time::Instant::now();
+        while !ok() {
+            assert!(began.elapsed().as_secs() < secs, "{what} within {secs} s");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn the_start_never_waits_for_a_slow_microphone_and_keeps_every_sample_from_the_first() {
+        let mut a = app("slow-mic");
+        let dir = std::env::temp_dir().join(format!("pc-session-slow-mic-{}", std::process::id()));
+        {
+            let m = Arc::get_mut(&mut a).expect("not shared yet");
+            m.open_mic = slow_mic;
+            m.settings.get_mut().unwrap().keep_audio = true;
+            m.settings.get_mut().unwrap().device = None;
+        }
+        let began = std::time::Instant::now();
+        a.start().unwrap();
+        let took = began.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "the start returned after {took:?}");
+        // Nothing flows yet: the HUD must not say it records, and its clock has not started.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let ui = a.ui();
+        assert!(!ui.mic, "no samples yet, so the microphone is not live");
+        assert_eq!(ui.phase, Phase::Loading, "not shown as recording before audio flows");
+        assert_eq!(ui.duration_ms, 0, "the clock waits for the first audio");
+        until("the microphone goes live", 5, || a.ui().mic);
+        until("the HUD says it records", 5, || a.ui().phase == Phase::Recording);
+        let at = a.audio_at.load(Ordering::SeqCst);
+        assert!((1_450..1_900).contains(&at), "the audio starts {at} ms after the press");
+        assert!(a.ui().duration_ms < 1_000, "the clock counts from the first audio, not the press: {}", a.ui().duration_ms);
+        // The take holds the microphone's very first sample.
+        let take = a.take.lock().unwrap().clone().unwrap();
+        assert_eq!(take.copy(0..2), vec![1.0 / 32_000.0, 2.0 / 32_000.0]);
+        // The kept audio is silence from the press to the first sample, then every sample from that one on.
+        let lead = at as usize * audio::RATE as usize / 1000;
+        let pcm = dir.join("recovery").join("audio.pcm");
+        let read = || {
+            std::fs::read(&pcm).unwrap_or_default().chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()
+        };
+        until("the kept audio reaches past the first sample", 5, || read().len() > lead + 200);
+        let kept = read();
+        assert!(kept[..lead].iter().all(|v| *v == 0), "silence up to the first sample");
+        let ramp = |i: usize| (i as f32 / 32_000.0 * 32767.0).round() as i16;
+        assert_eq!(&kept[lead..lead + 200], &(1..=200).map(ramp).collect::<Vec<_>>()[..], "then the ramp from its first sample");
+        a.stop(true).unwrap();
+        assert!(a.mic.lock().unwrap().is_none(), "Discard closed the microphone");
+    }
+
+    #[test]
+    fn a_microphone_that_opens_after_its_recording_stopped_is_closed_at_once() {
+        let mut a = app("late-mic");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = slow_mic;
+        a.start().unwrap();
+        a.stop(true).unwrap();
+        // The open finishes 1.5 s after the press, with nothing to record into.
+        std::thread::sleep(std::time::Duration::from_millis(1_800));
+        assert!(a.mic.lock().unwrap().is_none(), "nothing holds the microphone open");
+        let ui = a.ui();
+        assert!(!ui.mic, "and the HUD does not say it is live");
+        assert_eq!(ui.phase, Phase::Idle);
     }
 
     static NEVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

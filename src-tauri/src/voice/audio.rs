@@ -545,9 +545,29 @@ pub struct Take {
     pub error: Mutex<Option<String>>,
     /// Bytes copied out of the take so far, so the cost of reading a long one stays in view.
     pub copied: AtomicU64,
+    /// When the first sample was heard, in ms since the Unix epoch; 0 until audio flows.
+    pub first_at: AtomicU64,
 }
 
 impl Take {
+    /// Add what the microphone just delivered (16 kHz mono). The first delivery notes when its first sample was heard:
+    /// now, less the length of what it carries.
+    pub fn push(&self, out: &[f32]) {
+        if out.is_empty() {
+            return;
+        }
+        self.level.store(meter(rms(out)).to_bits(), Ordering::Relaxed);
+        let mut s = self.samples.lock().unwrap();
+        if s.is_empty() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            self.first_at.store(now.saturating_sub(out.len() as u64 * 1000 / RATE as u64).max(1), Ordering::SeqCst);
+        }
+        s.extend_from_slice(out);
+    }
+    /// When the first sample was heard (ms since the Unix epoch), once audio flows.
+    pub fn first_at(&self) -> Option<u64> {
+        Some(self.first_at.load(Ordering::SeqCst)).filter(|t| *t != 0)
+    }
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
@@ -664,16 +684,11 @@ impl Mic {
                 downmix(chunk, channels, &mut mono);
                 let mut out = vec![];
                 rs.push(&mono, &mut out);
-                take.level
-                    .store(meter(rms(&out)).to_bits(), Ordering::Relaxed);
-                take.samples.lock().unwrap().extend_from_slice(&out);
+                take.push(&out);
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             while !s2.load(Ordering::SeqCst) {
-                take.samples
-                    .lock()
-                    .unwrap()
-                    .extend(std::iter::repeat(0.0).take(320));
+                take.push(&[0.0; 320]);
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             take.open.store(false, Ordering::SeqCst);
@@ -682,6 +697,25 @@ impl Mic {
             stop,
             thread: Some(thread),
         })
+    }
+
+    /// `samples` (16 kHz mono) played into `take` 20 ms at a time, then silence until closed: a microphone for tests.
+    pub fn from_samples(samples: Vec<f32>, take: Arc<Take>) -> Mic {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = stop.clone();
+        take.open.store(true, Ordering::SeqCst);
+        let thread = std::thread::spawn(move || {
+            let mut chunks = samples.chunks(320);
+            while !s2.load(Ordering::SeqCst) {
+                take.push(chunks.next().unwrap_or(&[0.0; 320]));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            take.open.store(false, Ordering::SeqCst);
+        });
+        Mic {
+            stop,
+            thread: Some(thread),
+        }
     }
 
     fn close(&mut self) {
@@ -729,9 +763,16 @@ pub fn read_wav(b: &[u8]) -> Result<(u32, usize, Vec<f32>), String> {
 }
 
 fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String> {
+    build_marked(device, take, &mut vec![])
+}
+
+/// `build`, noting when each step ended (for the open-time measurement).
+fn build_marked(device: Option<String>, take: Arc<Take>, marks: &mut Vec<(&'static str, std::time::Instant)>) -> Result<cpal::Stream, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let mut mark = |m: &'static str| marks.push((m, std::time::Instant::now()));
     keep_com_apartment();
     let host = cpal::default_host();
+    mark("host");
     let dev = match device {
         Some(name) => host
             .input_devices()
@@ -741,7 +782,9 @@ fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String
         None => host.default_input_device(),
     }
     .ok_or("No microphone")?;
+    mark("device");
     let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
+    mark("config");
     let channels = cfg.channels() as usize;
     let rate = cfg.sample_rate().0;
     let fmt = cfg.sample_format();
@@ -759,9 +802,7 @@ fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String
         downmix(data, channels, &mut mono);
         let mut out = Vec::with_capacity(mono.len() / 2);
         rs.lock().unwrap().push(&mono, &mut out);
-        take.level
-            .store(meter(rms(&out)).to_bits(), Ordering::Relaxed);
-        take.samples.lock().unwrap().extend_from_slice(&out);
+        take.push(&out);
     };
     let stream = match fmt {
         cpal::SampleFormat::F32 => {
@@ -788,7 +829,9 @@ fn build(device: Option<String>, take: Arc<Take>) -> Result<cpal::Stream, String
         other => return Err(format!("{other:?} microphones are not supported")),
     }
     .map_err(|e| e.to_string())?;
+    mark("build");
     stream.play().map_err(|e| e.to_string())?;
+    mark("play");
     Ok(stream)
 }
 
@@ -804,6 +847,50 @@ pub(crate) mod tests {
     }
 
     use super::*;
+
+    /// The microphone named in the owner's settings, read only; none means the default one.
+    fn owner_device() -> Option<String> {
+        let p = std::path::Path::new(&std::env::var("LOCALAPPDATA").ok()?).join("dev.pointcast.app/settings.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
+        v.get("device")?.as_str().map(str::to_string)
+    }
+
+    /// Where the time goes when the real microphone opens: ten opens of the default device, ten by name (the path a
+    /// device chosen in Settings takes), and ten of the owner's chosen one if set. Each lasts under a second.
+    /// `cargo test --lib mic_open_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mic_open_timings_on_this_machine() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let default_name = cpal::default_host().default_input_device().and_then(|d| d.name().ok());
+        let mut runs: Vec<(&str, Option<String>)> = vec![("default", None), ("by name", default_name.clone())];
+        if let Some(d) = owner_device() {
+            runs.push(("owner's", Some(d)));
+        }
+        println!("default device: {default_name:?}; owner's setting: {:?}", owner_device());
+        for (label, device) in runs {
+            println!("\n{label}: host / device / config / build / play / first samples (ms from the start of the open)");
+            let mut firsts = vec![];
+            for i in 0..10 {
+                let take = Arc::new(Take::default());
+                let t0 = std::time::Instant::now();
+                let mut marks = vec![];
+                let stream = build_marked(device.clone(), take.clone(), &mut marks).expect("open");
+                while take.len() == 0 && t0.elapsed().as_secs() < 3 {
+                    std::thread::sleep(std::time::Duration::from_micros(500));
+                }
+                let first = t0.elapsed().as_secs_f64() * 1000.0;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let loud = take.copy(0..1600).iter().fold(0f32, |m, v| m.max(v.abs()));
+                drop(stream);
+                let steps: Vec<String> = marks.iter().map(|(m, at)| format!("{m} {:.1}", (*at - t0).as_secs_f64() * 1000.0)).collect();
+                println!("  #{i:>2}: {} | first {first:.1} | peak of first 100 ms {loud:.4}", steps.join(" / "));
+                firsts.push(first);
+            }
+            firsts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("  median {:.1} ms, worst {:.1} ms", (firsts[4] + firsts[5]) / 2.0, firsts[9]);
+        }
+    }
 
     fn sine(rate: u32, hz: f32, secs: f32, amp: f32) -> Vec<f32> {
         (0..(rate as f32 * secs) as usize)
