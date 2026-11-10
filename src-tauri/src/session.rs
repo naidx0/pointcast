@@ -971,6 +971,19 @@ impl App {
     pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
         let s = self.settings.lock().unwrap().clone();
         let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
+        self.make_last(id, exp)
+    }
+
+    /// `set_last` for a copy, paste or send from History: with picture paths on, the prompt names the entry's handoff
+    /// folder, kept while it holds these pictures and written again when it does not (`Store::agent_files`).
+    pub fn copy_from_history(&self, id: &str) -> Result<SessionExport, String> {
+        let s = self.settings.lock().unwrap().clone();
+        let root = s.picture_paths.then(|| prompt::handoff_root(&s));
+        let exp = self.history.export_for_agents(id, root.as_deref(), s.tidy, now_ms())?;
+        self.make_last(id, exp)
+    }
+
+    fn make_last(&self, id: &str, exp: SessionExport) -> Result<SessionExport, String> {
         *self.last_export.lock().unwrap() = Some(exp.clone());
         *self.last_id.lock().unwrap() = Some(id.to_string());
         self.latest.changed(id, &exp);
