@@ -1076,13 +1076,13 @@ button.card:hover {
   font: 500 13px / 1 var(--font);
   animation: hud-in 260ms var(--spring) both;
 }
+/* The capsule rises into place but is never faded in: its first frame, on a freshly built window too, is what it says. */
 html.win .hud {
   border-radius: 8px;
   font-size: 14px;
 }
 @keyframes hud-in {
   from {
-    opacity: 0;
     transform: translateY(10px) scale(0.96);
   }
 }
@@ -1095,9 +1095,16 @@ html.win .hud {
   animation: rec 1.6s ease-out infinite;
   flex: none;
 }
-.hud .rec.wait {
-  background: var(--orange);
-  animation: none;
+/* Getting ready: the microphone is not live yet, so nothing is recorded. A quiet ring, not the red dot. */
+.hud .rec.ready {
+  background: transparent;
+  box-shadow: 0 0 0 1.5px var(--hud-ink-2) inset;
+  animation: ready 1.2s ease-in-out infinite alternate;
+}
+@keyframes ready {
+  to {
+    opacity: 0.45;
+  }
 }
 @keyframes rec {
   70% {
@@ -1208,6 +1215,30 @@ html.win .hud .hb {
   text-overflow: ellipsis;
 }
 .hud .note.warn b {
+  color: var(--hud-ink);
+  font-weight: 600;
+}
+/* "Getting ready…" takes the place of the time and the wave, as the microphone warning does. */
+.hud .note.getting {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 136px;
+  max-width: 136px;
+  margin: 0 6px 0 10px;
+  font-size: 12px;
+  line-height: 14px;
+}
+.hud .note.getting.two {
+  font-size: 11px;
+  line-height: 13px;
+}
+.hud .note.getting > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud .note.getting b {
   color: var(--hud-ink);
   font-weight: 600;
 }

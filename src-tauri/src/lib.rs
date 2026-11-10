@@ -220,8 +220,9 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     // The installer closes Pointcast: a recording started now would stop mid-sentence.
     if update::installing() {
         svc.refuse(session::UPDATING);
-        platform::show_indicator(app);
+        // A HUD already built shows the new state from its first frame, not the last recording's.
         emit_state(app, svc);
+        platform::show_indicator(app, &svc.ui());
         hide_hud_soon(app, svc);
         return Err(session::UPDATING.into());
     }
@@ -230,8 +231,9 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     if svc.settings.lock().unwrap().sounds {
         platform::chime(true);
     }
-    platform::show_indicator(app);
     emit_state(app, svc);
+    platform::show_indicator(app, &svc.ui());
+    emit_state_now(app, svc);
     Ok(())
 }
 

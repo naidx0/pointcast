@@ -37,9 +37,31 @@ const idle: UiState = {
 
 const BARS = 9;
 
+/** The state the window was built for, set by the app before the page loads, so a freshly built capsule's first frame
+ * is the true one ("Getting ready…" for a recording just started) and never a recording at 0:00. */
+function built(): UiState {
+  const st = (window as { __POINTCAST_HUD__?: Partial<UiState> }).__POINTCAST_HUD__;
+  return { ...idle, phase: "loading", ...st };
+}
+
+/** What the capsule says while a recording gets ready: before the microphone is live nothing is recorded (a neutral
+ * dot, no clock); once it is live but the speech model still loads, audio is kept and transcribed after, so it says so. */
+export function readyNote(s: UiState): { lines: [string, string?]; full: string } | null {
+  const live = s.mic;
+  const loading = s.phase === "loading";
+  if (!(s.phase === "loading" || s.phase === "recording")) return null;
+  if (live && !loading) return null;
+  if (s.preparing_gpu) {
+    const lines: [string, string] = ["Setting up your graphics card", live ? "(first time only) keep talking" : "(first time only)"];
+    return { lines, full: `Setting up your graphics card (first time only)${live ? ", keep talking" : ""}` };
+  }
+  if (live) return { lines: ["Getting ready…", "keep talking"], full: "Getting ready… keep talking" };
+  return { lines: ["Getting ready…"], full: "Getting ready…" };
+}
+
 /** The recording HUD: a small capsule that never takes focus from the app you are talking about. */
 export function Indicator() {
-  const [s, setS] = useState<UiState>(idle);
+  const [s, setS] = useState<UiState>(inTauri ? built : idle);
   const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
   const [lv, setLv] = useState<number[]>(Array(BARS).fill(0));
   const last = useRef(0);
@@ -52,18 +74,23 @@ export function Indicator() {
         .catch(() => undefined);
     } else if (preview) {
       // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1][&engine=gpu|cpu], ?phase=ready&notice=partial or
-      // ?quiet=silent|quiet to look at the other states.
+      // ?quiet=silent|quiet to look at the other states; ?hud=ready (microphone not live yet), ?hud=gpu (and the graphics
+      // card being set up), ?hud=talk (live, model still loading), ?hud=gpu-talk for the start of a recording.
       const q = new URLSearchParams(location.search);
       const quiet = q.get("quiet");
       const phase = q.get("phase");
       const pct = q.get("progress");
       const stalled = q.get("stalled") === "1";
       const engine = q.get("engine");
+      const hud = q.get("hud");
+      const starting = hud === "ready" || hud === "gpu" || hud === "talk" || hud === "gpu-talk";
+      const live = !starting || hud === "talk" || hud === "gpu-talk";
       setS({
         ...idle,
-        phase: phase === "transcribing" || phase === "ready" ? phase : "recording",
-        mic: true,
-        duration_ms: 16_000,
+        phase: phase === "transcribing" || phase === "ready" ? phase : starting ? "loading" : "recording",
+        mic: live,
+        preparing_gpu: hud === "gpu" || hud === "gpu-talk",
+        duration_ms: live ? (starting ? 2_000 : 16_000) : 0,
         image_count: 2,
         level: 0.4,
         notice: (q.get("notice") as UiState["notice"]) ?? null,
@@ -100,16 +127,18 @@ export function Indicator() {
   if (s.phase === "transcribing") return <Finishing s={s} />;
   if (s.phase === "ready" && s.notice) return <Done s={s} />;
 
-  const waiting = s.phase === "loading";
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
   const problem = s.error;
-  const mic = s.phase === "recording" && s.quiet_mic ? micNotice(s.quiet_mic) : null;
+  const ready = readyNote(s);
+  // Nothing is recorded until the microphone's first samples arrive: no red dot and no clock before that.
+  const live = s.mic;
+  const mic = s.phase === "recording" && live && s.quiet_mic ? micNotice(s.quiet_mic) : null;
 
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud" data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
-        <span className={`rec ${waiting ? "wait" : ""}`} data-tauri-drag-region />
-        {mic ? null : (
+        <span className={`rec ${live ? "" : "ready"}`} data-tauri-drag-region />
+        {mic || ready || !live ? null : (
           <span className="time" data-tauri-drag-region>
             {stamp(s.duration_ms)}
           </span>
@@ -117,6 +146,11 @@ export function Indicator() {
         {problem ? (
           <span className="note" title={problem} data-tauri-drag-region>
             {problem}
+          </span>
+        ) : ready ? (
+          <span className={`note getting ${ready.lines[1] ? "two" : ""}`} role="status" aria-label={ready.full} title={ready.full} data-tauri-drag-region>
+            <b data-tauri-drag-region>{ready.lines[0]}</b>
+            {ready.lines[1] ? <span data-tauri-drag-region>{ready.lines[1]}</span> : null}
           </span>
         ) : mic ? (
           <MicNote notice={mic} />
