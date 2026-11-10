@@ -142,6 +142,10 @@ pub struct Settings {
     /// The plain-text prompt names each picture's file, for agents in a terminal that cannot take pasted images.
     #[serde(default = "yes")]
     pub picture_paths: bool,
+    /// Tidy the text when the prompt is composed: paragraphs at the pauses, no ums and no repeated words. Nothing is
+    /// summarized or reworded, and History keeps the words as they were said; off joins the pieces with single spaces.
+    #[serde(default = "yes")]
+    pub tidy: bool,
     /// Clean up room noise and even out the volume before the voice detector and the model hear it, live and when a
     /// recording is transcribed again; the kept audio stays as it came.
     #[serde(default = "yes")]
@@ -208,6 +212,7 @@ impl Default for Settings {
             granted: Granted::default(),
             keep_audio: true,
             picture_paths: true,
+            tidy: true,
             voice_boost: true,
             auto_gpu: true,
             free_memory_minutes: default_free_minutes(),
@@ -468,6 +473,8 @@ mod tests {
         assert!(Settings::default().keep_audio && Settings::default().picture_paths);
         let off: Settings = serde_json::from_str(r#"{"keep_audio":false,"picture_paths":false}"#).unwrap();
         assert!(!off.keep_audio && !off.picture_paths);
+        assert!(old.tidy && Settings::default().tidy, "the text is tidied unless turned off");
+        assert!(!serde_json::from_str::<Settings>(r#"{"tidy":false}"#).unwrap().tidy);
         assert!(old.auto_gpu && Settings::default().auto_gpu, "the faster engine sets itself up unless turned off");
         assert!(!serde_json::from_str::<Settings>(r#"{"auto_gpu":false}"#).unwrap().auto_gpu);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();

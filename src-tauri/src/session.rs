@@ -607,7 +607,7 @@ impl App {
         if self.practice.load(Ordering::SeqCst) {
             self.history.clear_checkpoint();
             self.state.lock().unwrap().phase = Phase::Ready;
-            return Ok(Some(prompt::assemble_export(&items)));
+            return Ok(Some(prompt::assemble_export_files(&items, &[], settings.tidy)));
         }
         // The checkpoint goes only once History has the prompt: a failed save leaves it for
         // the next launch to recover. A recording that came back with no words keeps its audio there, to transcribe
@@ -632,10 +632,10 @@ impl App {
         // Saved, the pictures are copied to a handoff folder and the prompt lists their files for agents in a terminal;
         // unsaved, it marks them as before.
         let files = match &saved {
-            Some(id) => agent_files(&self.history, &prompt::handoff_root(&settings), id, created_ms, &items, settings.picture_paths),
+            Some(id) => agent_files(&self.history, &prompt::handoff_root(&settings), id, created_ms, &items, settings.picture_paths, settings.tidy),
             None => vec![],
         };
-        let exp = prompt::assemble_export_files(&items, &files);
+        let exp = prompt::assemble_export_files(&items, &files, settings.tidy);
         *self.last_export.lock().unwrap() = Some(exp.clone());
         let audio_kept = saved.is_some();
         self.latest.set(saved, exp.clone());
@@ -643,12 +643,12 @@ impl App {
         if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
             let _ = std::fs::create_dir_all(&dir);
-            if let Ok(p) = prompt::export_folder(&items, &dir) {
+            if let Ok(p) = prompt::export_folder(&items, &dir, settings.tidy) {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
             }
         }
         let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
-        let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
+        let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard, settings.tidy);
         let mut st = self.state.lock().unwrap();
         st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
         st.phase = Phase::Ready;
@@ -956,7 +956,8 @@ impl App {
     /// Make a history entry the one "Paste Last Prompt" uses. When coding agents read that entry, they read it as it
     /// is now (after a picture in it was edited).
     pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
-        let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
+        let s = self.settings.lock().unwrap().clone();
+        let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
         *self.last_export.lock().unwrap() = Some(exp.clone());
         *self.last_id.lock().unwrap() = Some(id.to_string());
         self.latest.changed(id, &exp);
@@ -1065,7 +1066,8 @@ impl App {
             }
             self.history.replace_speech(id, &said)?;
             let _ = self.history.note_run(id, &self.run(spent, x.len() as u64 * 1000 / audio::RATE as u64));
-            let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
+            let s = self.settings.lock().unwrap().clone();
+            let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
             if self.last_id.lock().unwrap().as_deref() == Some(id) {
                 *self.last_export.lock().unwrap() = Some(exp.clone());
             }
@@ -1289,8 +1291,8 @@ impl App {
 /// One new folder per recording, named by when it was saved, in the chosen folder or Documents › Pointcast.
 /// Copy a saved recording's pictures to a handoff folder under `root` and return the files its prompt lists, in prompt
 /// order: the handoff copies, or History's own when the folder could not be written; none when `paths` is off.
-fn agent_files(history: &crate::history::Store, root: &std::path::Path, id: &str, created_ms: u64, items: &[Item], paths: bool) -> Vec<String> {
-    let handoff = prompt::write_handoff(root, id, created_ms, items, now_ms());
+fn agent_files(history: &crate::history::Store, root: &std::path::Path, id: &str, created_ms: u64, items: &[Item], paths: bool, tidy: bool) -> Vec<String> {
+    let handoff = prompt::write_handoff(root, id, created_ms, items, now_ms(), tidy);
     match handoff {
         _ if !paths => vec![],
         Ok(h) => h.files,
@@ -1524,7 +1526,8 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let mut a = App::new(Settings::default(), d.join("settings.json"));
+        // The text as said: tidying has its own tests (prompt.rs) and one here.
+        let mut a = App::new(Settings { tidy: false, ..Settings::default() }, d.join("settings.json"));
         // History and the recovery checkpoint live in the test's own folder, never the real app's.
         Arc::get_mut(&mut a).expect("not shared yet").history = crate::history::Store::new(&d);
         // A practice run checkpoints nothing and delivers nowhere: a stop never pastes into the desktop.
@@ -1867,6 +1870,19 @@ mod tests {
     }
 
     #[test]
+    fn history_composes_the_tidy_text_when_the_setting_is_on_and_keeps_the_words_as_said() {
+        let a = app("tidy");
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 900, text: "um, the the header".into() }];
+        let m = a.history.save(&items, 1_000, 9).unwrap();
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off: the words as said");
+        a.settings.lock().unwrap().tidy = true;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "The header");
+        assert_eq!(a.history.items(&m.id).unwrap(), items, "History keeps what was said");
+        a.settings.lock().unwrap().tidy = false;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off again: the raw joining");
+    }
+
+    #[test]
     fn deleting_the_last_prompt_or_clearing_history_forgets_it() {
         let a = app("forget");
         let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
@@ -1976,21 +1992,21 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let blocked = base.join("a-file");
         std::fs::write(&blocked, b"not a folder").unwrap();
-        let files = agent_files(&a.history, &blocked, &rec.id, rec.created_ms, &items, true);
+        let files = agent_files(&a.history, &blocked, &rec.id, rec.created_ms, &items, true, false);
         assert_eq!(files, a.history.prompt_files(&rec.id));
         assert!(files.len() == 1 && files[0].contains("/history/"), "{files:?}");
-        let plain = prompt::assemble_export_files(&items, &files).plain;
+        let plain = prompt::assemble_export_files(&items, &files, false).plain;
         assert!(plain.starts_with("look [image 1]\n\nPictures (1), in `"), "{plain}");
         assert!(plain.ends_with(&format!("[image 1] `{}`  full 1x1", files[0])), "{plain}");
         assert_eq!(std::fs::read(&blocked).unwrap(), b"not a folder", "the file is left as it was");
         // A root that works: the prompt names the handoff copies, numbered as the prompt numbers them.
         let root = base.join("Pointcast");
-        let files = agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, true);
+        let files = agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, true, false);
         let root_fwd = root.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
         assert!(files.len() == 1 && files[0].starts_with(&root_fwd) && files[0].ends_with("/01.png"), "{files:?}");
         assert_eq!(std::fs::read(&files[0]).unwrap(), png());
         // Paths off: the folder is still written for agents, and the prompt names no file.
-        assert!(agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, false).is_empty());
+        assert!(agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, false, false).is_empty());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
         // The setting picks the root; unset, tests never reach the real home folder.
         let mine = Settings { handoff_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
@@ -2006,7 +2022,7 @@ mod tests {
         let mine = Settings { export_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
         let first = export_dir(&mine, "20261029-101500");
         assert_eq!(first, root.join("20261029-101500"));
-        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first).unwrap();
+        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first, false).unwrap();
         // A second recording in the same second never writes over the first one's prompt.md.
         let second = export_dir(&mine, "20261029-101500");
         assert_eq!(second, root.join("20261029-101500-2"));
@@ -2321,7 +2337,7 @@ mod tests {
         assert_eq!(seen.last(), Some(&(8_500, 8_500)));
         let plain = "piece 1 [image 1] piece 2 piece 3 [image 2]";
         assert_eq!(a.history.export(&id).unwrap().plain, plain);
-        let named = a.history.export_with(&id, true).unwrap().plain;
+        let named = a.history.export_with(&id, true, false).unwrap().plain;
         assert_eq!((a.last_export().unwrap().plain, a.latest.get().unwrap().plain), (named.clone(), named), "the last prompt and agents read it now");
         assert_eq!(a.history.list()[0].preview, "piece 1 piece 2 piece 3");
         // Another entry is the last prompt: it stays the last prompt, untouched.

@@ -147,7 +147,7 @@ fn named(e: &crate::element::ElementMark) -> String {
 /// piece being spoken then, at the word that far through it, or between pieces. Images are
 /// numbered in time order. Returns the text and the pictures in that order (ids rewritten 1..n).
 pub fn compose(items: &[Item]) -> (String, Vec<Capture>) {
-    compose_marked(items, false)
+    compose_marked(items, false, false)
 }
 
 /// For each picture in the order the prompt numbers them (`[image 1]` first), its place among the pictures in `items`.
@@ -166,8 +166,56 @@ pub fn picture_order(items: &[Item]) -> Vec<usize> {
     v.into_iter().map(|x| x.1).collect()
 }
 
-/// `compose`; with `short`, each marker is the bare `[image n]` (the picture list carries the rest).
-fn compose_marked(items: &[Item], short: bool) -> (String, Vec<Capture>) {
+/// `compose`, formatted by `tidy_pieces` when `tidy` is on (paragraphs at the pauses, no ums, no repeated words); off,
+/// the pieces joined by single spaces exactly as `compose` joins them.
+pub fn compose_with(items: &[Item], tidy: bool) -> (String, Vec<Capture>) {
+    compose_marked(items, false, tidy)
+}
+
+/// One token of a composed prompt: a spoken word, or a picture marker that formatting never moves, changes or drops.
+#[derive(Debug, Clone, PartialEq)]
+enum Tok {
+    Word(String),
+    Mark(String),
+}
+
+impl Tok {
+    fn text(&self) -> &str {
+        match self {
+            Tok::Word(s) | Tok::Mark(s) => s,
+        }
+    }
+    fn word(&self) -> Option<&str> {
+        match self {
+            Tok::Word(s) => Some(s),
+            Tok::Mark(_) => None,
+        }
+    }
+}
+
+/// A speech piece from `t_ms` to `end_ms` with its words and the markers placed inside it.
+#[derive(Debug, Clone)]
+struct Piece {
+    t_ms: u64,
+    end_ms: u64,
+    toks: Vec<Tok>,
+}
+
+/// `compose`; with `short`, each marker is the bare `[image n]` (the picture list carries the rest); with `tidy`,
+/// formatted by `tidy_pieces`.
+fn compose_marked(items: &[Item], short: bool, tidy: bool) -> (String, Vec<Capture>) {
+    let (pieces, captures) = pieces_of(items, short);
+    let text = if tidy {
+        tidy_pieces(&pieces).0
+    } else {
+        pieces.iter().flat_map(|p| p.toks.iter().map(Tok::text)).collect::<Vec<_>>().join(" ")
+    };
+    (text, captures)
+}
+
+/// The speech pieces in time order with each picture's marker at the second it was taken, and the pictures in that
+/// order (ids rewritten 1..n). Pictures without any speech sit in one empty piece.
+fn pieces_of(items: &[Item], short: bool) -> (Vec<Piece>, Vec<Capture>) {
     let mut said: Vec<(u64, u64, Vec<String>)> = vec![];
     let mut shots: Vec<(u64, Capture)> = vec![];
     for i in items {
@@ -199,25 +247,29 @@ fn compose_marked(items: &[Item], short: bool) -> (String, Vec<Capture>) {
         at.push(place);
     }
 
-    let mut out: Vec<String> = vec![];
+    let mut pieces: Vec<Piece> = vec![];
     let mut n = 0u32;
     let mut next = 0usize;
-    let put = |k: usize, w: usize, n: &mut u32, next: &mut usize, out: &mut Vec<String>| {
+    let put = |k: usize, w: usize, n: &mut u32, next: &mut usize, out: &mut Vec<Tok>| {
         while *next < at.len() && at[*next] == (k, w) {
             *n += 1;
-            out.push(if short { format!("[image {}]", *n) } else { marker(*n, &shots[*next].1) });
+            out.push(Tok::Mark(if short { format!("[image {}]", *n) } else { marker(*n, &shots[*next].1) }));
             *next += 1;
         }
     };
     if said.is_empty() {
-        put(0, 0, &mut n, &mut next, &mut out);
+        let mut toks = vec![];
+        put(0, 0, &mut n, &mut next, &mut toks);
+        pieces.push(Piece { t_ms: 0, end_ms: 0, toks });
     }
-    for (k, (_, _, words)) in said.iter().enumerate() {
+    for (k, (a, b, words)) in said.iter().enumerate() {
+        let mut toks = vec![];
         for (w, word) in words.iter().enumerate() {
-            put(k, w, &mut n, &mut next, &mut out);
-            out.push(word.clone());
+            put(k, w, &mut n, &mut next, &mut toks);
+            toks.push(Tok::Word(word.clone()));
         }
-        put(k, words.len(), &mut n, &mut next, &mut out);
+        put(k, words.len(), &mut n, &mut next, &mut toks);
+        pieces.push(Piece { t_ms: *a, end_ms: *b, toks });
     }
 
     let captures: Vec<Capture> = shots
@@ -228,7 +280,300 @@ fn compose_marked(items: &[Item], short: bool) -> (String, Vec<Capture>) {
             c
         })
         .collect();
-    (out.join(" "), captures)
+    (pieces, captures)
+}
+
+/// A pause at least this long after a sentence end, or before a capital, starts a paragraph.
+const PAUSE_MS: u64 = 1_200;
+/// A pause at least this long starts a paragraph whatever the punctuation.
+const LONG_PAUSE_MS: u64 = 2_500;
+/// A paragraph of fewer words joins the one before it, unless a long pause came first.
+const FRAGMENT_WORDS: usize = 8;
+/// A paragraph past this many words is split at its next sentence end.
+const PARAGRAPH_WORDS: usize = 110;
+/// Sounds that are never words. "you know", "like", "I mean" and "kind of" are words and stay.
+const FILLERS: &[&str] = &["um", "umm", "uh", "uhh", "uhm", "erm", "hmm"];
+/// Doubled on purpose ("what it had had", "I said that that was"): never collapsed.
+const KEEP_DOUBLE: &[&str] = &["had", "that"];
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+    "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
+    "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million", "billion",
+];
+const ORDINALS: &[&str] = &["first", "firstly", "second", "secondly", "third", "thirdly", "fourth", "fourthly", "fifth", "fifthly"];
+const SPOKEN_ORDINALS: &[&str] = &["one", "two", "three", "four", "five", "1", "2", "3", "4", "5"];
+
+/// What `tidy_pieces` did, for the report on real transcripts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TidyStats {
+    paragraphs: usize,
+    repeats: usize,
+    fillers: usize,
+}
+
+/// A word lower-cased, with only its letters, digits and apostrophes.
+fn norm(w: &str) -> String {
+    w.chars()
+        .map(|c| if c == '\u{2019}' { '\'' } else { c })
+        .filter(|c| c.is_alphanumeric() || *c == '\'')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_filler(w: &str) -> bool {
+    FILLERS.contains(&norm(w).as_str())
+}
+
+fn is_number(n: &str) -> bool {
+    n.chars().any(|c| c.is_ascii_digit()) || NUMBER_WORDS.contains(&n)
+}
+
+fn ends_sentence(w: &str) -> bool {
+    w.trim_end_matches(['"', '\'', '\u{201d}', '\u{2019}', ')', ']']).ends_with(['.', '?', '!', '\u{2026}'])
+}
+
+fn starts_capital(w: &str) -> bool {
+    w.chars().find(|c| c.is_alphanumeric()).is_some_and(char::is_uppercase)
+}
+
+/// The word with its first letter capitalised.
+fn capitalize(w: &str) -> String {
+    match w.char_indices().find(|(_, c)| c.is_alphanumeric()) {
+        Some((i, c)) => format!("{}{}{}", &w[..i], c.to_uppercase(), &w[i + c.len_utf8()..]),
+        None => w.to_string(),
+    }
+}
+
+fn count_words(toks: &[Tok]) -> usize {
+    toks.iter().filter(|t| t.word().is_some()).count()
+}
+
+fn capitalize_first(toks: &mut [Tok]) {
+    if let Some(Tok::Word(w)) = toks.iter_mut().find(|t| t.word().is_some()) {
+        *w = capitalize(w);
+    }
+}
+
+/// The pieces as paragraphs: a new one at a pause of `PAUSE_MS` after a sentence end or before a capital, or at any
+/// pause of `LONG_PAUSE_MS`; a fragment under `FRAGMENT_WORDS` words joins the paragraph before it; a long one splits
+/// at a sentence end past `PARAGRAPH_WORDS`. A piece that is only a filler goes, as does a filler that opens a
+/// sentence; an immediate repeat of one to three words is said once; each paragraph starts with a capital, and a run of
+/// First / Second / Third sentences becomes a `- ` list. Markers stay where they are and never stand alone. Nothing
+/// else is removed, reworded or summarized.
+fn tidy_pieces(pieces: &[Piece]) -> (String, TidyStats) {
+    let mut stats = TidyStats::default();
+    // Paragraphs by pauses, each with the pause before it.
+    let mut paras: Vec<(u64, Vec<Tok>)> = vec![];
+    let mut last_end: Option<u64> = None;
+    for p in pieces {
+        let words: Vec<&str> = p.toks.iter().filter_map(Tok::word).collect();
+        let toks: Vec<Tok> = if !words.is_empty() && words.iter().all(|w| is_filler(w)) {
+            stats.fillers += words.len();
+            p.toks.iter().filter(|t| t.word().is_none()).cloned().collect()
+        } else {
+            p.toks.clone()
+        };
+        if toks.is_empty() {
+            continue;
+        }
+        let gap = last_end.map_or(0, |e| p.t_ms.saturating_sub(e));
+        last_end = Some(p.end_ms);
+        let new = match paras.last() {
+            None => true,
+            Some((_, cur)) => {
+                let ends = cur.iter().rev().find_map(Tok::word).is_some_and(ends_sentence);
+                let cap = toks.iter().find_map(Tok::word).is_some_and(starts_capital);
+                count_words(&toks) > 0 && (gap >= LONG_PAUSE_MS || (gap >= PAUSE_MS && (ends || cap)))
+            }
+        };
+        match paras.last_mut() {
+            Some((_, cur)) if !new => cur.extend(toks),
+            _ => paras.push((gap, toks)),
+        }
+    }
+    // A fragment joins the paragraph before it; markers never stand alone.
+    let mut merged: Vec<Vec<Tok>> = vec![];
+    for (gap, toks) in paras {
+        let n = count_words(&toks);
+        match merged.last_mut() {
+            Some(prev) if n == 0 || (n < FRAGMENT_WORDS && gap < LONG_PAUSE_MS) || count_words(prev) == 0 => {
+                prev.extend(toks)
+            }
+            _ => merged.push(toks),
+        }
+    }
+    // Long paragraphs split at a sentence end; a list paused between its items stays one list.
+    let mut chunks: Vec<Vec<Tok>> = vec![];
+    for toks in merged {
+        for c in split_long(toks) {
+            let c = collapse_repeats(drop_lead_fillers(c, &mut stats), &mut stats);
+            if c.is_empty() {
+                continue;
+            }
+            match chunks.last_mut() {
+                Some(prev) if continues_list(prev, &c) => prev.extend(c),
+                _ => chunks.push(c),
+            }
+        }
+    }
+    stats.paragraphs = chunks.len();
+    let out: Vec<String> = chunks.into_iter().map(render).collect();
+    (out.join("\n\n"), stats)
+}
+
+/// Cut after the first sentence end once `PARAGRAPH_WORDS` words have gone by, keeping the markers right after it with
+/// it, and never leaving a tail under `FRAGMENT_WORDS` words.
+fn split_long(toks: Vec<Tok>) -> Vec<Vec<Tok>> {
+    let total = count_words(&toks);
+    let mut out = vec![];
+    let mut cur: Vec<Tok> = vec![];
+    let (mut n, mut seen) = (0, 0);
+    let mut it = toks.into_iter().peekable();
+    while let Some(t) = it.next() {
+        let end = t.word().is_some_and(ends_sentence);
+        if t.word().is_some() {
+            n += 1;
+            seen += 1;
+        }
+        cur.push(t);
+        if end && n >= PARAGRAPH_WORDS && total - seen >= FRAGMENT_WORDS {
+            while let Some(m) = it.next_if(|t| t.word().is_none()) {
+                cur.push(m);
+            }
+            out.push(std::mem::take(&mut cur));
+            n = 0;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Remove a filler that opens a sentence ("Um, so the header" is "So the header"); one inside a sentence stays.
+fn drop_lead_fillers(toks: Vec<Tok>, stats: &mut TidyStats) -> Vec<Tok> {
+    let mut out: Vec<Tok> = Vec::with_capacity(toks.len());
+    let mut cap = false;
+    for t in toks {
+        match t {
+            Tok::Word(w) => {
+                let start = out.iter().rev().find_map(Tok::word).is_none_or(ends_sentence);
+                if start && is_filler(&w) {
+                    stats.fillers += 1;
+                    cap = true;
+                    continue;
+                }
+                out.push(Tok::Word(if std::mem::take(&mut cap) { capitalize(&w) } else { w }));
+            }
+            m => out.push(m),
+        }
+    }
+    out
+}
+
+/// Words `i..i + n` said again straight after, within one sentence, with no marker between and no number among them.
+fn repeat_at(toks: &[Tok], i: usize, n: usize) -> bool {
+    let (a, b) = (&toks[i..i + n], &toks[i + n..i + 2 * n]);
+    let words = |s: &[Tok]| s.iter().map(|t| t.word().map(norm)).collect::<Option<Vec<String>>>();
+    let (Some(x), Some(y)) = (words(a), words(b)) else { return false };
+    x == y
+        && x.iter().all(|w| !w.is_empty() && !is_number(w))
+        && !(n == 1 && KEEP_DOUBLE.contains(&x[0].as_str()))
+        && !a.iter().filter_map(Tok::word).any(ends_sentence)
+        && !b[..n - 1].iter().filter_map(Tok::word).any(ends_sentence)
+}
+
+/// Say an immediate repeat of one to three words once ("kind of kind of" is "kind of"), keeping the second copy, which
+/// carries the punctuation, with the first one's capital.
+fn collapse_repeats(mut toks: Vec<Tok>, stats: &mut TidyStats) -> Vec<Tok> {
+    loop {
+        let mut changed = false;
+        for n in (1..=3).rev() {
+            let mut i = 0;
+            while i + 2 * n <= toks.len() {
+                if repeat_at(&toks, i, n) {
+                    let cap = toks[i].word().is_some_and(starts_capital);
+                    toks.drain(i..i + n);
+                    if cap {
+                        capitalize_first(&mut toks[i..i + 1]);
+                    }
+                    stats.repeats += 1;
+                    changed = true;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if !changed {
+            return toks;
+        }
+    }
+}
+
+/// The sentences of a paragraph: each ends after a word that ends one, with the markers right after it.
+fn sentences(toks: &[Tok]) -> Vec<&[Tok]> {
+    let mut out = vec![];
+    let (mut s, mut i) = (0, 0);
+    while i < toks.len() {
+        let end = toks[i].word().is_some_and(ends_sentence);
+        i += 1;
+        if end {
+            while i < toks.len() && toks[i].word().is_none() {
+                i += 1;
+            }
+            out.push(&toks[s..i]);
+            s = i;
+        }
+    }
+    if s < toks.len() {
+        out.push(&toks[s..]);
+    }
+    out
+}
+
+/// The sentence opens with First / Second / Third.. or "number one" / "number two"..; with `later`, Finally and Lastly
+/// count too (they only continue a list).
+fn ordinal(sentence: &[Tok], later: bool) -> bool {
+    let mut w = sentence.iter().filter_map(Tok::word).map(norm);
+    match w.next().as_deref() {
+        Some("number") => w.next().is_some_and(|n| SPOKEN_ORDINALS.contains(&n.as_str())),
+        Some(f) => ORDINALS.contains(&f) || (later && ["finally", "lastly"].contains(&f)),
+        None => false,
+    }
+}
+
+/// `next` opens with a later item of a list `prev` has begun ("Second, .." after "First, ..").
+fn continues_list(prev: &[Tok], next: &[Tok]) -> bool {
+    let opens = sentences(next).first().is_some_and(|s| ordinal(s, true));
+    let first = next.iter().find_map(Tok::word).map(norm);
+    opens && !matches!(first.as_deref(), Some("first" | "firstly")) && sentences(prev).iter().any(|s| ordinal(s, false))
+}
+
+/// One paragraph as text: its first letter capitalised, and a run of First / Second / Third sentences one `- ` line
+/// each, in their own words.
+fn render(mut toks: Vec<Tok>) -> String {
+    capitalize_first(&mut toks);
+    let join = |s: &[Tok]| s.iter().map(Tok::text).collect::<Vec<_>>().join(" ");
+    let sents = sentences(&toks);
+    let strong: Vec<usize> = (0..sents.len()).filter(|&i| ordinal(sents[i], false)).collect();
+    if strong.len() < 2 {
+        return join(&toks);
+    }
+    let mut lines: Vec<String> = vec![];
+    if strong[0] > 0 {
+        lines.push(join(&toks[..sents[..strong[0]].iter().map(|s| s.len()).sum()]));
+    }
+    for s in &sents[strong[0]..] {
+        let mut s = s.to_vec();
+        if ordinal(&s, true) {
+            capitalize_first(&mut s);
+            lines.push(format!("- {}", join(&s)));
+        } else if let Some(l) = lines.last_mut() {
+            l.push(' ');
+            l.push_str(&join(&s));
+        }
+    }
+    lines.join("\n")
 }
 
 /// `m:ss` for a walkthrough stamp.
@@ -262,14 +607,14 @@ fn filename(n: u32, kind: CaptureKind) -> String {
     format!("{n:02}-{}.png", kind.as_str())
 }
 
-/// Markdown with images inlined at the capture moment, pointing at `images/NN-kind.png`.
-pub fn assemble_markdown(items: &[Item]) -> (String, Vec<Capture>) {
-    markdown_linked(items, &|c| format!("images/{}", filename(c.id, c.kind)))
+/// Markdown with images inlined at the capture moment, pointing at `images/NN-kind.png`; with `tidy`, in paragraphs.
+pub fn assemble_markdown(items: &[Item], tidy: bool) -> (String, Vec<Capture>) {
+    markdown_linked(items, &|c| format!("images/{}", filename(c.id, c.kind)), tidy)
 }
 
 /// Markdown with each picture inlined at its marker, linking to `link(capture)`.
-fn markdown_linked(items: &[Item], link: &dyn Fn(&Capture) -> String) -> (String, Vec<Capture>) {
-    let (plain, captures) = compose(items);
+fn markdown_linked(items: &[Item], link: &dyn Fn(&Capture) -> String, tidy: bool) -> (String, Vec<Capture>) {
+    let (plain, captures) = compose_with(items, tidy);
     if plain.is_empty() {
         return (String::new(), captures);
     }
@@ -294,18 +639,19 @@ pub struct ClipboardPayload {
 }
 
 pub fn assemble_clipboard(items: &[Item]) -> ClipboardPayload {
-    assemble_clipboard_files(items, &[])
+    assemble_clipboard_files(items, &[], false)
 }
 
 /// The clipboard form whose plain text lists each picture's file; the HTML shows the pictures. `files[j]` is picture
 /// `j + 1` as the prompt numbers it. With files, the markers are the bare `[image n]` and one list closes the prompt;
-/// without (the setting is off, or nothing was saved), the markers carry the control and pins as before.
-pub fn assemble_clipboard_files(items: &[Item], files: &[String]) -> ClipboardPayload {
-    let (marked, captures) = compose(items);
+/// without (the setting is off, or nothing was saved), the markers carry the control and pins as before. With `tidy`,
+/// the text is in paragraphs (`tidy_pieces`), each a `<p>` in the HTML.
+pub fn assemble_clipboard_files(items: &[Item], files: &[String], tidy: bool) -> ClipboardPayload {
+    let (marked, captures) = compose_with(items, tidy);
     let plain = if files.is_empty() || captures.is_empty() {
         marked.clone()
     } else {
-        format!("{}\n\n{}", compose_marked(items, true).0, picture_list(&captures, files))
+        format!("{}\n\n{}", compose_marked(items, true, tidy).0, picture_list(&captures, files))
     };
     if plain.is_empty() {
         return ClipboardPayload {
@@ -313,7 +659,13 @@ pub fn assemble_clipboard_files(items: &[Item], files: &[String]) -> ClipboardPa
             plain: String::new(),
         };
     }
-    let mut html_body = escape_html(&marked);
+    let mut html_body = if tidy {
+        marked.split("
+
+").map(|p| format!("<p style=\"margin:0 0 0.75em;\">{}</p>", escape_html(p))).collect()
+    } else {
+        escape_html(&marked)
+    };
     for c in &captures {
         let needle = escape_html(&marker(c.id, c));
         let img = format!(
@@ -441,7 +793,7 @@ fn create_private(p: &Path) -> std::io::Result<()> {
 /// Copy a saved recording's pictures for agents: `<root>/<YYYY-MM-DD_HHMM>/` with `01.png`.. numbered as the prompt
 /// numbers them, `prompt.md` linking to them and `manifest.json`. Then prune the root (`prune_handoff`). A recording
 /// without pictures writes nothing. On failure the folder is removed and History's own copies stand.
-pub fn write_handoff(root: &Path, id: &str, created_ms: u64, items: &[Item], now_ms: u64) -> Result<Handoff, String> {
+pub fn write_handoff(root: &Path, id: &str, created_ms: u64, items: &[Item], now_ms: u64, tidy: bool) -> Result<Handoff, String> {
     let digits = |n: usize| if n >= 100 { 3 } else { 2 };
     let (_, captures) = compose(items);
     if captures.is_empty() {
@@ -470,7 +822,7 @@ pub fn write_handoff(root: &Path, id: &str, created_ms: u64, items: &[Item], now
         for c in &captures {
             std::fs::write(dir.join(name(c.id)), &c.png).map_err(|e| e.to_string())?;
         }
-        let (md, _) = markdown_linked(items, &|c| name(c.id));
+        let (md, _) = markdown_linked(items, &|c| name(c.id), tidy);
         std::fs::write(dir.join("prompt.md"), format!("{md}\n")).map_err(|e| e.to_string())?;
         let manifest = Manifest {
             app: HANDOFF_APP.into(),
@@ -533,8 +885,8 @@ pub fn prune_handoff(root: &Path, now_ms: u64, spare: Option<&Path>) {
 }
 
 /// Write `prompt.md` and `images/NN-kind.png` under `dir`. Returns the markdown path.
-pub fn export_folder(items: &[Item], dir: &Path) -> Result<std::path::PathBuf, String> {
-    let (md, captures) = assemble_markdown(items);
+pub fn export_folder(items: &[Item], dir: &Path, tidy: bool) -> Result<std::path::PathBuf, String> {
+    let (md, captures) = assemble_markdown(items, tidy);
     let images = dir.join("images");
     std::fs::create_dir_all(&images).map_err(|e| e.to_string())?;
     for c in &captures {
@@ -580,13 +932,13 @@ pub struct SessionImage {
 }
 
 pub fn assemble_export(items: &[Item]) -> SessionExport {
-    assemble_export_files(items, &[])
+    assemble_export_files(items, &[], false)
 }
 
 /// The export whose plain text lists each picture's file (`assemble_clipboard_files`; `files` in prompt order).
-pub fn assemble_export_files(items: &[Item], files: &[String]) -> SessionExport {
-    let clip = assemble_clipboard_files(items, files);
-    let (markdown, captures) = assemble_markdown(items);
+pub fn assemble_export_files(items: &[Item], files: &[String], tidy: bool) -> SessionExport {
+    let clip = assemble_clipboard_files(items, files, tidy);
+    let (markdown, captures) = assemble_markdown(items, tidy);
     SessionExport {
         plain: clip.plain,
         markdown,
@@ -766,7 +1118,7 @@ mod tests {
     #[test]
     fn markdown_and_html_carry_the_named_control() {
         let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", vec![Label { n: 1, text: "too far left".into() }])];
-        let (md, _) = assemble_markdown(&items);
+        let (md, _) = assemble_markdown(&items, false);
         assert_eq!(md, r#"this ![image 1: button "Place order"; 1=too far left](images/01-full.png) one"#);
         let clip = assemble_clipboard(&items);
         assert_eq!(clip.plain, r#"this [image 1: button "Place order"; 1=too far left] one"#);
@@ -794,7 +1146,7 @@ mod tests {
         // `files[j]` is picture j + 1 as the prompt numbers it.
         let dir = "C:/Users/max/Pointcast/2026-11-09_1432";
         let files = [format!("{dir}/01.png"), format!("{dir}/02.png")];
-        let clip = assemble_clipboard_files(&items, &files);
+        let clip = assemble_clipboard_files(&items, &files, false);
         assert_eq!(
             clip.plain,
             concat!(
@@ -807,18 +1159,18 @@ mod tests {
         );
         assert_eq!(clip.html, assemble_clipboard(&items).html, "the HTML keeps the pictures inline, without paths");
         assert!(!clip.html.contains("Pointcast/2026"));
-        let exp = assemble_export_files(&items, &files);
+        let exp = assemble_export_files(&items, &files, false);
         assert_eq!(exp.plain, clip.plain, "agents read the list too");
-        assert_eq!(exp.markdown, assemble_markdown(&items).0);
+        assert_eq!(exp.markdown, assemble_markdown(&items, false).0);
         // The control pointed at rides in the caption, between the size and the pins.
         let one = [pointed(0, "button", "Place order", vec![])];
-        assert!(assemble_clipboard_files(&one, &files[..1]).plain.ends_with(r#"`  full 1x1 · pointing at button "Place order""#));
+        assert!(assemble_clipboard_files(&one, &files[..1], false).plain.ends_with(r#"`  full 1x1 · pointing at button "Place order""#));
         // No files (the setting is off, or History could not keep the recording): no list and no paths.
-        let off = assemble_export_files(&items, &[]).plain;
+        let off = assemble_export_files(&items, &[], false).plain;
         assert_eq!(off, "the save [image 1: 1=too far left] button sits too far [image 2] left");
         assert!(!off.contains("Pictures") && !off.contains('/'), "{off}");
         // No pictures: no list.
-        assert_eq!(assemble_clipboard_files(&[said(0, 1_000, "just words")], &files).plain, "just words");
+        assert_eq!(assemble_clipboard_files(&[said(0, 1_000, "just words")], &files, false).plain, "just words");
     }
 
     const CREATED: u64 = 1_793_000_000_000;
@@ -852,7 +1204,7 @@ mod tests {
         }
         let items = vec![said(0, 1_000, "look here"), key, mine];
         assert_eq!(picture_order(&items), [1, 0]);
-        let h = write_handoff(&root, "e1", CREATED, &items, CREATED).unwrap();
+        let h = write_handoff(&root, "e1", CREATED, &items, CREATED, false).unwrap();
         assert!(h.files[0].ends_with("/01.png") && h.files[1].ends_with("/02.png"), "{:?}", h.files);
         let first = std::fs::read(h.dir.join("01.png")).unwrap();
         assert_eq!(crate::image_ops::png_size(&first), Some((2, 1)), "[image 1] is the picture taken at 0.2 s");
@@ -860,7 +1212,7 @@ mod tests {
         let m = manifest(&h.dir);
         let got: Vec<_> = m.pictures.iter().map(|p| (p.n, p.file.as_str(), p.t_ms, p.auto)).collect();
         assert_eq!(got, [(1, "01.png", 200, false), (2, "02.png", 800, true)]);
-        let plain = assemble_clipboard_files(&items, &h.files).plain;
+        let plain = assemble_clipboard_files(&items, &h.files, false).plain;
         assert!(plain.starts_with("[image 1] look here [image 2]\n\n"), "{plain}");
         assert!(plain.contains(&format!("[image 1] `{}`  region 2x1\n", h.files[0])), "{plain}");
         let _ = std::fs::remove_dir_all(&root);
@@ -875,7 +1227,7 @@ mod tests {
             sized(900, CaptureKind::Full, 1813, 989, vec![]),
             sized(300, CaptureKind::Region, 933, 73, pin),
         ];
-        let h = write_handoff(&root, "entry-7", CREATED, &items, CREATED).unwrap();
+        let h = write_handoff(&root, "entry-7", CREATED, &items, CREATED, false).unwrap();
         use chrono::TimeZone;
         let stamp = chrono::Local.timestamp_millis_opt(CREATED as i64).unwrap().format("%Y-%m-%d_%H%M").to_string();
         assert_eq!(h.dir, root.join(&stamp));
@@ -884,7 +1236,7 @@ mod tests {
         names.sort();
         assert_eq!(names, ["01.png", "02.png", "manifest.json", "prompt.md"]);
         // Shown with --nocapture: what is pasted and what the folder holds.
-        println!("{}\n---\n{}: {names:?}", assemble_clipboard_files(&items, &h.files).plain, h.dir.display());
+        println!("{}\n---\n{}: {names:?}", assemble_clipboard_files(&items, &h.files, false).plain, h.dir.display());
         println!("{}", std::fs::read_to_string(h.dir.join("manifest.json")).unwrap());
         let base = h.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
         assert_eq!(h.files, [format!("{base}/01.png"), format!("{base}/02.png")]);
@@ -905,15 +1257,15 @@ mod tests {
             ])
         );
         // Another recording in the same minute gets its own folder.
-        let again = write_handoff(&root, "entry-8", CREATED + 1_000, &items, CREATED).unwrap();
+        let again = write_handoff(&root, "entry-8", CREATED + 1_000, &items, CREATED, false).unwrap();
         assert_eq!(again.dir, root.join(format!("{stamp}-2")));
-        assert_eq!(write_handoff(&root, "entry-9", CREATED + 2_000, &items, CREATED).unwrap().dir, root.join(format!("{stamp}-3")));
+        assert_eq!(write_handoff(&root, "entry-9", CREATED + 2_000, &items, CREATED, false).unwrap().dir, root.join(format!("{stamp}-3")));
         // No pictures: no folder.
-        assert!(write_handoff(&root, "words", CREATED, &[said(0, 9, "hi")], CREATED).is_err());
+        assert!(write_handoff(&root, "words", CREATED, &[said(0, 9, "hi")], CREATED, false).is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
         // A hundred pictures or more take three digits.
         let many: Vec<Item> = (0..100).map(|t| shot(t, CaptureKind::Full, vec![])).collect();
-        let h = write_handoff(&root, "many", CREATED + DAY, &many, CREATED + DAY).unwrap();
+        let h = write_handoff(&root, "many", CREATED + DAY, &many, CREATED + DAY, false).unwrap();
         assert!(h.files[0].ends_with("/001.png") && h.files[99].ends_with("/100.png"), "{:?}", &h.files[..2]);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -924,7 +1276,7 @@ mod tests {
         let items = [shot(0, CaptureKind::Full, vec![])];
         let now = CREATED + 10 * DAY;
         // Eight days old, written when it was new.
-        let old = write_handoff(&root, "old", now - 8 * DAY, &items, now - 8 * DAY).unwrap().dir;
+        let old = write_handoff(&root, "old", now - 8 * DAY, &items, now - 8 * DAY, false).unwrap().dir;
         // Things Pointcast did not write: a folder named like one, one with a manifest of someone else's, a file.
         let foreign = root.join("2020-01-01_0000");
         std::fs::create_dir_all(&foreign).unwrap();
@@ -935,7 +1287,7 @@ mod tests {
         std::fs::write(root.join("keep.txt"), "mine").unwrap();
         let mut ours = vec![];
         for i in 0..32 {
-            ours.push(write_handoff(&root, &format!("e{i}"), now - (32 - i) * MINUTE, &items, now).unwrap().dir);
+            ours.push(write_handoff(&root, &format!("e{i}"), now - (32 - i) * MINUTE, &items, now, false).unwrap().dir);
             if i == 0 {
                 assert!(!old.exists(), "a folder older than a week goes at the next write");
             }
@@ -955,7 +1307,7 @@ mod tests {
         let (md, caps) = assemble_markdown(&[
             said(0, 1_000, "look here"),
             shot(500, CaptureKind::Region, vec![]),
-        ]);
+        ], false);
         assert_eq!(md, "look ![image 1](images/01-region.png) here");
         assert_eq!(caps[0].id, 1);
     }
@@ -1009,7 +1361,7 @@ mod tests {
             ),
             shot(900, CaptureKind::Zoom, vec![]),
         ];
-        let prompt = export_folder(&items, &dir).unwrap();
+        let prompt = export_folder(&items, &dir, false).unwrap();
         assert_eq!(prompt, dir.join("prompt.md"));
         let md = std::fs::read_to_string(&prompt).unwrap();
         assert!(md.contains("images/01-region.png"), "{md}");
@@ -1033,5 +1385,342 @@ mod tests {
         assert_eq!(exp.images[0].n, 1);
         assert!(exp.images[0].data_url.starts_with("data:image/png;base64,"));
         assert!(exp.html.contains("<img"));
+    }
+
+    // ---- Tidy the text: paragraphs at the pauses, no ums, no repeated words.
+
+    /// The tidied text of `items`.
+    fn tidy(items: &[Item]) -> String {
+        compose_with(items, true).0
+    }
+
+    /// Pieces said back to back, `gap_ms` apart, each lasting 300 ms a word.
+    fn spoken(parts: &[(u64, &str)]) -> Vec<Item> {
+        let mut t = 0;
+        let mut v = vec![];
+        for (gap, text) in parts {
+            t += gap;
+            let end = t + 300 * text.split_whitespace().count().max(1) as u64;
+            v.push(said(t, end, text));
+            t = end;
+        }
+        v
+    }
+
+    const LONG_ENOUGH: &str = "the header is far too tall on this page";
+
+    #[test]
+    fn tidy_starts_a_paragraph_at_a_pause_after_a_sentence_end_or_before_a_capital_or_at_any_long_pause() {
+        let a = "the header is far too tall on this page.";
+        let b = "the footer has the same problem on every page.";
+        // 1.2 s after a sentence end: a new paragraph, its first letter capitalised.
+        assert_eq!(
+            tidy(&spoken(&[(0, a), (1_200, b)])),
+            "The header is far too tall on this page.\n\nThe footer has the same problem on every page."
+        );
+        // A shorter pause, or no sentence end and no capital: the same paragraph.
+        assert_eq!(tidy(&spoken(&[(0, a), (1_100, b)])), format!("The header is far too tall on this page. {b}"));
+        assert_eq!(tidy(&spoken(&[(0, LONG_ENOUGH), (2_000, b)])), format!("The header is far too tall on this page {b}"));
+        // No sentence end but a capital after 1.2 s: a new paragraph.
+        assert_eq!(
+            tidy(&spoken(&[(0, LONG_ENOUGH), (1_300, "The footer has the same problem on every page.")])),
+            "The header is far too tall on this page\n\nThe footer has the same problem on every page."
+        );
+        // 2.5 s, whatever the punctuation.
+        assert_eq!(
+            tidy(&spoken(&[(0, LONG_ENOUGH), (2_500, b)])),
+            "The header is far too tall on this page\n\nThe footer has the same problem on every page."
+        );
+    }
+
+    #[test]
+    fn tidy_joins_a_short_fragment_to_the_paragraph_before_it_unless_a_long_pause_came_first() {
+        let a = "the header is far too tall on this page.";
+        assert_eq!(
+            tidy(&spoken(&[(0, a), (1_500, "Okay, that one too.")])),
+            "The header is far too tall on this page. Okay, that one too."
+        );
+        assert_eq!(
+            tidy(&spoken(&[(0, a), (2_600, "Okay, that one too.")])),
+            "The header is far too tall on this page.\n\nOkay, that one too."
+        );
+    }
+
+    #[test]
+    fn tidy_splits_a_paragraph_past_110_words_at_its_next_sentence_end() {
+        let sentence = |k: usize| format!("sentence {} has exactly ten words in it right here.", NUMBER_WORDS[k % 20]);
+        let text: Vec<String> = (0..13).map(sentence).collect();
+        let got = tidy(&[said(0, 60_000, &text.join(" "))]);
+        let paras: Vec<&str> = got.split("\n\n").collect();
+        assert_eq!(paras.len(), 2, "{got}");
+        assert_eq!(paras[0].split_whitespace().count(), 110, "cut at the sentence end that reached 110 words");
+        assert_eq!(paras[1].split_whitespace().count(), 20);
+        assert!(paras[0].ends_with("right here.") && paras[1].starts_with("Sentence"), "{got}");
+        // 115 words: the tail would be a 5-word fragment, so no cut.
+        let short = format!("{} five more words right here.", text[..11].join(" "));
+        assert!(!tidy(&[said(0, 60_000, &short)]).contains("\n\n"));
+    }
+
+    #[test]
+    fn tidy_says_an_immediate_repeat_of_one_to_three_words_once_but_never_numbers_or_across_a_sentence_end() {
+        let one = |s: &str| tidy(&[said(0, 9_000, s)]);
+        assert_eq!(one("it is kind of kind of slow"), "It is kind of slow");
+        assert_eq!(one("click the the button"), "Click the button");
+        assert_eq!(one("I I think the save button is gone"), "I think the save button is gone");
+        assert_eq!(one("move it to the left to the left please"), "Move it to the left please");
+        assert_eq!(one("the the header"), "The header");
+        assert_eq!(one("The the header"), "The header");
+        // Not numbers, not across a sentence end, not the doubles grammar wants.
+        assert_eq!(one("press two two times"), "Press two two times");
+        assert_eq!(one("it costs 5 5 dollars"), "It costs 5 5 dollars");
+        assert_eq!(one("done. done. now the menu"), "Done. done. now the menu");
+        assert_eq!(one("what it had had in it"), "What it had had in it");
+        // A picture between the two keeps both: markers are never moved.
+        let items = [said(0, 1_000, "the the"), shot(500, CaptureKind::Full, vec![])];
+        assert_eq!(tidy(&items), "The [image 1] the");
+    }
+
+    #[test]
+    fn tidy_drops_a_piece_that_is_only_a_filler_and_a_filler_that_opens_a_sentence_and_nothing_else() {
+        let a = "the header is far too tall on this page.";
+        for um in ["Um.", "Um...", "Uh.", "um", "Uh, um."] {
+            assert_eq!(
+                tidy(&spoken(&[(0, a), (300, um), (300, "and the footer is too.")])),
+                "The header is far too tall on this page. and the footer is too.",
+                "{um}"
+            );
+        }
+        assert_eq!(tidy(&[said(0, 9_000, "Um, so the header is too tall")]), "So the header is too tall");
+        assert_eq!(tidy(&[said(0, 9_000, "it is gone. uh, so the header")]), "It is gone. So the header");
+        // Inside a sentence a filler stays, and the phrases that are words stay too.
+        assert_eq!(tidy(&[said(0, 9_000, "the, um, header is tall")]), "The, um, header is tall");
+        let words = "you know, it is like, I mean, kind of slow and basically broken";
+        assert_eq!(tidy(&[said(0, 9_000, words)]), "You know, it is like, I mean, kind of slow and basically broken");
+        // A filler-only piece with a picture in it keeps the picture.
+        let items = [said(0, 3_000, a), said(3_100, 3_600, "Um."), shot(3_300, CaptureKind::Full, vec![])];
+        assert_eq!(tidy(&items), "The header is far too tall on this page. [image 1]");
+    }
+
+    #[test]
+    fn tidy_turns_a_run_of_first_second_third_sentences_into_a_list_in_their_own_words() {
+        let got = tidy(&[said(0, 20_000, "we need three things. first, the header. Second, the footer is off. it overlaps. Third, the sidebar.")]);
+        assert_eq!(got, "We need three things.\n- First, the header.\n- Second, the footer is off. it overlaps.\n- Third, the sidebar.");
+        let spoken_numbers = tidy(&[said(0, 20_000, "Number one, the save button. Number two, the menu.")]);
+        assert_eq!(spoken_numbers, "- Number one, the save button.\n- Number two, the menu.");
+        // Items with pauses between them stay one list.
+        let paused = tidy(&spoken(&[
+            (0, "First, the header is far too tall on the page."),
+            (1_500, "Second, the footer is off by a few pixels."),
+            (1_500, "Finally, the menu opens on the wrong side."),
+        ]));
+        assert_eq!(
+            paused,
+            "- First, the header is far too tall on the page.\n- Second, the footer is off by a few pixels.\n- Finally, the menu opens on the wrong side."
+        );
+        // One "first" is not a list.
+        assert_eq!(tidy(&[said(0, 9_000, "First I opened the menu. Then it closed.")]), "First I opened the menu. Then it closed.");
+    }
+
+    #[test]
+    fn tidy_never_moves_a_marker_and_never_lets_one_stand_as_a_paragraph() {
+        // A picture taken in the pause stays after the words before it, not alone between paragraphs.
+        let items = [
+            said(0, 3_000, "look at this part of the screen right here."),
+            shot(4_000, CaptureKind::Full, vec![]),
+            said(8_000, 11_000, "the next thing is the footer on the page."),
+        ];
+        assert_eq!(tidy(&items), "Look at this part of the screen right here. [image 1]\n\nThe next thing is the footer on the page.");
+        // A picture as the piece starts leads its paragraph, attached to the words; the capital skips it.
+        let items = [said(0, 3_000, "first piece of words goes right here now."), said(6_000, 9_000, "next piece of words goes here."), shot(6_000, CaptureKind::Zoom, vec![])];
+        assert_eq!(tidy(&items), "First piece of words goes right here now.\n\n[image 1] Next piece of words goes here.");
+        // Pictures only, or a picture before a long pause: one paragraph.
+        assert_eq!(tidy(&[shot(10, CaptureKind::Full, vec![]), shot(20, CaptureKind::Zoom, vec![])]), "[image 1] [image 2]");
+        let items = [shot(0, CaptureKind::Full, vec![]), said(5_000, 6_000, "hello there")];
+        assert_eq!(tidy(&items), "[image 1] Hello there");
+        // Named markers are copied as they are, mid-sentence.
+        let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", vec![])];
+        assert_eq!(tidy(&items), r#"This [image 1: button "Place order"] one"#);
+    }
+
+    #[test]
+    fn tidy_reaches_every_output_markdown_prompt_md_html_and_the_listed_plain_text() {
+        let items = [
+            said(0, 3_000, "the save button is far too tall on this page."),
+            sized(1_500, CaptureKind::Region, 933, 73, vec![]),
+            said(4_500, 7_500, "um, the footer has the same problem everywhere."),
+        ];
+        let want = "The save button is far [image 1] too tall on this page.\n\nThe footer has the same problem everywhere.";
+        assert_eq!(tidy(&items), want);
+        let (md, _) = assemble_markdown(&items, true);
+        assert_eq!(md, want.replace("[image 1]", "![image 1](images/01-region.png)"));
+        let clip = assemble_clipboard_files(&items, &[], true);
+        assert_eq!(clip.plain, want);
+        assert_eq!(clip.html.matches("<p ").count(), 2, "{}", clip.html);
+        assert!(clip.html.contains("<p style=\"margin:0 0 0.75em;\">The save button") && clip.html.contains("<img"), "{}", clip.html);
+        let files = ["C:/p/01.png".to_string()];
+        let listed = assemble_clipboard_files(&items, &files, true).plain;
+        assert!(listed.starts_with(&format!("{want}\n\nPictures (1)")), "{listed}");
+        let exp = assemble_export_files(&items, &files, true);
+        assert_eq!((exp.plain.as_str(), exp.markdown.as_str()), (listed.as_str(), md.as_str()));
+        // Off: today's single-space joining, everywhere.
+        let raw = "the save button is far [image 1] too tall on this page. um, the footer has the same problem everywhere.";
+        assert_eq!(compose_with(&items, false).0, raw);
+        assert_eq!(assemble_clipboard_files(&items, &[], false).plain, raw);
+        assert!(!assemble_clipboard_files(&items, &[], false).html.contains("<p"));
+        // The handoff prompt.md reads in paragraphs too.
+        let root = tmp("tidy");
+        let h = write_handoff(&root, "t", CREATED, &items, CREATED, true).unwrap();
+        assert_eq!(std::fs::read_to_string(h.dir.join("prompt.md")).unwrap(), format!("{}\n", want.replace("[image 1]", "![image 1](01.png)")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The markers in a text, in order.
+    fn marks_in(s: &str) -> Vec<String> {
+        let mut out = vec![];
+        let mut rest = s;
+        while let Some(i) = rest.find("[image ") {
+            let j = i + rest[i..].find(']').expect("a closed marker");
+            out.push(rest[i..=j].to_string());
+            rest = &rest[j + 1..];
+        }
+        out
+    }
+
+    /// The words of a text without its markers, lower-cased with the punctuation stripped.
+    fn words_in(s: &str) -> Vec<String> {
+        let mut t = s.to_string();
+        for m in marks_in(s) {
+            t = t.replacen(&m, " ", 1);
+        }
+        t.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect()
+    }
+
+    /// `out` is `raw` with only fillers and immediate repeats of one to three words taken out, the order kept and
+    /// nothing added; and the markers are the same, in the same order.
+    fn check_invariants(raw: &str, out: &str) -> Result<(), String> {
+        if marks_in(raw) != marks_in(out) {
+            return Err(format!("markers changed: {:?} -> {:?}", marks_in(raw), marks_in(out)));
+        }
+        let (r, o) = (words_in(raw), words_in(out));
+        // Word `p` of `seq` is one copy of one to three words said twice in a row.
+        let repeat = |seq: &[String], p: usize| {
+            (1..=3).any(|n| {
+                (p.saturating_sub(n - 1)..=p).any(|s| {
+                    (s + 2 * n <= seq.len() && seq[s..s + n] == seq[s + n..s + 2 * n])
+                        || (s >= n && s + n <= seq.len() && seq[s - n..s] == seq[s..s + n])
+                })
+            })
+        };
+        let mut j = 0;
+        for (i, w) in r.iter().enumerate() {
+            if j < o.len() && o[j] == *w {
+                j += 1;
+                continue;
+            }
+            // What is left once the words already taken out are gone: the output so far, then the rest of the input.
+            let seq: Vec<String> = o[..j].iter().chain(&r[i..]).cloned().collect();
+            if !(FILLERS.contains(&w.as_str()) || repeat(&seq, j)) {
+                return Err(format!("word {i} {w:?} went missing"));
+            }
+        }
+        if j != o.len() {
+            return Err(format!("words added or moved from output word {j}"));
+        }
+        for p in out.split("\n\n") {
+            if words_in(p).is_empty() && !o.is_empty() {
+                return Err(format!("a paragraph without words: {p:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tidy_keeps_every_content_word_in_order_and_every_marker_over_generated_dictations() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let vocab = [
+            "the", "header", "button", "is", "too", "tall", "so", "we", "kind", "of", "like", "you", "know,", "I", "mean,",
+            "two", "three", "4", "Um,", "um", "uh.", "First,", "second,", "Third", "number", "one", "save", "page.",
+            "done.", "right?", "okay!", "It's", "menu\u{2026}", "had", "that", "\u{201c}Save\u{201d}", "it", "here.",
+        ];
+        let gaps = [0, 100, 900, 1_200, 1_300, 2_000, 2_500, 4_000];
+        for case in 0..400 {
+            let mut items = vec![];
+            let mut t = 0u64;
+            for _ in 0..1 + rnd(14) {
+                t += gaps[rnd(gaps.len())];
+                let mut w: Vec<&str> = if rnd(6) == 0 {
+                    vec![["Um.", "Um...", "Uh.", "um"][rnd(4)]]
+                } else {
+                    (0..1 + rnd(16)).map(|_| vocab[rnd(vocab.len())]).collect()
+                };
+                if rnd(3) == 0 && w.len() > 1 {
+                    let (s, n) = (rnd(w.len()), 1 + rnd(3));
+                    let span: Vec<&str> = w[s..(s + n).min(w.len())].to_vec();
+                    let at = s + span.len();
+                    w.splice(at..at, span);
+                }
+                let end = t + 250 * w.len() as u64;
+                items.push(said(t, end, &w.join(" ")));
+                t = end;
+            }
+            for _ in 0..rnd(5) {
+                items.push(shot(rnd(t as usize + 3_000) as u64, CaptureKind::Full, vec![]));
+            }
+            let raw = compose(&items).0;
+            let out = tidy(&items);
+            if let Err(e) = check_invariants(&raw, &out) {
+                panic!("case {case}: {e}\nraw: {raw}\nout: {out}");
+            }
+            assert_eq!(compose_with(&items, false).0, raw, "off is today's joining");
+        }
+    }
+
+    /// The owner's real dictations: `POINTCAST_REAL_ITEMS` names a folder of `*.items.json`. Prints counts only.
+    #[test]
+    #[ignore]
+    fn tidy_keeps_every_word_and_marker_of_real_transcripts() {
+        let dir = std::env::var("POINTCAST_REAL_ITEMS").expect("POINTCAST_REAL_ITEMS names a folder of *.items.json");
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().ends_with(".items.json"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no transcripts in {dir}");
+        println!("| # | words in | words out | paragraphs | repeats collapsed | fillers dropped |");
+        for (k, p) in paths.iter().enumerate() {
+            let mut items: Vec<Item> = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+            // The recordings had no pictures: plant them as compose places them (in a gap, and mid-piece).
+            let ends: Vec<(u64, u64)> = items.iter().filter_map(|i| match i {
+                Item::Speech { t_ms, end_ms, .. } => Some((*t_ms, *end_ms)),
+                Item::Image { .. } => None,
+            }).collect();
+            let end = ends.iter().map(|e| e.1).max().unwrap_or(0);
+            let mut times = vec![end * 3 / 10, end * 62 / 100, end * 9 / 10];
+            if ends.len() > 1 {
+                times.push((ends[0].1 + ends[1].0) / 2);
+            }
+            items.extend(times.into_iter().map(|t| shot(t, CaptureKind::Full, vec![])));
+            let (pieces, _) = pieces_of(&items, false);
+            let raw = compose(&items).0;
+            let (out, st) = tidy_pieces(&pieces);
+            assert_eq!(out, tidy(&items));
+            check_invariants(&raw, &out).unwrap_or_else(|e| panic!("transcript {}: {e}", k + 1));
+            println!(
+                "| {} | {} | {} | {} | {} | {} |",
+                k + 1,
+                words_in(&raw).len(),
+                words_in(&out).len(),
+                st.paragraphs,
+                st.repeats,
+                st.fillers
+            );
+        }
     }
 }
