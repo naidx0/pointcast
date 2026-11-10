@@ -34,10 +34,11 @@ use voice::ptt::TalkMode;
 /// Quiet time before the floating windows (HUD, overlay) are released. The speech model has its own setting, free_memory_minutes.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// Whether the speech model should be let go now: it has been quiet for the `minutes` the person chose (0 means never),
-/// and it has not been let go already in this quiet spell.
-fn free_due(quiet: std::time::Duration, minutes: u32, already: bool) -> bool {
-    !already && minutes > 0 && quiet >= std::time::Duration::from_secs(u64::from(minutes) * 60)
+/// Whether the speech model should be let go `now`: one is in memory, last `used` at least the `minutes` the person chose
+/// ago (0 means never), and nothing is recording, finishing or transcribed again. However it was loaded.
+fn free_due(now: std::time::Instant, used: Option<std::time::Instant>, minutes: u32, busy: bool) -> bool {
+    let after = std::time::Duration::from_secs(u64::from(minutes) * 60);
+    !busy && minutes > 0 && used.is_some_and(|u| now.saturating_duration_since(u) >= after)
 }
 
 /// A hold shorter than this is a tap: the session keeps recording until the next press.
@@ -1508,19 +1509,17 @@ pub fn run() {
                 });
             }
             // Pulse live state to the HUD and the menu bar clock while a session runs. After
-            // IDLE without one, the floating windows and the speech model are let go.
+            // IDLE without one, the floating windows are let go; the speech model, the chosen time after its last use.
             let svc2 = svc.clone();
             std::thread::spawn(move || {
                 let mut busy_at = std::time::Instant::now();
                 let mut reaped_at = busy_at;
-                let mut freed = false;
                 loop {
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
                         emit_state(&handle, &svc2);
                         busy_at = std::time::Instant::now();
                         reaped_at = busy_at;
-                        freed = false;
                         // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
                         // click on the HUD's Stop can bring Pointcast forward on macOS.
                         #[cfg(target_os = "macos")]
@@ -1533,9 +1532,8 @@ pub fn run() {
                             reaped_at = std::time::Instant::now();
                         }
                         let minutes = svc2.settings.lock().unwrap().free_memory_minutes;
-                        if free_due(busy_at.elapsed(), minutes, freed) && !svc2.busy() {
+                        if free_due(std::time::Instant::now(), svc2.engine_used(), minutes, svc2.busy()) {
                             svc2.unload_engine();
-                            freed = true;
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
@@ -1594,15 +1592,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_speech_model_is_freed_once_per_quiet_spell_at_the_time_chosen() {
-        use std::time::Duration;
-        let min = |m: u64| Duration::from_secs(m * 60);
-        assert!(!free_due(min(4), 5, false), "not before the chosen time");
-        assert!(free_due(min(5), 5, false), "at it");
-        assert!(free_due(min(30), 5, false), "and after it, if it was missed");
-        assert!(!free_due(min(30), 5, true), "but only once, until the next recording");
-        assert!(!free_due(min(600), 0, false), "0 keeps the model loaded however long it is quiet");
-        assert!(free_due(min(2), 2, false) && !free_due(min(1), 2, false), "the shortest choice");
+    fn the_speech_model_is_freed_the_chosen_time_after_its_last_use_however_it_was_loaded() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // Loaded outside a recording (Transcribe again, a model change, the check, the GPU version) at t0.
+        let loaded = Some(t0);
+        assert!(!free_due(at(59), loaded, 1, false), "not before the chosen time");
+        assert!(free_due(at(60), loaded, 1, false), "at it");
+        assert!(free_due(at(3_600), loaded, 1, false), "and after it, if it was missed");
+        // Loaded again after it was freed: freed again, with no recording in between.
+        assert!(free_due(at(7_200), Some(at(7_000)), 1, false), "every load, not once per quiet spell");
+        // A recording, a Transcribe again or a piece heard at 50 s pushes the time to 110 s.
+        assert!(!free_due(at(60), Some(at(50)), 1, false), "a use in between pushes it back");
+        assert!(free_due(at(110), Some(at(50)), 1, false), "to a minute after that use");
+        assert!(!free_due(at(3_600), loaded, 1, true), "never while recording, finishing or transcribed again");
+        assert!(!free_due(at(36_000), loaded, 0, false), "0 keeps the model loaded however long it is quiet");
+        assert!(!free_due(at(3_600), None, 1, false), "nothing in memory, nothing to free");
+        assert!(free_due(at(300), loaded, 5, false) && !free_due(at(299), loaded, 5, false), "a longer choice");
     }
 
     #[test]
