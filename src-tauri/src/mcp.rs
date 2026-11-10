@@ -475,7 +475,7 @@ struct Prompt {
     /// A folder name for copies: `YYYY-MM-DD_HHMM`.
     stamp: String,
     /// The session, when History has it (the text is then made again for copied files).
-    items: Option<Vec<Item>>,
+    items: Option<Vec<crate::prompt::Item>>,
     plain: String,
     pics: Vec<Pic>,
 }
