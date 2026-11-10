@@ -883,6 +883,9 @@ mod tests {
             std::fs::read_dir(&h.dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["01.png", "02.png", "manifest.json", "prompt.md"]);
+        // Shown with --nocapture: what is pasted and what the folder holds.
+        println!("{}\n---\n{}: {names:?}", assemble_clipboard_files(&items, &h.files).plain, h.dir.display());
+        println!("{}", std::fs::read_to_string(h.dir.join("manifest.json")).unwrap());
         let base = h.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
         assert_eq!(h.files, [format!("{base}/01.png"), format!("{base}/02.png")]);
         assert_eq!(
