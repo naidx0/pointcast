@@ -212,7 +212,18 @@ impl Frame {
     }
 }
 
+/// Whether an X display is named for this process. Without one the pointer library opens a null display and reads
+/// through it, which ends the whole app.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn has_x_display(display: Option<std::ffi::OsString>) -> bool {
+    display.is_some_and(|d| !d.is_empty())
+}
+
 pub fn cursor_pos() -> Result<(i32, i32), String> {
+    #[cfg(target_os = "linux")]
+    if !has_x_display(std::env::var_os("DISPLAY")) {
+        return Err("could not read the pointer".into());
+    }
     match Mouse::get_mouse_position() {
         Mouse::Position { x, y } => Ok((x, y)),
         Mouse::Error => Err("could not read the pointer".into()),
@@ -538,6 +549,18 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pointer_is_only_asked_for_where_a_display_is_named() {
+        assert!(!has_x_display(None));
+        assert!(!has_x_display(Some("".into())));
+        assert!(has_x_display(Some(":0".into())));
+        // A machine with no display (a build server) reads no pointer instead of crashing.
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("DISPLAY").is_none() {
+            assert!(cursor_pos().is_err());
+        }
+    }
     use std::cell::Cell;
 
     fn p(t_ms: u64, x: i32, y: i32) -> Point {
