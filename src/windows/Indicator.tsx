@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Monitor, SquareDashedMousePointer, X, ZoomIn } from "lucide-react";
+import { Check, Monitor, SquareDashedMousePointer, TriangleAlert, X, ZoomIn } from "lucide-react";
 import {
   captureFull,
   captureZoom,
+  historyOpen,
+  historyRetranscribe,
+  hudHold,
   inTauri,
   onState,
+  permissionRequest,
   preview,
   regionBegin,
   sessionCancel,
@@ -17,6 +21,7 @@ import {
   type Config,
   type UiState,
 } from "@/lib/api";
+import { discardClick, finishingLine, micCaption, noticeView } from "@/lib/capsule";
 import { chordText } from "@/lib/keys";
 import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
@@ -74,9 +79,10 @@ export function Indicator() {
         .then((c) => setKeys(c.hotkeys))
         .catch(() => undefined);
     } else if (preview) {
-      // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1][&engine=gpu|cpu], ?phase=ready&notice=partial or
-      // ?quiet=silent|quiet to look at the other states; ?hud=ready (microphone not live yet), ?hud=gpu (and the graphics
-      // card being set up), ?hud=talk (live, model still loading), ?hud=gpu-talk for the start of a recording.
+      // ?phase=transcribing&behind=40000, ?phase=transcribing&progress=42[&stalled=1][&engine=gpu|cpu], ?phase=ready&notice=partial
+      // [&blocked=1 for a copy auto-paste could not make] or ?quiet=silent|quiet, ?pics=0 and ?discard=1 (asking) to look at the
+      // other states; ?hud=ready (microphone not live yet), ?hud=gpu (and the graphics card being set up), ?hud=talk (live,
+      // model still loading), ?hud=gpu-talk for the start of a recording.
       const q = new URLSearchParams(location.search);
       const quiet = q.get("quiet");
       const phase = q.get("phase");
@@ -92,9 +98,11 @@ export function Indicator() {
         mic: live,
         preparing_gpu: hud === "gpu" || hud === "gpu-talk",
         duration_ms: live ? (starting ? 2_000 : 16_000) : 0,
-        image_count: 2,
+        image_count: q.get("pics") == null ? 2 : Number(q.get("pics")),
         level: 0.4,
         notice: (q.get("notice") as UiState["notice"]) ?? null,
+        entry: "preview",
+        paste_blocked: q.get("blocked") === "1",
         behind_ms: Number(q.get("behind")) || 0,
         quiet_mic: quiet === "silent" || quiet === "quiet" ? quiet : null,
         engine_label: engine === "gpu" ? "your graphics card" : engine === "cpu" ? "your processor" : null,
@@ -128,18 +136,45 @@ export function Indicator() {
   if (s.phase === "transcribing") return <Finishing s={s} />;
   if (s.phase === "ready" && s.notice) return <Done s={s} />;
 
+  return <Recording s={s} keys={keys} lv={lv} />;
+}
+
+/** The recording row. A quiet microphone keeps the timer and the bars (flat bars are the evidence) and says so under
+ * them; Discard asks once before it throws the recording away. */
+function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null; lv: number[] }) {
+  const [armed, setArmed] = useState<number | null>(() =>
+    preview && new URLSearchParams(location.search).get("discard") === "1" ? Number.MAX_SAFE_INTEGER : null,
+  );
+  useEffect(() => {
+    if (armed == null) return;
+    const id = setTimeout(() => setArmed(null), Math.min(armed - Date.now(), 2 ** 31 - 1));
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setArmed(null);
+    window.addEventListener("keydown", esc);
+    return () => {
+      clearTimeout(id);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [armed]);
+  const discard = () => {
+    const r = discardClick(armed, Date.now());
+    setArmed(r.armedUntil);
+    if (r.discard) sessionCancel().catch(() => undefined);
+  };
+
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
   const problem = s.error;
   const ready = readyNote(s);
   // Nothing is recorded until the microphone's first samples arrive: no red dot and no clock before that.
   const live = s.mic;
-  const mic = s.phase === "recording" && live && s.quiet_mic ? micNotice(s.quiet_mic) : null;
+  const quiet = s.phase === "recording" && live && s.quiet_mic && !problem && !ready ? s.quiet_mic : null;
+  const mic = quiet ? micNotice(quiet) : null;
+  const n = s.image_count;
 
   return (
     <div className="hud-wrap" data-tauri-drag-region>
-      <div className="hud" data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
+      <div className={`hud ${mic ? "warned" : ""}`} data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
         <span className={`rec ${live ? "" : "ready"}`} data-tauri-drag-region />
-        {mic || ready || !live ? null : (
+        {ready || !live ? null : (
           <span className="time" data-tauri-drag-region>
             {stamp(s.duration_ms)}
           </span>
@@ -153,8 +188,6 @@ export function Indicator() {
             <b data-tauri-drag-region>{ready.lines[0]}</b>
             {ready.lines[1] ? <span data-tauri-drag-region>{ready.lines[1]}</span> : null}
           </span>
-        ) : mic ? (
-          <MicNote notice={mic} />
         ) : (
           <span className="wave" aria-hidden="true" data-tauri-drag-region>
             {lv.map((v, i) => (
@@ -162,6 +195,11 @@ export function Indicator() {
             ))}
           </span>
         )}
+        {mic && quiet ? (
+          <span className="cap warn" role="status" title={mic.full} aria-label={mic.full} data-tauri-drag-region>
+            {micCaption(quiet)}
+          </span>
+        ) : null}
         <span className="sep" />
         <button
           type="button"
@@ -171,7 +209,6 @@ export function Indicator() {
           onClick={() => regionBegin().catch(() => undefined)}
         >
           <SquareDashedMousePointer size={18} strokeWidth={1.75} />
-          {s.image_count ? <span className="n">{s.image_count}</span> : null}
         </button>
         <button
           type="button"
@@ -191,16 +228,31 @@ export function Indicator() {
         >
           <ZoomIn size={18} strokeWidth={1.75} />
         </button>
+        {/* While recording the slot is always there, so the first picture does not move the buttons. Getting ready has
+            no room for it at 392 px: the count shows once recording runs. */}
+        {!ready ? (
+          <span
+            className="count"
+            style={{ visibility: n ? "visible" : "hidden" }}
+            title={`${n} ${n === 1 ? "picture" : "pictures"} in this prompt`}
+            aria-label={`${n} ${n === 1 ? "picture" : "pictures"}`}
+            data-tauri-drag-region
+          >
+            {n || 0}
+          </span>
+        ) : null}
         <span className="sep" />
-        <button
-          type="button"
-          className="hb"
-          title="Discard"
-          aria-label="Discard this recording"
-          onClick={() => sessionCancel().catch(() => undefined)}
-        >
-          <X size={17} strokeWidth={2} />
-        </button>
+        <span className="discard-slot">
+          <button
+            type="button"
+            className={`hb discard ${armed != null ? "armed" : ""}`}
+            title={armed != null ? "Click again to discard (Esc keeps it)" : "Discard"}
+            aria-label={armed != null ? "Click again to discard this recording" : "Discard this recording"}
+            onClick={discard}
+          >
+            {armed != null ? "Discard?" : <X size={17} strokeWidth={2} />}
+          </button>
+        </span>
         <button
           type="button"
           className="stop"
@@ -215,37 +267,14 @@ export function Indicator() {
   );
 }
 
-/** The microphone warning takes the place of the time and the wave, so the buttons stay where they are. */
-function MicNote({ notice }: { notice: ReturnType<typeof micNotice> }) {
-  return (
-    <span className="note warn" role="status" title={notice.full} aria-label={notice.full} data-tauri-drag-region>
-      <b data-tauri-drag-region>{notice.lines[0]}</b>
-      <span data-tauri-drag-region>{notice.lines[1]}</span>
-    </span>
-  );
-}
-
-/** After stop, while the last words are transcribed: how far that is on a determinate bar, and Cancel to keep what is
- * done. Cancel is offered quietly after 5 s and in the accent once nothing has moved for 20 s. */
+/** After stop, while the last words are written down: how far that is on a determinate bar, and Paste what's done to stop
+ * waiting, offered from the start and in the accent once nothing has moved for 20 s. */
 function Finishing({ s }: { s: UiState }) {
   const p = s.progress ?? null;
-  const [waited, setWaited] = useState(false);
   const [cutting, setCutting] = useState(false);
-  useEffect(() => {
-    const id = setTimeout(() => setWaited(true), 5000);
-    return () => clearTimeout(id);
-  }, []);
   const pct = p ? Math.min(100, Math.max(0, Math.round(p.percent))) : null;
   const stalled = !!p?.stalled;
-  const text = cutting
-    ? "Saving what's done…"
-    : pct == null
-      ? "Finishing…"
-      : stalled
-        ? `Still working… ${pct}%`
-        : s.engine_label
-          ? `Transcribing on ${s.engine_label} · ${pct}%`
-          : `Transcribing ${pct}%`;
+  const text = finishingLine(p, cutting);
   const cancel = () => {
     setCutting(true);
     if (inTauri) sessionFinishNow().catch(() => setCutting(false));
@@ -272,54 +301,73 @@ function Finishing({ s }: { s: UiState }) {
         <button
           type="button"
           className={`fin-cancel ${stalled ? "accent" : ""}`}
-          style={{ visibility: waited || stalled ? "visible" : "hidden" }}
           disabled={cutting}
-          title="Stop waiting: paste what is transcribed and keep the audio in History"
+          title="Stop waiting: paste what is written so far and keep the audio in History"
           onClick={cancel}
         >
-          Cancel
+          Paste what's done
         </button>
       </div>
     </div>
   );
 }
 
-/** After stop: a short pill that says where the prompt went, then the window hides itself. */
+/** After stop: a short pill that says where the prompt went, then the window hides itself. The pill is a button: it opens
+ * History on the prompt just saved (or does what its second line says), and stays while the pointer is on it. */
 function Done({ s }: { s: UiState }) {
-  const paste = platform() === "mac" ? "⌘V" : "Ctrl+V";
-  if (s.notice === "partial")
-    return (
-      <div className="hud-wrap" data-tauri-drag-region>
-        <div className="hud done two" role="status" aria-live="polite" data-tauri-drag-region>
-          <span className="done-mark part">
-            <Check size={13} strokeWidth={3} />
-          </span>
-          <span className="lines" data-tauri-drag-region>
-            <b>Saved what's done · audio kept in History</b>
-            <span>Use Transcribe again for the rest.</span>
-          </span>
-        </div>
-      </div>
-    );
-  const text =
-    s.notice === "pasted"
-      ? "Pasted"
-      : s.notice === "copied"
-        ? `Copied · ${paste} to paste`
-        : s.notice === "saved"
-          ? "Saved to your folder"
-          : s.notice === "kept"
-            ? "No words yet · audio kept in History"
-            : s.notice === "cut"
-              ? "Saved what's done · the rest was not transcribed"
-              : s.error || "Nothing was recorded";
+  const entry = s.entry ?? null;
+  const v = noticeView(s.notice ?? "empty", { mac: platform() === "mac", pasteBlocked: !!s.paste_blocked, entry, error: s.error });
+  const held = useRef({ pointer: false, focus: false });
+  const hold = (k: "pointer" | "focus", on: boolean) => {
+    held.current[k] = on;
+    if (inTauri) hudHold(held.current.pointer || held.current.focus).catch(() => undefined);
+  };
+  const act = () => {
+    if (!inTauri) return;
+    if (v.action === "permission") permissionRequest("accessibility").catch(() => undefined);
+    else if (v.action === "transcribe" && entry)
+      historyOpen(entry)
+        .then(() => historyRetranscribe(entry))
+        .catch(() => undefined);
+    else historyOpen(entry).catch(() => undefined);
+  };
+  const [first, second] = v.lines;
+  const mark = (
+    <span className={`done-mark ${v.mark}`} aria-hidden="true">
+      {v.mark === "warn" ? <TriangleAlert size={18} strokeWidth={2.25} /> : <Check size={13} strokeWidth={3} />}
+    </span>
+  );
+  const text = second ? (
+    <span className="lines">
+      <b>{first}</b>
+      <span className="act">{second}</span>
+    </span>
+  ) : (
+    <span>{first}</span>
+  );
   return (
     <div className="hud-wrap" data-tauri-drag-region>
-      <div className="hud done" role="status" aria-live="polite" data-tauri-drag-region>
-        <span className={`done-mark ${s.notice === "empty" || s.notice === "kept" ? "none" : s.notice === "cut" ? "part" : ""}`}>
-          <Check size={13} strokeWidth={3} />
-        </span>
-        <span>{text}</span>
+      <div role="status" aria-live="polite">
+        {v.action ? (
+          <button
+            type="button"
+            className={`hud done ${second ? "two" : ""}`}
+            title={second ? undefined : "Open in History"}
+            onClick={act}
+            onPointerEnter={() => hold("pointer", true)}
+            onPointerLeave={() => hold("pointer", false)}
+            onFocus={() => hold("focus", true)}
+            onBlur={() => hold("focus", false)}
+          >
+            {mark}
+            {text}
+          </button>
+        ) : (
+          <div className="hud done" data-tauri-drag-region>
+            {mark}
+            {text}
+          </div>
+        )}
       </div>
     </div>
   );
