@@ -237,17 +237,90 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     Ok(())
 }
 
-/// The HUD's last word stays a moment, then it goes unless a new recording took it. A save that Cancel cut short has
-/// two lines to read.
+/// The capsule's last word: which one it is (`gen`), whether the pointer is over it or it has focus, and when that
+/// last ended, in ms since it showed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Hold {
+    gen: u64,
+    over: bool,
+    left_ms: Option<u64>,
+}
+
+static HOLD: std::sync::Mutex<(Hold, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((Hold { gen: 0, over: false, left_ms: None }, None));
+
+/// How long a notice shows on its own, and how long it stays after the pointer leaves it. A notice with something to
+/// act on (kept, partial, cut) has two lines to read and stays 4 s after.
+fn notice_times(notice: Option<&str>) -> (u64, u64) {
+    match notice {
+        Some("kept" | "partial" | "cut") => (4500, 4000),
+        _ => (1600, 1600),
+    }
+}
+
+/// When the capsule's last word may hide, in ms since it showed: never while the pointer is over it or it has focus,
+/// and not before its own time nor before the linger after the pointer left.
+fn hide_at(notice: Option<&str>, over: bool, left_ms: Option<u64>) -> Option<u64> {
+    if over {
+        return None;
+    }
+    let (show, linger) = notice_times(notice);
+    Some(left_ms.map_or(show, |left| show.max(left + linger)))
+}
+
+/// The pointer came onto the notice (or it took focus), or went off it at `at_ms`.
+fn hold_step(h: Hold, over: bool, at_ms: u64) -> Hold {
+    match (h.over, over) {
+        (false, true) => Hold { over: true, ..h },
+        (true, false) => Hold { over: false, left_ms: Some(at_ms), ..h },
+        _ => h,
+    }
+}
+
+/// The HUD's last word stays a moment, then it goes unless a new recording took it or the pointer is on it.
 fn hide_hud_soon(app: &AppHandle, svc: &Arc<App>) {
     let (app, svc) = (app.clone(), svc.clone());
-    let ms = if matches!(svc.ui().notice, Some("partial" | "cut")) { 4500 } else { 1600 };
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-        if svc.ui().phase == Phase::Ready {
+    let notice = svc.ui().notice;
+    let gen = {
+        let mut h = HOLD.lock().unwrap();
+        let gen = h.0.gen + 1;
+        *h = (Hold { gen, ..Hold::default() }, Some(std::time::Instant::now()));
+        gen
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (h, shown) = *HOLD.lock().unwrap();
+        // A newer notice runs its own clock; a new recording took the capsule.
+        if h.gen != gen || svc.ui().phase != Phase::Ready {
+            return;
+        }
+        let elapsed = shown.map_or(0, |t| t.elapsed().as_millis() as u64);
+        if hide_at(notice, h.over, h.left_ms).is_some_and(|at| elapsed >= at) {
             hide_window(&app, "indicator");
+            return;
         }
     });
+}
+
+/// The capsule's notice has the pointer or focus (`over`), or lost it.
+#[tauri::command]
+fn hud_hold(over: bool) {
+    let mut h = HOLD.lock().unwrap();
+    let at = h.1.map_or(0, |t| t.elapsed().as_millis() as u64);
+    h.0 = hold_step(h.0, over, at);
+}
+
+/// Open History, on entry `id` when given (the capsule's notice for the prompt just saved). A History window built just
+/// now selects the latest entry, which is that one; one already open hears `history://select`.
+#[tauri::command]
+fn history_open(app: AppHandle, id: Option<String>) {
+    show_window(&app, "result");
+    if let Some(id) = id {
+        let _ = app.emit("history://select", json!({ "id": id }));
+    }
+    if app.try_state::<Arc<App>>().is_some_and(|svc| svc.ui().phase == Phase::Ready) {
+        hide_window(&app, "indicator");
+    }
 }
 
 /// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
@@ -1564,6 +1637,8 @@ pub fn run() {
             session_toggle,
             session_cancel,
             session_finish_now,
+            hud_hold,
+            history_open,
             capture_full,
             capture_zoom,
             region_begin,
@@ -1766,6 +1841,39 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_hides_on_its_own_time_unless_the_pointer_is_on_it() {
+        assert_eq!(hide_at(Some("pasted"), false, None), Some(1600), "pasted keeps today's timing");
+        assert_eq!(hide_at(Some("copied"), false, None), Some(1600));
+        assert_eq!(hide_at(Some("partial"), false, None), Some(4500));
+        assert_eq!(hide_at(Some("kept"), false, None), Some(4500), "two lines to read");
+        for n in ["pasted", "kept", "partial", "cut", "empty"] {
+            assert_eq!(hide_at(Some(n), true, None), None, "{n}: never while hovered or focused");
+            assert_eq!(hide_at(Some(n), true, Some(100)), None, "{n}: back on it after leaving");
+        }
+    }
+
+    #[test]
+    fn kept_partial_and_cut_stay_four_seconds_after_the_pointer_leaves() {
+        for n in ["kept", "partial", "cut"] {
+            assert_eq!(hide_at(Some(n), false, Some(10_000)), Some(14_000), "{n}");
+            assert_eq!(hide_at(Some(n), false, Some(200)), Some(4_500), "{n}: never before its own time");
+        }
+        assert_eq!(hide_at(Some("pasted"), false, Some(10_000)), Some(11_600), "others linger their usual time");
+    }
+
+    #[test]
+    fn the_hold_follows_the_pointer_and_remembers_when_it_left() {
+        let h = Hold { gen: 3, ..Hold::default() };
+        let on = hold_step(h, true, 500);
+        assert_eq!(on, Hold { gen: 3, over: true, left_ms: None });
+        let off = hold_step(on, false, 7_000);
+        assert_eq!(off, Hold { gen: 3, over: false, left_ms: Some(7_000) });
+        assert_eq!(hold_step(off, false, 9_000), off, "a second leave does not move the time");
+        let walk = [true, false, true, false].iter().zip([1_000, 2_000, 3_000, 8_000]).fold(h, |h, (o, t)| hold_step(h, *o, t));
+        assert_eq!(hide_at(Some("cut"), walk.over, walk.left_ms), Some(12_000));
+    }
 
     #[test]
     fn the_speech_model_is_freed_the_chosen_time_after_its_last_use_however_it_was_loaded() {

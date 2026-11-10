@@ -32,6 +32,10 @@ export type UiState = {
   preparing_gpu?: boolean;
   /** Where the engine transcribes: "your graphics card" or "your processor"; null before a model is loaded. */
   engine_label?: string | null;
+  /** After a stop: the History entry the prompt was saved as; null when nothing was saved. */
+  entry?: string | null;
+  /** Auto-paste was chosen but macOS would not take it (no Accessibility), so the prompt was copied instead. */
+  paste_blocked?: boolean;
 };
 
 export type Progress = {
@@ -189,6 +193,10 @@ export const sessionState = () => invoke<UiState>("session_state");
 export const sessionCancel = () => invoke<void>("session_cancel");
 /** Stop waiting for the last words: save what is transcribed now and keep the audio for Transcribe again. */
 export const sessionFinishNow = () => invoke<void>("session_finish_now");
+/** The capsule's end notice has the pointer or focus, or lost it: it stays while held and a moment after. */
+export const hudHold = (over: boolean) => invoke<void>("hud_hold", { over });
+/** Open History, on entry `id` when given. */
+export const historyOpen = (id: string | null) => invoke<void>("history_open", { id });
 export const captureFull = () => invoke<void>("capture_full");
 export const captureZoom = () => invoke<void>("capture_zoom");
 export const regionBegin = () => invoke<{ png_b64: string; width: number; height: number }>("region_begin");
@@ -316,6 +324,8 @@ export const onPracticeResult = on<SessionExport>("practice://result");
 export const onOverlayFinish = on<null>("overlay://finish");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
 export const onHistoryChanged = on<{ id: string }>("history://changed");
+/** Open History on this entry (the capsule's notice was clicked). */
+export const onHistorySelect = on<{ id: string }>("history://select");
 export const onTranscribeProgress = on<{ id: string; done_ms: number; total_ms: number }>("transcribe://progress");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");

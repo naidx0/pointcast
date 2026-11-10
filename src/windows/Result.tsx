@@ -21,6 +21,7 @@ import {
   preview,
   ranText,
   sendToTool,
+  onHistorySelect,
   subscribe,
   type DetectedTool,
   type HistoryMeta,
@@ -92,6 +93,7 @@ export function Result() {
     window.addEventListener("focus", onFocus);
     const off = subscribe(
       onResult(() => load(null, true)),
+      onHistorySelect((c) => load(c.id)),
       onHistoryChanged((c) => {
         setRev((r) => r + 1);
         setJob((j) => (j && j.id === c.id ? null : j));
