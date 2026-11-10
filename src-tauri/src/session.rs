@@ -2103,6 +2103,7 @@ mod tests {
 
     #[test]
     fn a_long_recording_is_read_once_and_the_microphone_never_waits_behind_the_worker() {
+        let _alone = crate::test_support::alone();
         let a = app("linear");
         *a.t0.lock().unwrap() = Some(now_ms());
         a.state.lock().unwrap().phase = Phase::Recording;
@@ -2723,6 +2724,7 @@ mod tests {
 
     #[test]
     fn a_stop_wakes_the_worker_at_once_rather_than_at_its_next_look() {
+        let _alone = crate::test_support::alone();
         let a = app("wake");
         let mut slow = Vec::new();
         for no in 1..=12u64 {

@@ -1838,6 +1838,17 @@ pub fn run() {
         });
 }
 
+/// For tests that measure time and tests that keep every core busy for seconds: one at a time, so a timing test
+/// measures the code and not its neighbours.
+#[cfg(test)]
+pub(crate) mod test_support {
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub fn alone() -> std::sync::MutexGuard<'static, ()> {
+        ALONE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

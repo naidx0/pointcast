@@ -1166,6 +1166,7 @@ mod tests {
 
     #[test]
     fn a_picture_past_1568_pixels_comes_back_downscaled_and_full_size_from_pointcast_shot() {
+        let _alone = crate::test_support::alone();
         let lab = lab("big");
         let big = noisy_png(2400, 1000, 3);
         let (latest, id) = saved(&lab, &[words(0, 2_000, "look"), pic(500, &big, vec![])], CREATED, true);
@@ -1180,6 +1181,7 @@ mod tests {
 
     #[test]
     fn thirty_large_pictures_stay_within_the_image_budget_and_the_rest_are_links() {
+        let _alone = crate::test_support::alone();
         let lab = lab("thirty");
         let png = noisy_png(1600, 1000, 4);
         let mut items = vec![words(0, 60_000, "a long walk through the app")];
@@ -1213,6 +1215,7 @@ mod tests {
 
     #[test]
     fn fifteen_full_screen_pictures_fit_one_result() {
+        let _alone = crate::test_support::alone();
         let lab = lab("fifteen");
         let png = noisy_png(1920, 1080, 5);
         let mut items = vec![words(0, 30_000, "fifteen screens")];
