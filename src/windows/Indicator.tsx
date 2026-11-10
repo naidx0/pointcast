@@ -52,7 +52,8 @@ export function readyNote(s: UiState): { lines: [string, string?]; full: string 
   if (!(s.phase === "loading" || s.phase === "recording")) return null;
   if (live && !loading) return null;
   if (s.preparing_gpu) {
-    const lines: [string, string] = ["Setting up your graphics card", live ? "(first time only) keep talking" : "(first time only)"];
+    // The full sentence is too wide for the capsule's two short lines; it is the tooltip and what a screen reader says.
+    const lines: [string, string] = ["Setting up graphics card", live ? "keep talking" : "(first time only)"];
     return { lines, full: `Setting up your graphics card (first time only)${live ? ", keep talking" : ""}` };
   }
   if (live) return { lines: ["Getting ready…", "keep talking"], full: "Getting ready… keep talking" };

@@ -1224,9 +1224,9 @@ html.win .hud .hb {
   flex-direction: column;
   justify-content: center;
   gap: 3px;
-  width: 136px;
-  max-width: 136px;
-  margin: 0 6px 0 10px;
+  width: 124px;
+  max-width: 124px;
+  margin: 0 6px 0 8px;
   font-size: 12px;
   line-height: 14px;
 }
