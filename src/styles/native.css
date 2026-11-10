@@ -928,6 +928,64 @@ html.win .onb-foot {
   width: 16px;
   border-radius: 3px;
 }
+/* The speech model getting ready in the background: one quiet line beside the step dots. */
+.onb-speech {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  row-gap: 2px;
+  margin: 0 8px 0 4px;
+  color: var(--label-2);
+  text-align: left;
+}
+.onb-speech .spinner {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+.onb-speech .link {
+  font: inherit;
+}
+.onb-speech-ok {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--green);
+  color: #fff;
+}
+.onb-speech-warn {
+  color: var(--orange-ink);
+}
+.onb-note {
+  margin: -12px 0 16px;
+  text-wrap: balance;
+}
+.card.try.down {
+  box-shadow: 0 0 0 2px var(--accent);
+  border-color: transparent;
+}
+
+/* —— About: credits —— */
+.about-credits {
+  margin-top: 28px;
+  max-width: 380px;
+}
+.about-credits-head {
+  font-weight: 600;
+  color: var(--label-2);
+}
+.about-credits ul {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+  line-height: 1.6;
+}
 .cards {
   width: 100%;
   display: grid;
