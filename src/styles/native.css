@@ -906,6 +906,77 @@ html.win .prefs-pane {
   max-width: 760px;
 }
 
+/* —— Windows: the window has no frame of its own, so a slim bar across the top of the content carries the window's
+   buttons at Windows 11's sizes (46 x 32) and colours; Close turns red. The sidebar runs the full height beside it. —— */
+.prefs.frameless {
+  grid-template-rows: 32px minmax(0, 1fr);
+}
+.prefs.frameless .prefs-side {
+  grid-row: 1 / -1;
+}
+.prefs.frameless .prefs-main {
+  grid-column: 2;
+  grid-row: 2;
+}
+.win-bar {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  justify-content: flex-end;
+  height: 32px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.win-cap {
+  width: 46px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--label);
+  transition: background-color 80ms linear;
+}
+.win-cap svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  overflow: visible;
+}
+.win-cap:hover {
+  background: rgba(0, 0, 0, 0.0373);
+}
+.win-cap:active {
+  background: rgba(0, 0, 0, 0.0241);
+  color: var(--label-2);
+}
+html[data-theme="dark"] .win-cap:hover {
+  background: rgba(255, 255, 255, 0.0605);
+}
+html[data-theme="dark"] .win-cap:active {
+  background: rgba(255, 255, 255, 0.0419);
+}
+.win-cap.close:hover,
+html[data-theme="dark"] .win-cap.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+.win-cap.close:active,
+html[data-theme="dark"] .win-cap.close:active {
+  background: rgba(196, 43, 28, 0.9);
+  color: rgba(255, 255, 255, 0.7);
+}
+.win-cap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.win-bar.inactive .win-cap:not(:hover) {
+  color: var(--label-3);
+}
+
 /* —— Home: a few large numbers, when in the week, the last recordings, the two shortcuts. Flat on both skins: type and
    hairlines do the work, two greys of text, nothing drawn for decoration. —— */
 .home {
