@@ -386,6 +386,8 @@ export type HistoryMeta = {
   mic_open_ms?: number;
   /** The loudest sample of the recording, in dBFS (-100 for nothing but zeros). */
   mic_peak_db?: number;
+  /** How many words the prompt kept; absent from builds before 0.5. */
+  words?: number;
 };
 
 /** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
@@ -436,6 +438,8 @@ export function previewHistory(now: number): HistoryMeta[] {
     preview: preview.split(" ").slice(0, 24).join(" "),
     images,
     recovered: false,
+    // About 150 words a minute; `?words=none` plays a build from before the count.
+    words: location.search.includes("words=none") ? undefined : Math.round(s * 2.5),
   }));
 }
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
