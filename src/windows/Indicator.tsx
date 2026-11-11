@@ -23,6 +23,7 @@ import {
 } from "@/lib/api";
 import { READY_WAIT_MS, discardClick, finishingLine, micCaption, noticeView, readyNote } from "@/lib/capsule";
 import { chordText } from "@/lib/keys";
+import { meterLevel, meterStart, meterStep } from "@/lib/line";
 import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
 
@@ -55,6 +56,8 @@ export function Indicator() {
   const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
   const [lv, setLv] = useState<number[]>(Array(BARS).fill(0));
   const last = useRef(0);
+  // The same adaptive meter as Ask's line: a soft voice on a weak microphone still fills the bars, silence stays low.
+  const meter = useRef({ m: meterStart(), at: 0 });
 
   useEffect(() => {
     if (inTauri) {
@@ -102,9 +105,12 @@ export function Indicator() {
       onState((st) => {
         setS(st);
         const now = performance.now();
+        const mt = meter.current;
+        mt.m = meterStep(mt.m, st.level, mt.at ? Math.min(250, now - mt.at) : 0);
+        mt.at = now;
         if (now - last.current > 80) {
           last.current = now;
-          setLv((x) => [...x.slice(1), st.mic ? Math.min(1, st.level) : 0]);
+          setLv((x) => [...x.slice(1), st.mic ? meterLevel(mt.m, st.level) : 0]);
         }
       }),
     );

@@ -94,7 +94,37 @@ export function voiceLevel(raw: number, floor = 0): number {
   return clamp(Math.max(Math.sqrt(Math.min(1, v)), Math.min(0.25, v * 8)), 0, 1);
 }
 
-/** Listening: the drawn levels (0 to 1, from voiceLevel and smoothLevel, oldest first, one per VOICE_STEP_MS) as a line
+/** The meter adapts to the voice it hears: the room's floor below, the loudest recent speech above, and the level is
+ * read inside that window. A soft voice on a weak microphone still swings the line most of its height. */
+export type Meter = { floor: number; peak: number };
+/** Just over the room that still counts as the room (2 dB): below it, a flat line. */
+const METER_GATE = 0.04;
+/** The narrowest window between the gate and the loudest speech (6 dB), so the room's own flutter never fills it. */
+const METER_MIN_SPAN = 0.12;
+/** The loudest recent speech lets go over about this long, so a cough does not squash the words after it. */
+const PEAK_MS = 2000;
+
+export const meterStart = (): Meter => ({ floor: FLOOR_START, peak: FLOOR_START + METER_GATE + METER_MIN_SPAN });
+
+/** The meter after `dt` ms with the level at `raw`: the floor as trackFloor follows it; the peak jumps to any louder
+ * level and decays toward the narrowest window above the floor. */
+export function meterStep(m: Meter, raw: number, dt: number): Meter {
+  const r = unit(raw);
+  const floor = trackFloor(m.floor, r, dt);
+  const rest = floor + METER_GATE + METER_MIN_SPAN;
+  const held = Math.max(unit(m.peak), rest);
+  const peak = dt > 0 ? rest + (held - rest) * Math.exp(-dt / PEAK_MS) : held;
+  return { floor, peak: Math.max(peak, r) };
+}
+
+/** How far the line lifts (0 to 1) for `raw` inside the meter's window, on a square-root curve. At or under the gate: 0. */
+export function meterLevel(m: Meter, raw: number): number {
+  const span = Math.max(METER_MIN_SPAN, unit(m.peak) - unit(m.floor) - METER_GATE);
+  const v = (unit(raw) - unit(m.floor) - METER_GATE) / span;
+  return v > 0 ? Math.sqrt(Math.min(1, v)) : 0;
+}
+
+/** Listening: the drawn levels (0 to 1, from meterLevel and smoothLevel, oldest first, one per VOICE_STEP_MS) as a line
  * of handwriting. The pen stays at the right end, where the red dot is, and the paper moves left under it. The strokes
  * take turns: one lifts the pen from the baseline as high as the voice was loud, the next brings it back to the line.
  * Heights vary a little like a hand's, but are fixed per stroke, so the trace does not shimmer as it moves.
