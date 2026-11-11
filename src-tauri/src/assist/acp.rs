@@ -599,11 +599,18 @@ pub mod tests {
             let _ = o.flush();
         };
         let mut pending: Option<Value> = None;
+        // Like a real agent, whose tool call waits on its permission, a cancelled turn is answered only once
+        // Pointcast has answered every request the stand-in made of it.
+        let mut asked: Vec<u64> = Vec::new();
+        let mut cancelled = false;
         for line in input.lines() {
             let Ok(line) = line else { break };
             let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
             saw(&m);
             let id = m.get("id").cloned().unwrap_or(Value::Null);
+            if m.get("method").is_none() {
+                asked.retain(|a| id != *a);
+            }
             let reply = |result: Value| say(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
             match m["method"].as_str() {
                 Some("initialize") => {
@@ -618,6 +625,7 @@ pub mod tests {
                         let options = json!([{ "optionId": "yes", "name": "Allow", "kind": "allow_once" }, { "optionId": "no", "name": "Reject", "kind": "reject_once" }]);
                         say(json!({ "jsonrpc": "2.0", "id": PERMISSION, "method": "session/request_permission", "params": { "sessionId": SESSION, "toolCall": { "toolCallId": "t1" }, "options": options } }));
                         say(json!({ "jsonrpc": "2.0", "id": READ_FILE, "method": "fs/read_text_file", "params": { "sessionId": SESSION, "path": "/etc/hosts" } }));
+                        asked = vec![PERMISSION, READ_FILE];
                         pending = Some(id.clone());
                     }
                     "slow" => {
@@ -638,12 +646,14 @@ pub mod tests {
                         reply(json!({ "stopReason": "end_turn" }));
                     }
                 },
-                Some("session/cancel") => {
-                    if let Some(p) = pending.take() {
-                        say(json!({ "jsonrpc": "2.0", "id": p, "result": { "stopReason": "cancelled" } }));
-                    }
-                }
+                Some("session/cancel") => cancelled = true,
                 _ => {}
+            }
+            if cancelled && asked.is_empty() {
+                cancelled = false;
+                if let Some(p) = pending.take() {
+                    say(json!({ "jsonrpc": "2.0", "id": p, "result": { "stopReason": "cancelled" } }));
+                }
             }
         }
         Exit::Eof
