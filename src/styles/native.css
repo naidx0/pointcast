@@ -659,7 +659,8 @@ html.win .progress {
 .level {
   flex: none;
   align-self: flex-start;
-  margin-top: 11px;
+  /* On the select's centre line, which is the row's first line (the status line runs under the select alone). */
+  margin-top: calc(var(--h-control) / 2 - 3px);
   width: 72px;
   height: 6px;
   border-radius: 3px;
@@ -1323,11 +1324,39 @@ html.win .home-foot .btn {
   justify-content: flex-end;
   gap: 8px;
 }
-/* Sixteen routes stay calm: on Windows too they are compact rows, not full-height cards. */
+/* Sixteen routes stay calm: compact rows on hairlines inside one surface per group (on Windows too: one card, not a
+   card per row), the name over one quiet line, and one small action at the end of the row. */
+html.win .group.routes {
+  gap: 0;
+  border-radius: var(--r-box);
+  background: var(--box);
+  border: 1px solid var(--box-line);
+  overflow: hidden;
+}
 html.win .ai-route {
   min-height: 52px;
   padding-top: 8px;
   padding-bottom: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+html.win .ai-route + .ai-route {
+  border-top: 1px solid var(--sep);
+}
+.ai-route .btn {
+  height: var(--h-control);
+  padding: 0 10px;
+}
+html.win .ai-route .btn {
+  height: 28px;
+  padding: 0 12px;
+}
+.ai-route .btn.plain:not(.danger) {
+  color: var(--label-2);
+}
+.ai-route .btn.plain:not(.danger):hover {
+  color: var(--label);
 }
 .ai-help {
   margin: 0;

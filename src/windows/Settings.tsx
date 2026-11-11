@@ -838,7 +838,7 @@ function Ai() {
       {groups(a).map((g) => (
         <Fragment key={g.kind}>
           <h2 className="group-title">{g.title}</h2>
-          <div className="group">
+          <div className="group routes">
             {g.routes.map((v) => {
               const p = a.providers.find((x) => x.id === v.id)!;
               const open = more?.id === v.id ? more.what : null;
