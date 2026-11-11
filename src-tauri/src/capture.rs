@@ -208,6 +208,35 @@ struct Frame {
     hidden: Vec<Rect>,
     /// The title of each window a caption may name, by its rect.
     titles: Vec<(Rect, String)>,
+    /// Where the person looked when it was taken.
+    look: Look,
+}
+
+/// Where the person looks, from one read of the window list: the window in front and the one under the pointer, each as
+/// a key that changes when it is another window, or the same one with another title (another page) or place. Pointcast's
+/// own windows, minimised ones and the desktop's shell are passed over. Only compared, never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Look {
+    pub front: Option<u64>,
+    pub under: Option<u64>,
+}
+
+fn look_from(seen: &[Listed], me: u32, at: (i32, i32)) -> Look {
+    use std::hash::{Hash, Hasher};
+    let key = |w: &Listed| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&w.app, &w.title, w.pid, w.rect.x, w.rect.y, w.rect.w, w.rect.h).hash(&mut h);
+        h.finish()
+    };
+    let open: Vec<&Listed> =
+        seen.iter().filter(|w| !w.minimized && !w.paint_only && w.pid != Some(me) && !shell(&w.app) && w.rect.w > 0 && w.rect.h > 0).collect();
+    let inside = |r: Rect| at.0 >= r.x && at.1 >= r.y && at.0 < r.x + r.w && at.1 < r.y + r.h;
+    Look { front: open.first().map(|w| key(*w)), under: open.iter().find(|w| inside(w.rect)).map(|w| key(*w)) }
+}
+
+/// Where the person looks now, without taking a picture.
+pub fn look() -> Look {
+    look_from(&listed(), std::process::id(), cursor_pos().unwrap_or((i32::MIN, i32::MIN)))
 }
 
 impl Frame {
@@ -252,6 +281,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let hide = settings.hidden_list();
     let (rects, windows) = sort_out(&seen, &hide, std::process::id(), panel());
     let titles = titles(&seen, &hide);
+    let look = look_from(&seen, std::process::id(), (cx, cy));
     let img = mon.capture_image().map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
     let mut buf = img.into_raw();
@@ -273,6 +303,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         windows,
         hidden: rects,
         titles,
+        look,
     })
 }
 
@@ -284,6 +315,7 @@ fn paint_out(buf: &mut [u8], map: &Mapping, rects: &[Rect]) {
 }
 
 /// A window as one read of the window list saw it.
+#[derive(Clone)]
 struct Listed {
     app: String,
     title: String,
@@ -622,6 +654,16 @@ pub fn grab_ask_frame(settings: &Settings) -> Result<AskFrame, String> {
 }
 
 impl AskFrame {
+    /// Where the person looked when it was taken.
+    pub fn look(&self) -> Look {
+        self.0.look
+    }
+
+    /// The whole frame as a 64 px thumbnail, to tell how much the screen changed since another.
+    pub fn thumb(&self) -> keyframes::Thumb {
+        keyframes::thumb(&self.0.buf, self.0.width, self.0.height)
+    }
+
     /// Cut it to `target`, mark it as any capture is marked, and fit the copy to send to `edge` on its long side.
     pub fn finish(self, settings: &Settings, target: AskTarget, edge: u32) -> Result<Asked, String> {
         ask_from(self.0, settings, target, edge, element::at)
@@ -916,7 +958,40 @@ mod tests {
         // Every pixel names its place, so a cut is known by its corner.
         let mut buf: Vec<u8> = (0..width * height).flat_map(|i| [(i % width) as u8, (i / width) as u8, 7, 255]).collect();
         paint_out(&mut buf, &map, &rects);
-        Frame { buf, width, height, cursor: at, screen: at, density: 1.0, map, windows, hidden: rects, titles: titles(seen, hidden) }
+        Frame { buf, width, height, cursor: at, screen: at, density: 1.0, map, windows, hidden: rects, titles: titles(seen, hidden), look: look_from(seen, 42, at) }
+    }
+
+    #[test]
+    fn where_the_person_looks_is_the_window_in_front_and_the_one_under_the_pointer_and_a_hidden_one_never_labels_a_picture() {
+        let s = |s: &str| Some(s.to_string());
+        let panel = Listed { id: Some(77), ..Listed::seen(s("Pointcast"), s("Pointcast"), r(150, 0, 50, 100), Some(false), Some(42)) };
+        let pdf = Listed::seen(s("Preview"), s("Lecture 4.pdf"), r(20, 10, 120, 60), Some(false), Some(7));
+        let vault = Listed::seen(s("1Password"), s("Vault"), r(0, 80, 40, 20), Some(false), Some(8));
+        let back = Listed::seen(s("Safari"), s("Notes"), r(0, 0, 200, 100), Some(false), Some(9));
+        let seen = [panel.clone(), pdf.clone(), vault.clone(), back.clone()];
+        // Pointcast's own panel on top is passed over: the PDF is in front, and under the pointer where it is.
+        let on_pdf = look_from(&seen, 42, (30, 20));
+        assert_eq!((on_pdf.front.is_some(), on_pdf.front), (true, on_pdf.under));
+        let on_back = look_from(&seen, 42, (180, 90));
+        assert_eq!(on_back.front, on_pdf.front, "the same window in front");
+        assert!(on_back.under.is_some() && on_back.under != on_pdf.under, "another window under the pointer");
+        assert_eq!(look_from(&seen, 42, (30, 20)), on_pdf, "the same look read twice is the same");
+        // The same window on another page (its title) or moved is another look; minimised it is none.
+        let paged = [panel.clone(), Listed { title: "Lecture 5.pdf".into(), ..pdf.clone() }, vault.clone(), back.clone()];
+        assert_ne!(look_from(&paged, 42, (30, 20)), on_pdf);
+        let moved = [panel.clone(), Listed { rect: r(21, 10, 120, 60), ..pdf.clone() }, vault.clone(), back.clone()];
+        assert_ne!(look_from(&moved, 42, (30, 20)), on_pdf);
+        let gone = [panel, Listed { minimized: true, ..pdf }, vault, back];
+        assert_eq!(look_from(&gone, 42, (30, 20)).under, on_back.under, "the window behind is under the pointer now");
+        // The panel names a picture by the window it shows, and never a window on the never-capture list.
+        let hide = privacy::default_hidden_list();
+        let plain = Settings { mark_point: MarkPoint::Off, outline_element: false, ..Settings::default() };
+        let a = ask_from(frame(200, 100, (30, 20), &seen, &hide), &plain, AskTarget::Window, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!(crate::live::label(&a), "Lecture 4.pdf");
+        let v = ask_from(frame(200, 100, (10, 90), &seen, &hide), &plain, AskTarget::Window, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!((v.width, v.height, crate::live::label(&v)), (40, 20, String::new()), "the vault is cut and painted, never named");
+        let whole = ask_from(frame(200, 100, (30, 20), &seen, &hide), &plain, AskTarget::Screen, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!(crate::live::label(&whole), "");
     }
 
     #[test]

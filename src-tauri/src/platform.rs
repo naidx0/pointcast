@@ -18,6 +18,10 @@ fn ensure_with(app: &AppHandle, label: &str, init: Option<String>) -> Option<Web
     }
     let cfg = app.config().app.windows.iter().find(|w| w.label == label)?.clone();
     let mut b = tauri::WebviewWindowBuilder::from_config(app, &cfg).ok()?;
+    if own_title_bar(label, std::env::consts::OS) {
+        // The OS keeps the shadow and, on Windows 11, the rounded corners of a window without its frame.
+        b = b.decorations(false).shadow(true);
+    }
     if let Some(js) = init {
         b = b.initialization_script(&js);
     }
@@ -138,6 +142,14 @@ pub mod icons {
 /// The windows a person works in (not the HUD or overlay).
 pub const DESK: [&str; 3] = ["settings", "onboarding", "result"];
 
+/// Whether the window `label` draws its own slim title bar on `os` (as `std::env::consts::OS` names it): Settings on
+/// Windows, built without the system's frame. On macOS its traffic lights sit over the sidebar (`titleBarStyle`
+/// "Overlay" with the title hidden, in tauri.conf.json). Its title stays "Pointcast Settings" for the taskbar and
+/// Alt+Tab either way.
+pub fn own_title_bar(label: &str, os: &str) -> bool {
+    label == "settings" && os == "windows"
+}
+
 /// macOS: a menu bar app has no Dock icon, so its windows are out of reach of Cmd+Tab. While
 /// Settings, setup or History is open Pointcast is a regular app; then it goes back to the menu
 /// bar. `closing` is a window on its way out that still reports itself visible.
@@ -235,6 +247,18 @@ pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
 pub const PANEL_WIDTH: f64 = 380.0;
 pub const PANEL_MARGIN: f64 = 12.0;
 
+/// How tall the panel opens, in logical pixels: its header and the listening row. It grows only as its page asks.
+pub const PANEL_START: f64 = 120.0;
+
+/// The height the panel shows at: the height it has while it is on screen; a panel that opens starts small.
+pub fn opening_height(on_screen: bool, high: f64) -> f64 {
+    if on_screen {
+        high
+    } else {
+        PANEL_START
+    }
+}
+
 /// Where the answer panel goes, in logical pixels, as (x, y, width, height): docked at the right edge of `area` (the
 /// screen's work area in its physical pixels at `scale`) with `margin` around it, and narrower on a screen too small.
 pub fn panel_spot(area: (i32, i32, u32, u32), scale: f64, width: f64, margin: f64) -> (f64, f64, f64, f64) {
@@ -287,7 +311,7 @@ pub fn redock_panel(w: &tauri::Window) {
 }
 
 /// Show the answer panel at the right edge of the pointer's screen, without taking focus from the app being asked about.
-/// It keeps the height its page last asked for, within that screen.
+/// On screen it keeps the height its page last asked for, within that screen; one that opens starts `PANEL_START` tall.
 pub fn show_panel(app: &AppHandle) {
     let Some(w) = ensure(app, PANEL) else {
         return;
@@ -296,6 +320,7 @@ pub fn show_panel(app: &AppHandle) {
         let wa = m.work_area();
         let s = m.scale_factor();
         let high = w.inner_size().map(|z| z.height as f64 / w.scale_factor().unwrap_or(s)).unwrap_or(0.0);
+        let high = opening_height(w.is_visible().unwrap_or(false), high);
         let spot = panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN, high);
         place_panel(&w.as_ref().window(), spot, s);
     }
@@ -682,6 +707,52 @@ mod tests {
         let live = conf["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == PANEL).expect("a live window");
         assert_eq!((live["url"].as_str(), live["create"].as_bool(), live["contentProtected"].as_bool()), (Some("live.html"), Some(false), None));
         assert_eq!((live["width"].as_f64(), live["alwaysOnTop"].as_bool(), live["focus"].as_bool()), (Some(PANEL_WIDTH), Some(true), Some(false)));
+        assert_eq!(live["height"].as_f64(), Some(PANEL_START), "built at its header and listening row");
+    }
+
+    #[test]
+    fn the_answer_panel_opens_small_at_the_top_right_and_keeps_the_height_its_page_set_while_on_screen() {
+        let near = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| [a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3].iter().all(|d| d.abs() < 1e-6);
+        // About 380 x 120 logical: the header and the listening row, nothing empty below.
+        assert_eq!((PANEL_WIDTH, PANEL_START), (380.0, 120.0));
+        assert_eq!((opening_height(false, 649.0), opening_height(true, 300.0)), (PANEL_START, 300.0));
+        // The owner's 1080p screen under its taskbar: docked 12 px in from the top right, 120 tall, not 649.
+        let area = (0, 0, 1920, 1040);
+        let spot = panel_spot(area, 1.0, PANEL_WIDTH, PANEL_MARGIN);
+        assert!(near((spot.0, spot.1, spot.2, 0.0), (1528.0, 12.0, 380.0, 0.0)) && spot.3 >= PANEL_START, "{spot:?}");
+        let at = |area, scale| panel_fit(area, scale, PANEL_WIDTH, PANEL_MARGIN, opening_height(false, 649.0));
+        assert!(near(at(area, 1.0), (1528.0, 12.0, 380.0, 120.0)), "{:?}", at(area, 1.0));
+        // At 150 % and on a Retina screen, in logical pixels of that screen.
+        assert!(near(at((0, 0, 2880, 1560), 1.5), (1920.0 - 392.0, 12.0, 380.0, 120.0)), "{:?}", at((0, 0, 2880, 1560), 1.5));
+        assert!(near(at((0, 50, 3024, 1888), 2.0), (1120.0, 37.0, 380.0, 120.0)));
+        // A screen too short for even that: it stays within the margins.
+        assert!(near(at((0, 0, 1280, 100), 1.0), (888.0, 12.0, 380.0, 76.0)));
+    }
+
+    #[test]
+    fn settings_draws_its_own_title_bar_on_windows_and_keeps_the_traffic_lights_over_its_sidebar_on_macos() {
+        assert!(own_title_bar("settings", "windows"));
+        assert!(!own_title_bar("settings", "macos") && !own_title_bar("settings", "linux"));
+        assert!(DESK.iter().chain([PANEL, "indicator", "overlay"].iter()).filter(|l| **l != "settings").all(|l| !own_title_bar(l, "windows")));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("tauri.conf.json")).unwrap()).unwrap();
+        let w = conf["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == "settings").expect("a settings window");
+        // The taskbar and Alt+Tab still name it; on macOS the frame is kept (no `decorations` here) with the title hidden.
+        assert_eq!((w["title"].as_str(), w["resizable"].as_bool(), w["decorations"].as_bool()), (Some("Pointcast Settings"), Some(true), None));
+        assert_eq!((w["titleBarStyle"].as_str(), w["hiddenTitle"].as_bool()), (Some("Overlay"), Some(true)));
+        // Its page may drag, minimize, maximize, ask whether it is maximized and close its own window.
+        let mut granted = vec![];
+        for file in std::fs::read_dir(root.join("capabilities")).unwrap().flatten() {
+            let cap: serde_json::Value = serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+            if cap["windows"].as_array().unwrap().iter().any(|w| w == "settings") {
+                granted.extend(cap["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(String::from)));
+            }
+        }
+        for p in ["start-dragging", "minimize", "toggle-maximize", "close", "is-maximized"] {
+            assert!(granted.contains(&format!("core:window:allow-{p}")), "{p}: {granted:?}");
+        }
+        // The check can say no: a window permission no file grants Settings is not found.
+        assert!(!granted.is_empty() && !granted.iter().any(|p| p == "core:window:allow-maximize"), "{granted:?}");
     }
 
     #[test]

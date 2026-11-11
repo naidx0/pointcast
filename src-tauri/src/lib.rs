@@ -42,6 +42,8 @@ const REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The pulse to the HUD and the menu bar clock while a session runs.
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// While an Ask listens, the session's state (its `loudness`) goes out this often: about 30 times a second.
+const LEVEL_TICK: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// When the idle scheduler looks again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +282,25 @@ fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
     }
 }
 
+/// A frame of the screen for a question, with the settings it is cut by.
+struct AskTaken(capture::AskFrame, settings::Settings);
+
+impl live::Taken for AskTaken {
+    fn look(&self) -> capture::Look {
+        self.0.look()
+    }
+
+    fn thumb(&self) -> keyframes::Thumb {
+        self.0.thumb()
+    }
+
+    fn cut(self: Box<Self>) -> Result<capture::Asked, String> {
+        let AskTaken(frame, s) = *self;
+        let target = s.ask_target;
+        frame.finish(&s, target, capture::ASK_EDGE)
+    }
+}
+
 /// The Ask loop as the app runs it: the recording path for its words, one frame of the screen for its picture, and
 /// the panel for what it says.
 fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<live::Live> {
@@ -289,11 +310,10 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             voice: Arc::new(live::AppVoice(svc.clone())),
             grab: Box::new(move || {
                 let s = shots.settings.lock().unwrap().clone();
-                let frame = capture::grab_ask_frame(&s)?;
-                let target = s.ask_target;
-                let cut: live::Frame = Box::new(move || frame.finish(&s, target, capture::ASK_EDGE));
-                Ok(cut)
+                let frame: Box<dyn live::Taken> = Box::new(AskTaken(capture::grab_ask_frame(&s)?, s));
+                Ok(frame)
             }),
+            look: Box::new(capture::look),
             // The AI the settings name at this Ask: a choice made in Settings needs no restart.
             provider: Box::new(move || {
                 let s = chooser.settings.lock().unwrap().clone();
@@ -370,7 +390,9 @@ fn assist_change(svc: &App, change: impl FnOnce(&mut Settings) -> Result<(), Str
 }
 
 #[tauri::command]
-fn assist_choose(svc: tauri::State<'_, Arc<App>>, id: String, model: Option<String>, consent: bool) -> Result<(), String> {
+fn assist_choose(svc: tauri::State<'_, Arc<App>>, id: String, base: Option<String>, model: Option<String>, consent: bool) -> Result<(), String> {
+    // The typed address of the custom route; wired when the catalogue's choose_at lands.
+    let _ = base;
     let mut s = svc.settings.lock().unwrap().clone();
     assist::catalog::choose(&mut s, &id, model, consent, now_ms())?;
     svc.save_settings(s)
@@ -2160,11 +2182,19 @@ pub fn run() {
                 // Windows made hidden at launch go too.
                 *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
                 let mut was_busy = false;
+                let mut told_tray = std::time::Instant::now();
                 loop {
                     let gen = WAKE.gen();
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
-                        emit_state(&handle, &svc2);
+                        // While an Ask listens the panel's line hears the microphone 30 times a second; the tray and the
+                        // menu bar clock still hear of it 10 times a second.
+                        if told_tray.elapsed() >= TICK {
+                            emit_state(&handle, &svc2);
+                            told_tray = std::time::Instant::now();
+                        } else {
+                            emit_state_now(&handle, &svc2);
+                        }
                         was_busy = true;
                         // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
                         // click on the HUD's Stop can bring Pointcast forward on macOS.
@@ -2209,7 +2239,8 @@ pub fn run() {
                             h.cool();
                         }
                     }
-                    WAKE.wait(gen, sooner(d.next, at));
+                    let listening = busy && live.as_ref().is_some_and(|l| l.listening());
+                    WAKE.wait(gen, sooner(if listening { Next::Tick(LEVEL_TICK) } else { d.next }, at));
                 }
             });
             Ok(())
