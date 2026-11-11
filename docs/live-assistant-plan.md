@@ -65,6 +65,18 @@ pub fn replay(earlier: &[Turn], pictures_of_last: usize) -> Vec<Part>;   // one 
   chat does not open, so the consent line is never false. One list holds every method the adapter may send, and a
   test fails on any other or on a parameter that asks for a token.
 
+## The first real handshake (2026-11-11, owner approved)
+
+Codex 0.164.0, the owner's signed-in account, no turn started, nothing spent. `account/read`: a ChatGPT **free**
+plan, which works. `model/list`: `gpt-6-luna` (default), `gpt-5.6-terra`, `gpt-5.6-luna`, all text and image.
+`thread/start` with the fence answered in about 0.2 s with `modelProvider: openai`, a read-only sandbox without
+network, `approvalPolicy: untrusted`; every config override was accepted without error (whether each takes effect is
+still unproven). Two findings change the adapter: a thread started without a model took the person's configured
+default (`gpt-6.1-sol`), which this plan does not offer, so Pointcast always names a listed model; and Codex always
+adds the person's own `~/.codex/AGENTS.md` (`instructionSources`), which no setting removed, so Pointcast says so
+where the AI is chosen and records it in what was sent rather than hiding it. No Codex process outlived the
+handshake. Script and results are kept outside the repository.
+
 ## Slices
 
 Each slice is one branch off the program branch, gated on its own, merged back when green. No slice sits behind a flag.
