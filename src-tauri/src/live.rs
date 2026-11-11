@@ -5,9 +5,11 @@
 //! whole loop runs in a test on a scripted provider with no microphone, screen or window.
 
 use crate::assist::{self, Chat, Event, Failure, Kind, Part, Provider, Role, Turn};
-use crate::capture::Asked;
-use crate::prompt;
+use crate::capture::{Asked, Look};
+use crate::keyframes::{self, Thumb};
+use crate::prompt::{self, Item};
 use crate::session::{Phase, Purpose, Said};
+use crate::voice::stt;
 use crate::sessions::{Answer, Question, Sent, Sessions, Times, Used, Wire};
 use base64::Engine as _;
 use serde::Serialize;
@@ -23,6 +25,9 @@ const FRAME: Duration = Duration::from_millis(34);
 
 /// The long side of the picture the panel shows beside the question.
 const THUMB: u32 = 480;
+
+/// While a question is said, where the person looks is read every this many words checks (100 ms each): twice a second.
+const LOOK_EVERY: u64 = 5;
 
 pub const NO_PROVIDER: &str = assist::catalog::NONE_CHOSEN;
 pub const NO_ANSWER: &str = "No answer after 20 seconds. Ask again.";
@@ -43,6 +48,8 @@ pub enum State {
     Answering,
     Shown,
     Error,
+    /// Stop while the question was said or finished: nothing was kept or sent. The panel says so briefly, then closes.
+    Discarded,
 }
 
 /// What moves the panel on. Each state is entered by exactly one of these.
@@ -56,8 +63,10 @@ pub enum Step {
     Send,
     /// The first words of the answer came.
     First,
-    /// The question was discarded or empty, or its answer ended: the panel shows what there is.
+    /// The question was empty, or its answer ended: the panel shows what there is.
     Settle,
+    /// Stop while the question was said or finished: it is thrown away.
+    Discard,
     Fail,
     Close,
 }
@@ -66,12 +75,13 @@ pub enum Step {
 pub fn next(from: State, step: Step) -> Option<State> {
     use State::*;
     match (from, step) {
-        (Closed | Shown | Error, Step::Press) => Some(Listening),
+        (Closed | Shown | Error | Discarded, Step::Press) => Some(Listening),
         (Listening, Step::Release) => Some(Finishing),
         (Finishing | Error, Step::Send) => Some(Sending),
         (Sending, Step::First) => Some(Answering),
         (Listening | Finishing | Sending | Answering, Step::Settle) => Some(Shown),
-        (Closed | Shown | Error | Finishing | Sending | Answering, Step::Fail) => Some(Error),
+        (Listening | Finishing, Step::Discard) => Some(Discarded),
+        (Closed | Shown | Error | Discarded | Finishing | Sending | Answering, Step::Fail) => Some(Error),
         (_, Step::Close) => Some(Closed),
         _ => None,
     }
@@ -89,6 +99,8 @@ pub struct Picture {
     pub src: String,
     pub w: u32,
     pub h: u32,
+    /// The window it shows, by its title (`label`); empty for a whole screen or a window that is never named.
+    pub label: String,
 }
 
 /// Everything the panel draws from, sent whole on every change (`live://state`).
@@ -123,10 +135,34 @@ pub trait Voice: Send + Sync {
     fn busy(&self) -> bool;
     /// Start listening for a question; false when a recording is already under way.
     fn start(&self) -> Result<bool, String>;
-    /// The question so far.
-    fn words(&self) -> String;
+    /// The question so far: the pieces heard, and the piece being heard.
+    fn heard(&self) -> (Vec<Item>, String);
     /// Stop, waiting for the last words. None when discarded or when nothing was listening.
     fn stop(&self, discard: bool) -> Option<Said>;
+}
+
+/// A question's pieces without the strays it starts with: a piece that says only one of `stt::STRAY` ("you", "thank
+/// you") before any other words is what the speech model made of the quiet before the person spoke, as dictation drops
+/// it. A question of nothing else has nothing said.
+pub fn unstrayed(mut items: Vec<Item>) -> Vec<Item> {
+    let mut lead = true;
+    items.retain(|i| match i {
+        Item::Speech { text, .. } if lead && (text.trim().is_empty() || stt::is_stray(text)) => false,
+        Item::Speech { .. } => {
+            lead = false;
+            true
+        }
+        Item::Image { .. } => true,
+    });
+    items
+}
+
+/// The question so far as the panel shows it: the pieces heard, then the piece being heard, with no stray at the start.
+pub fn said_so_far(items: Vec<Item>, partial: &str) -> String {
+    let items = unstrayed(items);
+    let lead = !items.iter().any(|i| matches!(i, Item::Speech { .. }));
+    let partial = if lead && stt::is_stray(partial) { "" } else { partial.trim() };
+    [prompt::compose(&items).0, partial.to_string()].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 /// The recording path of the app.
@@ -141,9 +177,8 @@ impl Voice for AppVoice {
         self.0.start_for(Purpose::Ask)
     }
 
-    fn words(&self) -> String {
-        let st = self.0.ui();
-        [st.text, st.partial].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join(" ")
+    fn heard(&self) -> (Vec<Item>, String) {
+        (self.0.heard(), self.0.ui().partial)
     }
 
     fn stop(&self, discard: bool) -> Option<Said> {
@@ -152,13 +187,22 @@ impl Voice for AppVoice {
     }
 }
 
-/// The frame taken at the press, cut and encoded when called.
-pub type Frame = Box<dyn FnOnce() -> Result<Asked, String> + Send>;
+/// A frame of the screen as it was taken, not yet cut or encoded.
+pub trait Taken: Send {
+    /// Where the person looked when it was taken.
+    fn look(&self) -> Look;
+    /// The whole frame as a 64 px thumbnail, to tell how much the screen changed.
+    fn thumb(&self) -> Thumb;
+    /// Cut, marked and encoded: the question's picture.
+    fn cut(self: Box<Self>) -> Result<Asked, String>;
+}
 
 pub struct Deps {
     pub voice: Arc<dyn Voice>,
     /// One frame of the screen as it is now.
-    pub grab: Box<dyn Fn() -> Result<Frame, String> + Send + Sync>,
+    pub grab: Box<dyn Fn() -> Result<Box<dyn Taken>, String> + Send + Sync>,
+    /// Where the person looks now, from one read of the window list and no picture.
+    pub look: Box<dyn Fn() -> Look + Send + Sync>,
     /// The AI the person chose, as the settings say at this Ask; else the line the panel shows instead.
     pub provider: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>,
     pub out: Box<dyn Fn(Out) + Send + Sync>,
@@ -182,7 +226,11 @@ struct Inner {
     /// Moved on by every press, discard and close: work begun under an older number leaves the panel alone.
     run: u64,
     /// The picture of the question being said, on its way from the frame.
-    picture: Option<Receiver<Option<Asked>>>,
+    picture: Option<Receiver<Option<Shot>>>,
+    /// Where the person looked when that frame was taken.
+    look: Look,
+    /// Moved on by every frame taken for a question: a picture cut from an older one never reaches the panel.
+    shot: u64,
     provider: Option<Arc<dyn Provider>>,
     chat: Option<Box<dyn Chat>>,
     stopper: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -244,6 +292,31 @@ pub fn caption(a: &Asked) -> String {
     c
 }
 
+/// What the panel names a picture by: the title of the window it shows. The capture never reads out the title of a
+/// window on the never-capture list, so such a window is never named; nor is a whole screen.
+pub fn label(a: &Asked) -> String {
+    a.window.clone().unwrap_or_default()
+}
+
+/// While a question is said, its picture is taken again when the window in front or the one under the pointer is
+/// another than when it was taken (or the same one with another title or place).
+pub fn look_moved(was: &Look, now: &Look) -> bool {
+    was != now
+}
+
+/// At the release, the frame taken then goes instead of the picture so far when the person looks at another window, or
+/// the screen changed by more than `keyframes::CHANGE` on its 64 px thumbnail (another page in the same window).
+pub fn moved_on(was: &Look, now: &Look, change: f32) -> bool {
+    look_moved(was, now) || change > keyframes::CHANGE
+}
+
+/// A frame cut and encoded: what is kept and sent, the panel's small copy, and the thumbnail its change is measured on.
+struct Shot {
+    asked: Asked,
+    small: Option<Picture>,
+    thumb: Thumb,
+}
+
 /// Exactly the picture that is sent, made small for the panel.
 fn thumbnail(a: &Asked) -> Option<Picture> {
     let small = image::load_from_memory(&a.wire).ok()?.thumbnail(THUMB, THUMB).to_rgb8();
@@ -252,7 +325,16 @@ fn thumbnail(a: &Asked) -> Option<Picture> {
         .encode(small.as_raw(), small.width(), small.height(), image::ExtendedColorType::Rgb8)
         .ok()?;
     let src = format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpeg));
-    Some(Picture { src, w: a.wire_w, h: a.wire_h })
+    Some(Picture { src, w: a.wire_w, h: a.wire_h, label: label(a) })
+}
+
+fn shot_from(asked: Asked, thumb: Thumb) -> Shot {
+    Shot { small: thumbnail(&asked), asked, thumb }
+}
+
+fn shot_of(taken: Box<dyn Taken>) -> Option<Shot> {
+    let thumb = taken.thumb();
+    taken.cut().ok().map(|a| shot_from(a, thumb))
 }
 
 impl Live {
@@ -336,37 +418,47 @@ impl Live {
         g.snap.dropped = false;
         g.snap.thinking = false;
         self.step(&mut g, Step::Press);
-        let (tx, rx) = mpsc::channel();
-        g.picture = frame.is_some().then_some(rx);
+        g.picture = None;
+        if let Some(frame) = frame {
+            self.cut(&mut g, frame, run);
+        }
         self.tell(&g);
         drop(g);
         (self.deps.out)(Out::Show);
-        // Cutting and encoding the frame happens off the key's thread; the panel gets its small copy when it is done.
-        if let Some(frame) = frame {
-            let me = self.clone();
-            std::thread::spawn(move || {
-                let asked = frame().ok();
-                let small = asked.as_ref().and_then(thumbnail);
-                {
-                    let mut g = me.inner.lock().unwrap();
-                    let waiting = matches!(g.snap.state, State::Listening | State::Finishing);
-                    if g.run == run && waiting && !g.snap.dropped {
-                        g.snap.picture = small;
-                        me.tell(&g);
-                    }
-                }
-                let _ = tx.send(asked);
-            });
-        }
         let me = self.clone();
         std::thread::spawn(move || me.follow(run));
         true
     }
 
-    /// While the question is said, its words reach the panel as they are heard.
-    fn follow(&self, run: u64) {
-        loop {
+    /// `frame` is the question's picture from now on. Cutting and encoding it happens off the caller's thread; the panel
+    /// gets its small copy when it is done, unless a later frame took its place or the picture was dropped meanwhile.
+    fn cut(self: &Arc<Self>, g: &mut Inner, frame: Box<dyn Taken>, run: u64) {
+        g.shot += 1;
+        g.look = frame.look();
+        let shot = g.shot;
+        let (tx, rx) = mpsc::channel();
+        g.picture = Some(rx);
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let made = shot_of(frame);
+            {
+                let mut g = me.inner.lock().unwrap();
+                let waiting = matches!(g.snap.state, State::Listening | State::Finishing);
+                if g.run == run && g.shot == shot && waiting && !g.snap.dropped {
+                    g.snap.picture = made.as_ref().and_then(|s| s.small.clone());
+                    me.tell(&g);
+                }
+            }
+            let _ = tx.send(made);
+        });
+    }
+
+    /// While the question is said, its words reach the panel as they are heard, and twice a second the picture follows
+    /// the window the person looks at, so the one the panel shows is the one that would go.
+    fn follow(self: &Arc<Self>, run: u64) {
+        for n in 1u64.. {
             std::thread::sleep(Duration::from_millis(100));
+            let look = (n % LOOK_EVERY == 0).then(|| (self.deps.look)());
             let mut g = self.inner.lock().unwrap();
             if g.run != run || g.snap.state != State::Listening {
                 return;
@@ -376,10 +468,21 @@ impl Live {
                 drop(g);
                 return self.stop();
             }
-            let words = self.deps.voice.words();
+            let (items, partial) = self.deps.voice.heard();
+            let words = said_so_far(items, &partial);
             if words != g.snap.words {
                 g.snap.words = words;
                 self.tell(&g);
+            }
+            let Some(look) = look.filter(|l| !g.snap.dropped && look_moved(&g.look, l)) else { continue };
+            // Not asked again for this window if the screen cannot be read now.
+            g.look = look;
+            drop(g);
+            // Reading the screen takes a moment: never under the lock.
+            let Ok(frame) = (self.deps.grab)() else { continue };
+            let mut g = self.inner.lock().unwrap();
+            if g.run == run && g.snap.state == State::Listening && !g.snap.dropped {
+                self.cut(&mut g, frame, run);
             }
         }
     }
@@ -418,10 +521,15 @@ impl Live {
                 // The worker finishing the words, if there is one, finds its question discarded.
                 g.run += 1;
                 g.picture = None;
+                // Nothing of the discarded question is left for the panel to show as sent: no words, no picture, and no
+                // AI being asked. The turn count is of kept questions, so this one never moved it.
                 g.snap.picture = None;
                 g.snap.words.clear();
                 g.snap.dropped = false;
-                self.step(&mut g, Step::Settle);
+                g.snap.provider.clear();
+                g.snap.error = None;
+                g.snap.thinking = false;
+                self.step(&mut g, Step::Discard);
                 self.tell(&g);
                 drop(g);
                 if listening {
@@ -503,7 +611,16 @@ impl Live {
     /// From the release to the end of the answer, off the key's thread.
     fn answer(&self, run: u64) {
         let now = || (self.deps.now)();
-        let said = self.deps.voice.stop(false);
+        // The screen at the release is read while the last words are finished, unless the picture was taken off.
+        let dropped = self.inner.lock().unwrap().snap.dropped;
+        let (said, later) = std::thread::scope(|s| {
+            let later = (!dropped).then(|| s.spawn(|| (self.deps.grab)().ok()));
+            let said = self.deps.voice.stop(false).map(|mut said| {
+                said.items = unstrayed(said.items);
+                said
+            });
+            (said, later.and_then(|l| l.join().ok().flatten()))
+        });
         let words_ms = now();
         let text = said.as_ref().map(|s| prompt::compose_with(&s.items, (self.deps.tidy)()).0).unwrap_or_default().trim().to_string();
         let picture = {
@@ -525,14 +642,14 @@ impl Live {
             picture
         };
         let Some(said) = said else { return };
-        let asked = picture.and_then(|rx| rx.recv().ok().flatten());
+        let shot = self.pick(run, picture.and_then(|rx| rx.recv().ok().flatten()), later);
         let (provider, session, fresh, press_ms, release_ms, asked) = {
             let mut g = self.inner.lock().unwrap();
             if g.run != run || g.snap.state != State::Finishing {
                 return;
             }
             // From here the picture can no longer be dropped: it is what is kept and sent, or it is neither.
-            let asked = asked.filter(|_| !g.snap.dropped);
+            let asked = shot.map(|s| s.asked).filter(|_| !g.snap.dropped);
             self.step(&mut g, Step::Send);
             self.tell(&g);
             (g.provider.clone(), g.session.clone(), g.chat.is_none(), g.press_ms, g.release_ms, asked)
@@ -581,6 +698,28 @@ impl Live {
             (g.snap.turn, g.chat.take())
         };
         self.send(run, &provider, kept, turn_no, chat, before);
+    }
+
+    /// The one picture that goes with the question: the one so far (`was`), or the frame taken at the release (`later`)
+    /// when the person moved on since to another window or another page. The panel is shown the one that goes.
+    fn pick(&self, run: u64, was: Option<Shot>, later: Option<Box<dyn Taken>>) -> Option<Shot> {
+        let Some(later) = later else { return was };
+        let thumb = later.thumb();
+        let change = was.as_ref().map_or(1.0, |s| keyframes::change(&s.thumb, &thumb));
+        let look = later.look();
+        if !moved_on(&self.inner.lock().unwrap().look, &look, change) {
+            return was;
+        }
+        let Ok(asked) = later.cut() else { return was };
+        let shot = shot_from(asked, thumb);
+        let mut g = self.inner.lock().unwrap();
+        if g.run == run && g.snap.state == State::Finishing && !g.snap.dropped {
+            g.shot += 1;
+            g.look = look;
+            g.snap.picture = shot.small.clone();
+            self.tell(&g);
+        }
+        Some(shot)
     }
 
     /// Ask the question that failed again, as it was kept: the same words and the same picture bytes, in the same
@@ -798,9 +937,20 @@ mod tests {
     struct FakeVoice {
         on: AtomicBool,
         say: Mutex<String>,
+        /// When set, what is heard piece by piece instead of `say` as one piece.
+        pieces: Mutex<Vec<String>>,
         /// Every stop asked of it: whether it was a discard.
         stops: Mutex<Vec<bool>>,
         nth: AtomicU64,
+    }
+
+    impl FakeVoice {
+        fn items(&self) -> Vec<Item> {
+            let pieces = self.pieces.lock().unwrap().clone();
+            let pieces = if pieces.is_empty() { vec![self.say.lock().unwrap().clone()] } else { pieces };
+            let piece = |(n, text): (usize, String)| Item::Speech { t_ms: n as u64 * 1_000, end_ms: n as u64 * 1_000 + 900, text };
+            pieces.into_iter().filter(|t| !t.is_empty()).enumerate().map(piece).collect()
+        }
     }
 
     impl Voice for FakeVoice {
@@ -812,8 +962,8 @@ mod tests {
             Ok(!self.on.swap(true, Ordering::SeqCst))
         }
 
-        fn words(&self) -> String {
-            self.say.lock().unwrap().clone()
+        fn heard(&self) -> (Vec<Item>, String) {
+            (self.items(), String::new())
         }
 
         fn stop(&self, discard: bool) -> Option<Said> {
@@ -822,8 +972,7 @@ mod tests {
             if !was || discard {
                 return None;
             }
-            let text = self.say.lock().unwrap().clone();
-            let items = if text.is_empty() { vec![] } else { vec![Item::Speech { t_ms: 0, end_ms: 900, text }] };
+            let items = self.items();
             // Each question begins at its own second, as real ones do.
             let created_ms = 1_700_000_000_000 + self.nth.fetch_add(1, Ordering::SeqCst) * 1_000;
             Some(Said { items, created_ms, duration_ms: 900, audio: None })
@@ -879,12 +1028,46 @@ mod tests {
         grabs: Arc<AtomicUsize>,
         /// Held by a test, the frame taken at the press is not cut until it lets go.
         gate: Arc<Mutex<()>>,
+        /// What is on the screen: where the person looks, the window a frame shows and its shade.
+        screen: Arc<Mutex<Screen>>,
         dir: PathBuf,
     }
 
+    #[derive(Clone)]
+    struct Screen {
+        look: Look,
+        window: &'static str,
+        shade: u8,
+    }
+
+    impl Default for Screen {
+        fn default() -> Self {
+            Screen { look: Look { front: Some(1), under: Some(1) }, window: "Notes", shade: 200 }
+        }
+    }
+
     fn shot() -> Asked {
-        let wire = crate::image_ops::encode_png(&[200u8; 4 * 2 * 4], 4, 2).unwrap();
-        Asked { png: wire.clone(), width: 4, height: 2, wire, wire_w: 4, wire_h: 2, mime: Mime::Png, window: Some("Notes".into()), element: None, hidden: 1 }
+        shot_on(&Screen::default())
+    }
+
+    fn shot_on(s: &Screen) -> Asked {
+        let wire = crate::image_ops::encode_png(&[s.shade; 4 * 2 * 4], 4, 2).unwrap();
+        Asked { png: wire.clone(), width: 4, height: 2, wire, wire_w: 4, wire_h: 2, mime: Mime::Png, window: Some(s.window.into()), element: None, hidden: 1 }
+    }
+
+    struct FakeFrame(Screen, Arc<Mutex<()>>);
+
+    impl Taken for FakeFrame {
+        fn look(&self) -> Look {
+            self.0.look
+        }
+        fn thumb(&self) -> Thumb {
+            keyframes::thumb(&[self.0.shade; 64 * 36 * 4], 64, 36)
+        }
+        fn cut(self: Box<Self>) -> Result<Asked, String> {
+            let _open = self.1.lock().unwrap();
+            Ok(shot_on(&self.0))
+        }
     }
 
     fn rig(name: &str, provider: Option<Arc<dyn Provider>>, wait: Duration) -> Rig {
@@ -899,24 +1082,23 @@ mod tests {
         let (o, g, clock) = (outs.clone(), grabs.clone(), AtomicU64::new(1_700_000_000_000));
         let gate = Arc::new(Mutex::new(()));
         let held = gate.clone();
+        let screen = Arc::new(Mutex::new(Screen::default()));
+        let (on, looked) = (screen.clone(), screen.clone());
         let deps = Deps {
             voice: voice.clone(),
             grab: Box::new(move || {
                 g.fetch_add(1, Ordering::SeqCst);
-                let held = held.clone();
-                let cut: Frame = Box::new(move || {
-                    let _open = held.lock().unwrap();
-                    Ok(shot())
-                });
-                Ok(cut)
+                let frame: Box<dyn Taken> = Box::new(FakeFrame(on.lock().unwrap().clone(), held.clone()));
+                Ok(frame)
             }),
+            look: Box::new(move || looked.lock().unwrap().look),
             provider,
             out: Box::new(move |out| o.lock().unwrap().push(out)),
             // Every reading is a millisecond after the last, so the order of the stages is the order of their times.
             now: Box::new(move || clock.fetch_add(1, Ordering::SeqCst)),
             tidy: Box::new(|| false),
         };
-        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, dir }
+        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, dir }
     }
 
     impl Rig {
@@ -973,8 +1155,8 @@ mod tests {
     #[test]
     fn each_state_is_reached_by_one_step_and_a_question_walks_them_in_order() {
         use State::*;
-        let states = [Closed, Listening, Finishing, Sending, Answering, Shown, Error];
-        let steps = [Step::Press, Step::Release, Step::Send, Step::First, Step::Settle, Step::Fail, Step::Close];
+        let states = [Closed, Listening, Finishing, Sending, Answering, Shown, Error, Discarded];
+        let steps = [Step::Press, Step::Release, Step::Send, Step::First, Step::Settle, Step::Discard, Step::Fail, Step::Close];
         for to in states {
             let ways: Vec<Step> = steps.iter().copied().filter(|s| states.iter().any(|from| next(*from, *s) == Some(to))).collect();
             assert_eq!(ways.len(), 1, "{to:?} is entered by {ways:?}");
@@ -986,6 +1168,12 @@ mod tests {
         assert_eq!((next(Closed, Step::Release), next(Finishing, Step::Release), next(Listening, Step::Send)), (None, None, None));
         assert_eq!((next(Closed, Step::First), next(Shown, Step::Settle), next(Listening, Step::Fail)), (None, None, None));
         assert_eq!([Listening, Finishing, Sending, Answering].map(|s| next(s, Step::Press)), [None; 4]);
+        // Only a question still being said or finished is discarded; after a discard the next press listens.
+        assert_eq!([Listening, Finishing].map(|s| next(s, Step::Discard)), [Some(Discarded); 2]);
+        assert_eq!([Closed, Sending, Answering, Shown, Error, Discarded].map(|s| next(s, Step::Discard)), [None; 6]);
+        assert_eq!((next(Discarded, Step::Press), next(Discarded, Step::Close)), (Some(Listening), Some(Closed)));
+        // Lower-case on the wire, as the panel reads it.
+        assert_eq!(serde_json::to_value(Discarded).unwrap(), "discarded");
     }
 
     #[test]
@@ -993,7 +1181,9 @@ mod tests {
         let script = Scripted { id: assist::codex::ID, ..Scripted::new(&[(5, "Hel"), (5, "lo")]) };
         let r = rig("asked", Some(Arc::new(script.clone())), FIRST_WAIT);
         r.ask("what is this", State::Shown);
-        assert_eq!(r.grabs.load(Ordering::SeqCst), 1, "one frame, at the press");
+        // A frame at the press and one at the release, to see whether the screen moved on; it did not, so the press frame
+        // went (rule changed: the release frame is new).
+        assert_eq!(r.grabs.load(Ordering::SeqCst), 2, "a frame at the press and one at the release");
         assert_eq!(r.outs.lock().unwrap().iter().filter(|o| **o == Out::Show).count(), 1);
         assert_eq!(r.states(), [State::Listening, State::Finishing, State::Sending, State::Answering, State::Shown]);
         assert_eq!(r.deltas().iter().map(|d| d.1.as_str()).collect::<String>(), "Hello");
@@ -1032,13 +1222,139 @@ mod tests {
         let r = rig("discard", provider, FIRST_WAIT);
         assert!(r.live.press());
         *r.voice.say.lock().unwrap() = "what is".into();
+        r.wait("the words and the picture in the panel", || {
+            let s = r.live.snapshot();
+            s.picture.is_some() && s.words == "what is"
+        });
         r.live.stop();
-        assert_eq!(r.live.snapshot().state, State::Shown);
+        // Rule changed: a discard was `shown`, which the panel drew as an answer sent; it is its own state now.
+        let snap = r.live.snapshot();
+        assert_eq!(snap.state, State::Discarded);
         assert_eq!(*r.voice.stops.lock().unwrap(), [true], "the recording was discarded, not finished");
         std::thread::sleep(Duration::from_millis(150));
         assert!(r.kept().is_empty() && script.asked.lock().unwrap().is_empty() && script.opened.lock().unwrap().is_empty());
         assert!(r.live.inner.lock().unwrap().picture.is_none() && r.live.snapshot().picture.is_none());
+        // Nothing in what the panel draws from can say the question went: no words, picture, AI or turn.
+        let s = r.live.snapshot();
+        assert_eq!((s.words.as_str(), s.dropped, s.provider.as_str(), s.turn, s.thinking, s.error), ("", false, "", 0, false, None), "{s:?}");
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!((json["state"].as_str(), json["picture"].is_null()), (Some("discarded"), true));
+        // The same for a question stopped while its last words were finished.
+        let (script, provider) = scripted(&[(0, "never")]);
+        let r2 = rig("discard-late", provider, FIRST_WAIT);
+        let slow = r2.gate.lock().unwrap();
+        assert!(r2.live.press());
+        *r2.voice.say.lock().unwrap() = "what is this".into();
+        r2.live.release();
+        r2.wait("the question waiting for its picture", || r2.live.inner.lock().unwrap().picture.is_none());
+        r2.live.stop();
+        drop(slow);
+        std::thread::sleep(Duration::from_millis(150));
+        let s = r2.live.snapshot();
+        assert_eq!((s.state, s.words.as_str(), s.picture.is_none(), s.provider.as_str()), (State::Discarded, "", true, ""), "{s:?}");
+        assert!(r2.kept().is_empty() && script.asked.lock().unwrap().is_empty());
         r.end();
+        r2.end();
+    }
+
+    #[test]
+    fn a_stray_piece_before_the_question_never_shows_or_goes_and_a_question_of_only_strays_is_nothing_said() {
+        let speech = |texts: &[&str]| -> Vec<Item> {
+            texts.iter().enumerate().map(|(n, t)| Item::Speech { t_ms: n as u64 * 1_000, end_ms: n as u64 * 1_000 + 900, text: t.to_string() }).collect()
+        };
+        let text = |items: Vec<Item>| prompt::compose(&items).0;
+        // The model's word for the quiet before the person spoke goes, however many pieces of it there are.
+        assert_eq!(text(unstrayed(speech(&["you", "Thank you.", "What is this graph?"]))), "What is this graph?");
+        // A stray after the first real words is the person's own: it stays, as do words that only begin like one.
+        assert_eq!(text(unstrayed(speech(&["What is this?", "Okay."]))), "What is this? Okay.");
+        assert_eq!(text(unstrayed(speech(&["So what is this?"]))), "So what is this?");
+        // Nothing but strays is nothing said.
+        assert!(unstrayed(speech(&["you", "Um."])).is_empty());
+        for s in stt::STRAY {
+            assert!(unstrayed(speech(&[*s])).is_empty(), "{s}");
+        }
+        // Live: neither a heard piece nor the piece being heard starts the words with one.
+        assert_eq!(said_so_far(speech(&[]), "you"), "");
+        assert_eq!(said_so_far(speech(&["You."]), "what is"), "what is");
+        assert_eq!(said_so_far(speech(&["What is"]), "you"), "What is you");
+        // Through the loop: the panel never shows the stray, and the question kept and sent has none.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("stray", provider, FIRST_WAIT);
+        assert!(r.live.press());
+        *r.voice.pieces.lock().unwrap() = vec!["you".into(), "What is this?".into()];
+        r.wait("the words in the panel", || !r.live.snapshot().words.is_empty());
+        assert_eq!(r.live.snapshot().words, "What is this?");
+        r.live.release();
+        r.until(State::Shown);
+        let kept = r.kept();
+        let a = kept[0].1[0].answer.clone().unwrap();
+        assert!(a.sent.text.starts_with("What is this?\n\n[Picture"), "{}", a.sent.text);
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text(a.sent.text.clone()));
+        assert!(r.outs.lock().unwrap().iter().all(|o| !matches!(o, Out::State(s) if s.words.to_lowercase().starts_with("you"))));
+        // A question of only strays keeps and sends nothing: the panel is simply open.
+        assert!(r.live.press());
+        *r.voice.pieces.lock().unwrap() = vec!["you".into(), "Thank you.".into()];
+        r.live.release();
+        r.wait("the second question settled", || r.live.snapshot().state == State::Shown && r.live.inner.lock().unwrap().picture.is_none());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!((r.kept()[0].1.len(), script.asked.lock().unwrap().len(), r.live.snapshot().words.as_str()), (1, 1, ""));
+        r.end();
+    }
+
+    #[test]
+    fn the_picture_follows_the_window_the_person_looks_at_and_the_one_the_panel_shows_is_the_one_sent() {
+        let (a, b) = (Look { front: Some(1), under: Some(1) }, Look { front: Some(2), under: Some(1) });
+        // The decision, alone: another window in front or under the pointer takes the picture again; at the release a
+        // screen that changed on its thumbnail (another page in the same window) does too, and a small change does not.
+        assert!(!look_moved(&a, &a) && look_moved(&a, &b) && look_moved(&a, &Look { under: Some(3), ..a }));
+        assert!(moved_on(&a, &b, 0.0) && moved_on(&a, &a, keyframes::CHANGE + 0.01));
+        assert!(!moved_on(&a, &a, 0.0) && !moved_on(&a, &a, keyframes::CHANGE));
+        // The panel's picture is named by the window it shows; a whole screen or an unnamed window is not.
+        assert_eq!((label(&shot()), label(&Asked { window: None, ..shot() })), ("Notes".to_string(), String::new()));
+
+        // Another app in front while the question is said: the panel's picture is taken again, and that one goes.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("follows", provider, FIRST_WAIT);
+        assert!(r.live.press());
+        r.wait("the press picture", || r.live.snapshot().picture.is_some_and(|p| p.label == "Notes"));
+        *r.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30 };
+        r.wait("the picture following the window in front", || r.live.snapshot().picture.is_some_and(|p| p.label == "Lecture 4.pdf"));
+        *r.voice.say.lock().unwrap() = "what is this".into();
+        r.live.release();
+        r.until(State::Shown);
+        let sent = &script.asked.lock().unwrap()[0];
+        assert_eq!(sent.parts.len(), 2, "one picture, not two");
+        let Part::Picture { path, .. } = &sent.parts[1] else { panic!("no picture sent") };
+        assert_eq!(std::fs::read(path).unwrap(), shot_on(&r.screen.lock().unwrap()).wire);
+        assert_eq!(sent.parts[0], Part::Text("what is this\n\n[Picture: 4 x 2 pixels, the window \"Lecture 4.pdf\", 1 area hidden]".into()));
+        assert_eq!(r.live.snapshot().picture.map(|p| p.label), Some("Lecture 4.pdf".into()));
+
+        // Another page in the same window between the last look and the release: the release frame goes, and the panel
+        // shows it before it is sent.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r2 = rig("moved-on", provider, FIRST_WAIT);
+        assert!(r2.live.press());
+        r2.wait("the press picture", || r2.live.snapshot().picture.is_some());
+        *r2.screen.lock().unwrap() = Screen { window: "Notes, page 2", shade: 30, ..Screen::default() };
+        *r2.voice.say.lock().unwrap() = "and this".into();
+        r2.live.release();
+        r2.until(State::Shown);
+        assert!(matches!(&script.asked.lock().unwrap()[0].parts[0], Part::Text(t) if t.contains("Notes, page 2")));
+        assert_eq!(r2.live.snapshot().picture.map(|p| p.label), Some("Notes, page 2".into()));
+        // A picture taken off before the release is not taken again.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r3 = rig("dropped-stays", provider, FIRST_WAIT);
+        assert!(r3.live.press());
+        r3.live.drop_picture();
+        *r3.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30 };
+        std::thread::sleep(Duration::from_millis(700));
+        *r3.voice.say.lock().unwrap() = "what is this".into();
+        r3.live.release();
+        r3.until(State::Shown);
+        assert_eq!((r3.grabs.load(Ordering::SeqCst), script.asked.lock().unwrap()[0].parts.len()), (1, 1));
+        r.end();
+        r2.end();
+        r3.end();
     }
 
     #[test]

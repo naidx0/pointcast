@@ -58,6 +58,9 @@ pub struct UiState {
     pub image_count: u32,
     pub model_ready: bool,
     pub level: f32,
+    /// The microphone as the Ask panel's line follows it, 0 to 1: rms over about 50 ms, rising at once and falling over
+    /// about 150 ms, from -50 dBFS (0) to -10 dBFS (1). Sent about 30 times a second while an Ask listens.
+    pub loudness: f32,
     /// After a stop, where the prompt went: pasted, copied, saved, kept or empty; "partial" when Cancel saved what was
     /// done and kept the audio, "cut" when it did with Keep audio off.
     pub notice: Option<&'static str>,
@@ -94,6 +97,7 @@ impl Default for UiState {
             image_count: 0,
             model_ready: false,
             level: 0.0,
+            loudness: 0.0,
             notice: None,
             behind_ms: 0,
             quiet_mic: None,
@@ -289,6 +293,7 @@ impl App {
         let mut s = self.state.lock().unwrap().clone();
         if let Some(t) = self.take.lock().unwrap().as_ref() {
             s.level = t.level();
+            s.loudness = t.loudness();
         }
         // The clock runs from the first audio: before the microphone is live a recording has recorded nothing.
         if let Some(t0) = *self.t0.lock().unwrap() {
@@ -630,6 +635,11 @@ impl App {
     /// What the last stop of a question heard, once.
     pub fn take_said(&self) -> Option<Said> {
         self.said.lock().unwrap().take()
+    }
+
+    /// The pieces and pictures of the recording under way, as heard so far.
+    pub fn heard(&self) -> Vec<Item> {
+        self.items.lock().unwrap().clone()
     }
 
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {

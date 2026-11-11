@@ -71,6 +71,51 @@ pub fn meter(rms: f32) -> f32 {
     ((db + 60.0) / 50.0).clamp(0.0, 1.0)
 }
 
+/// The Ask panel's line: power averaged over about this long...
+pub const LOUD_RMS_MS: f32 = 50.0;
+/// ...shown rising over about this long (at once, to the eye)...
+pub const LOUD_RISE_MS: f32 = 10.0;
+/// ...and falling over about this long...
+pub const LOUD_FALL_MS: f32 = 150.0;
+/// ...on a dB scale from this (0)...
+pub const LOUD_FLOOR_DB: f32 = -50.0;
+/// ...to this (1).
+pub const LOUD_TOP_DB: f32 = -10.0;
+
+/// An rms on the line's scale: 0 at `LOUD_FLOOR_DB` and below, 1 at `LOUD_TOP_DB` and above, even in dB between.
+pub fn loud_scale(rms: f32) -> f32 {
+    let db = 20.0 * rms.max(1e-9).log10();
+    ((db - LOUD_FLOOR_DB) / (LOUD_TOP_DB - LOUD_FLOOR_DB)).clamp(0.0, 1.0)
+}
+
+/// The level the Ask panel's line follows: smooth however the microphone splits what it delivers.
+#[derive(Debug, Default, Clone)]
+pub struct Loudness {
+    /// The last deliveries, as (sum of squares, samples): the newest whole, and enough before it to cover `LOUD_RMS_MS`.
+    recent: std::collections::VecDeque<(f32, usize)>,
+    shown: f32,
+}
+
+impl Loudness {
+    /// Hear `x` (16 kHz mono) and say the level now, 0 to 1.
+    pub fn feed(&mut self, x: &[f32]) -> f32 {
+        if x.is_empty() {
+            return self.shown;
+        }
+        self.recent.push_back((x.iter().map(|v| v * v).sum(), x.len()));
+        let keep = (RATE as f32 * LOUD_RMS_MS / 1000.0) as usize;
+        while self.recent.len() > 1 && self.recent.iter().skip(1).map(|r| r.1).sum::<usize>() >= keep {
+            self.recent.pop_front();
+        }
+        let (squares, n) = self.recent.iter().fold((0.0, 0), |a, r| (a.0 + r.0, a.1 + r.1));
+        let to = loud_scale((squares / n.max(1) as f32).sqrt());
+        let ms = x.len() as f32 * 1000.0 / RATE as f32;
+        let share = |tau: f32| 1.0 - (-ms / tau).exp();
+        self.shown += (to - self.shown) * share(if to > self.shown { LOUD_RISE_MS } else { LOUD_FALL_MS });
+        self.shown
+    }
+}
+
 /// A frame is voice only above this rms (about -54 dBFS), however quiet the room.
 pub const MIN_VOICE: f32 = 0.002;
 /// Voice starts this many times above the room's noise floor, and once started holds down to `HOLD` times it.
@@ -551,6 +596,9 @@ pub struct Take {
     pub peak: AtomicU32,
     /// The microphone this take was opened on, by the name the system gives it.
     pub device: Mutex<Option<String>>,
+    /// The level the Ask panel's line follows (`Loudness`), and its last value (bits of an f32).
+    pub smooth: Mutex<Loudness>,
+    pub loud: AtomicU32,
 }
 
 impl Take {
@@ -561,6 +609,7 @@ impl Take {
             return;
         }
         self.level.store(meter(rms(out)).to_bits(), Ordering::Relaxed);
+        self.loud.store(self.smooth.lock().unwrap().feed(out).to_bits(), Ordering::Relaxed);
         let loud = out.iter().fold(0f32, |m, v| m.max(v.abs()));
         if loud > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(loud.to_bits(), Ordering::Relaxed);
@@ -578,6 +627,10 @@ impl Take {
     }
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+    /// The level the Ask panel's line follows, 0 to 1 (`Loudness`).
+    pub fn loudness(&self) -> f32 {
+        f32::from_bits(self.loud.load(Ordering::Relaxed))
     }
     /// The loudest sample so far in dBFS, rounded; `SILENT_DB` when nothing but zeros came.
     pub fn peak_db(&self) -> i32 {
@@ -989,6 +1042,33 @@ pub(crate) mod tests {
         let quiet = meter(rms(&sine(16_000, 200.0, 0.03, 0.01)));
         let loud = meter(rms(&sine(16_000, 200.0, 0.03, 0.3)));
         assert!(quiet > 0.0 && loud > quiet && loud <= 1.0, "{quiet} {loud}");
+    }
+
+    #[test]
+    fn the_ask_line_level_is_rms_over_50_ms_rising_at_once_and_falling_over_150_ms_from_minus_50_to_minus_10_dbfs() {
+        // The scale: even in dB, 0 at the floor and below, 1 at the top and above.
+        let at = |db: f32| loud_scale(10f32.powf(db / 20.0));
+        for (db, want) in [(-90.0, 0.0), (-50.0, 0.0), (-40.0, 0.25), (-30.0, 0.5), (-20.0, 0.75), (-10.0, 1.0), (0.0, 1.0)] {
+            assert!((at(db) - want).abs() < 1e-3, "{db} dBFS: {}", at(db));
+        }
+        assert_eq!(loud_scale(0.0), 0.0);
+        // Speech at -20 dBFS rms, delivered 10 ms at a time: past half its level by the second delivery, there by 150 ms.
+        let speech = sine(16_000, 200.0, 0.4, 0.1 * std::f32::consts::SQRT_2);
+        let mut l = Loudness::default();
+        let up: Vec<f32> = speech.chunks(160).map(|b| l.feed(b)).collect();
+        assert!(up[1] > 0.375 && (up[15] - 0.75).abs() < 0.02, "{:?}", &up[..16]);
+        // Then quiet: no drop at once, about a third left 150 ms after the 50 ms window has emptied, nothing at 600 ms.
+        let quiet = [0.0f32; 160];
+        let down: Vec<f32> = (0..60).map(|_| l.feed(&quiet)).collect();
+        assert!(down[4] > 0.6, "{:?}", &down[..6]);
+        assert!(down[19] > 0.15 && down[19] < 0.45, "{}", down[19]);
+        assert!(down[59] < 0.05, "{}", down[59]);
+        // How the microphone splits its deliveries does not change the level, and a quiet room shows as nothing.
+        let mut big = Loudness::default();
+        let settled = speech.chunks(480).map(|b| big.feed(b)).last().unwrap();
+        assert!((settled - up[up.len() - 1]).abs() < 0.02, "{settled} {}", up[up.len() - 1]);
+        let mut room = Loudness::default();
+        assert_eq!(sine(16_000, 200.0, 0.3, 0.001).chunks(160).map(|b| room.feed(b)).last(), Some(0.0));
     }
 
     fn take(parts: &[(f32, f32)]) -> Vec<f32> {
