@@ -988,6 +988,16 @@ html.win .prefs-pane {
 .home-sec .home-title {
   margin: 0;
 }
+/* The page's links and its Reset are grey, as the rest of its quiet text: no colour but the sidebar's, and AA on
+   either skin (the system blue on light grey is not). */
+.home-sec .link,
+.home-foot .btn.plain:not(.danger) {
+  color: var(--label-2);
+}
+.home-sec .link:hover {
+  color: var(--label);
+  text-decoration: none;
+}
 /* Seven rows of 24 hours in one grey: the more recordings, the darker. */
 .home-grid,
 .home-row {
@@ -1004,9 +1014,6 @@ html.win .prefs-pane {
   line-height: 12px;
   color: var(--label-2);
   font-variant-numeric: tabular-nums;
-}
-.home-row.hours {
-  margin-top: 4px;
 }
 .home-row i {
   height: 12px;
