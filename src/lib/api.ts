@@ -175,6 +175,14 @@ export type Config = {
   /** The model a recording would load now (the picked one, or the installed one it falls back to). */
   speech_in_use?: string | null;
   devices: string[];
+  /** The system's default microphone, by name. */
+  default_device?: string | null;
+  /** The microphone of the newest recordings, newest first. */
+  mic_recent?: MicRecent[];
+  /** This computer, as measured at launch. */
+  machine?: Machine;
+  /** Cancel was pressed on the graphics-card download: not tried again until asked. */
+  gpu_declined?: boolean;
   permissions: Permissions;
   recommended: string;
 };
@@ -243,7 +251,12 @@ export const sendToTool = (id: string) => invoke<void>("send_to_tool", { id });
 export const hotkeysSuspend = (on: boolean) => invoke<Config>("hotkeys_suspend", { on });
 export const hotkeyTest = (on: boolean) => invoke<void>("hotkey_test", { on });
 export const practice = (on: boolean) => invoke<void>("practice", { on });
-export const micMonitor = (on: boolean) => invoke<void>("mic_monitor", { on });
+/** Open or close the microphone check. With `leaseMs` it closes by itself unless asked again within that time. */
+export const micMonitor = (on: boolean, leaseMs?: number) => invoke<void>("mic_monitor", { on, leaseMs });
+/** Listen briefly to the other microphones: the ones that picked up sound, loudest first (dBFS). */
+export const micScan = () => invoke<{ name: string; peak_db: number }[]>("mic_scan");
+/** Forget that the graphics card could not run the engine, or that its download was stopped, so it is tried again. */
+export const gpuRetry = () => invoke<void>("gpu_retry");
 export const onboardingFinish = () => invoke<void>("onboarding_finish");
 /** Open at login for this user; `machine` is an older entry for every user that only an administrator can remove. */
 export type Login = { enabled: boolean; machine: boolean };
@@ -253,6 +266,20 @@ export const updateCheck = () => invoke<string | null>("update_check");
 export const updateInstall = () => invoke<void>("update_install");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
 export const platformInfo = () => invoke<{ os: string; materials: boolean }>("platform_info");
+
+export type MicRecent = { mic: string; open_ms: number; peak_db: number };
+export type Machine = {
+  cpu?: string;
+  cores: number;
+  ram_gb: number;
+  /** The graphics card and its own memory in GB. */
+  gpu?: [string, number] | null;
+  gpu_integrated: boolean;
+  mac: boolean;
+  apple_silicon: boolean;
+  /** A graphics-card version of the speech engine is published for this computer. */
+  helper: boolean;
+};
 
 export type HistoryMeta = {
   id: string;
@@ -272,6 +299,12 @@ export type HistoryMeta = {
   /** The engine's time on it and the length of its audio, in ms. */
   transcribe_ms?: number;
   audio_ms?: number;
+  /** The microphone it was recorded on; empty for an entry from before this was kept. */
+  mic?: string;
+  /** From the press to the microphone's first sample, in ms. */
+  mic_open_ms?: number;
+  /** The loudest sample of the recording, in dBFS (-100 for nothing but zeros). */
+  mic_peak_db?: number;
 };
 
 /** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
@@ -333,6 +366,8 @@ export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null 
 export const onGpuUpgrade = on<GpuUpgrade>("gpu://upgrade");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
+/** The loudest sample of the microphone check's last 50 ms, in dBFS. */
+export const onMicPeak = on<number>("mic://peak");
 export const onUpdateChecked = on<string | null>("update://checked");
 export const onUpdateFailed = on<string>("update://failed");
 export const onSettingsPane = on<string>("settings://pane");

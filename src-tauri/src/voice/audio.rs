@@ -547,6 +547,10 @@ pub struct Take {
     pub copied: AtomicU64,
     /// When the first sample was heard, in ms since the Unix epoch; 0 until audio flows.
     pub first_at: AtomicU64,
+    /// The loudest sample so far, as it came from the microphone (bits of an f32).
+    pub peak: AtomicU32,
+    /// The microphone this take was opened on, by the name the system gives it.
+    pub device: Mutex<Option<String>>,
 }
 
 impl Take {
@@ -557,6 +561,10 @@ impl Take {
             return;
         }
         self.level.store(meter(rms(out)).to_bits(), Ordering::Relaxed);
+        let loud = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+        if loud > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
+            self.peak.store(loud.to_bits(), Ordering::Relaxed);
+        }
         let mut s = self.samples.lock().unwrap();
         if s.is_empty() {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
@@ -570,6 +578,18 @@ impl Take {
     }
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+    /// The loudest sample so far in dBFS, rounded; `SILENT_DB` when nothing but zeros came.
+    pub fn peak_db(&self) -> i32 {
+        db(f32::from_bits(self.peak.load(Ordering::Relaxed)))
+    }
+    /// What arrived since the last call, taken out of the take: a reader that only watches the level (the microphone
+    /// check in Settings) holds nothing however long it runs.
+    pub fn drain(&self) -> Vec<f32> {
+        std::mem::take(&mut *self.samples.lock().unwrap())
+    }
+    pub fn device(&self) -> Option<String> {
+        self.device.lock().unwrap().clone()
     }
     pub fn len(&self) -> usize {
         self.samples.lock().unwrap().len()
@@ -606,6 +626,27 @@ fn keep_com_apartment() {
             let _ = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() };
         });
     }
+}
+
+/// The level of a recording that delivered only zeros.
+pub const SILENT_DB: i32 = -100;
+
+/// A sample's size in dBFS, rounded, floored at `SILENT_DB`.
+pub fn db(peak: f32) -> i32 {
+    if peak <= 0.0 {
+        return SILENT_DB;
+    }
+    ((20.0 * peak.log10()).round() as i32).clamp(SILENT_DB, 0)
+}
+
+/// The system's default microphone, by name.
+pub fn default_device() -> Option<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    if !crate::permissions::may_list_microphones() {
+        return None;
+    }
+    keep_com_apartment();
+    cpal::default_host().default_input_device().and_then(|d| d.name().ok())
 }
 
 pub fn devices() -> Vec<String> {
@@ -782,6 +823,7 @@ fn build_marked(device: Option<String>, take: Arc<Take>, marks: &mut Vec<(&'stat
         None => host.default_input_device(),
     }
     .ok_or("No microphone")?;
+    *take.device.lock().unwrap() = dev.name().ok();
     mark("device");
     let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
     mark("config");
@@ -837,6 +879,22 @@ fn build_marked(device: Option<String>, take: Arc<Take>, marks: &mut Vec<(&'stat
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn a_take_knows_its_loudest_sample_in_dbfs_and_a_level_reader_holds_nothing() {
+        use super::*;
+        assert_eq!((db(0.0), db(1.0), db(0.5), db(0.001), db(1e-9)), (SILENT_DB, 0, -6, -60, SILENT_DB));
+        let t = Take::default();
+        assert_eq!(t.peak_db(), SILENT_DB, "nothing heard yet");
+        t.push(&[0.0; 320]);
+        assert_eq!(t.peak_db(), SILENT_DB, "only zeros");
+        t.push(&[0.01, -0.1, 0.05]);
+        t.push(&[0.02]);
+        assert_eq!(t.peak_db(), -20, "the loudest sample of all, either sign");
+        assert_eq!(t.drain().len(), 324);
+        assert_eq!(t.len(), 0, "drained");
+        assert_eq!(t.peak_db(), -20, "the peak stays");
+    }
+
     #[test]
     fn devices_can_be_listed_from_one_thread_after_another() {
         // Each listing on a fresh thread that starts after the last one ended, as Settings and the

@@ -54,6 +54,24 @@ pub struct Meta {
     /// How long its audio is, in ms.
     #[serde(default)]
     pub audio_ms: u64,
+    /// The microphone it was recorded on, by the name the system gives it; empty for an entry from before this was
+    /// kept.
+    #[serde(default)]
+    pub mic: String,
+    /// From the press to the microphone's first sample, in ms: words before that were not recorded.
+    #[serde(default)]
+    pub mic_open_ms: u64,
+    /// The loudest sample of the whole recording in dBFS (`audio::SILENT_DB` for nothing but zeros).
+    #[serde(default)]
+    pub mic_peak_db: i32,
+}
+
+/// What the microphone did for a recording, for `Store::note_mic`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MicRun {
+    pub mic: String,
+    pub open_ms: u64,
+    pub peak_db: i32,
 }
 
 /// How an entry was transcribed, for `Store::note_run`.
@@ -183,6 +201,26 @@ impl Store {
         let mut meta: Meta = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("no such prompt")?;
         (meta.engine, meta.device, meta.transcribe_ms, meta.audio_ms) = (run.engine.clone(), run.device.clone(), run.transcribe_ms, run.audio_ms);
         write_atomic(&path, &serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
+    }
+
+    /// Note which microphone recorded an entry, how long it took to start and how loud it got. Transcribing again
+    /// leaves this as it is: the recording did not change.
+    pub fn note_mic(&self, id: &str, run: &MicRun) -> Result<(), String> {
+        let path = self.entry_dir(id)?.join("meta.json");
+        let mut meta: Meta = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("no such prompt")?;
+        (meta.mic, meta.mic_open_ms, meta.mic_peak_db) = (run.mic.clone(), run.open_ms, run.peak_db);
+        write_atomic(&path, &serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
+    }
+
+    /// The microphone of the newest recordings that name one, newest first, at most `n`: what Settings judges a
+    /// microphone by.
+    pub fn recent_mics(&self, n: usize) -> Vec<MicRun> {
+        self.list()
+            .into_iter()
+            .filter(|m| !m.mic.is_empty())
+            .take(n)
+            .map(|m| MicRun { mic: m.mic, open_ms: m.mic_open_ms, peak_db: m.mic_peak_db })
+            .collect()
     }
 
     /// Newest first.
@@ -444,6 +482,9 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         device: String::new(),
         transcribe_ms: 0,
         audio_ms: 0,
+        mic: String::new(),
+        mic_open_ms: 0,
+        mic_peak_db: 0,
     }
 }
 
@@ -952,6 +993,27 @@ mod tests {
         let old: Meta = serde_json::from_str(r#"{"id":"x","created_ms":1,"duration_ms":2,"preview":"","images":0}"#).unwrap();
         assert_eq!((old.engine, old.device, old.transcribe_ms, old.audio_ms), (String::new(), String::new(), 0, 0));
         assert!(s.note_run("nope", &run).is_err());
+    }
+
+    #[test]
+    fn the_microphone_of_an_entry_is_kept_with_it_and_survives_a_new_run_and_new_words() {
+        let s = store("mic");
+        let said = |t: &str| [Item::Speech { t_ms: 0, end_ms: 900, text: t.into() }];
+        let a = s.save(&said("older"), 1_793_000_000_000, 900).unwrap();
+        let b = s.save(&said("newer"), 1_793_000_001_000, 900).unwrap();
+        let mic = MicRun { mic: "Headset (WH-1000XM4)".into(), open_ms: 1_420, peak_db: -71 };
+        s.note_mic(&b.id, &mic).unwrap();
+        s.note_run(&b.id, &Run { engine: "gpu".into(), transcribe_ms: 9, audio_ms: 900, ..Run::default() }).unwrap();
+        s.replace_speech(&b.id, &said("again")).unwrap();
+        let m = s.list().into_iter().find(|m| m.id == b.id).unwrap();
+        assert_eq!((m.mic.as_str(), m.mic_open_ms, m.mic_peak_db), ("Headset (WH-1000XM4)", 1_420, -71));
+        assert_eq!(s.recent_mics(5), vec![mic], "only entries that name their microphone count");
+        s.note_mic(&a.id, &MicRun { mic: "USB".into(), open_ms: 90, peak_db: -12 }).unwrap();
+        assert_eq!(s.recent_mics(1).len(), 1);
+        assert_eq!(s.recent_mics(5)[1].mic, "USB", "newest first");
+        let old: Meta = serde_json::from_str(r#"{"id":"x","created_ms":1,"duration_ms":2,"preview":"","images":0}"#).unwrap();
+        assert_eq!((old.mic, old.mic_open_ms, old.mic_peak_db), (String::new(), 0, 0), "an older entry reads with none");
+        assert!(s.note_mic("nope", &MicRun::default()).is_err());
     }
 
     #[test]
