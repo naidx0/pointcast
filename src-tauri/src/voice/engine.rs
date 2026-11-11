@@ -45,8 +45,13 @@ pub struct Gpu {
     failure: Mutex<Option<String>>,
     /// Moved on by a cancel: the piece under way stops. Shared by every helper this engine starts.
     pub abort: Arc<AtomicU64>,
-    pub language: String,
+    /// What each piece is sent in: "auto" (the helper detects it) until a piece of `SETTLE_MS` told the language of
+    /// this recording, then that one. A new recording starts at "auto" again.
+    language: Mutex<String>,
 }
+
+/// The first piece of a recording with this much audio (5 s) settles its language.
+pub const SETTLE_MS: u64 = 5_000;
 
 impl Gpu {
     pub fn new(model: &str, mut server: Server, load_backup: LoadBackup) -> Gpu {
@@ -59,11 +64,26 @@ impl Gpu {
             load_backup,
             failure: Mutex::default(),
             abort,
-            language: "auto".into(),
+            language: Mutex::new("auto".into()),
         }
     }
 
     pub fn hear(&self, samples: &[f32]) -> Heard {
+        self.hear_as(samples, true)
+    }
+
+    /// The language pieces are sent in now.
+    pub fn language(&self) -> String {
+        self.language.lock().unwrap().clone()
+    }
+
+    /// A new recording: its language is detected again.
+    pub fn new_recording(&self) {
+        *self.language.lock().unwrap() = "auto".into();
+    }
+
+    /// `hear`; a piece of `SETTLE_MS` heard while the language is "auto" settles it, when `settles`.
+    fn hear_as(&self, samples: &[f32], settles: bool) -> Heard {
         if let Some(b) = self.backup.lock().unwrap().as_ref() {
             return b.hear(samples);
         }
@@ -83,7 +103,18 @@ impl Gpu {
                     None => {}
                 }
             }
-            match srv.transcribe(samples, &self.language, ws::piece_timeout(ms)) {
+            let lang = self.language();
+            let said = if settles && lang == "auto" && ms >= SETTLE_MS {
+                srv.transcribe_detect(samples, ws::piece_timeout(ms)).map(|(text, heard_in)| {
+                    if let Some(l) = heard_in {
+                        *self.language.lock().unwrap() = l;
+                    }
+                    text
+                })
+            } else {
+                srv.transcribe(samples, &lang, ws::piece_timeout(ms))
+            };
+            match said {
                 Ok(text) => return Heard { text, tokens: None },
                 Err(Fail::Aborted) => return Heard::default(),
                 Err(Fail::Broken(_)) => {}
@@ -150,6 +181,21 @@ impl Engine {
         }
     }
 
+    /// A short piece with the audio before it, heard as one: the language is never settled by it.
+    pub fn hear_joined(&self, samples: &[f32]) -> Heard {
+        match self {
+            Engine::Sherpa(e) => e.hear(samples),
+            Engine::Gpu(g) => g.hear_as(samples, false),
+        }
+    }
+
+    /// A new recording begins: the helper detects its language again.
+    pub fn new_recording(&self) {
+        if let Engine::Gpu(g) = self {
+            g.new_recording();
+        }
+    }
+
     pub fn transcribe(&self, samples: &[f32]) -> String {
         self.hear(samples).text
     }
@@ -208,6 +254,12 @@ impl Engine {
 
     pub fn is_gpu(&self) -> bool {
         matches!(self, Engine::Gpu(_))
+    }
+
+    /// Whether a short piece is heard again with the audio before it: only through the helper, which answers in a
+    /// fraction of a second; never on the processor, nor once the processor took over from the helper.
+    pub fn hears_in_context(&self) -> bool {
+        matches!(self, Engine::Gpu(g) if g.backup.lock().unwrap().is_none())
     }
 }
 
@@ -431,6 +483,52 @@ mod tests {
         assert_eq!((f.posts.lock().unwrap().len(), loads.load(Ordering::SeqCst)), (3, 1));
         assert_eq!((e.backend(), e.failure()), ("cpu", None));
         assert_eq!((e.label(), e.device()), ("cpu-sherpa", None), "History says sherpa heard it");
+        assert!(!e.hears_in_context(), "the processor hears each piece once, as it always did");
+    }
+
+    /// The value of form field `name` in a post the stand-in recorded.
+    fn field(post: &str, name: &str) -> String {
+        let crlf = String::from_utf8(vec![13, 10]).unwrap();
+        let at = post.find(&format!("name={q}{name}{q}{crlf}{crlf}", q = '"')).unwrap_or_else(|| panic!("no {name} in {post}"));
+        post[at..].split(crlf.as_str()).nth(2).unwrap().to_string()
+    }
+
+    #[test]
+    fn the_first_piece_of_five_seconds_settles_the_language_of_the_recording() {
+        let short = r#"{"text":"Hola."}"#;
+        let long = r#"{"task":"transcribe","language":"spanish","duration":5.5,"text":" Abre la configuracion.","segments":[]}"#;
+        let f = fake(PATH, [short, long, short, short, short].map(|j| Answer::Json(j.into())).to_vec());
+        let e = gpu(f.port, None, Arc::default());
+        assert!(e.hears_in_context());
+        let (four, five) = (vec![0.1; 16_000 * 4], vec![0.1; 16_000 * SETTLE_MS as usize / 1000]);
+        e.hear(&four);
+        assert_eq!(e.hear(&five).text, "Abre la configuracion.", "the words of a verbose answer");
+        e.hear(&vec![0.1; 16_000]);
+        e.hear_joined(&four);
+        let posts = f.posts.lock().unwrap().clone();
+        let sent: Vec<(String, String)> = posts.iter().map(|p| (field(p, "language"), field(p, "response_format"))).collect();
+        let pair = |l: &str, r: &str| (l.to_string(), r.to_string());
+        assert_eq!(sent, [pair("auto", "json"), pair("auto", "verbose_json"), pair("spanish", "json"), pair("spanish", "json")]);
+        // A new recording is detected again.
+        e.new_recording();
+        e.hear(&four);
+        assert_eq!(field(&f.posts.lock().unwrap()[4], "language"), "auto");
+    }
+
+    #[test]
+    fn a_recording_of_only_short_pieces_stays_on_auto() {
+        let f = fake(PATH, vec![Answer::Json(r#"{"text":"Okay."}"#.into())]);
+        let e = gpu(f.port, None, Arc::default());
+        for _ in 0..3 {
+            e.hear(&vec![0.1; 16_000 * 2]);
+        }
+        // Heard with the audio before it, a short piece runs past five seconds: it settles nothing.
+        e.hear_joined(&vec![0.1; 16_000 * 7]);
+        let posts = f.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 4);
+        assert!(posts.iter().all(|p| field(p, "language") == "auto" && field(p, "response_format") == "json"));
+        let Engine::Gpu(g) = &e else { unreachable!() };
+        assert_eq!(g.language(), "auto");
     }
 
     #[test]

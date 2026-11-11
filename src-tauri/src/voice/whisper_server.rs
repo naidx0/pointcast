@@ -126,6 +126,14 @@ pub fn clean(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The language a verbose answer says it was heard in (`detected_language`, else `language`), lower-cased, when it is a
+/// plain name or code the helper takes back as a request's language.
+fn detected(v: &serde_json::Value) -> Option<String> {
+    let l = ["detected_language", "language"].iter().find_map(|k| v.get(k).and_then(|l| l.as_str()).filter(|l| !l.is_empty()))?;
+    let l = l.trim().to_lowercase();
+    (l != "auto" && l.len() <= 32 && l.chars().all(|c| c.is_ascii_lowercase() || c == ' ')).then_some(l)
+}
+
 /// What the helper is started with, after its model.
 fn launch_args(port: u16, prefix: &str, inference: &str) -> Vec<String> {
     // -nfa: with flash attention the GPU gives a different transcript for the same audio on each run.
@@ -423,11 +431,23 @@ impl Server {
 
     /// The words of one piece: beam search of 5 at temperature 0, no prompt, in `language` ("auto" detects it).
     pub fn transcribe(&self, samples: &[f32], language: &str, timeout: Duration) -> Result<String, Fail> {
+        self.post(samples, language, "json", timeout).map(|r| r.0)
+    }
+
+    /// The words of one piece in the language the helper detects, with that language as it names it (as "english"),
+    /// when it does.
+    pub fn transcribe_detect(&self, samples: &[f32], timeout: Duration) -> Result<(String, Option<String>), Fail> {
+        let (text, v) = self.post(samples, "auto", "verbose_json", timeout)?;
+        Ok((text, detected(&v)))
+    }
+
+    /// One piece sent in `language`, answered as `format`: its cleaned words and the whole answer.
+    fn post(&self, samples: &[f32], language: &str, format: &str, timeout: Duration) -> Result<(String, serde_json::Value), Fail> {
         let gen = self.abort.load(Ordering::SeqCst);
         let mut key = [0u8; 8];
         let _ = getrandom::getrandom(&mut key);
         let boundary = format!("pointcast{}", key.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        let fields = [("response_format", "json"), ("language", language), ("beam_size", "5"), ("temperature", "0.0")];
+        let fields = [("response_format", format), ("language", language), ("beam_size", "5"), ("temperature", "0.0")];
         let body = form(&boundary, &fields, &wav(samples));
         let head = format!("POST {} HTTP/1.1\r\nContent-Type: multipart/form-data; boundary={boundary}\r\n", self.path);
         let (status, body) = request(self.port, &head, &body, Instant::now() + timeout, &self.abort, gen)?;
@@ -437,7 +457,7 @@ impl Server {
         let v: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| Fail::Broken("the GPU engine's answer was not readable".into()))?;
         let text = v.get("text").and_then(|t| t.as_str()).ok_or_else(|| Fail::Broken("the GPU engine gave no text".into()))?;
-        Ok(clean(text))
+        Ok((clean(text), v))
     }
 
     /// Stop the helper, which frees the graphics card's memory.
@@ -684,6 +704,21 @@ pub mod tests {
     }
 
     const PATH: &str = "/i-test";
+
+    #[test]
+    fn the_language_a_verbose_answer_was_heard_in_is_read_from_it() {
+        let v = |j: &str| serde_json::from_str::<serde_json::Value>(j).unwrap();
+        assert_eq!(detected(&v(r#"{"language":"english","text":"x"}"#)).as_deref(), Some("english"));
+        assert_eq!(detected(&v(r#"{"detected_language":"French","language":"auto"}"#)).as_deref(), Some("french"));
+        for j in [r#"{"text":"x"}"#, r#"{"language":"auto"}"#, r#"{"language":""}"#, r#"{"language":"en:x"}"#] {
+            assert_eq!(detected(&v(j)), None, "{j}");
+        }
+        let f = fake(PATH, vec![Answer::Json(r#"{"language":"german","text":" Guten Tag. [BLANK_AUDIO]"}"#.into())]);
+        let said = Server::at(f.port, PATH).transcribe_detect(&[0.1; 16_000], Duration::from_secs(5));
+        assert_eq!(said, Ok(("Guten Tag.".into(), Some("german".into()))));
+        let post = f.posts.lock().unwrap()[0].clone();
+        assert!(post.contains("verbose_json") && post.contains(&format!("{0}{0}auto{0}", String::from_utf8(vec![13, 10]).unwrap())), "{post}");
+    }
 
     /// One bodyless request as `head` (its request line), for what a route answers.
     pub fn raw(port: u16, head: &str, abort: &AtomicU64) -> Result<(u16, Vec<u8>), Fail> {
