@@ -1,7 +1,9 @@
 // Run: node --test src/lib/usage.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
+  KEEP_DAYS,
   NOTHING_THIS_WEEK,
   NOTHING_YET,
   SAVED_NOTE,
@@ -13,6 +15,7 @@ import {
   over,
   perDay,
   previewUsage,
+  readUsage,
   savedMinutes,
   shades,
   speed,
@@ -40,6 +43,16 @@ function usage(days, before = {}) {
   }
   u.total = t;
   return u;
+}
+
+const one = day(1, 10, 5_000, 6_000);
+/** One recording on each of these days of November 2026. */
+const novDays = (...ds) => Object.fromEntries(ds.map((d) => [`2026-11-${String(d).padStart(2, "0")}`, one]));
+const from = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+/** The pane's two streak lines, the streak and the longest. */
+function streakLines(u, today = TODAY) {
+  const v = usageView(u, today, "week", "en-GB");
+  return [v.streak, v.longest];
 }
 
 test("a day is named by the local calendar, and the last days are counted by it, newest first", () => {
@@ -90,15 +103,73 @@ test("recordings a day do not count the days before counting began", () => {
 });
 
 test("a streak still counts if its last day is today or yesterday, and is over after that", () => {
-  const u = usage({});
-  u.streak = { current: 6, longest: 14, last_day: "2026-11-11" };
-  assert.equal(streakNow(u, TODAY), 6);
-  u.streak.last_day = "2026-11-10";
-  assert.equal(streakNow(u, TODAY), 6, "today is not over yet");
-  u.streak.last_day = "2026-11-09";
+  // The run is read from the days themselves.
+  assert.equal(streakNow(usage(novDays(...from(6, 11))), TODAY), 6);
+  assert.equal(streakNow(usage(novDays(...from(5, 10))), TODAY), 6, "today is not over yet");
+  assert.equal(streakNow(usage(novDays(...from(4, 9))), TODAY), 0);
+  assert.equal(streakNow(usage({}), TODAY), 0);
+  const kept = usage({});
+  kept.streak = { current: 6, longest: 14, last_day: "2026-11-11" };
+  assert.equal(streakNow(kept, TODAY), 0, "a kept run with no days under it is not a streak");
+});
+
+test("one recording dated ahead of the clock does not hide the days in a row before it", () => {
+  // Made while the clock said the 20th; the 9th to the 11th came after it, as earlier days. The app keeps this:
+  const u = usage(novDays(9, 10, 11, 20));
+  u.streak = { current: 1, longest: 3, last_day: "2026-11-20" };
+  assert.equal(streakNow(u, TODAY), 3);
+  assert.deepEqual(streakLines(u), ["3 days in a row", null]);
+  assert.equal(streakNow(u, new Date(2026, 10, 13, 9)), 0, "nothing on the 12th ends it, the 20th ahead or not");
+});
+
+test("a gap starts the streak again and the longest run is kept", () => {
+  // The 2nd to the 6th, nothing on the 7th and 8th, then the 9th to today.
+  const u = usage({ ...novDays(...from(2, 6)), ...novDays(...from(9, 11)) });
+  // As the app keeps it, and with nothing kept: the days alone say the same.
+  for (const kept of [{ current: 3, longest: 5, last_day: "2026-11-11" }, { current: 0, longest: 0, last_day: "" }]) {
+    u.streak = kept;
+    assert.equal(streakNow(u, TODAY), 3, JSON.stringify(kept));
+    assert.deepEqual(streakLines(u), ["3 days in a row", "Longest: 5 days"], JSON.stringify(kept));
+  }
+});
+
+test("a streak that ended yesterday still shows until today passes without a recording", () => {
+  const u = usage(novDays(8, 9, 10));
+  assert.deepEqual(streakLines(u), ["3 days in a row", null], "nothing yet today, and today is not over");
+  assert.deepEqual(streakLines(u, new Date(2026, 10, 12, 0, 5)), [null, "Longest: 3 days"], "the 11th went by without one");
+  u.days["2026-11-11"] = one;
+  assert.deepEqual(streakLines(u), ["4 days in a row", null]);
+  // By the calendar: across the end of October, and a clock change where there is one.
+  const turn = usage({ "2026-10-30": one, "2026-10-31": one, "2026-11-01": one });
+  assert.equal(streakNow(turn, new Date(2026, 10, 2, 8)), 3);
+});
+
+test("a streak that ended two days ago shows nothing, and is still the longest", () => {
+  const u = usage(novDays(7, 8, 9));
   assert.equal(streakNow(u, TODAY), 0);
-  u.streak.last_day = "";
-  assert.equal(streakNow(u, TODAY), 0);
+  assert.deepEqual(streakLines(u), [null, "Longest: 3 days"]);
+});
+
+test("the days folded past four hundred never shorten the longest run, nor a streak older than them", () => {
+  // stats.rs keeps this many days one by one; the pane counts on the same number.
+  const rs = readFileSync(new URL("../../src-tauri/src/stats.rs", import.meta.url), "utf8");
+  assert.equal(Number(rs.match(/pub const KEEP_DAYS: usize = (\d+);/)?.[1]), KEEP_DAYS);
+  const keep = (keys) => usage(Object.fromEntries(keys.map((k) => [k, one])));
+  // 405 days in a row up to today: the five oldest are only in the totals now.
+  const long = keep(lastDays(TODAY, 405).slice(0, KEEP_DAYS));
+  long.streak = { current: 405, longest: 405, last_day: "2026-11-11" };
+  assert.equal(Object.keys(long.days).length, KEEP_DAYS);
+  assert.equal(streakNow(long, TODAY), 405);
+  assert.deepEqual(streakLines(long), ["405 days in a row", null]);
+  // A run of 450 long ago, folded away; the days kept are two runs of 200, the newer one up to today.
+  const days = lastDays(TODAY, 401);
+  const gap = keep([...days.slice(0, 200), ...days.slice(201)]);
+  gap.streak = { current: 200, longest: 450, last_day: "2026-11-11" };
+  assert.equal(Object.keys(gap.days).length, KEEP_DAYS);
+  assert.deepEqual(streakLines(gap), ["200 days in a row", "Longest: 450 days"]);
+  // The kept run is read only where the days run out: a run that starts inside them is what they say.
+  gap.streak.current = 999;
+  assert.equal(streakNow(gap, TODAY), 200);
 });
 
 test("the grid has five shades: none, then four by share of the busiest hour", () => {
@@ -141,18 +212,57 @@ test("a fresh install is one quiet line, and a week off says so without zeros", 
   assert.equal(usageView(away, TODAY, "all", "en-GB").quiet, null);
 });
 
+test("counts that did not arrive or do not read show a fresh install's quiet line, never a blank or an error", () => {
+  const now = TODAY.getTime();
+  const good = usage(novDays(9, 10, 11));
+  assert.equal(readUsage(good, now), good, "counts that read are taken as they are");
+  const preview = previewUsage(TODAY);
+  assert.equal(readUsage(preview, now), preview);
+  const unread = [
+    undefined,
+    null,
+    "",
+    "{ not json",
+    7,
+    [],
+    {},
+    { ...good, v: 7 },
+    { ...good, since_ms: "yesterday" },
+    { ...good, total: undefined },
+    { ...good, total: { ...good.total, words: Number.NaN } },
+    { ...good, days: null },
+    { ...good, days: [] },
+    { ...good, days: { "2026-11-11": null } },
+    { ...good, days: { "2026-11-11": { r: "1", w: 1, speech_ms: 1, wall_ms: 1, p: 0 } } },
+    { ...good, hours: [] },
+    { ...good, weekdays: good.weekdays.slice(1) },
+    { ...good, grid: [] },
+    { ...good, grid: good.grid.map((row) => row.slice(1)) },
+    { ...good, grid: good.grid.map((row, d) => (d === 3 ? null : row)) },
+    { ...good, streak: null },
+    { ...good, streak: { ...good.streak, last_day: 11 } },
+  ];
+  for (const range of ["week", "all"]) {
+    const fresh = usageView(emptyUsage(now), TODAY, range, "en-GB");
+    assert.deepEqual([fresh.empty, fresh.quiet], [true, NOTHING_YET]);
+    for (const raw of unread) {
+      assert.deepEqual(usageView(readUsage(raw, now), TODAY, range, "en-GB"), fresh, `${range}: ${JSON.stringify(raw)}`);
+    }
+  }
+});
+
 test("the streak is said only past one day, and the longest only when it says more", () => {
-  const u = usage({ "2026-11-11": day(1, 10, 5_000, 6_000) });
-  const said = (current, longest, last_day = "2026-11-11") => {
-    u.streak = { current, longest, last_day };
-    const v = usageView(u, TODAY, "week", "en-GB");
-    return [v.streak, v.longest];
+  // The runs are in the days; the longest kept is the run of 14 no longer among them.
+  const said = (days, longest = 0) => {
+    const u = usage(days);
+    u.streak.longest = longest;
+    return streakLines(u);
   };
-  assert.deepEqual(said(0, 0, ""), [null, null]);
-  assert.deepEqual(said(1, 1), [null, null]);
-  assert.deepEqual(said(6, 6), ["6 days in a row", null]);
-  assert.deepEqual(said(6, 14), ["6 days in a row", "Longest: 14 days"]);
-  assert.deepEqual(said(6, 14, "2026-11-08"), [null, "Longest: 14 days"], "a run that ended is not a streak");
+  assert.deepEqual(said({}), [null, null]);
+  assert.deepEqual(said(novDays(11), 1), [null, null]);
+  assert.deepEqual(said(novDays(...from(6, 11)), 6), ["6 days in a row", null]);
+  assert.deepEqual(said(novDays(...from(6, 11)), 14), ["6 days in a row", "Longest: 14 days"]);
+  assert.deepEqual(said(novDays(...from(3, 8)), 14), [null, "Longest: 14 days"], "a run that ended is not a streak");
 });
 
 test("each hour of the grid says its weekday, hour and exact count", () => {
