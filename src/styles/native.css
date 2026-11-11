@@ -605,6 +605,68 @@ html.win .progress {
   transition: height 70ms linear;
 }
 
+/* Settings › Speech: the microphone and this computer. */
+.mic-pick {
+  width: 100%;
+  max-width: 340px;
+}
+.mic-status {
+  margin-top: 6px !important;
+  min-height: 1.4em;
+}
+.mic-status.ok::before,
+.mic-status.warn::before,
+.mic-status.bad::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+  background: var(--green-ink);
+}
+.mic-status.warn::before {
+  background: var(--orange-ink);
+}
+.mic-status.bad::before {
+  background: var(--red-ink);
+}
+.mic-status.bad {
+  color: var(--label-2, var(--label));
+}
+.mic-status.ok,
+.mic-status.warn,
+.mic-status.bad {
+  padding-left: 13px;
+  text-indent: -13px;
+}
+.mic-offer {
+  display: block;
+  text-indent: 0;
+}
+.level {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 11px;
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--sep);
+  overflow: hidden;
+}
+.level i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform 80ms linear;
+}
+.pc-lines .sub + .sub {
+  margin-top: 2px;
+}
+
 /* —— Grouped rows (System Settings / Windows Settings cards) —— */
 .group {
   border-radius: var(--r-box);

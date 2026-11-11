@@ -4,9 +4,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-react";
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
-import { ModelPicker } from "@/components/Models";
+import { ModelPicker, useSpeechJob } from "@/components/Models";
 import {
   HOTKEY_FIELD,
+  gpuRetry,
   historyClear,
   historyList,
   inTauri,
@@ -24,6 +25,8 @@ import {
   type Login,
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
+import { computerView, micStatus } from "@/lib/hardware";
+import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
 const PANES = [
@@ -421,27 +424,80 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
   );
 }
 
-function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+  const cfg = previewHardware(real);
+  const speech = useSpeechJob(refresh);
+  const device = cfg.device ?? cfg.default_device ?? "";
+  const check = useMicCheck(true, cfg.device ?? null);
+  const status = micStatus({ device, live: check.live, recent: cfg.mic_recent ?? [], others: check.others, mac: platform() === "mac" });
+  const model = (cfg.speech.models ?? []).find((m) => m.id === (cfg.speech_in_use ?? cfg.model)) ?? null;
+  const pc = cfg.machine ? computerView({ machine: cfg.machine, model, upgrade: cfg.gpu_upgrade ?? null, declined: !!cfg.gpu_declined }) : null;
+  const fix = async () => {
+    if (pc?.action === "retry" && inTauri) await gpuRetry().catch(() => undefined);
+    speech.start("whisper-turbo", cfg, patch);
+  };
   return (
     <>
+      <h2 className="group-title">Microphone</h2>
+      <div className="group">
+        <div className="row mic-row">
+          <div className="grow">
+            <select
+              className="field mic-pick"
+              aria-label="Microphone"
+              value={cfg.device ?? ""}
+              onChange={(e) => patch({ device: e.target.value || null })}
+            >
+              <option value="">{cfg.default_device ? `System default (${cfg.default_device})` : "System default"}</option>
+              {cfg.devices.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+            <div className={`sub mic-status ${status?.tone ?? ""}`} role="status">
+              {status ? status.text : "Used only while you record."}
+              {status?.offer ? (
+                <>
+                  <span className="mic-offer">
+                    {status.offer} is picking up sound.{" "}
+                    <button type="button" className="link" onClick={() => patch({ device: status.offer })}>
+                      Use it
+                    </button>
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <LevelMeter level={check.level} />
+        </div>
+      </div>
+      {pc ? (
+        <>
+          <h2 className="group-title">This computer</h2>
+          <div className="group">
+            <div className="row">
+              <div className="grow pc-lines">
+                <div className="lbl">{pc.card}</div>
+                {pc.engine ? <div className="sub">{pc.engine}</div> : null}
+                {pc.why ? (
+                  <div className="sub pc-why">
+                    {pc.why}{" "}
+                    {pc.action ? (
+                      <button type="button" className="link" disabled={!!speech.job} onClick={fix}>
+                        {pc.action === "retry" ? "Try again" : "Set it up"}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </>
+      ) : null}
       <h2 className="group-title">Model</h2>
-      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} removable />
+      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} removable speech={speech} computer={!!pc} />
       <div className="group" style={{ marginTop: 12 }}>
-        <Row label="Microphone" sub="Used only while you record.">
-          <select
-            className="field"
-            style={{ maxWidth: 240 }}
-            value={cfg.device ?? ""}
-            onChange={(e) => patch({ device: e.target.value || null })}
-          >
-            <option value="">System default</option>
-            {cfg.devices.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-        </Row>
         <Row
           label="Pick up quieter and farther speech"
           sub="Cleans up room noise and evens out your volume before transcribing. Turn it off if it ever makes your voice sound wrong."
@@ -493,6 +549,15 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
       </div>
       <p className="group-note">Models are saved in Pointcast’s data folder.</p>
     </>
+  );
+}
+
+/** The live input level as one bar of fixed size: it moves without moving anything around it. */
+function LevelMeter({ level }: { level: number }) {
+  return (
+    <div className="level" aria-label="Microphone level" role="meter" aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.round(level * 100) / 100}>
+      <i style={{ transform: `scaleX(${Math.max(0.02, Math.min(1, level * 1.4))})` }} />
+    </div>
   );
 }
 

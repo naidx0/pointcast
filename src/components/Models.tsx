@@ -203,6 +203,7 @@ export function ModelPicker({
   refresh,
   removable,
   speech,
+  computer,
 }: {
   cfg: Config;
   patch: (p: Record<string, unknown>) => Promise<string | null>;
@@ -211,6 +212,8 @@ export function ModelPicker({
   removable?: boolean;
   /** A setup job the window already follows (first-run setup's background download), so both show the same one. */
   speech?: SpeechJob;
+  /** Settings' "This computer" block says where the model runs, how fast, and offers the graphics-card version. */
+  computer?: boolean;
 }) {
   const own = useSpeechJob(refresh);
   const { job, error, start, cancel } = speech ?? own;
@@ -293,7 +296,7 @@ export function ModelPicker({
                   </span>
                 </div>
               ) : null}
-              {device && !mine && !preparing ? (
+              {device && !computer && !mine && !preparing ? (
                 <div className="t-small" style={{ marginTop: 4, color: device.warn ? "var(--orange-ink)" : undefined }}>
                   {device.text}
                 </div>
@@ -323,12 +326,12 @@ export function ModelPicker({
                   {bg.note}
                 </div>
               ) : null}
-              {m.gpu?.unusable && on && !mine ? (
+              {m.gpu?.unusable && on && !computer && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   Your graphics card can't run the faster version, so Whisper Turbo runs on your processor.
                 </div>
               ) : null}
-              {ready && offerSwitch && !mine ? (
+              {ready && offerSwitch && !computer && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   <button
                     type="button"

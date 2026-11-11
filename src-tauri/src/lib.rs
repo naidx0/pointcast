@@ -1208,6 +1208,16 @@ fn speech_cancel() {
 }
 
 /// Cancel on the Whisper Turbo card while the faster GPU version downloads by itself.
+/// Settings › Speech › Try again: forget that the graphics card could not run the engine here, or that its download was
+/// stopped, so the next setup tries it.
+#[tauri::command]
+fn gpu_retry() {
+    let data = settings::data_dir();
+    let mut s = voice::upgrade::load_state(&data);
+    (s.gpu_unusable, s.declined) = (None, false);
+    voice::upgrade::save_state(&data, &s);
+}
+
 #[tauri::command]
 fn gpu_upgrade_cancel() {
     voice::upgrade::cancel(&settings::data_dir());
@@ -1693,6 +1703,7 @@ pub fn run() {
             history_clear,
             speech_cancel,
             gpu_upgrade_cancel,
+            gpu_retry,
             speech_status,
             speech_remove,
             permissions_get,

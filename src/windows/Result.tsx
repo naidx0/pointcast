@@ -27,6 +27,7 @@ import {
   type HistoryMeta,
   type SessionExport,
 } from "@/lib/api";
+import { micText } from "@/lib/hardware";
 import { platform } from "@/lib/theme";
 import { UNDO_MS, close as closeUndo, due, startDelete, undo as undoDelete, undoView, visible, type Pending } from "@/lib/undo";
 
@@ -72,6 +73,9 @@ export function Result() {
             : engine === "cpu"
               ? { engine: "cpu-sherpa", transcribe_ms: 24_000, audio_ms: 121_000 }
               : {};
+        // ?mic=slow|silent: and which microphone it was made on.
+        const m = new URLSearchParams(location.search).get("mic");
+        if (m) Object.assign(ran, { mic: "Headset (WH-1000XM4)", mic_open_ms: m === "slow" ? 1_420 : 120, mic_peak_db: m === "silent" ? -100 : -14 });
         setEntries(PREVIEW_ENTRIES.filter((e) => !previewGone.current.has(e.id)).map((e, i) => (i === 0 ? { ...e, ...ran } : e)));
         setSel((s) => pick ?? s ?? PREVIEW_ENTRIES[0].id);
         setExp(PREVIEW_EXPORT);
@@ -382,9 +386,9 @@ export function Result() {
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
             ) : null}
-            {cur && ranText(cur) ? (
+            {cur && (ranText(cur) || micText(cur)) ? (
               <p className="t-small ran-line" style={{ margin: "0 0 10px" }}>
-                {ranText(cur)}
+                {[ranText(cur), micText(cur)].filter(Boolean).join(" · ")}
               </p>
             ) : null}
             {cur ? (
