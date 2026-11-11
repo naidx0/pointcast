@@ -1,21 +1,44 @@
 name: CI
 
+# Every run tests the whole app on Linux, macOS and Windows. Installers are built only where someone will use them:
+# on main, on a pull request, or when a manual run asks for them (Actions > CI > Run workflow > installers).
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      installers:
+        description: "Also build the macOS and Windows installers"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# A newer run on the same branch makes the older one pointless: stop it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  # The test build and the release build share compiled dependencies through the cache below; debug info for
+  # dependencies is what makes the cache big and slow to restore.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   test-linux:
     name: Test (Linux)
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -38,19 +61,22 @@ jobs:
       - name: Front-end unit tests
         run: node --experimental-strip-types --test src/lib/*.test.mjs
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --offline || cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Linux bundle (optional smoke)
-        run: npm run tauri build -- --bundles deb
-        continue-on-error: true
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
   build-macos:
     name: Build macOS universal
     runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      INSTALLERS: ${{ github.event_name != 'workflow_dispatch' || inputs.installers }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -62,12 +88,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib live_ -- --ignored --nocapture
+      # The Intel half of the universal app compiles only here; without installers it is still checked, not built.
+      - name: The Intel build compiles (without installers)
+        if: env.INSTALLERS != 'true'
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (action-v0.6.2)
+        if: env.INSTALLERS == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: --target universal-apple-darwin --bundles app,dmg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: env.INSTALLERS == 'true'
         with:
           name: pointcast-macos
           path: |
@@ -77,9 +109,15 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      INSTALLERS: ${{ github.event_name != 'workflow_dispatch' || inputs.installers }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -88,11 +126,13 @@ jobs:
       - name: Rust tests (Windows)
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (action-v0.6.2)
+        if: env.INSTALLERS == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: --bundles nsis,msi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: env.INSTALLERS == 'true'
         with:
           name: pointcast-windows
           path: src-tauri/target/release/bundle/**
