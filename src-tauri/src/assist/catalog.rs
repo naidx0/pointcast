@@ -1,7 +1,10 @@
 //! The AIs a person can choose in Settings, and what Pointcast keeps of that choice: which one, which model, whether
 //! only this computer may be asked, and each destination the person agreed to. `providers` reads only what is known
 //! without spending anything; a pasted key goes straight to `vault` and is never in a setting, an event or an error.
+//! The address the person types for "Other OpenAI-compatible" is kept as the destination they agreed to.
 
+use super::acp;
+use super::anthropic;
 use super::codex::{self, Codex};
 use super::vault::{self, Secret};
 use super::{openai, Failure, Health, Provider, State};
@@ -15,11 +18,19 @@ pub const OFFLINE_ONLY: &str = "Only on this computer is on, so nothing is sent 
 pub const UNKNOWN: &str = "Pointcast does not offer that AI.";
 const KEYS_NOT_HERE: &str = "Keys are not supported on Linux yet. A model on this computer needs no key.";
 
-/// How a route is paid for: the person's plan, a pasted key, or nothing (a model on this computer).
+/// The route whose address the person types.
+pub const CUSTOM: &str = "custom";
+pub const CLAUDE_CODE: &str = "claude-code";
+pub const CLAUDE_CODE_NOT_OK: &str = "Needs your OK first: Anthropic's terms for using Claude Code inside another app";
+const NO_ADDRESS: &str = "Type the address of the service first.";
+
+/// How a route is paid for: the person's plan through Codex, another subscription through its vendor's own agent, a
+/// pasted key, or nothing (a model on this computer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Way {
     Plan,
+    Agent,
     Key,
     Local,
 }
@@ -32,12 +43,23 @@ pub struct Route {
     pub goes_to: &'static str,
 }
 
-/// Every route Pointcast offers, in the order Settings lists them.
+/// Every route Pointcast offers, in the order Settings lists them: the subscriptions first (ChatGPT, then the agents),
+/// then the keys, then this computer. An agent's destination is the one `acp::AGENTS` names.
 pub const ROUTES: &[Route] = &[
     Route { id: codex::ID, name: "ChatGPT", way: Way::Plan, base: "", goes_to: super::detect::GOES_TO },
+    Route { id: "gemini-cli", name: "Gemini", way: Way::Agent, base: "", goes_to: "Google, through your Gemini CLI sign-in" },
+    Route { id: "copilot", name: "GitHub Copilot", way: Way::Agent, base: "", goes_to: "GitHub, through your Copilot plan" },
+    Route { id: "opencode", name: "OpenCode", way: Way::Agent, base: "", goes_to: "the AI you set up in OpenCode" },
+    Route { id: CLAUDE_CODE, name: "Claude", way: Way::Agent, base: "", goes_to: "Anthropic, through your Claude plan" },
     Route { id: "openai", name: "OpenAI API", way: Way::Key, base: "https://api.openai.com/v1", goes_to: "api.openai.com" },
-    Route { id: "openrouter", name: "OpenRouter", way: Way::Key, base: "https://openrouter.ai/api/v1", goes_to: "openrouter.ai" },
+    Route { id: anthropic::ID, name: "Claude API", way: Way::Key, base: anthropic::BASE, goes_to: "api.anthropic.com" },
+    Route { id: "xai", name: "Grok (xAI API)", way: Way::Key, base: "https://api.x.ai/v1", goes_to: "api.x.ai" },
     Route { id: "gemini", name: "Gemini API", way: Way::Key, base: "https://generativelanguage.googleapis.com/v1beta/openai", goes_to: "generativelanguage.googleapis.com" },
+    Route { id: "groq", name: "Groq", way: Way::Key, base: "https://api.groq.com/openai/v1", goes_to: "api.groq.com" },
+    Route { id: "mistral", name: "Mistral", way: Way::Key, base: "https://api.mistral.ai/v1", goes_to: "api.mistral.ai" },
+    Route { id: "deepseek", name: "DeepSeek", way: Way::Key, base: "https://api.deepseek.com/v1", goes_to: "api.deepseek.com" },
+    Route { id: "openrouter", name: "OpenRouter", way: Way::Key, base: "https://openrouter.ai/api/v1", goes_to: "openrouter.ai" },
+    Route { id: CUSTOM, name: "Other OpenAI-compatible", way: Way::Key, base: "", goes_to: "" },
     Route { id: "ollama", name: "Ollama on this computer", way: Way::Local, base: openai::LOCAL[0].1, goes_to: "this computer" },
     Route { id: "lmstudio", name: "LM Studio on this computer", way: Way::Local, base: openai::LOCAL[1].1, goes_to: "this computer" },
 ];
@@ -77,8 +99,12 @@ pub struct Row {
     pub kind: Way,
     pub state: Status,
     pub line: String,
-    pub goes_to: &'static str,
+    pub goes_to: String,
     pub offline: bool,
+    /// Whether it can be chosen now.
+    pub available: bool,
+    /// The address the person typed, for the route that takes one.
+    pub base: Option<String>,
     pub consented: bool,
     pub models: Vec<Model>,
     /// Files the AI's own app sends along with every question (Codex: the person's own instructions file).
@@ -105,6 +131,8 @@ pub struct Look {
     pub keys: Vec<&'static str>,
     pub keys_here: bool,
     pub local: Vec<openai::Found>,
+    /// Each agent as `acp::health` found it.
+    pub agents: Vec<(&'static str, Health)>,
 }
 
 /// Gather a `Look`: the model servers at `places` asked for their lists (two seconds), Codex's version and sign-in
@@ -123,7 +151,20 @@ pub fn gather(places: &[(&'static str, &str)], codex: impl FnOnce() -> (Health, 
         keys: ROUTES.iter().filter(|r| r.way == Way::Key && has_key(r.id)).map(|r| r.id).collect(),
         keys_here: cfg!(any(windows, target_os = "macos")),
         local,
+        agents: Vec::new(),
     }
+}
+
+/// Claude Code, as far as finding it goes.
+static CLAUDE_CLI: acp::Agent = acp::Agent { id: CLAUDE_CODE, name: "Claude", cli: "Claude Code", program: "claude", args: &[], goes_to: "Anthropic, through your Claude plan" };
+
+/// Each agent's `--version`, all at once.
+fn agents_now() -> Vec<(&'static str, Health)> {
+    let all: Vec<&'static acp::Agent> = acp::AGENTS.iter().chain([&CLAUDE_CLI]).collect();
+    std::thread::scope(|sc| {
+        let found: Vec<_> = all.iter().map(|a| sc.spawn(move || (a.id, acp::health(a)))).collect();
+        found.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
 }
 
 /// The `Look` of this computer.
@@ -133,10 +174,49 @@ pub fn look(held: &Held) -> Look {
         let signed = found.as_ref().ok().and_then(|f| super::detect::signed_in(&f.exe));
         (super::detect::health_of(&found), signed)
     };
-    gather(openai::LOCAL, codex, vault::has, held.held())
+    let agents = std::thread::spawn(agents_now);
+    let mut look = gather(openai::LOCAL, codex, vault::has, held.held());
+    look.agents = agents.join().unwrap_or_default();
+    look
+}
+
+/// The address the person typed for the other service, checked: https, or http only to this computer, and nothing
+/// but the address (no name, password or query, which could carry a key into the settings).
+pub fn base_of(text: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(text.trim()).map_err(|_| "That is not a web address.".to_owned())?;
+    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err("Type only the address of the service, with no name, password or query in it.".into());
+    }
+    match url.scheme() {
+        "https" => {}
+        "http" if openai::loopback(&url) => {}
+        _ => return Err("The address must start with https:// (http:// only for this computer).".into()),
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn here(base: &str) -> bool {
+    reqwest::Url::parse(base).is_ok_and(|u| openai::loopback(&u))
+}
+
+fn host_of(base: &str) -> String {
+    reqwest::Url::parse(base).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default()
+}
+
+/// The address the person agreed to send questions to through the other service, if they did.
+pub fn custom_base(s: &Settings) -> Option<String> {
+    s.assist_consent.iter().filter(|c| c.provider == CUSTOM).find_map(|c| base_of(&c.goes_to).ok())
+}
+
+/// Whether nothing sent through `r` leaves this computer.
+fn stays_here(s: &Settings, r: &Route) -> bool {
+    r.way == Way::Local || (r.id == CUSTOM && custom_base(s).is_some_and(|b| here(&b)))
 }
 
 pub fn consented(s: &Settings, r: &Route) -> bool {
+    if r.id == CUSTOM {
+        return custom_base(s).is_some();
+    }
     s.assist_consent.iter().any(|c| c.provider == r.id && c.goes_to == r.goes_to)
 }
 
@@ -146,6 +226,7 @@ fn file_name(path: &str) -> &str {
 
 /// Every route as Settings shows it.
 pub fn providers(s: &Settings, look: &Look) -> List {
+    let custom = custom_base(s);
     let rows = ROUTES
         .iter()
         .map(|r| {
@@ -169,6 +250,17 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                     },
                     None => (Status::NotInstalled, "Codex is not installed on this computer.".to_owned()),
                 },
+                Way::Agent if r.id == CLAUDE_CODE && !s.assist_claude_code_ok => (Status::Unsupported, CLAUDE_CODE_NOT_OK.to_owned()),
+                Way::Agent => match look.agents.iter().find(|(id, _)| *id == r.id).map(|(_, h)| h) {
+                    Some(h) => match h.state {
+                        State::Ready => (Status::Ready, h.line.clone()),
+                        State::NotInstalled => (Status::NotInstalled, h.line.clone()),
+                        State::TooOld => (Status::TooOld, h.line.clone()),
+                        State::Unknown => (Status::Unsupported, h.line.clone()),
+                    },
+                    None => (Status::NotInstalled, format!("{} is not installed on this computer.", r.name)),
+                },
+                Way::Key if r.id == CUSTOM && custom.is_none() && look.keys_here => (if look.keys.contains(&r.id) { Status::Ready } else { Status::NoKey }, NO_ADDRESS.to_owned()),
                 Way::Key if !look.keys_here => (Status::Unsupported, KEYS_NOT_HERE.to_owned()),
                 Way::Key if look.keys.contains(&r.id) => (Status::Ready, "Key saved.".to_owned()),
                 Way::Key => (Status::NoKey, "No key yet.".to_owned()),
@@ -181,7 +273,13 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                     None => (Status::NotRunning, "Not running.".to_owned()),
                 },
             };
-            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to: r.goes_to, offline: r.way == Way::Local, consented: consented(s, r), models, adds }
+            let (goes_to, base) = match (r.id, &custom) {
+                (CUSTOM, Some(b)) => (host_of(b), Some(b.clone())),
+                (CUSTOM, None) => ("the address you type".to_owned(), None),
+                _ => (r.goes_to.to_owned(), None),
+            };
+            let available = !(r.id == CLAUDE_CODE && !s.assist_claude_code_ok);
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, adds }
         })
         .collect();
     List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), offline_only: s.assist_offline_only, providers: rows }
@@ -190,20 +288,35 @@ pub fn providers(s: &Settings, look: &Look) -> List {
 /// Choose the AI `id` and its `model`. Refused unless the person agrees now (`consent`) or agreed before to this
 /// route and destination; the agreement is kept. A route off this computer is refused while "Only on this computer" is on.
 pub fn choose(s: &mut Settings, id: &str, model: Option<String>, consent: bool, now_ms: u64) -> Result<(), String> {
+    choose_at(s, id, None, model, consent, now_ms)
+}
+
+/// `choose`, with the address the person typed for the other service (`CUSTOM`); none keeps the one agreed to. A new
+/// address is a new destination and needs a new yes. Claude through Claude Code is refused until the owner's OK.
+pub fn choose_at(s: &mut Settings, id: &str, base: Option<&str>, model: Option<String>, consent: bool, now_ms: u64) -> Result<(), String> {
     let r = route(id).ok_or(UNKNOWN)?;
-    if s.assist_offline_only && r.way != Way::Local {
+    if r.id == CLAUDE_CODE && !s.assist_claude_code_ok {
+        return Err(CLAUDE_CODE_NOT_OK.into());
+    }
+    let goes_to = match (r.id, base) {
+        (CUSTOM, Some(b)) => base_of(b)?,
+        (CUSTOM, None) => custom_base(s).ok_or(NO_ADDRESS)?,
+        _ => r.goes_to.to_owned(),
+    };
+    if s.assist_offline_only && !(r.way == Way::Local || (r.id == CUSTOM && here(&goes_to))) {
         return Err(OFFLINE_ONLY.into());
     }
     let model = model.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
-    if r.way != Way::Plan && model.is_none() {
+    if matches!(r.way, Way::Key | Way::Local) && model.is_none() {
         return Err(format!("Choose a model for {} first.", r.name));
     }
-    if !consented(s, r) {
+    if !s.assist_consent.iter().any(|c| c.provider == r.id && c.goes_to == goes_to) {
         if !consent {
-            return Err(format!("Agree to send your questions to {} first.", r.goes_to));
+            let shown = if r.id == CUSTOM { host_of(&goes_to) } else { goes_to };
+            return Err(format!("Agree to send your questions to {shown} first."));
         }
         s.assist_consent.retain(|c| c.provider != r.id);
-        s.assist_consent.push(Consent { provider: r.id.into(), goes_to: r.goes_to.into(), at_ms: now_ms });
+        s.assist_consent.push(Consent { provider: r.id.into(), goes_to, at_ms: now_ms });
     }
     s.assist_provider = Some(r.id.into());
     s.assist_model = model;
@@ -274,6 +387,8 @@ pub struct Picked {
     pub id: &'static str,
     pub model: Option<String>,
     pub offline_only: bool,
+    /// The address agreed to, for the other service.
+    pub base: Option<String>,
 }
 
 /// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
@@ -282,13 +397,17 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
     let Some(r) = s.assist_provider.as_deref().and_then(route) else {
         return Err(NONE_CHOSEN.into());
     };
+    if r.id == CLAUDE_CODE && !s.assist_claude_code_ok {
+        return Err(CLAUDE_CODE_NOT_OK.into());
+    }
     if !consented(s, r) {
         return Err(format!("Allow {} in Settings first", r.name));
     }
-    if s.assist_offline_only && r.way != Way::Local {
+    if s.assist_offline_only && !stays_here(s, r) {
         return Err(OFFLINE_ONLY.into());
     }
-    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only })
+    let base = if r.id == CUSTOM { custom_base(s) } else { None };
+    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -301,10 +420,28 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
             c.model = p.model.clone();
             Ok(Arc::new(c))
         }
+        Way::Agent => match acp::agent(r.id) {
+            Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)))),
+            // Claude through Claude Code: its adapter arrives with the owner's OK.
+            None => Err(CLAUDE_CODE_NOT_OK.into()),
+        },
         _ if model.is_empty() => Err(format!("Choose a model for {} in Settings first.", r.name)),
-        Way::Key => Ok(Arc::new(openai::remote(r.id, r.base, model).provider(p.offline_only)?)),
+        Way::Key => Ok(Arc::new(keyed(r, p.base.as_deref(), model)?.provider(p.offline_only)?)),
         Way::Local => Ok(Arc::new(openai::local(r.id, r.base, model).provider(p.offline_only)?)),
     }
+}
+
+/// The service behind a key route: Anthropic's own API, the address typed for the other service (with a key only if
+/// one is saved, when that is this computer), or OpenAI's chat API at the route's own address.
+fn keyed(r: &Route, base: Option<&str>, model: &str) -> Result<openai::Config, String> {
+    Ok(match r.id {
+        anthropic::ID => anthropic::config(r.id, r.base, model),
+        CUSTOM => {
+            let base = base.ok_or(NO_ADDRESS)?;
+            openai::Config { needs_key: !here(base) || vault::has(r.id), ..openai::remote(r.id, base, model) }
+        }
+        _ => openai::remote(r.id, r.base, model),
+    })
 }
 
 pub type Build = Box<dyn Fn(&Picked) -> Result<Arc<dyn Provider>, String> + Send + Sync>;
@@ -371,7 +508,9 @@ pub fn models_of(id: &str, s: &Settings, held: &Held, home: &Path) -> Result<Vec
                 None => Codex::new(home.join("codex")).list().map_err(said),
             }
         }
-        Way::Key => openai::remote(r.id, r.base, "").provider(s.assist_offline_only)?.listed(),
+        // An agent picks its own model, from what the person set up in it.
+        Way::Agent => Ok(Vec::new()),
+        Way::Key => keyed(r, custom_base(s).as_deref(), "")?.provider(s.assist_offline_only)?.listed(),
         Way::Local => openai::local(r.id, r.base, "").provider(s.assist_offline_only)?.listed(),
     }
 }
@@ -392,11 +531,23 @@ mod tests {
     #[test]
     fn every_route_says_where_a_question_goes_and_a_service_is_named_by_its_own_host() {
         let ids: Vec<&str> = ROUTES.iter().map(|r| r.id).collect();
-        assert_eq!(ids, ["codex", "openai", "openrouter", "gemini", "ollama", "lmstudio"]);
+        assert_eq!(
+            ids,
+            [
+                "codex", "gemini-cli", "copilot", "opencode", "claude-code", "openai", "anthropic", "xai", "gemini", "groq", "mistral", "deepseek", "openrouter",
+                "custom", "ollama", "lmstudio"
+            ]
+        );
         for r in ROUTES {
             assert!(!r.name.is_empty() && name_of(r.id) == r.name);
             match r.way {
                 Way::Plan => assert!(r.base.is_empty()),
+                Way::Agent => {
+                    assert!(r.base.is_empty() && !r.goes_to.is_empty(), "{}", r.id);
+                    let named = acp::agent(r.id).map_or(CLAUDE_CLI.goes_to, |a| a.goes_to);
+                    assert_eq!(r.goes_to, named, "{}", r.id);
+                }
+                Way::Key if r.id == CUSTOM => assert!(r.base.is_empty() && r.goes_to.is_empty()),
                 Way::Key => assert_eq!(reqwest::Url::parse(r.base).unwrap().host_str(), Some(r.goes_to), "{}", r.id),
                 Way::Local => assert_eq!((reqwest::Url::parse(r.base).unwrap().host_str(), r.goes_to), (Some("127.0.0.1"), "this computer")),
             }
@@ -417,7 +568,7 @@ mod tests {
         // Remembered: the next choice of it needs no new yes, and Codex takes its own default model.
         assert_eq!(choose(&mut s, "openai", Some("gpt-y".into()), false, 9), Ok(()));
         assert_eq!(s.assist_consent.len(), 1);
-        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false }));
+        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None }));
         assert_eq!(choose(&mut s, "codex", None, true, 10), Ok(()));
         assert_eq!(s.assist_model, None);
         assert_eq!(choose(&mut s, "nope", None, true, 1), Err(UNKNOWN.into()));
@@ -449,7 +600,7 @@ mod tests {
         assert_eq!(choose(&mut s, "ollama", Some("llava".into()), true, 2), Ok(()));
         assert!(held.provider(&s).is_ok());
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true };
+        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None };
         assert_eq!(build(&remote, Path::new("unused")).err(), Some(OFFLINE_ONLY.into()));
     }
 
@@ -500,7 +651,9 @@ mod tests {
         let keyed = if cfg!(any(windows, target_os = "macos")) { (Status::Ready, Status::NoKey) } else { (Status::Unsupported, Status::Unsupported) };
         assert_eq!((row("openrouter").state, row("openai").state), keyed);
         let json = serde_json::to_value(&list).unwrap();
-        assert_eq!((json["providers"][0]["kind"].as_str(), json["providers"][1]["state"].as_str()), (Some("plan"), Some(if keyed.1 == Status::NoKey { "no_key" } else { "unsupported" })));
+        let at = |id: &str| list.providers.iter().position(|r| r.id == id).unwrap();
+        assert_eq!((json["providers"][0]["kind"].as_str(), json["providers"][at("openai")]["state"].as_str()), (Some("plan"), Some(if keyed.1 == Status::NoKey { "no_key" } else { "unsupported" })));
+        assert_eq!(json["providers"][at("copilot")]["kind"].as_str(), Some("agent"));
         // Codex signed out, missing, too old: one plain state each.
         let codex_as = |h: State, signed: Option<bool>| {
             let look = Look { codex: Some((Health { state: h, line: "said".into(), goes_to: "" }, signed)), ..Look::default() };
@@ -510,6 +663,80 @@ mod tests {
             [codex_as(State::Ready, Some(false)), codex_as(State::NotInstalled, None), codex_as(State::TooOld, None), codex_as(State::Unknown, None)],
             [Status::SignedOut, Status::NotInstalled, Status::TooOld, Status::Unsupported]
         );
+    }
+
+    #[test]
+    fn the_other_service_takes_an_address_the_person_types_and_a_new_address_asks_again() {
+        let mut s = Settings::default();
+        assert_eq!(choose(&mut s, CUSTOM, Some("m".into()), true, 1), Err(NO_ADDRESS.into()));
+        for bad in ["ftp://x.example.test/v1", "http://x.example.test/v1", "https://user:pw@x.example.test/v1", "https://x.example.test/v1?key=abc", "not an address"] {
+            assert!(choose_at(&mut s, CUSTOM, Some(bad), Some("m".into()), true, 1).is_err(), "{bad}");
+        }
+        assert!(s.assist_consent.is_empty() && s.assist_provider.is_none());
+        let first = "https://llm.example.test/v1/";
+        assert_eq!(choose_at(&mut s, CUSTOM, Some(first), Some("m".into()), false, 1), Err("Agree to send your questions to llm.example.test first.".into()));
+        assert_eq!(choose_at(&mut s, CUSTOM, Some(first), Some("m".into()), true, 2), Ok(()));
+        assert_eq!(s.assist_consent, [Consent { provider: CUSTOM.into(), goes_to: "https://llm.example.test/v1".into(), at_ms: 2 }]);
+        assert_eq!(picked(&s).unwrap().base.as_deref(), Some("https://llm.example.test/v1"));
+        // The same address needs no new yes; another one does, and replaces the first.
+        assert_eq!(choose(&mut s, CUSTOM, Some("n".into()), false, 3), Ok(()));
+        let other = "https://other.example.test/v1";
+        assert!(choose_at(&mut s, CUSTOM, Some(other), Some("m".into()), false, 4).is_err());
+        assert_eq!(picked(&s).unwrap().base.as_deref(), Some("https://llm.example.test/v1"), "a no changes nothing");
+        assert_eq!(choose_at(&mut s, CUSTOM, Some(other), Some("m".into()), true, 4), Ok(()));
+        assert_eq!(s.assist_consent.len(), 1);
+        let row = providers(&s, &Look::default()).providers.into_iter().find(|r| r.id == CUSTOM).unwrap();
+        assert_eq!((row.goes_to.as_str(), row.base.as_deref(), row.offline), ("other.example.test", Some(other), false));
+        // http only to this computer, which "Only on this computer" allows.
+        s.assist_offline_only = true;
+        assert_eq!(picked(&s), Err(OFFLINE_ONLY.into()));
+        assert_eq!(choose_at(&mut s, CUSTOM, Some(other), Some("m".into()), true, 5), Err(OFFLINE_ONLY.into()));
+        assert_eq!(choose_at(&mut s, CUSTOM, Some("http://127.0.0.1:8000/v1"), Some("m".into()), true, 5), Ok(()));
+        let p = picked(&s).unwrap();
+        assert_eq!(p.base.as_deref(), Some("http://127.0.0.1:8000/v1"));
+        assert_eq!(build(&p, Path::new("unused")).map(|b| b.id()), Ok(CUSTOM));
+    }
+
+    #[test]
+    fn claude_through_claude_code_cannot_be_chosen_or_asked_until_the_owner_s_ok() {
+        let mut s = Settings::default();
+        assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 1), Err(CLAUDE_CODE_NOT_OK.into()));
+        assert!(s.assist_provider.is_none() && s.assist_consent.is_empty());
+        let row = providers(&s, &Look::default()).providers.into_iter().find(|r| r.id == CLAUDE_CODE).unwrap();
+        assert_eq!((row.available, row.kind, row.state, row.line.as_str()), (false, Way::Agent, Status::Unsupported, CLAUDE_CODE_NOT_OK));
+        // Chosen by hand in the settings file, it is still refused at the Ask, and nothing is made.
+        s.assist_provider = Some(CLAUDE_CODE.into());
+        s.assist_consent.push(Consent { provider: CLAUDE_CODE.into(), goes_to: CLAUDE_CLI.goes_to.into(), at_ms: 1 });
+        assert_eq!(picked(&s), Err(CLAUDE_CODE_NOT_OK.into()));
+        s.assist_claude_code_ok = true;
+        assert_eq!(choose(&mut s, CLAUDE_CODE, None, false, 2), Ok(()));
+        assert!(providers(&s, &Look::default()).providers.iter().all(|r| r.available));
+    }
+
+    #[test]
+    fn an_agent_is_a_subscription_that_needs_no_model_and_says_how_it_was_found() {
+        let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
+        let ready = "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.";
+        let look = Look { agents: vec![("gemini-cli", h(State::Ready, ready)), ("copilot", h(State::Unknown, "said"))], ..Look::default() };
+        let mut s = Settings::default();
+        let list = providers(&s, &look);
+        let row = |id: &str| list.providers.iter().find(|r| r.id == id).unwrap().clone();
+        let gemini = row("gemini-cli");
+        assert_eq!((gemini.state, gemini.kind, gemini.offline, gemini.line.as_str()), (Status::Ready, Way::Agent, false, ready));
+        assert_eq!(gemini.goes_to, "Google, through your Gemini CLI sign-in");
+        assert_eq!((row("copilot").state, row("opencode").state), (Status::Unsupported, Status::NotInstalled));
+        assert_eq!(choose(&mut s, "gemini-cli", None, false, 1), Err("Agree to send your questions to Google, through your Gemini CLI sign-in first.".into()));
+        assert_eq!(choose(&mut s, "gemini-cli", None, true, 1), Ok(()));
+        assert_eq!((s.assist_provider.as_deref(), s.assist_model.as_deref()), (Some("gemini-cli"), None));
+        let p = picked(&s).unwrap();
+        assert_eq!(build(&p, Path::new("unused")).map(|b| b.id()), Ok("gemini-cli"));
+        let held = Held::with(Box::new(|_| Err("unused".into())));
+        assert_eq!(models_of("opencode", &s, &held, Path::new("unused")), Ok(Vec::new()));
+        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None };
+        assert_eq!(build(&claude_api, Path::new("unused")).map(|b| b.id()), Ok("anthropic"));
+        s.assist_offline_only = true;
+        assert_eq!(choose(&mut s, "copilot", None, true, 2), Err(OFFLINE_ONLY.into()));
+        assert_eq!(picked(&s), Err(OFFLINE_ONLY.into()));
     }
 
     #[cfg(any(windows, target_os = "macos"))]

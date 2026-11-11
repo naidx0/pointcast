@@ -1,6 +1,8 @@
 //! Calls over a pair of byte streams, one JSON object per line: JSON-RPC shapes without the `jsonrpc` field, which
 //! is what `codex app-server` speaks on its stdio. It knows nothing of a child process, so the protocol is tested
 //! over pipes inside one process. A line that is not a JSON object (a shim's notice, say) is skipped and counted.
+//! `Client::rpc2` speaks strict JSON-RPC 2.0 instead, every message with `"jsonrpc": "2.0"`, as the Agent Client
+//! Protocol wants (`acp`).
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -44,6 +46,8 @@ struct Inner {
     waiting: Mutex<HashMap<u64, Sender<Answer>>>,
     closed: AtomicBool,
     noise: AtomicU64,
+    /// Every message carries `"jsonrpc": "2.0"`.
+    rpc2: bool,
 }
 
 #[derive(Clone)]
@@ -54,12 +58,22 @@ pub struct Client {
 impl Client {
     /// Speak over `reader` and `writer`. Everything that is not the answer to a `call` arrives on the receiver.
     pub fn over<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W) -> (Client, Receiver<Incoming>) {
+        Self::speaking(reader, writer, false)
+    }
+
+    /// As `over`, in strict JSON-RPC 2.0.
+    pub fn rpc2<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W) -> (Client, Receiver<Incoming>) {
+        Self::speaking(reader, writer, true)
+    }
+
+    fn speaking<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W, rpc2: bool) -> (Client, Receiver<Incoming>) {
         let inner = Arc::new(Inner {
             out: Mutex::new(Some(Box::new(writer))),
             next: AtomicU64::new(1),
             waiting: Mutex::default(),
             closed: AtomicBool::new(false),
             noise: AtomicU64::new(0),
+            rpc2,
         });
         let (tx, rx) = channel();
         let theirs = inner.clone();
@@ -136,6 +150,10 @@ impl Client {
         self.write(&json!({ "method": method }))
     }
 
+    pub fn notify_with(&self, method: &str, params: Value) -> std::io::Result<()> {
+        self.write(&json!({ "method": method, "params": params }))
+    }
+
     /// Answer a request of theirs.
     pub fn answer(&self, id: &Value, result: Value) -> std::io::Result<()> {
         self.write(&json!({ "id": id, "result": result }))
@@ -157,7 +175,11 @@ impl Client {
     }
 
     fn write(&self, v: &Value) -> std::io::Result<()> {
-        let mut line = serde_json::to_vec(v)?;
+        let mut v = v.clone();
+        if self.inner.rpc2 {
+            v["jsonrpc"] = json!("2.0");
+        }
+        let mut line = serde_json::to_vec(&v)?;
         line.push(b'\n');
         let mut out = self.inner.out.lock().unwrap();
         let Some(w) = out.as_mut() else { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed")) };

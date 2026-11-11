@@ -1,6 +1,6 @@
 //! The line to a service that answers over HTTP: an OpenAI-compatible API on the network, or a model server on
 //! this computer. A question is one request on a thread of its own, and its answer is read as server-sent events
-//! while it arrives. A key rides in the `Authorization` header and nowhere else: this is the only file that puts a
+//! while it arrives. A key rides in the `Authorization` header (`x-api-key` for Anthropic) and nowhere else: this is the only file that puts a
 //! `Secret` on the wire, and what a server says back is shown with the key taken out.
 
 use super::vault::Secret;
@@ -76,10 +76,22 @@ impl Stopper {
     }
 }
 
+/// How a service is spoken to: OpenAI's chat API, with the key as a bearer, or Anthropic's Messages API, with the key
+/// in `x-api-key` and the version of the API named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    OpenAi,
+    Anthropic,
+}
+
+/// The version of Anthropic's Messages API the requests are written for.
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 /// The connections to one service, kept between questions so the next one does not start from nothing.
 #[derive(Clone)]
 pub struct Line {
     client: reqwest::blocking::Client,
+    wire: Wire,
 }
 
 impl Line {
@@ -93,7 +105,12 @@ impl Line {
         if direct {
             b = b.no_proxy();
         }
-        b.build().ok().map(|client| Line { client })
+        b.build().ok().map(|client| Line { client, wire: Wire::OpenAi })
+    }
+
+    /// The same line, speaking `wire`.
+    pub fn speaking(self, wire: Wire) -> Line {
+        Line { wire, ..self }
     }
 
     fn send(&self, ask: &Ask) -> Result<reqwest::blocking::Response, Trouble> {
@@ -102,7 +119,13 @@ impl Line {
             None => self.client.get(&ask.url),
         };
         if let Some(key) = &ask.key {
-            req = req.bearer_auth(key.expose());
+            req = match self.wire {
+                Wire::OpenAi => req.bearer_auth(key.expose()),
+                Wire::Anthropic => req.header("x-api-key", key.expose()),
+            };
+        }
+        if self.wire == Wire::Anthropic {
+            req = req.header("anthropic-version", ANTHROPIC_VERSION);
         }
         let resp = req.timeout(ask.within).send().map_err(|e| {
             if e.is_builder() {

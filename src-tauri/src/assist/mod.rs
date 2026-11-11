@@ -1,13 +1,15 @@
 //! The assistant: a question in words and pictures goes to an AI the person already has, and the answer streams back
 //! as text. One contract serves every route (`Provider` opens a conversation, `Chat` asks and cancels); the routes
-//! are the vendors' own command-line tools run as a child (`child`, `jsonl`, then `codex`), and any service that
-//! speaks OpenAI's chat API over HTTP (`http`, then `openai`): one the person pasted a key for (`vault`), or a model
-//! on this computer. Pointcast never reads, stores or forwards another program's sign-in: a test below fails the
+//! are the vendors' own command-line tools run as a child (`child`, `jsonl`, then `codex`, and the agents that speak
+//! the Agent Client Protocol, `acp`), and any service that speaks OpenAI's chat API or Anthropic's Messages API over
+//! HTTP (`http`, then `openai` and `anthropic`): one the person pasted a key for (`vault`), or a model on this computer. Pointcast never reads, stores or forwards another program's sign-in: a test below fails the
 //! build if this folder names a vendor's sign-in file.
 
 // Nothing calls this module yet: slice 3 wires it to commands and Settings, and removes this line.
 #![allow(dead_code)]
 
+pub mod acp;
+pub mod anthropic;
 pub mod catalog;
 pub mod child;
 pub mod codex;
@@ -577,7 +579,22 @@ pub mod tests {
     #[test]
     fn no_source_under_assist_names_a_vendor_sign_in_file() {
         // Built from pieces, so this file does not hold what it looks for.
-        let needles: Vec<String> = [[".creden", "tials.json"], ["auth", ".json"], ["key", "chain"], ["Claude Code-cre", "dentials"]]
+        // The Gemini CLI's and GitHub Copilot's sign-ins too: an agent spoken to over ACP keeps its own.
+        let needles: Vec<String> = [
+            [".creden", "tials.json"],
+            ["auth", ".json"],
+            ["key", "chain"],
+            ["Claude Code-cre", "dentials"],
+            ["oauth_", "creds"],
+            ["github-", "copilot"],
+            ["hosts", ".json"],
+            // The private endpoints and borrowed app ids a route that impersonates a vendor's own app reaches for.
+            ["oauth", "/usage"],
+            ["backend", "-api"],
+            ["copilot", "_internal"],
+            ["Iv", "1."],
+            ["app_EMoamEEZ73f0", "CkXaXp7hrann"],
+        ]
             .iter()
             .map(|p| p.concat())
             .collect();
@@ -590,7 +607,8 @@ pub mod tests {
 
         let mut files = Vec::new();
         sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("assist"), &mut files);
-        assert!(files.len() >= 9, "the scan read the folder it meant to: {files:?}");
+        assert!(files.len() >= 11, "the scan read the folder it meant to: {files:?}");
+        assert!(files.iter().any(|f| f.ends_with("acp.rs")) && files.iter().any(|f| f.ends_with("anthropic.rs")), "and the newest files in it");
         for f in files {
             let found = hits(&std::fs::read_to_string(&f).unwrap(), &needles);
             assert!(found.is_empty(), "{} names {found:?}", f.display());

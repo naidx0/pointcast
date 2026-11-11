@@ -195,6 +195,10 @@ pub struct Settings {
     /// Each AI and destination the person agreed to send questions to.
     #[serde(default)]
     pub assist_consent: Vec<Consent>,
+    /// The owner read Anthropic's terms for using Claude Code inside another app and agreed: until then the Claude
+    /// route through Claude Code cannot be chosen. Nothing in the app sets it yet.
+    #[serde(default)]
+    pub assist_claude_code_ok: bool,
 }
 
 /// The person agreed that questions asked through `provider` go to `goes_to`, at `at_ms`. A new destination asks again.
@@ -265,6 +269,7 @@ impl Default for Settings {
             assist_model: None,
             assist_offline_only: false,
             assist_consent: Vec::new(),
+            assist_claude_code_ok: false,
         }
     }
 }
@@ -663,5 +668,18 @@ mod tests {
         migrate(&old, &new);
         assert_eq!(std::fs::read_to_string(new.join("settings.json")).unwrap(), "{}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_through_claude_code_stays_off_until_turned_on_and_an_older_file_keeps_it_off() {
+        assert!(!Settings::default().assist_claude_code_ok);
+        let d = std::env::temp_dir().join(format!("pc-claude-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        std::fs::write(&f, "{}").unwrap();
+        assert!(!Settings::load(&f).assist_claude_code_ok);
+        Settings { assist_claude_code_ok: true, ..Settings::default() }.save(&f).unwrap();
+        assert!(Settings::load(&f).assist_claude_code_ok);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
