@@ -1,14 +1,23 @@
-//! Updates without the install command: ask GitHub for the latest release and, when the person
-//! says so, download it, check it against the SHA-256 GitHub publishes for it, and run the
-//! installer script built into this copy (never one fetched from the network). It closes
-//! Pointcast, installs the new version and opens it again.
+//! Updates without the install command: read the latest release's own list of installers (or ask
+//! GitHub's API when a release has none) and, when the person says so, download the installer,
+//! check it against the SHA-256 published for it, and run the installer script built into this
+//! copy (never one fetched from the network). It closes Pointcast, installs the new version and
+//! opens it again.
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// The latest release's list of its installers. It is a release download, which GitHub does not count against the
+/// 60 requests an hour its API gives a whole network, so the check works in a school or an office too.
+const MANIFEST: &str = "https://github.com/naidx0/pointcast/releases/latest/download/latest.json";
+/// GitHub's API, for a release published before it carried that list.
 const LATEST: &str = "https://api.github.com/repos/naidx0/pointcast/releases/latest";
+/// Where every installer of this repository is downloaded from.
+const DOWNLOADS: &str = "https://github.com/naidx0/pointcast/releases/download/";
+const NO_ANSWER: &str = "Could not check: GitHub did not answer. Try again in a minute.";
+const NO_NETWORK: &str = "Could not check: Pointcast can't reach GitHub. Check your connection and try again.";
 /// In the data folder: the versions an update was going from and to, written before it starts.
 const RECORD: &str = "update.json";
 const LOG: &str = "update.log";
@@ -103,6 +112,46 @@ fn sha256_of(digest: &str) -> Option<String> {
     (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hex.to_ascii_lowercase())
 }
 
+/// `latest.json`, the list a release carries of its own installers: one entry for each system it has one for.
+#[derive(Deserialize)]
+struct Manifest {
+    version: String,
+    #[serde(default)]
+    macos: Option<Installer>,
+    #[serde(default)]
+    windows: Option<Installer>,
+}
+
+#[derive(Deserialize)]
+struct Installer {
+    url: String,
+    sha256: String,
+}
+
+/// What the release's own list offers: its installer for `os` when the release is newer than `current`. A list
+/// without this system offers nothing (its installer is not up yet). `Err` when it is not such a list.
+fn offer_listed(body: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
+    let m: Manifest = serde_json::from_str(body).map_err(|_| "GitHub sent a list Pointcast can't read.".to_string())?;
+    let new = version(&m.version).ok_or("The list names no version.")?;
+    let Some(cur) = version(current) else {
+        return Ok(None);
+    };
+    let installer = match os {
+        "macos" => m.macos,
+        "windows" => m.windows,
+        _ => None,
+    };
+    let Some(i) = installer.filter(|_| new > cur) else {
+        return Ok(None);
+    };
+    // Only this repository's own downloads, each with the SHA-256 it is checked against.
+    let ours = i.url.starts_with(DOWNLOADS) || (cfg!(test) && i.url.starts_with("http://127.0.0.1:"));
+    match sha256_of(&format!("sha256:{}", i.sha256)).filter(|_| ours) {
+        Some(sha256) => Ok(Some(Offer { version: m.version.trim().trim_start_matches('v').to_string(), url: i.url, sha256 })),
+        None => Err("The list's download can't be used.".into()),
+    }
+}
+
 /// The release to offer: newer than `current`, published, and with a download for `os` whose
 /// SHA-256 GitHub publishes.
 fn offer(body: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
@@ -127,7 +176,7 @@ fn offer(body: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
 
 /// Ask GitHub once. `Ok(None)` means up to date, or nothing published for this system yet.
 pub fn check() -> Result<Option<String>, String> {
-    keep(check_at(LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS))
+    keep(check_at(MANIFEST, LATEST, env!("CARGO_PKG_VERSION"), std::env::consts::OS))
 }
 
 /// The last check's answer, for a Settings window opened after it: the newer version (none when up to date), or why
@@ -154,30 +203,56 @@ pub fn checked() -> serde_json::Value {
     }
 }
 
-fn check_at(url: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
-    check_with(url, current, os, None)
+fn check_at(manifest: &str, api: &str, current: &str, os: &str) -> Result<Option<Offer>, String> {
+    check_with(manifest, api, current, os, None)
 }
 
-/// `check_at`, signed in with `token` when there is one. The app never has a token; the live test in CI does, because
-/// GitHub gives a shared runner address only a handful of unsigned requests an hour and answers the rest with 403.
-fn check_with(url: &str, current: &str, os: &str, token: Option<&str>) -> Result<Option<Offer>, String> {
+/// What one address answered.
+enum Answer {
+    Body(String),
+    /// 404: nothing is published there.
+    Missing,
+    Failed(&'static str),
+}
+
+fn ask(url: &str, token: Option<&str>) -> Answer {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("Pointcast/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .build();
+    let Ok(client) = client else {
+        return Answer::Failed(NO_NETWORK);
+    };
     let mut req = client.get(url).header("Accept", "application/vnd.github+json");
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
-        .map_err(|_| "Can't reach GitHub. Check your connection and try again.".to_string())?;
+    let Ok(resp) = req.send() else {
+        return Answer::Failed(NO_NETWORK);
+    };
     match resp.status().as_u16() {
-        200 => offer(&resp.text().map_err(|e| e.to_string())?, current, os),
-        404 => Ok(None),
-        403 | 429 => Err("GitHub is limiting requests from your network. Try again later.".into()),
-        code => Err(format!("GitHub answered {code}. Try again later.")),
+        200 => resp.text().map_or(Answer::Failed(NO_ANSWER), Answer::Body),
+        404 => Answer::Missing,
+        // 403 and 429 are GitHub's allowance for this network used up; anything else is GitHub in trouble.
+        _ => Answer::Failed(NO_ANSWER),
+    }
+}
+
+/// The check: the release's own list first and, when there is none to read (a release from before the list, or no
+/// answer), GitHub's API. `Ok(None)` only when one of them said there is nothing newer: no answer from both is an
+/// error, never "up to date". The API is signed in with `token` when there is one. The app never has a token; the
+/// live test in CI does, because GitHub gives a shared runner address only a handful of unsigned requests an hour
+/// and answers the rest with 403.
+fn check_with(manifest: &str, api: &str, current: &str, os: &str, token: Option<&str>) -> Result<Option<Offer>, String> {
+    if let Answer::Body(body) = ask(manifest, None) {
+        if let Ok(found) = offer_listed(&body, current, os) {
+            return Ok(found);
+        }
+    }
+    match ask(api, token) {
+        Answer::Body(body) => offer(&body, current, os).map_err(|_| NO_ANSWER.to_string()),
+        Answer::Missing => Ok(None),
+        Answer::Failed(why) => Err(why.to_string()),
     }
 }
 
@@ -350,8 +425,12 @@ fn run(script: &Path, package: &Path, log: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn run(script: &Path, package: &Path, log: &Path) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("/bin/bash");
-    cmd.arg(script).env("POINTCAST_DMG", package);
+    use std::os::unix::process::CommandExt;
+    // The installer closes the Pointcast that started it and must live on to swap the app and open the new one:
+    // it ignores the hang-up a closing parent can send and sits in a process group of its own, so a signal meant
+    // for Pointcast and its group never reaches it.
+    let mut cmd = std::process::Command::new("/usr/bin/nohup");
+    cmd.arg("/bin/bash").arg(script).env("POINTCAST_DMG", package).process_group(0);
     wait(cmd, log)
 }
 
@@ -527,23 +606,121 @@ mod tests {
     #[ignore]
     fn live_the_published_release_is_offered_to_the_one_before_it() {
         let token = std::env::var("GITHUB_TOKEN").ok();
-        let got = check_with(LATEST, "0.0.1", std::env::consts::OS, token.as_deref());
+        let got = check_with(MANIFEST, LATEST, "0.0.1", std::env::consts::OS, token.as_deref());
         eprintln!("LIVE os={} -> {:?}", std::env::consts::OS, got.as_ref().map(|o| o.as_ref().map(|o| (&o.version, &o.url))));
         let offer = got.expect("the check reached GitHub").expect("a release is offered to an older version");
         assert!(offer.url.starts_with("https://github.com/naidx0/pointcast/releases/download/"), "{}", offer.url);
         assert_eq!(offer.sha256.len(), 64);
     }
 
+    /// A release's own list, as `scripts/release-manifest.sh` writes it: one entry for each system in `systems`.
+    fn listed(version: &str, systems: &[&str]) -> String {
+        let mut v = serde_json::json!({ "version": version });
+        for os in systems {
+            let file = if *os == "macos" { "Pointcast-macOS.dmg" } else { "Pointcast-Windows-setup.exe" };
+            let sha = if *os == "macos" { "a" } else { "b" }.repeat(64);
+            v[*os] = serde_json::json!({ "url": format!("{DOWNLOADS}v{version}/{file}"), "sha256": sha });
+        }
+        v.to_string()
+    }
+
+    const SYSTEMS: [&str; 2] = ["macos", "windows"];
+
     #[test]
-    fn the_check_reads_github_over_the_wire() {
-        let url = serve(200, release("v0.5.0", &BOTH));
-        let found = check_at(&url, "0.4.0", "windows").unwrap().unwrap();
+    fn the_list_offers_this_systems_installer_of_a_newer_release() {
+        let mac = offer_listed(&listed("0.5.0", &SYSTEMS), "0.4.0", "macos").unwrap().unwrap();
+        assert_eq!(mac.version, "0.5.0");
+        assert_eq!(mac.url, "https://github.com/naidx0/pointcast/releases/download/v0.5.0/Pointcast-macOS.dmg");
+        assert_eq!(mac.sha256, "a".repeat(64));
+        let win = offer_listed(&listed("0.5.0", &SYSTEMS), "0.4.0", "windows").unwrap().unwrap();
+        assert!(win.url.ends_with("/v0.5.0/Pointcast-Windows-setup.exe"), "{}", win.url);
+        assert_eq!(win.sha256, "b".repeat(64));
+        // The script's own layout, spaces and line ends included.
+        let written = r#"{
+  "version": "0.5.0",
+  "macos": { "url": "https://github.com/naidx0/pointcast/releases/download/v0.5.0/Pointcast-macOS.dmg", "sha256": "SHA" }
+}
+"#
+        .replace("SHA", &"C".repeat(64));
+        assert_eq!(offer_listed(&written, "0.4.0", "macos").unwrap().unwrap().sha256, "c".repeat(64));
+        for same_or_older in ["0.4.0", "v0.4.0", "0.3.9"] {
+            assert_eq!(offer_listed(&listed(same_or_older, &SYSTEMS), "0.4.0", "macos"), Ok(None), "{same_or_older}");
+        }
+        assert_eq!(offer_listed(&listed("0.5.0", &SYSTEMS), "0.4.0", "linux"), Ok(None));
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_trusted_is_not_a_list() {
+        assert!(offer_listed("<html>Not Found</html>", "0.4.0", "macos").is_err());
+        assert!(offer_listed(&listed("nightly", &SYSTEMS), "0.4.0", "macos").is_err());
+        // A download from anywhere else, or one with nothing to check it against, is never offered.
+        let mut v: serde_json::Value = serde_json::from_str(&listed("0.5.0", &SYSTEMS)).unwrap();
+        v["macos"]["url"] = "https://example.com/Pointcast-macOS.dmg".into();
+        assert!(offer_listed(&v.to_string(), "0.4.0", "macos").is_err());
+        let mut v: serde_json::Value = serde_json::from_str(&listed("0.5.0", &SYSTEMS)).unwrap();
+        v["macos"]["sha256"] = "abc".into();
+        assert!(offer_listed(&v.to_string(), "0.4.0", "macos").is_err());
+        assert!(offer_listed(&v.to_string(), "0.4.0", "windows").unwrap().is_some(), "the other system's entry is whole");
+    }
+
+    /// An address nobody answers at: a check that needs it fails.
+    fn nobody() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}/never", l.local_addr().unwrap())
+    }
+
+    #[test]
+    fn the_check_reads_the_releases_own_list_first() {
+        // The API would offer 0.6.0: the answer is the list's.
+        let found = check_at(&serve(200, listed("0.5.0", &SYSTEMS)), &serve(200, release("v0.6.0", &BOTH)), "0.4.0", "windows");
+        let found = found.unwrap().unwrap();
+        assert_eq!(found.version, "0.5.0");
+        assert!(found.url.ends_with("/v0.5.0/Pointcast-Windows-setup.exe"), "{}", found.url);
+        assert_eq!(found.sha256, "b".repeat(64));
+        let found = check_at(&serve(200, listed("0.5.0", &SYSTEMS)), &nobody(), "0.4.0", "macos").unwrap().unwrap();
+        assert_eq!(found.sha256, "a".repeat(64), "with the API unreachable, the list alone answers");
+        // Up to date by the list: nothing to offer, and still no need of the API.
+        assert_eq!(check_at(&serve(200, listed("0.4.0", &SYSTEMS)), &nobody(), "0.4.0", "macos"), Ok(None));
+    }
+
+    #[test]
+    fn a_release_without_a_list_is_read_from_the_api() {
+        // A release published before the list existed answers 404 for it.
+        let found = check_at(&serve(404, "Not Found".into()), &serve(200, release("v0.5.0", &BOTH)), "0.4.0", "windows");
+        let found = found.unwrap().unwrap();
         assert_eq!(found.version, "0.5.0");
         assert!(found.url.ends_with("x64-setup.exe"), "{}", found.url);
-        // A repo with nothing published answers 404: up to date, not an error.
-        assert_eq!(check_at(&serve(404, "{}".into()), "0.4.0", "windows").unwrap(), None);
-        let limited = check_at(&serve(403, "{}".into()), "0.4.0", "windows").unwrap_err();
-        assert!(limited.contains("limiting"), "{limited}");
+        // So does a list that is not one, and a list GitHub would not hand over.
+        for (status, body) in [(200, "<html>".to_string()), (403, "{}".to_string()), (500, String::new())] {
+            let found = check_at(&serve(status, body), &serve(200, release("v0.5.0", &BOTH)), "0.4.0", "macos");
+            assert_eq!(found.unwrap().unwrap().version, "0.5.0", "{status}");
+        }
+        // A repo with nothing published answers 404 to both: up to date, not an error.
+        assert_eq!(check_at(&serve(404, "{}".into()), &serve(404, "{}".into()), "0.4.0", "windows"), Ok(None));
+    }
+
+    #[test]
+    fn a_list_without_this_system_offers_nothing() {
+        // The Windows installer is up and the Mac one is not: a Mac waits, and the API (which would offer 0.6.0)
+        // is not asked for a second opinion.
+        let api = || serve(200, release("v0.6.0", &BOTH));
+        assert_eq!(check_at(&serve(200, listed("0.5.0", &["windows"])), &api(), "0.4.0", "macos"), Ok(None));
+        let win = check_at(&serve(200, listed("0.5.0", &["windows"])), &api(), "0.4.0", "windows").unwrap().unwrap();
+        assert_eq!(win.version, "0.5.0");
+    }
+
+    #[test]
+    fn no_answer_from_github_is_an_error_and_never_up_to_date() {
+        // GitHub's allowance for this network is used up (403, 429), or GitHub is in trouble.
+        for status in [403, 429, 500] {
+            let got = check_at(&serve(status, "{}".into()), &serve(status, "{}".into()), "0.4.0", "macos");
+            assert_eq!(got, Err(NO_ANSWER.to_string()), "{status}");
+        }
+        // A release from before the list, on a network whose allowance is used up: still not "up to date".
+        assert_eq!(check_at(&serve(404, "Not Found".into()), &serve(403, "{}".into()), "0.4.0", "macos"), Err(NO_ANSWER.to_string()));
+        assert_eq!(check_at(&serve(404, "Not Found".into()), &serve(200, "<html>".into()), "0.4.0", "macos"), Err(NO_ANSWER.to_string()));
+        assert_eq!(check_at(&nobody(), &nobody(), "0.4.0", "macos"), Err(NO_NETWORK.to_string()));
+        assert!(NO_ANSWER.starts_with("Could not check: GitHub did not answer."), "Settings shows these words as they are");
     }
 
     /// A folder of the test's own, empty.
@@ -631,6 +808,40 @@ mod tests {
         assert!(!tmp.join("Pointcast_x64-setup.exe").exists());
         assert!(!tmp.join("install.ps1").exists());
         assert!(!data.join(LOG).exists() && !data.join(RECORD).exists(), "the installer never ran");
+    }
+
+    #[test]
+    fn a_download_that_does_not_match_the_lists_sha256_is_refused() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        // The list names the installer and the SHA-256 of what was uploaded; what arrives is something else.
+        let installer = serve(200, "not the installer that was uploaded".into());
+        let list = serde_json::json!({
+            "version": "0.5.0",
+            "windows": { "url": installer, "sha256": format!("{:x}", Sha256::digest(PACKAGE.as_bytes())) },
+        });
+        let offer = check_at(&serve(200, list.to_string()), &nobody(), "0.4.0", "windows").unwrap().unwrap();
+        let mut j = job("listed-damaged", String::new(), String::new(), fake_run);
+        j.offer = offer;
+        let (tmp, data) = (j.tmp.clone(), j.data.clone());
+        assert_eq!(reported(j, &BUSY), DAMAGED);
+        assert!(!tmp.join("Pointcast_x64-setup.exe").exists(), "thrown away");
+        assert!(!data.join(LOG).exists() && !data.join(RECORD).exists(), "the installer never ran");
+    }
+
+    /// Live, on a Mac, in a process named `pointcast`: start the built-in installer on `POINTCAST_TEST_DMG` exactly
+    /// as an update does. The installer closes every Pointcast, this process included, so the test never returns:
+    /// `scripts/mac-update-test.sh` checks that it was closed and that the installer went on to open the new app.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_mac_the_installer_outlives_the_pointcast_that_started_it() {
+        let dmg = PathBuf::from(std::env::var("POINTCAST_TEST_DMG").expect("POINTCAST_TEST_DMG names the new version's dmg"));
+        let log = PathBuf::from(std::env::var("POINTCAST_TEST_LOG").expect("POINTCAST_TEST_LOG names the installer's log"));
+        let script = scratch("live-mac").join("install.sh");
+        std::fs::write(&script, SCRIPT.expect("a Mac has an installer").text).unwrap();
+        eprintln!("LIVE pid={} starts {} on {}", std::process::id(), script.display(), dmg.display());
+        run(&script, &dmg, &log).unwrap();
+        panic!("the installer ended and the process that started it is still running");
     }
 
     #[test]
