@@ -14,22 +14,35 @@ import {
   onLiveState,
   subscribe,
 } from "@/lib/api";
-import { initialLive, isPinned, liveReduce, liveView, sentLine, type LiveDelta, type LivePicture, type LiveView } from "@/lib/live";
-import { VOICE_SLOTS, loopsPath, marginPath, restPath, voicePath } from "@/lib/line";
+import { ENDED_MS, initialLive, isPinned, liveReduce, liveView, sentLine, type LiveDelta, type LivePicture, type LiveView } from "@/lib/live";
+import {
+  FLOOR_START,
+  VOICE_DX,
+  VOICE_STEP_MS,
+  loopsPath,
+  marginPath,
+  restPath,
+  smoothLevel,
+  trackFloor,
+  voiceLevel,
+  voicePath,
+} from "@/lib/line";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
 
 const noop = () => undefined;
 const h = createElement as unknown as H<ReactNode>;
 const ROW = 24;
+/** The listening line's height: room for a tall stroke above the baseline and a little below. */
+const VOICE_H = 36;
 /** The resting stroke: as long as one line of text is tall, less its leading. */
 const REST = 14;
 
-/** The Ask panel: a question about the screen and its answer, docked at the right edge. The line carries listening,
- * thinking and answering; everything around it is the app's native look. */
+/** The Ask panel: a question about the screen and its answer, docked at the right edge. While listening it is one quiet
+ * row (the line, the red dot, the picture); once the question is asked it grows downward to the answer. The line carries
+ * listening, thinking and answering; everything around it is the app's native look. */
 export function Live() {
   const [m, dispatch] = useReducer(liveReduce, undefined, initialLive);
   const [now, setNow] = useState(() => Date.now());
-  const [levels, setLevels] = useState<{ v: number[]; first: number }>({ v: [], first: 0 });
   const [big, setBig] = useState(false);
   const pending = useRef<LiveDelta[]>([]);
   const frame = useRef(0);
@@ -67,41 +80,16 @@ export function Live() {
     return () => clearInterval(id);
   }, [sending, m.waitFrom]);
 
-  // The microphone level, only while listening, one sample per ~90 ms and one paint per frame.
-  const listening = m.snap.state === "listening";
-  useEffect(() => {
-    setLevels({ v: [], first: 0 });
-    if (!listening) return;
-    const buf: number[] = [];
-    let first = 0;
-    let last = 0;
-    let raf = 0;
-    const off = subscribe(
-      onLiveLevel((x) => {
-        const t = performance.now();
-        if (t - last < 80) return;
-        last = t;
-        buf.push(x);
-        if (buf.length > VOICE_SLOTS) {
-          buf.shift();
-          first++;
-        }
-        if (!raf)
-          raf = requestAnimationFrame(() => {
-            raf = 0;
-            setLevels({ v: buf.slice(), first });
-          });
-      }),
-    );
-    return () => {
-      off();
-      cancelAnimationFrame(raf);
-    };
-  }, [listening, m.snap.turn]);
-
   const v = liveView(m, sending ? now : 0);
 
-  useEffect(() => setBig(false), [m.snap.turn, v.thumb == null]);
+  useEffect(() => setBig(false), [m.snap.turn, v.thumb == null, v.compact]);
+
+  // Not sent: said for a moment, then the panel hides.
+  useEffect(() => {
+    if (!v.hide) return;
+    const id = setTimeout(() => liveClose().catch(noop), ENDED_MS);
+    return () => clearTimeout(id);
+  }, [v.hide, m.snap.turn]);
 
   // Esc always works: it makes the picture small again, stops what is under way, or closes. Delete takes the picture out.
   useEffect(() => {
@@ -146,128 +134,262 @@ export function Live() {
     if (b) pinned.current = isPinned(b.scrollTop, b.scrollHeight, b.clientHeight);
   };
 
-  // The window's height follows the content, up to 60 % of the screen (Tauri only; the preview lays out by CSS).
+  // The window's height follows the content, from one row up to 60 % of the screen (Tauri only; the preview lays out
+  // by CSS). The scrolling body counts at its content's height.
   const root = useRef<HTMLDivElement>(null);
-  const inner = useRef<HTMLDivElement>(null);
+  const lastFit = useRef(0);
   useEffect(() => {
-    if (!inTauri || !root.current || !inner.current) return;
-    let last = 0;
+    const r = root.current;
+    if (!inTauri || !r) return;
     const fit = () => {
-      const r = root.current;
-      if (!r) return;
-      const head = r.querySelector<HTMLElement>(".live-head")?.offsetHeight ?? 0;
-      const foot = r.querySelector<HTMLElement>(".live-foot")?.offsetHeight ?? 0;
-      const want = Math.min(Math.round(screen.availHeight * 0.6), head + (inner.current?.offsetHeight ?? 0) + foot);
-      if (want !== last) {
-        last = want;
+      let want = 0;
+      for (const c of Array.from(r.children) as HTMLElement[]) {
+        if (c.classList.contains("live-sr")) continue;
+        want += c.classList.contains("live-body") ? ((c.firstElementChild as HTMLElement | null)?.offsetHeight ?? 0) : c.offsetHeight;
+      }
+      want = Math.min(Math.round(screen.availHeight * 0.6), want);
+      if (want > 0 && want !== lastFit.current) {
+        lastFit.current = want;
         liveFit(want).catch(noop);
       }
     };
     const ro = new ResizeObserver(fit);
-    ro.observe(inner.current);
-    ro.observe(root.current);
+    ro.observe(r);
+    for (const c of Array.from(r.querySelectorAll(".live > *, .live-inner"))) ro.observe(c);
+    fit();
     return () => ro.disconnect();
-  }, []);
+  }, [v.phase, v.compact, big, !!v.thumb]);
 
   if (v.phase === "closed") return <div className="live closed" ref={root} />;
+
+  const sr = (
+    <div className="live-sr" aria-live="polite" role="status">
+      {v.announce}
+    </div>
+  );
+  const bigPic = big && v.thumb ? <BigPicture pic={v.thumb} close={() => setBig(false)} /> : null;
+
+  if (v.compact)
+    return (
+      <div className={`live compact phase-${v.phase}`} ref={root} aria-label="Ask about the screen">
+        <div className="live-row">
+          {v.phase === "discarded" ? (
+            <p className="live-ended live-in">{v.note}</p>
+          ) : (
+            <>
+              <StopButton stop />
+              <div className="live-row-line">{v.line === "voice" ? <VoiceLine /> : <LineRow v={v} />}</div>
+              {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : null}
+            </>
+          )}
+        </div>
+        {bigPic}
+        {sr}
+      </div>
+    );
 
   const asked = v.phase === "answering" || v.phase === "shown";
   return (
     <div className={`live phase-${v.phase}`} ref={root} aria-label="Ask about the screen">
       <header className="live-head">
-        <span className="live-title" title={v.title || undefined}>
-          {v.title}
-        </span>
-        {v.provider ? <span className={`live-provider${v.inFlight ? " on" : ""}`}>{v.provider}</span> : null}
-        <button
-          type="button"
-          className="live-hb"
-          title={v.stop ? "Stop (Esc)" : "Close (Esc)"}
-          aria-label={v.stop ? "Stop" : "Close"}
-          onClick={() => (v.stop ? liveStop() : liveClose()).catch(noop)}
-        >
-          {v.stop ? <Square size={10} fill="currentColor" strokeWidth={0} /> : <X size={15} strokeWidth={1.75} />}
-        </button>
+        <Question key={m.snap.turn} text={v.question} />
+        <StopButton stop={v.stop} />
       </header>
       <div className="live-body" ref={body} onScroll={onScroll}>
-        <div className="live-inner" ref={inner}>
-          {v.thumb || v.words ? (
-            <div className={`live-q${big ? " big" : ""}`}>
-              {v.thumb ? <Thumb pic={v.thumb} big={big} setBig={setBig} canDrop={v.canDrop} /> : null}
-              {v.words ? <p className={`live-words${v.hearing || asked ? " quiet" : ""}`}>{v.words}</p> : null}
+        <div className="live-inner">
+          {v.thumb ? (
+            <div className="live-pic">
+              <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} />
             </div>
           ) : null}
-          {v.line === "voice" || v.line === "loops" ? <LineRow key={v.line} v={v} levels={levels} /> : null}
+          {bigPic}
+          {v.line === "loops" ? (
+            <div className="live-think">
+              <LineRow v={v} />
+              {v.provider ? <span className="live-provider">{v.provider}</span> : null}
+            </div>
+          ) : null}
           {v.note ? <p className="live-note live-in">{v.note}</p> : null}
           {v.error ? <ErrorLine err={v.error} /> : null}
           {asked ? <Answer text={m.text} v={v} /> : null}
         </div>
       </div>
       {v.complete ? <Foot text={m.text} v={v} /> : null}
-      <div className="live-sr" aria-live="polite" role="status">
-        {v.announce}
-      </div>
+      {sr}
     </div>
   );
 }
 
-/** Exactly the picture that will be sent: small, enlarged in place on a click, and taken out on hover or with Delete. */
-function Thumb({ pic, big, setBig, canDrop }: { pic: LivePicture; big: boolean; setBig: (b: boolean) => void; canDrop: boolean }) {
+/** Stop while anything is under way, Close otherwise: always visible, never only on hover. Esc does the same. */
+function StopButton({ stop }: { stop: boolean }) {
   return (
-    <div className={`live-thumb${big ? " big" : ""}`} style={big ? { aspectRatio: `${pic.w} / ${pic.h}` } : undefined}>
-      <button
-        type="button"
-        className="live-thumb-btn"
-        aria-expanded={big}
-        aria-label={big ? "Make the picture small" : "Enlarge the picture"}
-        title={`${canDrop ? "The picture that will be sent" : "The picture that was sent"} (${pic.w} × ${pic.h})`}
-        onClick={() => setBig(!big)}
-      >
-        <img src={pic.src} alt="" draggable={false} />
-      </button>
-      {canDrop ? (
+    <button
+      type="button"
+      className={`live-hb${stop ? " stop" : ""}`}
+      title={stop ? "Stop (Esc)" : "Close (Esc)"}
+      aria-label={stop ? "Stop" : "Close"}
+      onClick={() => (stop ? liveStop() : liveClose()).catch(noop)}
+    >
+      {stop ? <Square size={8} fill="currentColor" strokeWidth={0} /> : <X size={15} strokeWidth={1.75} />}
+    </button>
+  );
+}
+
+/** The question as asked: one line, the whole of it on hover or when opened. */
+function Question({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return <span className="live-question" />;
+  return (
+    <button type="button" className={`live-question${open ? " open" : ""}`} title={open ? undefined : text} aria-expanded={open} onClick={() => setOpen(!open)}>
+      {text}
+    </button>
+  );
+}
+
+/** Exactly the picture that will be sent, with the app it is of. When the picture changes (the person moved to another
+ * app) the new one fades in over the old. A click enlarges it below; on hover or focus, or with Delete, it comes out. */
+function Picture({
+  pic,
+  label,
+  big,
+  setBig,
+  canDrop,
+  under = false,
+}: {
+  pic: LivePicture;
+  label: string;
+  big: boolean;
+  setBig: (b: boolean) => void;
+  canDrop: boolean;
+  under?: boolean;
+}) {
+  const [layers, setLayers] = useState<{ cur: LivePicture; prev: LivePicture | null; n: number }>({ cur: pic, prev: null, n: 0 });
+  useEffect(() => {
+    setLayers((l) => (l.cur.src === pic.src ? l : { cur: pic, prev: l.cur, n: l.n + 1 }));
+  }, [pic.src]);
+  const what = label ? `The picture of ${label}` : "The picture";
+  return (
+    <figure className={`live-shot${under ? " under" : ""}`}>
+      <div className="live-thumb">
         <button
           type="button"
-          className="live-drop"
-          title="Don't send the picture (Delete)"
-          aria-label="Don't send the picture"
-          onClick={() => liveDropPicture().catch(noop)}
+          className="live-thumb-btn"
+          aria-expanded={big}
+          aria-label={`${what}${canDrop ? " that will be sent" : ""}: ${big ? "make it small" : "enlarge it"}`}
+          title={`${canDrop ? `${what} that will be sent` : `${what} that was sent`} (${pic.w} × ${pic.h})`}
+          onClick={() => setBig(!big)}
         >
-          <X size={12} strokeWidth={2.25} />
+          {layers.prev ? <img key={layers.n - 1} className="old" src={layers.prev.src} alt="" draggable={false} /> : null}
+          <img
+            key={layers.n}
+            className={layers.prev ? "new" : undefined}
+            src={layers.cur.src}
+            alt=""
+            draggable={false}
+            onAnimationEnd={() => setLayers((l) => (l.prev ? { ...l, prev: null } : l))}
+          />
         </button>
+        {canDrop ? (
+          <button type="button" className="live-drop" title="Don't send the picture (Delete)" aria-label="Don't send the picture" onClick={() => liveDropPicture().catch(noop)}>
+            <X size={11} strokeWidth={2.25} />
+          </button>
+        ) : null}
+      </div>
+      {label ? (
+        <figcaption className="live-label" title={label}>
+          {label}
+        </figcaption>
       ) : null}
-    </div>
+    </figure>
   );
 }
 
-/** Listening and thinking: the line drawn by the voice, or looping while the AI is asked. */
-function LineRow({ v, levels }: { v: LiveView; levels: { v: number[]; first: number } }) {
+/** The picture enlarged in place, full width, until clicked or Esc. */
+function BigPicture({ pic, close }: { pic: LivePicture; close: () => void }) {
+  return (
+    <button type="button" className="live-big live-in" style={{ aspectRatio: `${pic.w || 16} / ${pic.h || 9}` }} aria-label="Make the picture small" onClick={close}>
+      <img src={pic.src} alt="" draggable={false} />
+    </button>
+  );
+}
+
+/** Listening: the line drawn by the voice. The level is eased toward the voice every frame (quick to rise, slow to
+ * fall) and laid down as one broad stroke every VOICE_STEP_MS while the paper moves smoothly under the pen. Drawn
+ * straight into the SVG, so React does not render 60 times a second. Reduced motion: a still line and the dot. */
+function VoiceLine() {
   const ref = useRef<HTMLDivElement>(null);
-  const [w, setW] = useState(348);
+  const path = useRef<SVGPathElement>(null);
+  const dot = useRef<SVGCircleElement>(null);
+  const [w, setW] = useState(0);
+  // What the pen has written survives a change of width (the picture taken out, a longer app name).
+  const pen = useRef({ raw: 0, floor: FLOOR_START, env: 0, acc: 0, first: 0, hist: [] as number[] });
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const size = () => setW(Math.max(120, Math.round(el.clientWidth)));
+    const size = () => setW(Math.max(80, Math.round(el.clientWidth)));
     size();
     const ro = new ResizeObserver(size);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const box = { w, h: ROW };
-  if (v.line === "voice") {
-    const { d, tip } = voicePath(levels.v, box, { first: levels.first });
-    return (
-      <div className="live-line live-in" ref={ref} aria-hidden="true">
-        <svg className="ln ink" width={w} height={ROW} viewBox={`0 0 ${w} ${ROW}`}>
-          <path d={d} />
-          <circle className="tip" cx={tip.x} cy={tip.y} r={3} />
-        </svg>
-      </div>
-    );
-  }
-  const { d, width } = loopsPath({ w: Math.min(w, 220), h: ROW }, { n: 7, pitch: 19 });
+  useEffect(() => {
+    if (!w) return;
+    const box = { w, h: VOICE_H };
+    const paint = (d: string, tip: { x: number; y: number }) => {
+      path.current?.setAttribute("d", d);
+      dot.current?.setAttribute("cx", String(tip.x));
+      dot.current?.setAttribute("cy", String(tip.y));
+    };
+    const still = voicePath([], box);
+    paint(still.d, still.tip);
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const s = pen.current;
+    let last = performance.now();
+    const keep = Math.ceil(w / VOICE_DX) + 2;
+    const off = subscribe(onLiveLevel((x) => (s.raw = x)));
+    let raf = 0;
+    const draw = (t: number) => {
+      raf = requestAnimationFrame(draw);
+      const dt = Math.min(100, Math.max(0, t - last));
+      last = t;
+      if (document.hidden) return;
+      s.floor = trackFloor(s.floor, s.raw, dt);
+      s.env = smoothLevel(s.env, voiceLevel(s.raw, s.floor), dt);
+      s.acc += dt;
+      while (s.acc >= VOICE_STEP_MS) {
+        s.acc -= VOICE_STEP_MS;
+        s.hist.push(s.env);
+      }
+      while (s.hist.length > keep) {
+        s.hist.shift();
+        s.first++;
+      }
+      const { d, tip } = voicePath(s.hist, box, { first: s.first, shift: s.acc / VOICE_STEP_MS, live: s.env });
+      paint(d, tip);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => {
+      off();
+      cancelAnimationFrame(raf);
+    };
+  }, [w]);
   return (
-    <div className="live-line live-in" ref={ref} aria-hidden="true">
+    <div className="live-voice" ref={ref} aria-hidden="true">
+      {w ? (
+        <svg className="ln ink" width={w} height={VOICE_H} viewBox={`0 0 ${w} ${VOICE_H}`}>
+          <path ref={path} />
+          <circle className="tip" ref={dot} r={3} />
+        </svg>
+      ) : null}
+    </div>
+  );
+}
+
+/** Finishing and thinking: the line looping while the words are finished or the AI is asked. */
+function LineRow({ v }: { v: LiveView }) {
+  const { d, width } = loopsPath({ w: 220, h: ROW }, { n: v.compact ? 5 : 7, pitch: 19 });
+  return (
+    <div className="live-line live-in" aria-hidden="true">
       <svg className={`ln loops ${v.tone}`} width={width} height={ROW} viewBox={`0 0 ${width} ${ROW}`}>
         <path className="ghost" d={d} />
         <path className="tail" pathLength={100} d={d} />

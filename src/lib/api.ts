@@ -3,7 +3,7 @@ import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import { PREVIEW_ANSWER, PREVIEW_WORDS, previewChunks, previewLevel, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
+import { PREVIEW_ANSWER, levelOf, previewChunks, previewLevel, previewPicture, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
 import { normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -503,9 +503,14 @@ export const LIVE = {
   drop: "live_drop_picture",
   stop: "live_stop",
   close: "live_close",
-  /** The microphone level while listening: the capsule's own session stream (UiState.level), read as it is. */
+  /** The microphone level while listening: the capsule's own session stream (UiState), read as it is. */
   level: "session://state",
+  /** The level's fields on UiState, first found wins: an engine-smoothed level if the engine sends one, else the raw
+   * meter level (0 to 1 over 50 dB). */
+  levelFields: ["level_smooth", "voice", "level"],
 } as const;
+
+
 
 type Sink<T> = (p: T) => void;
 const livePv = {
@@ -530,7 +535,7 @@ export const liveState = (): Promise<LiveSnapshot | null> => (inTauri ? invoke<L
 export const onLiveState = (fn: Sink<LiveSnapshot>) => (inTauri ? listen<LiveSnapshot>(LIVE.state, (e) => fn(e.payload)) : pvOn(livePv.state)(fn));
 export const onLiveDelta = (fn: Sink<LiveDelta>) => (inTauri ? listen<LiveDelta>(LIVE.delta, (e) => fn(e.payload)) : pvOn(livePv.delta)(fn));
 export const onLiveLevel = (fn: Sink<number>) =>
-  inTauri ? listen<UiState>(LIVE.level, (e) => fn(e.payload.mic ? Math.min(1, Math.max(0, e.payload.level)) : 0)) : pvOn(livePv.level)(fn);
+  inTauri ? listen<UiState>(LIVE.level, (e) => fn(levelOf(e.payload, LIVE.levelFields))) : pvOn(livePv.level)(fn);
 export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvCommand("drop"));
 export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
 export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
@@ -549,14 +554,23 @@ function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
     return Promise.resolve();
   }
   if (c === "drop") pvEmit({ ...s, dropped: true });
-  else if (c === "close") pvEmit({ ...s, state: "closed" });
-  else pvEmit(s.state === "answering" ? { ...s, state: "shown" } : { ...s, state: "closed" });
+  else if (c === "close") {
+    livePv.timers.forEach(clearTimeout);
+    pvEmit({ ...s, state: "closed" });
+  }
+  // Stop: an answer under way ends as shown; a question still being heard is thrown away, as the engine does.
+  else if (s.state === "answering") pvEmit({ ...s, state: "shown" });
+  else if (s.state === "listening" || s.state === "finishing") {
+    livePv.timers.forEach(clearTimeout);
+    pvEmit({ ...s, state: "discarded" });
+  } else pvEmit({ ...s, state: "closed" });
   return Promise.resolve();
 }
 
-/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error[&error=provider]
- * plays the fixtures in src/lib/live.ts: a synthetic microphone for listening, the scripted stream for answering (which
- * ends in shown); thinking shows its 8 s and 20 s lines when left that long. */
+/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error|discarded
+ * [&error=provider][&pic=switch] plays the fixtures in src/lib/live.ts: a synthetic microphone for listening (with
+ * pic=switch the person moves to another app after 2 s, so the picture changes), the scripted stream for answering
+ * (which ends in shown); thinking shows its 8 s and 20 s lines when left that long. */
 export function startLivePreview(kind?: string) {
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
@@ -566,15 +580,10 @@ export function startLivePreview(kind?: string) {
   const snap = previewSnapshot(state, { error: q.get("error") });
   pvEmit(snap);
   if (state === "listening") {
-    const words = PREVIEW_WORDS.split(" ");
     let i = 0;
     const tick = () => {
       livePv.level.forEach((f) => f(previewLevel(i)));
-      if (i % 4 === 3 && livePv.snap?.state === "listening") {
-        const n = Math.min(words.length, Math.floor(i / 4));
-        const said = words.slice(0, n).join(" ");
-        if (said !== livePv.snap.words) pvEmit({ ...livePv.snap, words: said, session: { ...livePv.snap.session, title: n >= 6 ? words.slice(0, 6).join(" ") : "" } });
-      }
+      if (i === 22 && q.get("pic") === "switch" && livePv.snap?.state === "listening") pvEmit({ ...livePv.snap, picture: previewPicture("code") });
       i++;
       later(90, tick);
     };
@@ -592,6 +601,19 @@ export function startLivePreview(kind?: string) {
     later(400, tick);
   }
 }
+
+// —— The window's own controls, for a window that draws its own title bar (Settings on Windows). In the browser
+// preview they do nothing. ——
+
+const win = () => getCurrentWindow();
+export const winMinimize = () => (inTauri ? win().minimize() : Promise.resolve());
+export const winToggleMaximize = () => (inTauri ? win().toggleMaximize() : Promise.resolve());
+export const winClose = () => (inTauri ? win().close() : Promise.resolve());
+export const winStartDragging = () => (inTauri ? win().startDragging() : Promise.resolve());
+export const winIsMaximized = () => (inTauri ? win().isMaximized() : Promise.resolve(false));
+/** Whether the OS draws this window's frame; in the preview, no (so the drawn bar shows). */
+export const winIsDecorated = () => (inTauri ? win().isDecorated() : Promise.resolve(false));
+export const onWinResized = (fn: () => void): Promise<UnlistenFn> => (inTauri ? win().onResized(() => fn()) : Promise.resolve(() => undefined));
 
 // —— Opening Settings on a pane from another window. The window may not exist yet, so the ask goes through storage,
 // which every Pointcast window shares (as the theme does): read once as Settings opens, or as a storage event when it

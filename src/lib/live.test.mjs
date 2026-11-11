@@ -9,6 +9,7 @@ import {
   errorView,
   initialLive,
   isPinned,
+  levelOf,
   liveReduce,
   liveView,
   previewChunks,
@@ -33,9 +34,10 @@ test("each engine state is reached from a snapshot, with its one line behaviour 
     ["answering", "answering", "margin", "accent"],
     ["shown", "shown", "rest", "quiet"],
     ["error", "error", "rest", "warn"],
+    ["discarded", "discarded", "none", "ink"],
   ];
   for (const [state, phase, line, tone] of cases) {
-    const v = liveView(at(snap({ state, error: state === "error" ? "Network down" : null })), 0);
+    const v = liveView(at(snap({ state, error: state === "error" ? "Network down" : null, answer: state === "shown" ? "Yes." : undefined })), 0);
     assert.equal(v.phase, phase, state);
     assert.equal(v.line, line, state);
     assert.equal(v.tone, tone, state);
@@ -126,6 +128,13 @@ test("turn 0 with an empty session before the first question; the id arriving do
 
 test("the header shows the session title, or the first words of the question until there is one", () => {
   const untitled = { id: "", title: "" };
+  // While the question is heard the title is not the transcript: empty, whatever the engine has so far.
+  for (const state of ["listening", "finishing"]) {
+    const v = liveView(at(snap({ state, words: "Why do we divide by P(B) here and not" })), 0);
+    assert.equal(v.title, "", state);
+    assert.equal(v.question, "", state);
+    assert.equal(v.compact, true, state);
+  }
   assert.equal(liveView(at(snap({ state: "sending", session: untitled, words: "Why do we divide by P(B) here and not" })), 0).title, "Why do we divide by P(B)…");
   assert.equal(liveView(at(snap({ state: "listening", session: untitled, words: "" })), 0).title, "");
   assert.equal(liveView(at(snap({ state: "sending", words: "x y" })), 0).title, "Why divide");
@@ -193,10 +202,55 @@ test("Esc stops while anything is under way and closes otherwise", () => {
 
 test("only a complete answer has the foot row, and it says what left the computer", () => {
   assert.equal(liveView(at(snap({ state: "answering" })), 0).complete, false);
-  const v = liveView(at(snap({ state: "shown" })), 0);
+  const v = liveView(at(snap({ state: "shown", answer: "Yes." })), 0);
   assert.equal(v.complete, true);
   assert.equal(sentLine(v), "Sent your words and the picture to ChatGPT");
-  assert.equal(sentLine(liveView(at(snap({ state: "shown", dropped: true })), 0)), "Sent your words only to ChatGPT");
+  assert.equal(sentLine(liveView(at(snap({ state: "shown", dropped: true, answer: "Yes." })), 0)), "Sent your words only to ChatGPT");
+});
+
+test("a question stopped before it was sent never says it was sent, nor that an answer is ready", () => {
+  // The owner's bug: Stop while listening, the engine ends the turn as shown with no answer.
+  let m = at(snap({ state: "listening", words: "why is" }));
+  m = at(snap({ state: "shown", words: "why is" }), 1, m);
+  let v = liveView(m, 0);
+  assert.equal(v.phase, "discarded");
+  assert.equal(v.note, "Not sent");
+  assert.equal(v.complete, false, "no foot row");
+  assert.equal(v.sent, false);
+  assert.equal(sentLine(v), "");
+  assert.notEqual(v.announce, "Answer ready");
+  assert.equal(v.hide, true, "it says so for a moment, then the panel hides");
+  // The same after an earlier answer in the same turn: listening is a new question, the old answer is not its own.
+  m = at(snap({ state: "shown", answer: "Earlier answer" }));
+  m = at(snap({ state: "listening" }), 1, m);
+  m = at(snap({ state: "shown" }), 2, m);
+  assert.equal(liveView(m, 0).phase, "discarded");
+  assert.equal(liveView(m, 0).note, "Not sent");
+  // The engine's own discarded state reads the same.
+  v = liveView(at(snap({ state: "discarded" })), 0);
+  assert.deepEqual([v.phase, v.note, v.complete, v.sent, v.thumb, v.hide], ["discarded", "Not sent", false, false, null, true]);
+});
+
+test("a question stopped after it was sent says Stopped, not Answer ready; one with an answer keeps it", () => {
+  let m = at(snap({ state: "listening" }));
+  m = at(snap({ state: "sending" }), 1, m);
+  m = at(snap({ state: "shown" }), 2, m);
+  const v = liveView(m, 0);
+  assert.deepEqual([v.phase, v.note, v.complete, v.sent], ["discarded", "Stopped", false, true]);
+  m = deltas(at(snap({ state: "answering" })), { turn: 1, text: "Part" });
+  m = at(snap({ state: "shown" }), 3, m);
+  assert.equal(liveView(m, 0).phase, "shown");
+  assert.equal(liveView(m, 0).complete, true);
+  assert.equal(sentLine(liveView(m, 0)), "Sent your words and the picture to ChatGPT");
+});
+
+test("the picture carries the app's name when the engine gives one, and nothing else is required", () => {
+  assert.equal(liveView(at(snap({ state: "listening", picture: { ...pic, label: "  Chrome " } })), 0).label, "Chrome");
+  assert.equal(liveView(at(snap({ state: "listening", picture: { src: pic.src, w: 4, h: 3 } })), 0).label, "");
+  assert.equal(liveView(at(snap({ state: "listening", picture: { src: pic.src, w: 4, h: 3, label: 7 } })), 0).label, "");
+  assert.equal(liveView(at(snap({ state: "listening", dropped: true, picture: { ...pic, label: "Chrome" } })), 0).label, "");
+  // Unknown fields from a newer engine are ignored.
+  assert.equal(liveView(at(snap({ state: "listening", future: { x: 1 }, picture: { ...pic, extra: true } })), 0).phase, "listening");
 });
 
 test("the view follows the newest line only while the reader is at the bottom", () => {
@@ -206,7 +260,9 @@ test("the view follows the newest line only while the reader is at the bottom", 
 });
 
 test("the preview fixtures are fixed: every state, the stream joins back to the answer, and the mic has pauses", () => {
-  for (const k of ["listening", "finishing", "thinking", "answering", "shown", "error"]) assert.ok(previewSnapshot(k).state);
+  for (const k of ["listening", "finishing", "thinking", "answering", "shown", "error", "discarded"]) assert.ok(previewSnapshot(k).state);
+  assert.equal(previewSnapshot("listening").session.title, "", "no title while listening");
+  assert.ok(previewPicture().label && previewPicture("code").label && previewPicture("code").src !== previewPicture().src);
   assert.equal(previewSnapshot("thinking").state, "sending");
   assert.equal(previewChunks(PREVIEW_ANSWER).join(""), PREVIEW_ANSWER);
   assert.deepEqual(previewChunks(PREVIEW_ANSWER), previewChunks(PREVIEW_ANSWER));
@@ -214,4 +270,15 @@ test("the preview fixtures are fixed: every state, the stream joins back to the 
   assert.ok(lv.some((v) => v < 0.05) && lv.some((v) => v > 0.6));
   assert.ok(lv.every((v) => v >= 0 && v <= 1));
   assert.ok(previewPicture().src.startsWith("data:image/svg+xml,"));
+});
+
+test("the level prefers an engine-smoothed field, falls back to the raw level, and is 0 with the mic off", () => {
+  const fields = ["level_smooth", "voice", "level"];
+  assert.equal(levelOf({ mic: true, level: 0.4 }, fields), 0.4);
+  assert.equal(levelOf({ mic: true, level: 0.4, level_smooth: 0.3 }, fields), 0.3);
+  assert.equal(levelOf({ mic: true, level: 0.4, voice: 0.2 }, fields), 0.2);
+  assert.equal(levelOf({ mic: false, level: 0.9 }, fields), 0);
+  assert.equal(levelOf({ level: 7 }, fields), 1);
+  assert.equal(levelOf({ level: "loud" }, fields), 0);
+  assert.equal(levelOf(null, fields), 0);
 });
