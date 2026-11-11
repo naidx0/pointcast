@@ -45,6 +45,19 @@ Each slice is one branch off the program branch, gated on its own, merged back w
 | 10 | Paragraphs, not one block | A rule-based formatter where the prompt is composed: a new paragraph at a pause of 1.2 s after a sentence end or any pause of 2.5 s, repeats of 1 to 3 words collapsed, a short filler list removed, first/second/third runs as a list; markers never touched; on by default | `prompt.rs`, `settings.rs`, `Settings.tsx` | On the 10 real transcripts: every content word kept in order, none added, every marker kept; unit tests on each rule |
 | 11 | Tidy with a local model (opt-in) | A History action, never before the paste: Qwen3.5-2B (1.19 GiB, Apache-2.0) through a CI-built `llama-server` helper started on demand and killed after; markers stripped before the model and put back; each chunk checked (words kept 0.90 or more, at most 2 new words, length 0.85 to 1.05) or the rule text stays | `voice/` (helper), `models.json`, `Result.tsx`, a helper workflow | The 26 measured chunks pass the check; a summarising model is rejected; nothing of it runs when the action is not used |
 
+### Next loop (from ROADMAP.md items 4 to 6 and nine real recordings on the program build)
+
+Real use on the owner's PC, 9 recordings: audio starts 91 to 284 ms after the press (was 1.0 to 2.3 s in 4 of 10),
+no stray "Thank you." or "Um..." piece, 10 to 16x real time.
+
+| # | Slice | Items | Files | Gate |
+|---|---|---|---|---|
+| 12 | Mark-up without friction | A redact tool (a solid block over a region, burned into the picture, never recoverable from the file); a Cancel button beside Capture; dragging the box always moves it, so the Move tool goes | `Overlay.tsx`, the picture rasterizer | Unit test: the redacted pixels in the saved PNG are one colour; preview walk on both skins |
+| 13 | Step markers and crop | A numbered step marker that counts up by itself (1, 2, 3) and is named in the picture list; crop after capture | `Overlay.tsx`, `image_ops.rs`, `prompt.rs` | Tests on numbering and the caption; the crop keeps mark positions |
+| 14 | The app knows this computer | Settings › Speech shows the microphone in use with a live level and says when it is silent or slow to open, with the device named; each recording keeps how long its microphone took to open; one line for the graphics card, engine and measured speed | `Settings.tsx`, `session.rs`, `voice/audio.rs`, `history.rs` | Tests on the meta fields; preview walk; a real recording shows the fields |
+| 15 | Agent setup in one click | Settings writes the user-scope MCP config for Claude Code, Cursor and Codex and checks it answers; an MCP conformance test in CI | `lib.rs` (agent setup), `Settings.tsx`, `mcp.rs` tests | The check passes against the running server; a wrong token is reported |
+| 16 | Release 0.5.0 | Version, notes, README (size budget, handoff folder, tidy), a cross-platform pass: install tests on fresh macOS and Windows runners | release files | Draft release green; the owner's yes to publish |
+
 ## Order
 
 1, 2, 3 touch different files and land first (1 is the smallest and the largest gain for dictation).
