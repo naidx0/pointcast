@@ -68,8 +68,8 @@ pub struct Proc {
 }
 
 impl Proc {
-    /// Start the helper in `cwd` and hand back its stdin and stdout. With a `pidfile`, record it there for the
-    /// next run to find.
+    /// Start the helper in `cwd` and hand back its stdin and stdout. With a `pidfile`, add its record there for the
+    /// next run to find: the file holds one record for each helper that runs.
     pub fn start(l: &Launch, cwd: &Path, pidfile: Option<&Path>) -> std::io::Result<(Proc, ChildStdin, ChildStdout)> {
         let mut cmd = Command::new(&l.exe);
         cmd.args(&l.args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -114,7 +114,10 @@ impl Proc {
             if let Some(dir) = f.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            if std::fs::write(f, format!("{pid}\n{started}\n{}\n", std::process::id())).is_ok() {
+            let _one = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all = records(f);
+            all.push((pid as u64, started, std::process::id() as u64));
+            if keep(f, &all) {
                 p.pidfile = Some(f.to_owned());
             }
         }
@@ -168,8 +171,12 @@ impl Proc {
                 let _ = CloseHandle(HANDLE(j as _));
             }
         }
-        if let Some(p) = self.pidfile.take() {
-            let _ = std::fs::remove_file(p);
+        if let Some(f) = self.pidfile.take() {
+            // Only this helper's record goes: another helper beside it keeps its own.
+            let _one = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all = records(&f);
+            all.retain(|r| (r.0, r.2) != (self.pid as u64, std::process::id() as u64));
+            keep(&f, &all);
         }
     }
 }
@@ -291,22 +298,54 @@ pub fn start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// End a helper an earlier run left behind. The pid file holds its pid, the time it started and the Pointcast that
-/// started it; the process is ended only if one with that pid runs AND started at that time. A file written by
-/// this run names a helper that is in use, and is left alone.
+/// One helper in a pid file: its pid, the time it started and the Pointcast that started it, a line each.
+type Record = (u64, u64, u64);
+
+/// One reader or writer of a pid file at a time: two helpers of one provider share the file.
+static RECORDS: Mutex<()> = Mutex::new(());
+
+/// The whole records in `pidfile`; a record cut short is not one.
+fn records(pidfile: &Path) -> Vec<Record> {
+    let Ok(s) = std::fs::read_to_string(pidfile) else { return Vec::new() };
+    let n: Vec<Option<u64>> = s.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| l.parse().ok()).collect();
+    n.chunks_exact(3).filter_map(|c| Some((c[0]?, c[1]?, c[2]?))).collect()
+}
+
+/// Write `all` as the file's records, or remove the file when none is left. Whether that worked.
+fn keep(pidfile: &Path, all: &[Record]) -> bool {
+    if all.is_empty() {
+        let _ = std::fs::remove_file(pidfile);
+        return true;
+    }
+    let text: String = all.iter().map(|(pid, started, owner)| format!("{pid}\n{started}\n{owner}\n")).collect();
+    std::fs::write(pidfile, text).is_ok()
+}
+
+/// End every helper an earlier run left behind. Each record in the pid file holds a helper's pid, the time it
+/// started and the Pointcast that started it; the process is ended only if one with that pid runs AND started at
+/// that time. A record written by this run, or by another Pointcast that still runs, names a helper that is in
+/// use, and is left alone.
 pub fn reap_stale(pidfile: &Path) {
-    let Ok(s) = std::fs::read_to_string(pidfile) else { return };
-    let mut n = s.lines().map(|l| l.trim().parse::<u64>().ok());
-    let (pid, started, owner) = (n.next().flatten(), n.next().flatten(), n.next().flatten());
-    if owner == Some(std::process::id() as u64) {
+    let _one = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+    if !pidfile.exists() {
         return;
     }
-    let _ = std::fs::remove_file(pidfile);
-    let (Some(pid), Some(started)) = (pid.and_then(|p| u32::try_from(p).ok()), started) else { return };
-    if pid <= 1 || pid == std::process::id() || start_time(pid) != Some(started) {
-        return;
+    let me = std::process::id();
+    let mut left = Vec::new();
+    for r in records(pidfile) {
+        let (pid, started, owner) = r;
+        let Ok(pid) = u32::try_from(pid) else { continue };
+        // A record whose process is gone, or whose pid is now another process, names nothing to end.
+        if pid <= 1 || pid == me || start_time(pid) != Some(started) {
+            continue;
+        }
+        if u32::try_from(owner).is_ok_and(|o| o == me || (o > 1 && start_time(o).is_some())) {
+            left.push(r);
+            continue;
+        }
+        end_stray(pid);
     }
-    end_stray(pid);
+    keep(pidfile, &left);
 }
 
 #[cfg(windows)]
@@ -483,6 +522,71 @@ pub mod tests {
         assert!(gone(other.pid()), "the stray is ended");
         assert!(!f.exists());
         other.end();
+    }
+
+    #[test]
+    fn two_helpers_at_once_leave_two_records_and_closing_one_leaves_the_others() {
+        let d = scratch("two");
+        let f = d.join("helper.pid");
+        let (mut a, _ai, _ao) = Proc::start(&helper("sleep"), &d, Some(&f)).unwrap();
+        let (mut b, _bi, _bo) = Proc::start(&helper("sleep"), &d, Some(&f)).unwrap();
+        let me = std::process::id() as u64;
+        let of = |p: &Proc| (p.pid() as u64, start_time(p.pid()).unwrap(), me);
+        let (ra, rb) = (of(&a), of(&b));
+        assert_eq!(records(&f), [ra, rb]);
+        a.end();
+        assert_eq!(records(&f), [rb], "the helper that still runs keeps its record");
+        reap_stale(&f);
+        assert!(start_time(b.pid()).is_some());
+        b.end();
+        assert!(!f.exists());
+    }
+
+    /// The pid of a process that ran and is gone.
+    fn dead_pid(d: &Path) -> u32 {
+        let (mut p, _i, _o) = Proc::start(&helper("sleep"), d, None).unwrap();
+        let pid = p.pid();
+        p.end();
+        assert!(gone(pid));
+        pid
+    }
+
+    #[test]
+    fn after_a_crash_every_stray_is_found_and_ended() {
+        let d = scratch("crash");
+        let f = d.join("helper.pid");
+        // Two helpers of a Pointcast that is gone: its records are all that is left of it.
+        let (mut a, _ai, _ao) = Proc::start(&helper("sleep"), &d, None).unwrap();
+        let (mut b, _bi, _bo) = Proc::start(&helper("sleep"), &d, None).unwrap();
+        let owner = dead_pid(&d);
+        let line = |p: &Proc| format!("{}\n{}\n{owner}\n", p.pid(), start_time(p.pid()).unwrap());
+        std::fs::write(&f, line(&a) + &line(&b)).unwrap();
+        reap_stale(&f);
+        assert!(gone(a.pid()) && gone(b.pid()), "both strays are ended");
+        assert!(!f.exists());
+        a.end();
+        b.end();
+    }
+
+    #[test]
+    fn a_helper_of_a_pointcast_that_still_runs_is_left_alone_until_that_one_is_gone() {
+        let d = scratch("owned");
+        let f = d.join("helper.pid");
+        let (mut p, _i, _o) = Proc::start(&helper("sleep"), &d, None).unwrap();
+        let (mut owner, _oi, _oo) = Proc::start(&helper("sleep"), &d, None).unwrap();
+        let record = (p.pid() as u64, start_time(p.pid()).unwrap(), owner.pid() as u64);
+        // Beside it, a record whose process is long gone: dropped, and nothing is ended for it.
+        std::fs::write(&f, format!("{}\n{}\n{}\n{}\n7\n0\n", record.0, record.1, record.2, dead_pid(&d))).unwrap();
+        reap_stale(&f);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(start_time(p.pid()).is_some(), "its owner still runs");
+        assert_eq!(records(&f), [record]);
+        owner.end();
+        assert!(gone(owner.pid()));
+        reap_stale(&f);
+        assert!(gone(p.pid()), "with the owner gone it is a stray");
+        assert!(!f.exists());
+        p.end();
     }
 
     #[test]
