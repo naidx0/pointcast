@@ -1,5 +1,6 @@
 mod agents;
 mod anchor;
+mod assist;
 mod capture;
 mod chord;
 mod clipboard;
