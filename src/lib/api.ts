@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import { PREVIEW_ANSWER, PREVIEW_WORDS, previewChunks, previewLevel, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const preview = !inTauri && typeof location !== "undefined" && location.search.includes("preview=1");
@@ -478,6 +481,102 @@ export const onSettingsPane = on<string>("settings://pane");
 /** Subscribe in an effect; returns the cleanup. */
 export function subscribe(...subs: Promise<UnlistenFn>[]) {
   return () => subs.forEach((u) => u.then((fn) => fn()));
+}
+
+// —— The Ask panel (live.html): the one adapter. Every engine name the panel uses is in LIVE, so a rename is one edit. ——
+
+export const LIVE = {
+  /** event: a full snapshot (LiveSnapshot) on every change of state */
+  state: "live://state",
+  /** event: { turn, text } to append to the answer */
+  delta: "live://delta",
+  /** command: the current snapshot */
+  get: "live_state",
+  drop: "live_drop_picture",
+  stop: "live_stop",
+  close: "live_close",
+  /** The microphone level while listening: the capsule's own session stream (UiState.level), read as it is. */
+  level: "session://state",
+} as const;
+
+type Sink<T> = (p: T) => void;
+const livePv = {
+  snap: null as LiveSnapshot | null,
+  state: new Set<Sink<LiveSnapshot>>(),
+  delta: new Set<Sink<LiveDelta>>(),
+  level: new Set<Sink<number>>(),
+  timers: [] as ReturnType<typeof setTimeout>[],
+};
+const pvOn =
+  <T,>(set: Set<Sink<T>>) =>
+  (fn: Sink<T>): Promise<UnlistenFn> => {
+    set.add(fn);
+    return Promise.resolve(() => void set.delete(fn));
+  };
+const pvEmit = (s: LiveSnapshot) => {
+  livePv.snap = s;
+  livePv.state.forEach((f) => f(s));
+};
+
+export const liveState = (): Promise<LiveSnapshot | null> => (inTauri ? invoke<LiveSnapshot>(LIVE.get) : Promise.resolve(livePv.snap));
+export const onLiveState = (fn: Sink<LiveSnapshot>) => (inTauri ? listen<LiveSnapshot>(LIVE.state, (e) => fn(e.payload)) : pvOn(livePv.state)(fn));
+export const onLiveDelta = (fn: Sink<LiveDelta>) => (inTauri ? listen<LiveDelta>(LIVE.delta, (e) => fn(e.payload)) : pvOn(livePv.delta)(fn));
+export const onLiveLevel = (fn: Sink<number>) =>
+  inTauri ? listen<UiState>(LIVE.level, (e) => fn(e.payload.mic ? Math.min(1, Math.max(0, e.payload.level)) : 0)) : pvOn(livePv.level)(fn);
+export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvCommand("drop"));
+export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
+export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
+export const liveOpenSettings = () => (inTauri ? windowOpen("settings") : Promise.resolve());
+/** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
+export const liveFit = (height: number) =>
+  inTauri ? getCurrentWindow().setSize(new LogicalSize(380, Math.round(height))) : Promise.resolve();
+
+function pvCommand(c: "drop" | "stop" | "close"): Promise<void> {
+  const s = livePv.snap;
+  if (!s) return Promise.resolve();
+  if (c === "drop") pvEmit({ ...s, dropped: true });
+  else if (c === "close") pvEmit({ ...s, state: "closed" });
+  else pvEmit(s.state === "answering" ? { ...s, state: "shown" } : { ...s, state: "closed" });
+  return Promise.resolve();
+}
+
+/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error[&error=provider]
+ * plays the fixtures in src/lib/live.ts: a synthetic microphone for listening, the scripted stream for answering (which
+ * ends in shown); thinking shows its 8 s and 20 s lines when left that long. */
+export function startLivePreview(kind?: string) {
+  livePv.timers.forEach(clearTimeout);
+  livePv.timers = [];
+  const q = new URLSearchParams(location.search);
+  const state = kind ?? q.get("state") ?? "thinking";
+  const later = (ms: number, f: () => void) => livePv.timers.push(setTimeout(f, ms));
+  const snap = previewSnapshot(state, { error: q.get("error") });
+  pvEmit(snap);
+  if (state === "listening") {
+    const words = PREVIEW_WORDS.split(" ");
+    let i = 0;
+    const tick = () => {
+      livePv.level.forEach((f) => f(previewLevel(i)));
+      if (i % 4 === 3 && livePv.snap?.state === "listening") {
+        const n = Math.min(words.length, Math.floor(i / 4));
+        const said = words.slice(0, n).join(" ");
+        if (said !== livePv.snap.words) pvEmit({ ...livePv.snap, words: said, session: { ...livePv.snap.session, title: n >= 6 ? words.slice(0, 6).join(" ") : "" } });
+      }
+      i++;
+      later(90, tick);
+    };
+    tick();
+  } else if (state === "answering") {
+    const chunks = previewChunks(PREVIEW_ANSWER);
+    let i = 0;
+    const tick = () => {
+      if (livePv.snap?.state !== "answering") return;
+      if (i >= chunks.length) return pvEmit({ ...livePv.snap, state: "shown" });
+      livePv.delta.forEach((f) => f({ turn: snap.turn, text: chunks[i] }));
+      i++;
+      later(Number(q.get("speed")) || 32, tick);
+    };
+    later(400, tick);
+  }
 }
 
 export function stamp(ms: number): string {
