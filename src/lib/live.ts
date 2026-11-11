@@ -21,8 +21,8 @@ export type LiveSnapshot = {
   dropped: boolean;
   provider: string | { id?: string; name?: string } | null;
   error: LiveErrorPayload;
-  /** How long the request to the AI had already waited when the snapshot was taken, in ms. */
-  thinking?: number;
+  /** True while only reasoning has arrived for the current turn: the AI is working, nothing to show yet. */
+  thinking?: boolean;
   /** The answer so far, if the engine sends it with the snapshot (a window opened mid-answer). Optional. */
   answer?: string;
 };
@@ -67,7 +67,7 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     dropped: !!v.dropped,
     provider: v.provider ?? null,
     error: v.error ?? null,
-    thinking: Number.isFinite(v.thinking) ? Math.max(0, Number(v.thinking)) : undefined,
+    thinking: v.thinking === true,
     answer: typeof v.answer === "string" ? v.answer : undefined,
   };
 }
@@ -80,21 +80,22 @@ export function liveReduce(m: LiveModel, a: LiveAction): LiveModel {
     return text === m.text ? m : { ...m, text };
   }
   const s = normalizeSnapshot(a.snap);
-  const sameTurn = s.turn === m.snap.turn && s.session.id === m.snap.session.id;
+  // The session id is "" until the first question is kept: that is the same session, not a new one.
+  const sameTurn = s.turn === m.snap.turn && (s.session.id === m.snap.session.id || !s.session.id || !m.snap.session.id);
   let text = sameTurn ? m.text : "";
   if (s.answer !== undefined) text = s.answer;
   const waitFrom =
     s.state === "sending"
       ? m.snap.state === "sending" && sameTurn && m.waitFrom != null
         ? m.waitFrom
-        : a.now - (s.thinking ?? 0)
+        : a.now
       : null;
   return { snap: s, text, waitFrom };
 }
 
 /** After this long waiting for the AI, one quiet line says so. */
 export const SLOW_MS = 8_000;
-/** After this long, the wait is an error with Try again. */
+/** After this long with nothing back from the AI, the wait is an error with Stop. */
 export const STALL_MS = 20_000;
 
 export type Phase = "closed" | "listening" | "finishing" | "thinking" | "answering" | "shown" | "error";
@@ -102,7 +103,9 @@ export type Phase = "closed" | "listening" | "finishing" | "thinking" | "answeri
 export type LineMode = "voice" | "loops" | "margin" | "rest" | "none";
 /** ink: the work is on this computer. accent: going to or coming from the AI. warn: a wait ran long or failed. */
 export type Tone = "ink" | "accent" | "warn" | "quiet";
-export type ErrorAction = "retry" | "settings" | null;
+/** The one action an error offers: open Settings, stop the request still in flight, or close the panel. (Try again
+ * needs an engine command that does not exist yet; pressing Ask again asks again.) */
+export type ErrorAction = "settings" | "stop" | "close" | null;
 export type LiveErrorView = { text: string; action: ErrorAction; label: string | null };
 
 export type LiveView = {
@@ -150,7 +153,13 @@ export function errorView(e: LiveErrorPayload, provider: string): LiveErrorView 
   const message = (typeof e === "string" ? e : e?.message ?? "").trim();
   if (code === "no_provider" || (!provider && !message) || /^choose an ai/i.test(message))
     return { text: "Choose an AI in Settings first", action: "settings", label: "Open Settings" };
-  return { text: message || `${provider || "The AI"} could not answer`, action: "retry", label: "Try again" };
+  return { text: message || `${provider || "The AI"} could not answer`, action: "close", label: "Close" };
+}
+
+/** The first words of the question, for the header until the engine gives the session a title. */
+export function firstWords(words: string, n = 6): string {
+  const w = words.trim().split(" ").filter(Boolean);
+  return w.length > n ? w.slice(0, n).join(" ") + "…" : w.join(" ");
 }
 
 export function liveView(m: LiveModel, now: number): LiveView {
@@ -164,7 +173,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     mic: false,
     inFlight: false,
     provider,
-    title: s.session.title,
+    title: s.session.title || firstWords(s.words),
     words: s.words,
     hearing: false,
     thumb,
@@ -187,6 +196,8 @@ export function liveView(m: LiveModel, now: number): LiveView {
       // A first delta can arrive before the snapshot that says so: the answer has started.
       if (m.text) return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
       const waited = m.waitFrom == null ? 0 : now - m.waitFrom;
+      // Reasoning arriving is the AI at work, not a stall: the loops go on and the long-wait line says so.
+      if (s.thinking) return thinkingView(base, name, waited >= SLOW_MS ? `${provider || "The AI"} is thinking` : null);
       if (waited >= STALL_MS)
         return {
           ...base,
@@ -195,22 +206,13 @@ export function liveView(m: LiveModel, now: number): LiveView {
           tone: "warn",
           inFlight: true,
           stop: true,
-          error: { text: `${provider || "The AI"} has not answered`, action: "retry", label: "Try again" },
+          error: { text: `${provider || "The AI"} has not answered`, action: "stop", label: "Stop" },
           announce: `${provider || "The AI"} has not answered`,
         };
-      const slow = waited >= SLOW_MS;
-      return {
-        ...base,
-        phase: "thinking",
-        line: "loops",
-        tone: "accent",
-        inFlight: true,
-        stop: true,
-        note: slow ? `Waiting for ${name}` : null,
-        announce: slow ? `Waiting for ${name}` : `Asking ${name}`,
-      };
+      return thinkingView(base, name, waited >= SLOW_MS ? `Waiting for ${name}` : null);
     }
     case "answering":
+      if (s.thinking && !m.text) return thinkingView(base, name, null);
       return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
     case "shown":
       return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, announce: "Answer ready" };
@@ -219,6 +221,10 @@ export function liveView(m: LiveModel, now: number): LiveView {
       return { ...base, phase: "error", line: "rest", tone: "warn", error: err, announce: err.text };
     }
   }
+}
+
+function thinkingView(base: LiveView, name: string, note: string | null): LiveView {
+  return { ...base, phase: "thinking", line: "loops", tone: "accent", inFlight: true, stop: true, note, announce: note ?? `Asking ${name}` };
 }
 
 /** Whether the person is reading the newest line: the view follows the text only then, and leaves it alone once they
@@ -273,7 +279,7 @@ export function previewPicture(): LivePicture {
 }
 
 /** The preview's snapshot for a state named in the address. */
-export function previewSnapshot(kind: string, o: { error?: string | null; waited?: number; provider?: string } = {}): LiveSnapshot {
+export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
   const session = { id: "preview", title: "Why do we divide by P(B)" };
   const common = { ...CLOSED, session, turn: 1, picture: previewPicture(), provider, words: PREVIEW_WORDS };
@@ -289,9 +295,9 @@ export function previewSnapshot(kind: string, o: { error?: string | null; waited
     case "error":
       return o.error === "provider"
         ? { ...common, state: "error", error: { code: "provider", message: "ChatGPT could not be reached" } }
-        : { ...common, state: "error", provider: null, error: { code: "no_provider" } };
+        : { ...common, state: "error", provider: "", error: "Choose an AI in Settings first" };
     default:
-      return { ...common, state: "sending", thinking: o.waited ?? 0 };
+      return { ...common, state: "sending" };
   }
 }
 

@@ -90,18 +90,45 @@ test("thinking says nothing for 8 s, then one quiet line, then at 20 s the error
   assert.equal(slow.line, "loops");
   const stall = liveView(m, 1_000 + STALL_MS);
   assert.equal(stall.phase, "error");
-  assert.equal(stall.error?.action, "retry");
-  assert.equal(stall.error?.label, "Try again");
+  assert.equal(stall.error?.action, "stop");
+  assert.equal(stall.error?.label, "Stop");
   assert.equal(stall.stop, true, "Esc still stops the request that is in flight");
 });
 
-test("the wait clock starts when sending starts, survives repeated sending snapshots, and counts time already waited", () => {
+test("the wait clock starts when sending starts and survives repeated sending snapshots", () => {
   let m = at(snap({ state: "sending" }), 5_000);
-  m = at(snap({ state: "sending" }), 9_000, m);
+  m = at(snap({ state: "sending", thinking: true }), 9_000, m);
   assert.equal(m.waitFrom, 5_000);
-  const opened = at(snap({ state: "sending", thinking: 9_000 }), 100_000);
-  assert.equal(liveView(opened, 100_000).note, "Waiting for ChatGPT");
   assert.equal(at(snap({ state: "answering" }), 6_000, m).waitFrom, null);
+});
+
+test("reasoning arriving (thinking: true) is the AI at work: loops, no 20 s error, and the long-wait line says thinking", () => {
+  const m = at(snap({ state: "sending", thinking: true }), 0);
+  assert.equal(liveView(m, 1_000).note, null);
+  const late = liveView(m, STALL_MS + 5_000);
+  assert.equal(late.phase, "thinking");
+  assert.equal(late.error, null);
+  assert.equal(late.note, "ChatGPT is thinking");
+  const ans = liveView(at(snap({ state: "answering", thinking: true })), 0);
+  assert.equal(ans.phase, "thinking", "answering with only reasoning so far still loops");
+  assert.equal(ans.line, "loops");
+  assert.equal(liveView(at(snap({ state: "sending", thinking: "yes" })), STALL_MS).phase, "error", "only true means reasoning");
+});
+
+test("turn 0 with an empty session before the first question; the id arriving does not reset the answer", () => {
+  let m = at({ ...CLOSED, state: "listening", provider: "ChatGPT" });
+  assert.equal(m.snap.turn, 0);
+  m = at(snap({ state: "answering", session: { id: "", title: "" } }), 0, m);
+  m = deltas(m, { turn: 1, text: "Hi" });
+  m = at(snap({ state: "answering", session: { id: "s9", title: "" } }), 1, m);
+  assert.equal(m.text, "Hi");
+});
+
+test("the header shows the session title, or the first words of the question until there is one", () => {
+  const untitled = { id: "", title: "" };
+  assert.equal(liveView(at(snap({ state: "sending", session: untitled, words: "Why do we divide by P(B) here and not" })), 0).title, "Why do we divide by P(B)…");
+  assert.equal(liveView(at(snap({ state: "listening", session: untitled, words: "" })), 0).title, "");
+  assert.equal(liveView(at(snap({ state: "sending", words: "x y" })), 0).title, "Why divide");
 });
 
 test("a first delta before the answering snapshot shows the answer, not the loops", () => {
@@ -132,9 +159,10 @@ test("no AI chosen is the Settings error; any other failure offers Try again", (
   assert.deepEqual(errorView({ code: "no_provider" }, ""), { text: "Choose an AI in Settings first", action: "settings", label: "Open Settings" });
   assert.equal(errorView(null, "").action, "settings");
   assert.equal(errorView("Choose an AI in Settings first", "").action, "settings");
+  assert.equal(errorView("Choose an AI in Settings first", "").label, "Open Settings");
   const net = errorView({ code: "provider", message: "ChatGPT could not be reached" }, "ChatGPT");
   assert.equal(net.text, "ChatGPT could not be reached");
-  assert.equal(net.action, "retry");
+  assert.equal(net.action, "close");
   assert.equal(errorView(null, "Claude").text, "Claude could not answer");
 });
 

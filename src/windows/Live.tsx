@@ -6,7 +6,6 @@ import {
   liveDropPicture,
   liveFit,
   liveOpenSettings,
-  liveRetry,
   liveState,
   liveStop,
   onLiveDelta,
@@ -178,7 +177,7 @@ export function Live() {
         <span className="live-title" title={v.title || undefined}>
           {v.title}
         </span>
-        <span className={`live-provider${v.inFlight ? " on" : ""}`}>{v.provider}</span>
+        {v.provider ? <span className={`live-provider${v.inFlight ? " on" : ""}`}>{v.provider}</span> : null}
         <button
           type="button"
           className="live-hb"
@@ -220,7 +219,7 @@ function Thumb({ pic, big, setBig, canDrop }: { pic: LivePicture; big: boolean; 
         className="live-thumb-btn"
         aria-expanded={big}
         aria-label={big ? "Make the picture small" : "Enlarge the picture"}
-        title={canDrop ? "The picture that will be sent" : "The picture that was sent"}
+        title={`${canDrop ? "The picture that will be sent" : "The picture that was sent"} (${pic.w} × ${pic.h})`}
         onClick={() => setBig(!big)}
       >
         <img src={pic.src} alt="" draggable={false} />
@@ -278,7 +277,7 @@ function LineRow({ v, levels }: { v: LiveView; levels: { v: number[]; first: num
 }
 
 function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {
-  const act = () => (err.action === "settings" ? liveOpenSettings() : liveRetry()).catch(noop);
+  const act = () => (err.action === "settings" ? liveOpenSettings() : err.action === "stop" ? liveStop() : liveClose()).catch(noop);
   return (
     <div className="live-err live-in">
       <svg className="ln warn" width={16} height={20} viewBox="0 0 16 20" aria-hidden="true">

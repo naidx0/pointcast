@@ -470,8 +470,6 @@ export const LIVE = {
   drop: "live_drop_picture",
   stop: "live_stop",
   close: "live_close",
-  /** command, NOT in the 0.5 contract yet: ask the same question again after a failure or a 20 s wait */
-  retry: "live_retry",
   /** The microphone level while listening: the capsule's own session stream (UiState.level), read as it is. */
   level: "session://state",
 } as const;
@@ -503,32 +501,30 @@ export const onLiveLevel = (fn: Sink<number>) =>
 export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvCommand("drop"));
 export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
 export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
-export const liveRetry = () => (inTauri ? invoke<void>(LIVE.retry) : pvCommand("retry"));
 export const liveOpenSettings = () => (inTauri ? windowOpen("settings") : Promise.resolve());
 /** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
 export const liveFit = (height: number) =>
   inTauri ? getCurrentWindow().setSize(new LogicalSize(380, Math.round(height))) : Promise.resolve();
 
-function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
+function pvCommand(c: "drop" | "stop" | "close"): Promise<void> {
   const s = livePv.snap;
   if (!s) return Promise.resolve();
   if (c === "drop") pvEmit({ ...s, dropped: true });
   else if (c === "close") pvEmit({ ...s, state: "closed" });
-  else if (c === "retry") startLivePreview("thinking");
   else pvEmit(s.state === "answering" ? { ...s, state: "shown" } : { ...s, state: "closed" });
   return Promise.resolve();
 }
 
-/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error[&waited=9000]
- * [&error=provider] plays the fixtures in src/lib/live.ts: a synthetic microphone for listening, the scripted stream for
- * answering (which ends in shown), the 8 s and 20 s lines from `waited`. */
+/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error[&error=provider]
+ * plays the fixtures in src/lib/live.ts: a synthetic microphone for listening, the scripted stream for answering (which
+ * ends in shown); thinking shows its 8 s and 20 s lines when left that long. */
 export function startLivePreview(kind?: string) {
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
   const q = new URLSearchParams(location.search);
   const state = kind ?? q.get("state") ?? "thinking";
   const later = (ms: number, f: () => void) => livePv.timers.push(setTimeout(f, ms));
-  const snap = previewSnapshot(state, { error: q.get("error"), waited: Number(q.get("waited")) || 0 });
+  const snap = previewSnapshot(state, { error: q.get("error") });
   pvEmit(snap);
   if (state === "listening") {
     const words = PREVIEW_WORDS.split(" ");
