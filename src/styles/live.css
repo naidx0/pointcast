@@ -46,68 +46,99 @@ html.vibrant .live {
   outline-offset: 1px;
 }
 
-/* —— Header: the question's first words, and the AI's name —— */
-.live-head {
-  flex: none;
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 var(--pad);
-  border-bottom: 0.5px solid var(--sep);
-}
-html.win .live-head {
-  border-bottom-width: 1px;
-}
-.live-title {
-  flex: 1;
-  min-width: 0;
-  margin-right: 24px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-weight: 600;
-}
-.live-provider {
-  flex: none;
-  font-size: var(--fs-caption);
-  line-height: 16px;
-  color: var(--live-quiet);
-  transition:
-    color 180ms var(--ease),
-    transform 180ms var(--ease);
-}
-.live-provider.on {
-  color: var(--live-accent-text);
-}
+/* —— Stop or Close: always visible at rest, small and quiet —— */
 .live-hb {
-  position: absolute;
-  top: 8px;
-  right: 8px;
+  flex: none;
   width: 24px;
   height: 24px;
   display: grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: var(--r-control);
+  border-radius: 12px;
   background: transparent;
   color: var(--live-quiet);
-  opacity: 0;
-  transition: opacity 180ms var(--ease);
+  transition:
+    background-color 120ms var(--ease),
+    color 120ms var(--ease);
 }
-.live:hover .live-hb,
-.live-hb:focus-visible {
-  opacity: 1;
-}
-.live:hover .live-provider,
-.live:has(.live-hb:focus-visible) .live-provider {
-  transform: translateX(-24px);
+.live-hb.stop {
+  background: var(--fill);
+  color: var(--live-ink);
 }
 .live-hb:hover {
   background: var(--fill-2);
   color: var(--live-ink);
+}
+html.win .live-hb:not(.stop) {
+  border-radius: var(--r-control);
+}
+
+/* —— Listening: one row, as quiet as the dictation capsule. The stop, the line the voice draws with its red dot, and
+   the picture that would go with the app it is of. Nothing else. —— */
+.live-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 60px;
+  padding: 8px 12px 8px 14px;
+}
+html.win .live-row {
+  padding-left: 16px;
+}
+.live-row-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.live-voice {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  /* The past fades out to the left: the ink is freshest at the pen. */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 28px);
+  mask-image: linear-gradient(to right, transparent 0, #000 28px);
+}
+.live-voice .ln {
+  overflow: hidden;
+}
+.live-row .live-line {
+  margin: 0;
+}
+.live-ended {
+  margin: 0;
+  color: var(--live-quiet);
+}
+
+/* —— The question as asked, once asked: one line, the rest on hover or a click —— */
+.live-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 10px 0 var(--pad);
+}
+.live-question {
+  flex: 1;
+  min-width: 0;
+  min-height: 24px;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--live-ink);
+  font: 600 var(--fs-body) / 20px var(--font);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-question.open {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* —— Body —— */
@@ -120,44 +151,37 @@ html.win .live-head {
   overflow-anchor: none;
 }
 .live-inner {
-  padding: 12px var(--pad) 16px;
-}
-.live-q {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-.live-q.big {
-  flex-direction: column;
-}
-.live-words {
-  flex: 1;
-  min-width: 0;
-  margin: -2px 0 0;
-  color: var(--live-ink);
-  overflow-wrap: anywhere;
-  user-select: text;
-  -webkit-user-select: text;
-  transition: color 180ms var(--ease);
-}
-.live-words.quiet {
-  color: var(--live-quiet);
-}
-.live-q.big .live-words {
-  margin: 0;
+  padding: 8px var(--pad) 16px;
 }
 
+/* —— The picture: big enough to know, with the app it is of —— */
+.live-shot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  min-width: 0;
+}
+/* Under the thumbnail the name may run wider than it, to the left, below the line: the row never changes width. */
+.live-shot.under {
+  width: 76px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
 .live-thumb {
   position: relative;
   flex: none;
-  width: 96px;
-  height: 54px;
+  width: 80px;
+  height: 45px;
 }
-.live-thumb.big {
-  width: 100%;
-  height: auto;
+.live-shot.under .live-thumb {
+  width: 76px;
+  height: 43px;
 }
 .live-thumb-btn {
+  position: relative;
   display: block;
   width: 100%;
   height: 100%;
@@ -172,23 +196,45 @@ html.win .live-thumb-btn {
   border-radius: 4px;
 }
 .live-thumb-btn img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
+/* A new picture (the person moved to another app) fades in over the last one. */
+.live-thumb-btn img.new {
+  animation: live-in 280ms var(--ease) both;
+}
+.live-label {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-shot.under .live-label {
+  flex: none;
+  max-width: 150px;
+  font-size: 11px;
+  line-height: 13px;
+}
 .live-drop {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
   display: grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.62);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.66);
   color: #fff;
   opacity: 0;
   transition: opacity 120ms var(--ease);
@@ -197,11 +243,47 @@ html.win .live-thumb-btn {
 .live-thumb:focus-within .live-drop {
   opacity: 1;
 }
+.live-big {
+  display: block;
+  width: 100%;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 0.5px solid var(--sep);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--fill);
+}
+.live.compact .live-big {
+  width: auto;
+  margin: 0 12px 12px 14px;
+}
+html.win .live-big {
+  border-width: 1px;
+  border-radius: 4px;
+}
+.live-big img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* —— Thinking: the loops, and the AI's name beside them in the accent —— */
+.live-think {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.live-provider {
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-accent-text);
+}
 
 /* —— The line —— */
 .live-line {
   height: 24px;
-  margin-top: 12px;
 }
 .ln {
   display: block;
@@ -496,6 +578,9 @@ html.live-hidden .live * {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .live .live-thumb-btn img.new {
+    animation-duration: 1ms;
+  }
   .live .ln.loops .head,
   .live .ln.loops .tail {
     display: none;

@@ -3,8 +3,9 @@
 // wait lines on an injected clock, and the browser preview's fixtures, so node --test reads it without a window
 // (src/lib/live.test.mjs).
 
-export type LiveStateName = "closed" | "listening" | "finishing" | "sending" | "answering" | "shown" | "error";
-export type LivePicture = { src: string; w: number; h: number };
+export type LiveStateName = "closed" | "listening" | "finishing" | "sending" | "answering" | "shown" | "error" | "discarded";
+/** `label`: the app or window the picture is of, when the engine names it ("" otherwise). */
+export type LivePicture = { src: string; w: number; h: number; label?: string };
 /** The engine's error: a message, or a code with an optional message. `no_provider` asks for Settings. */
 export type LiveErrorPayload = string | { code?: string; message?: string } | null;
 
@@ -34,6 +35,9 @@ export type LiveModel = {
   snap: LiveSnapshot;
   /** The answer of snap.turn, as streamed so far. */
   text: string;
+  /** The question of snap.turn has left the computer: the engine said sending or answering for it, or an answer
+   * arrived. Only then does the panel say it was sent. A new question (listening) starts unsent. */
+  sent: boolean;
   /** Clock time at which the request to the AI started waiting, while it waits. */
   waitFrom: number | null;
 };
@@ -51,9 +55,9 @@ export const CLOSED: LiveSnapshot = {
   error: null,
 };
 
-export const initialLive = (): LiveModel => ({ snap: CLOSED, text: "", waitFrom: null });
+export const initialLive = (): LiveModel => ({ snap: CLOSED, text: "", sent: false, waitFrom: null });
 
-const STATES: LiveStateName[] = ["closed", "listening", "finishing", "sending", "answering", "shown", "error"];
+const STATES: LiveStateName[] = ["closed", "listening", "finishing", "sending", "answering", "shown", "error", "discarded"];
 
 /** A snapshot with every field in its type, whatever arrived. */
 export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): LiveSnapshot {
@@ -63,7 +67,15 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     session: { id: String(v.session?.id ?? ""), title: String(v.session?.title ?? "") },
     turn: Number.isFinite(v.turn) ? Number(v.turn) : 0,
     words: typeof v.words === "string" ? v.words : "",
-    picture: v.picture && typeof v.picture.src === "string" ? v.picture : null,
+    picture:
+      v.picture && typeof v.picture.src === "string"
+        ? {
+            src: v.picture.src,
+            w: Number(v.picture.w) || 0,
+            h: Number(v.picture.h) || 0,
+            label: typeof v.picture.label === "string" ? v.picture.label.trim() : "",
+          }
+        : null,
     dropped: !!v.dropped,
     provider: v.provider ?? null,
     error: v.error ?? null,
@@ -77,20 +89,35 @@ export function liveReduce(m: LiveModel, a: LiveAction): LiveModel {
     let text = m.text;
     // A delta for any turn but the current one is late or early: dropped, never appended to the wrong answer.
     for (const d of a.deltas) if (d && d.turn === m.snap.turn && typeof d.text === "string") text += d.text;
-    return text === m.text ? m : { ...m, text };
+    return text === m.text ? m : { ...m, text, sent: true };
   }
   const s = normalizeSnapshot(a.snap);
   // The session id is "" until the first question is kept: that is the same session, not a new one.
   const sameTurn = s.turn === m.snap.turn && (s.session.id === m.snap.session.id || !s.session.id || !m.snap.session.id);
-  let text = sameTurn ? m.text : "";
+  // Listening is a new question: whatever was answered before is not this one's.
+  const fresh = !sameTurn || s.state === "listening";
+  let text = fresh ? "" : m.text;
   if (s.answer !== undefined) text = s.answer;
+  const sent = (!fresh && m.sent) || s.state === "sending" || s.state === "answering" || text !== "";
   const waitFrom =
     s.state === "sending"
       ? m.snap.state === "sending" && sameTurn && m.waitFrom != null
         ? m.waitFrom
         : a.now
       : null;
-  return { snap: s, text, waitFrom };
+  return { snap: s, text, sent, waitFrom };
+}
+
+/** The microphone level in the session stream's payload (UiState), 0 to 1: the first of `fields` that is a number, so
+ * an engine-smoothed level is preferred when the engine sends one. 0 when the microphone is off or nothing fits. */
+export function levelOf(p: unknown, fields: readonly string[]): number {
+  const u = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+  if (u.mic === false) return 0;
+  for (const f of fields) {
+    const v = u[f];
+    if (typeof v === "number" && Number.isFinite(v)) return Math.min(1, Math.max(0, v));
+  }
+  return 0;
 }
 
 /** After this long waiting for the AI, one quiet line says so. */
@@ -98,7 +125,8 @@ export const SLOW_MS = 8_000;
 /** After this long with nothing back from the AI, the wait is an error with Stop. */
 export const STALL_MS = 20_000;
 
-export type Phase = "closed" | "listening" | "finishing" | "thinking" | "answering" | "shown" | "error";
+/** discarded: the question was stopped or thrown away before an answer; the panel says so for a moment and hides. */
+export type Phase = "closed" | "listening" | "finishing" | "thinking" | "answering" | "shown" | "error" | "discarded";
 /** The line's behaviour: drawn by the voice, looping, down the answer's margin, or resting. Never two at once. */
 export type LineMode = "voice" | "loops" | "margin" | "rest" | "none";
 /** ink: the work is on this computer. accent: going to or coming from the AI. warn: a wait ran long or failed. */
@@ -117,19 +145,27 @@ export type LiveView = {
   /** A request to the AI is in flight: its name takes the accent. */
   inFlight: boolean;
   provider: string;
+  /** The session's title: empty while a question is still being heard (the title is not the transcript). */
   title: string;
-  words: string;
-  /** The words are still being heard (quiet colour) rather than the question as asked. */
-  hearing: boolean;
+  /** One row and nothing else: the line, the dot, the picture. While listening and finishing, and the brief "Not sent". */
+  compact: boolean;
+  /** The question as asked, once it is asked; empty while it is being heard. */
+  question: string;
   thumb: LivePicture | null;
+  /** The app or window the picture is of ("" when the engine does not say). */
+  label: string;
   /** The picture can still be taken out (it has not left the computer). */
   canDrop: boolean;
   note: string | null;
   error: LiveErrorView | null;
   /** Stop is offered and Esc stops; otherwise Esc closes. */
   stop: boolean;
-  /** The answer is complete: the foot row and Copy. */
+  /** The answer is complete: the foot row and Copy. Only for a question that was sent and answered. */
   complete: boolean;
+  /** This turn's question left the computer. */
+  sent: boolean;
+  /** The panel hides itself after a moment (discarded). */
+  hide: boolean;
   /** What a screen reader hears, politely, when it changes. */
   announce: string;
 };
@@ -178,24 +214,28 @@ export function liveView(m: LiveModel, now: number): LiveView {
     inFlight: false,
     provider,
     title: s.session.title || firstWords(s.words),
-    words: s.words,
-    hearing: false,
+    compact: false,
+    question: s.words.trim(),
     thumb,
+    label: thumb?.label ?? "",
     canDrop: false,
     note: null,
     error: null,
     stop: false,
     complete: false,
+    sent: m.sent,
+    hide: false,
     announce: "",
   };
+  const hearing = { compact: true, title: "", question: "" };
   const name = provider || "the AI";
   switch (s.state) {
     case "closed":
       return { ...base, thumb: null };
     case "listening":
-      return { ...base, phase: "listening", line: "voice", mic: true, hearing: true, canDrop: !!thumb, stop: true, announce: "Listening" };
+      return { ...base, ...hearing, phase: "listening", line: "voice", mic: true, canDrop: !!thumb, stop: true, announce: "Listening" };
     case "finishing":
-      return { ...base, phase: "finishing", line: "loops", hearing: true, canDrop: !!thumb, stop: true, announce: "Finishing your words" };
+      return { ...base, ...hearing, phase: "finishing", line: "loops", canDrop: !!thumb, stop: true, announce: "Finishing your words" };
     case "sending": {
       // A first delta can arrive before the snapshot that says so: the answer has started.
       if (m.text) return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
@@ -219,12 +259,21 @@ export function liveView(m: LiveModel, now: number): LiveView {
       if (s.thinking && !m.text) return thinkingView(base, name, null);
       return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
     case "shown":
+      // Stopped before any answer came: nothing is ready, and nothing is said to have been sent unless it was.
+      if (!m.text) return endedView(base, m.sent);
       return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, announce: "Answer ready" };
+    case "discarded":
+      return endedView(base, false);
     case "error": {
       const err = errorView(s.error, provider, !!s.words.trim());
       return { ...base, phase: "error", line: "rest", tone: "warn", error: err, announce: err.text };
     }
   }
+}
+
+function endedView(base: LiveView, sent: boolean): LiveView {
+  const note = sent ? "Stopped" : "Not sent";
+  return { ...base, phase: "discarded", compact: true, title: "", question: "", thumb: null, label: "", sent, note, hide: true, announce: note };
 }
 
 function thinkingView(base: LiveView, name: string, note: string | null): LiveView {
@@ -237,8 +286,12 @@ export function isPinned(scrollTop: number, scrollHeight: number, clientHeight: 
   return scrollHeight - scrollTop - clientHeight <= slack;
 }
 
-/** The foot row's receipt: what left the computer. */
-export function sentLine(v: Pick<LiveView, "thumb" | "provider">): string {
+/** How long "Not sent" stays before the panel hides. */
+export const ENDED_MS = 1100;
+
+/** The foot row's receipt: what left the computer. Nothing for a question that never left. */
+export function sentLine(v: Pick<LiveView, "thumb" | "provider" | "sent">): string {
+  if (!v.sent) return "";
   const to = v.provider ? ` to ${v.provider}` : "";
   return v.thumb ? `Sent your words and the picture${to}` : `Sent your words only${to}`;
 }
@@ -268,8 +321,19 @@ export const PREVIEW_ANSWER = [
   "More in [Bayes' theorem](https://en.wikipedia.org/wiki/Bayes%27_theorem).",
 ].join(String.fromCharCode(10));
 
-/** A slide-like picture drawn inline, so the preview requests nothing. */
-export function previewPicture(): LivePicture {
+/** A slide-like picture drawn inline, so the preview requests nothing; `code` is another window to switch to. */
+export function previewPicture(kind: "slide" | "code" = "slide"): LivePicture {
+  if (kind === "code") {
+    const bars = [28, 44, 60, 76, 92, 108, 124, 140]
+      .map((y, i) => `<rect x="${80 + (i % 3) * 14}" y="${y}" width="${60 + ((i * 37) % 110)}" height="6" rx="3" fill="${["#c77dbb", "#6aab73", "#56a8f5"][i % 3]}"/>`)
+      .join("");
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">' +
+      '<rect width="320" height="180" fill="#1e1f22"/><rect width="64" height="180" fill="#2b2d30"/>' +
+      bars +
+      "</svg>";
+    return { src: "data:image/svg+xml," + encodeURIComponent(svg), w: 320, h: 180, label: "Visual Studio Code" };
+  }
   const svg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">' +
     '<rect width="320" height="180" fill="#fbfbfa"/><rect width="320" height="30" fill="#24314d"/>' +
@@ -279,7 +343,7 @@ export function previewPicture(): LivePicture {
     '<path d="M116 82H222" stroke="#1d1d1f" stroke-width="1.4"/>' +
     '<text x="148" y="102" font-family="Georgia, serif" font-style="italic" font-size="16" fill="#1d1d1f">P(B)</text>' +
     '<rect x="22" y="128" width="190" height="7" rx="3.5" fill="#c9ccd6"/><rect x="22" y="146" width="140" height="7" rx="3.5" fill="#c9ccd6"/></svg>';
-  return { src: "data:image/svg+xml," + encodeURIComponent(svg), w: 320, h: 180 };
+  return { src: "data:image/svg+xml," + encodeURIComponent(svg), w: 320, h: 180, label: "PowerPoint" };
 }
 
 /** The preview's snapshot for a state named in the address. */
@@ -296,6 +360,8 @@ export function previewSnapshot(kind: string, o: { error?: string | null; provid
       return { ...common, state: "answering" };
     case "shown":
       return { ...common, state: "shown", answer: PREVIEW_ANSWER };
+    case "discarded":
+      return { ...common, state: "discarded", words: "" };
     case "error":
       return o.error === "provider"
         ? { ...common, state: "error", error: { code: "provider", message: "ChatGPT could not be reached" } }
