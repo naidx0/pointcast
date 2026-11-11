@@ -67,8 +67,8 @@ pub fn replay(earlier: &[Turn], pictures_of_last: usize) -> Vec<Part>;   // one 
 
 ## The first real handshake (2026-11-11, owner approved)
 
-Codex 0.164.0, the owner's signed-in account, no turn started, nothing spent. `account/read`: a ChatGPT **free**
-plan, which works. `model/list`: `gpt-6-luna` (default), `gpt-5.6-terra`, `gpt-5.6-luna`, all text and image.
+Codex 0.164.0, the owner's signed-in account, no turn started, nothing spent. `account/read`: a
+ChatGPT plan, which works. `model/list`: `gpt-6-luna` (default), `gpt-5.6-terra`, `gpt-5.6-luna`, all text and image.
 `thread/start` with the fence answered in about 0.2 s with `modelProvider: openai`, a read-only sandbox without
 network, `approvalPolicy: untrusted`; every config override was accepted without error (whether each takes effect is
 still unproven). Two findings change the adapter: a thread started without a model took the person's configured
@@ -86,7 +86,7 @@ Copilot sign-ins reuse other apps' stored tokens or client ids and call private 
 allow; its `codex app-server` and `copilot --acp --stdio` routes are sanctioned. Consequences for this plan: a
 "Sign in with ChatGPT" route (no Codex install, no `~/.codex/AGENTS.md` added) becomes the preferred ChatGPT route
 for Plus and Pro plans once a spike on a paid account confirms pictures and streaming; Codex stays the route for Free
-plans like the owner's; Copilot goes through `copilot --acp --stdio`; Hermes's handling of an expired sign-in (never
+plans; Copilot goes through `copilot --acp --stdio`; Hermes's handling of an expired sign-in (never
 retried in a loop, one plain "sign in again") is copied, its routes are not. Report kept outside the repository.
 
 ## Slices
