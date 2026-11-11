@@ -22,14 +22,54 @@ fn ensure_with(app: &AppHandle, label: &str, init: Option<String>) -> Option<Web
         b = b.initialization_script(&js);
     }
     let w = b.build().ok()?;
-    if matches!(label, "indicator" | "overlay") {
+    if protects(label) {
         let _ = w.set_content_protected(PROTECT.load(Ordering::SeqCst));
+    }
+    if label == PANEL {
+        note_panel(&w);
     }
     #[cfg(windows)]
     if let Ok(h) = w.hwnd() {
         icons::apply(windows::Win32::Foundation::HWND(h.0 as _));
     }
     Some(w)
+}
+
+/// The windows kept out of captures while that is on: the HUD and the overlay, and never the answer panel.
+const PROTECTED: [&str; 2] = ["indicator", "overlay"];
+
+/// The answer panel's window. It shows in every screen share and recording: nothing ever protects it.
+pub const PANEL: &str = "live";
+
+/// Whether `label` is one of the windows content protection is applied to.
+fn protects(label: &str) -> bool {
+    label != PANEL && PROTECTED.contains(&label)
+}
+
+/// Tell the capture path which window is the answer panel, by the OS's own name for it, so every picture Pointcast
+/// takes paints it out.
+fn note_panel(w: &WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(h) = w.hwnd() {
+        crate::capture::set_panel(Some(h.0 as usize as u64));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let w = w.clone();
+        let _ = w.clone().run_on_main_thread(move || {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            if let Ok(ns) = w.ns_window() {
+                let ns = ns as *mut AnyObject;
+                let n: isize = unsafe { msg_send![ns, windowNumber] };
+                if n > 0 {
+                    crate::capture::set_panel(Some(n as u64));
+                }
+            }
+        });
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = w;
 }
 
 /// Windows: the taskbar, Alt+Tab and Task Manager draw a window's big icon, and Tauri sets only the small one, so they
@@ -116,12 +156,15 @@ pub fn dock(app: &AppHandle, closing: Option<&str>) {
     }
 }
 
-/// After a while without recording, let the HUD and overlay go; they are rebuilt on demand.
+/// After a while without recording, let the HUD, the overlay and a closed answer panel go; they are rebuilt on demand.
 pub fn reap(app: &AppHandle) {
-    for label in ["indicator", "overlay"] {
+    for label in ["indicator", "overlay", PANEL] {
         if let Some(w) = app.get_webview_window(label) {
             if !w.is_visible().unwrap_or(true) {
                 let _ = w.destroy();
+                if label == PANEL {
+                    crate::capture::set_panel(None);
+                }
             }
         }
     }
@@ -186,6 +229,77 @@ pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
     }
     raise(&w, Level::Hud);
     let _ = w.show();
+}
+
+/// The answer panel's width and the space kept around it, in logical pixels.
+pub const PANEL_WIDTH: f64 = 380.0;
+pub const PANEL_MARGIN: f64 = 12.0;
+
+/// Where the answer panel goes, in logical pixels, as (x, y, width, height): docked at the right edge of `area` (the
+/// screen's work area in its physical pixels at `scale`) with `margin` around it, and narrower on a screen too small.
+pub fn panel_spot(area: (i32, i32, u32, u32), scale: f64, width: f64, margin: f64) -> (f64, f64, f64, f64) {
+    let at = |v: f64| v / scale;
+    let (x, y, w, h) = (at(area.0 as f64), at(area.1 as f64), at(area.2 as f64), at(area.3 as f64));
+    let wide = width.min((w - 2.0 * margin).max(0.0));
+    (x + w - wide - margin, y + margin, wide, (h - 2.0 * margin).max(0.0))
+}
+
+/// Show the answer panel at the right edge of the pointer's screen, without taking focus from the app being asked about.
+pub fn show_panel(app: &AppHandle) {
+    let Some(w) = ensure(app, PANEL) else {
+        return;
+    };
+    if let Some(m) = pointer_monitor(app) {
+        let wa = m.work_area();
+        let s = m.scale_factor();
+        let (x, y, wide, high) = panel_spot((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN);
+        // As for the HUD: AppKit places windows in points, Windows in physical pixels of one desktop.
+        if cfg!(target_os = "macos") {
+            let _ = w.set_size(tauri::LogicalSize::new(wide, high));
+            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+        } else {
+            let _ = w.set_size(tauri::PhysicalSize::new((wide * s).round() as u32, (high * s).round() as u32));
+            let _ = w.set_position(tauri::PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32));
+        }
+    }
+    if !cfg!(target_os = "macos") {
+        let _ = w.set_always_on_top(true);
+    }
+    raise(&w, Level::Hud);
+    show_quietly(&w);
+}
+
+/// Put a window on screen without making it the one that takes keys.
+fn show_quietly(w: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        match w.hwnd() {
+            Ok(h) => unsafe {
+                let _ = ShowWindow(HWND(h.0 as _), SW_SHOWNOACTIVATE);
+            },
+            Err(_) => {
+                let _ = w.show();
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let w = w.clone();
+        let _ = w.clone().run_on_main_thread(move || {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            if let Ok(ns) = w.ns_window() {
+                let ns = ns as *mut AnyObject;
+                let _: () = unsafe { msg_send![ns, orderFrontRegardless] };
+            }
+        });
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = w.show();
+    }
 }
 
 /// Cover the screen the frame was taken from, above the menu bar and Dock, then take keys.
@@ -348,7 +462,7 @@ fn activate(_: isize) {}
 /// Alt+Tab and screen sharing, which ordinary windows like Settings must not be.
 pub fn protect(app: &AppHandle, on: bool) {
     PROTECT.store(on, Ordering::SeqCst);
-    for label in ["indicator", "overlay"] {
+    for label in PROTECTED.into_iter().filter(|l| protects(l)) {
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.set_content_protected(on);
         }
@@ -496,6 +610,53 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
+    }
+
+    #[test]
+    fn the_answer_panel_is_never_protected_from_captures_by_rust_or_by_its_own_page() {
+        // `ensure_with` and `protect` apply protection only where `protects` says, and it never says the panel.
+        assert!(!protects(PANEL) && !PROTECTED.contains(&PANEL));
+        assert!(protects("indicator") && protects("overlay"));
+        assert!(!protects("settings") && !protects("result") && !protects("onboarding"));
+        // The panel's page cannot ask for it either: no capability that reaches the panel grants that call.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut reach = 0;
+        for file in std::fs::read_dir(&dir).unwrap().flatten() {
+            let cap: serde_json::Value = serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+            let windows: Vec<&str> = cap["windows"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+            if !windows.iter().any(|w| *w == PANEL || w.contains('*')) {
+                continue;
+            }
+            reach += 1;
+            let asks = cap["permissions"].as_array().unwrap().iter().any(|p| p.to_string().contains("set-content-protected"));
+            assert!(!asks, "{} lets the panel hide itself", file.path().display());
+        }
+        assert!(reach > 0, "the panel has a capability, so the check above read something");
+        // And the window is declared: built on demand, never at launch.
+        let conf: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json")).unwrap()).unwrap();
+        let live = conf["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == PANEL).expect("a live window");
+        assert_eq!((live["url"].as_str(), live["create"].as_bool(), live["contentProtected"].as_bool()), (Some("live.html"), Some(false), None));
+        assert_eq!((live["width"].as_f64(), live["alwaysOnTop"].as_bool(), live["focus"].as_bool()), (Some(PANEL_WIDTH), Some(true), Some(false)));
+    }
+
+    #[test]
+    fn the_answer_panel_docks_at_the_right_edge_of_the_work_area() {
+        let at = |area, scale, want: (f64, f64, f64, f64)| {
+            let got = panel_spot(area, scale, PANEL_WIDTH, PANEL_MARGIN);
+            let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+            assert!(near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2) && near(got.3, want.3), "{got:?} != {want:?}");
+        };
+        // 1920x1040 work area under a 40 px top bar: 12 px in from the right, the top and the bottom.
+        at((0, 40, 1920, 1040), 1.0, (1528.0, 52.0, 380.0, 1016.0));
+        // A second screen to the left of the first.
+        at((-1280, 0, 1280, 800), 1.0, (-392.0, 12.0, 380.0, 776.0));
+        // A 150 % screen right of a 1920 px one: logical pixels of that screen.
+        at((1920, 0, 2560, 1400), 1.5, (1280.0 + 2560.0 / 1.5 - 392.0, 12.0, 380.0, 1400.0 / 1.5 - 24.0));
+        // A Retina screen in points.
+        at((0, 50, 3024, 1888), 2.0, (1120.0, 37.0, 380.0, 920.0));
+        // A screen narrower than the panel: it shrinks to fit inside the margins and never leaves the screen.
+        at((0, 0, 300, 200), 1.0, (12.0, 12.0, 276.0, 176.0));
     }
 
     #[test]

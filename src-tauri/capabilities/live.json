@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "live",
+  "description": "The answer panel: it hears events and calls Pointcast's own commands. It is given no way to keep itself out of captures",
+  "windows": [
+    "live"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

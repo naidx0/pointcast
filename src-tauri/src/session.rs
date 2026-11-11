@@ -28,6 +28,24 @@ pub enum Phase {
     Error,
 }
 
+/// What a recording is for: a dictation is saved to History and delivered; a question goes to the assistant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Purpose {
+    #[default]
+    Dictate,
+    Ask,
+}
+
+/// A question as it was said: its pieces, when it began (Unix ms), how long it ran, and its recording as a WAV file
+/// when audio is kept.
+#[derive(Clone)]
+pub struct Said {
+    pub items: Vec<Item>,
+    pub created_ms: u64,
+    pub duration_ms: u64,
+    pub audio: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UiState {
     pub phase: Phase,
@@ -181,6 +199,10 @@ pub struct App {
     pub practice: AtomicBool,
     /// Onboarding is on its practice step: the next recording started is a practice run.
     pub practice_next: AtomicBool,
+    /// What the recording under way, or the last one, is for.
+    purpose: Mutex<Purpose>,
+    /// What the last stop of a question heard, until the Ask loop takes it.
+    said: Mutex<Option<Said>>,
     /// Onboarding shortcut test: hotkeys only report that they fired.
     pub hotkey_test: AtomicBool,
     /// When the session chord went down, for hold-to-talk.
@@ -253,6 +275,8 @@ impl App {
             latest: Default::default(),
             practice: AtomicBool::new(false),
             practice_next: AtomicBool::new(false),
+            purpose: Mutex::default(),
+            said: Mutex::default(),
             hotkey_test: AtomicBool::new(false),
             hold_from: Mutex::default(),
             hotkey_errors: Mutex::default(),
@@ -432,11 +456,18 @@ impl App {
     }
 
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
+        self.start_for(Purpose::Dictate).map(|_| ())
+    }
+
+    /// Start a recording for `purpose`. False when one is already under way: it keeps the purpose it began with.
+    pub fn start_for(self: &Arc<Self>, purpose: Purpose) -> Result<bool, String> {
         match self.state.lock().unwrap().phase {
-            Phase::Recording | Phase::Loading => return Ok(()),
+            Phase::Recording | Phase::Loading => return Ok(false),
             Phase::Transcribing => return Err(BUSY.into()),
             _ => {}
         }
+        *self.purpose.lock().unwrap() = purpose;
+        *self.said.lock().unwrap() = None;
         // The microphone opens first, on its own thread, before anything that touches the disk: every word after the
         // press is kept, and the start never waits for the device. It says it records once the first samples arrive.
         self.cancel.store(false, Ordering::SeqCst);
@@ -468,10 +499,19 @@ impl App {
         self.monitor_off();
         // The background GPU upgrade never runs beside a recording: it stops where it is and goes on later.
         crate::voice::upgrade::pause();
-        self.bind_practice();
+        if purpose == Purpose::Dictate {
+            self.bind_practice();
+        } else {
+            // A question is never onboarding's practice run.
+            self.practice.store(false, Ordering::SeqCst);
+        }
         // A checkpoint still here was never recovered: keep it in History rather than mixing it in.
         if self.history.recover().is_none() {
             self.history.clear_checkpoint();
+        }
+        // A question's checkpoint says what it is: a crash while it is said never comes back as a dictation.
+        if purpose == Purpose::Ask {
+            let _ = self.history.mark_question();
         }
         self.trail.lock().unwrap().clear();
         self.tokens.lock().unwrap().clear();
@@ -479,10 +519,13 @@ impl App {
         *self.unsaved.lock().unwrap() = None;
         let me = Arc::clone(self);
         std::thread::spawn(move || me.follow_pointer(no));
-        self.keep_frames(&settings, no, capture::grab_key);
+        // A question takes one picture, at the press: the screen is not kept while it is said.
+        if purpose == Purpose::Dictate {
+            self.keep_frames(&settings, no, capture::grab_key);
+        }
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
-        Ok(())
+        Ok(true)
     }
 
     /// Whether recording `no` is still the one under way.
@@ -579,6 +622,16 @@ impl App {
         }
     }
 
+    /// What the recording under way, or the last one, is for.
+    pub fn purpose(&self) -> Purpose {
+        *self.purpose.lock().unwrap()
+    }
+
+    /// What the last stop of a question heard, once.
+    pub fn take_said(&self) -> Option<Said> {
+        self.said.lock().unwrap().take()
+    }
+
     pub fn stop(&self, cancel: bool) -> Result<Option<SessionExport>, String> {
         let _one = self.finishing.lock().unwrap();
         if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
@@ -625,6 +678,21 @@ impl App {
             self.state.lock().unwrap().phase = Phase::Idle;
             return Ok(None);
         }
+        // A question goes to the assistant and nowhere else: it is not saved to History, counted, copied or pasted.
+        // Its recording leaves the recovery area with it.
+        if self.purpose() == Purpose::Ask {
+            let t0 = self.t0.lock().unwrap().take().unwrap_or_else(now_ms);
+            let said = Said {
+                items: prompt::ordered(std::mem::take(&mut *self.items.lock().unwrap())),
+                created_ms: t0,
+                duration_ms: now_ms().saturating_sub(t0),
+                audio: self.history.recorded(),
+            };
+            self.history.clear_checkpoint();
+            *self.said.lock().unwrap() = Some(said);
+            self.state.lock().unwrap().phase = Phase::Idle;
+            return Ok(None);
+        }
         let settings = self.settings.lock().unwrap().clone();
         let mut items = prompt::ordered(self.items.lock().unwrap().clone());
         let trail = self.trail.lock().unwrap().since(0);
@@ -646,6 +714,7 @@ impl App {
         let mut saved = None;
         let mut created_ms = 0;
         let mut has_audio = false;
+        let mut kept = None;
         if items.is_empty() && !self.history.kept_audio() {
             self.history.clear_checkpoint();
         } else {
@@ -656,11 +725,11 @@ impl App {
                 if let Some(r) = &mic_run {
                     let _ = self.history.note_mic(&m.id, r);
                 }
-                self.stats.count(&m);
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
                 created_ms = m.created_ms;
-                saved = Some(m.id);
+                saved = Some(m.id.clone());
+                kept = Some(m);
                 self.history.clear_checkpoint();
             }
         }
@@ -686,6 +755,10 @@ impl App {
         let can_paste = crate::permissions::can_paste();
         let mode = paste_or_copy(settings.output, can_paste);
         let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard, settings.tidy);
+        // Counted once the prompt is out: reading or seeding the stats file never delays a paste.
+        if let Some(m) = &kept {
+            self.stats.count(m);
+        }
         let mut st = self.state.lock().unwrap();
         st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
         st.entry = entry;
@@ -2947,6 +3020,84 @@ mod tests {
         a.push(Item::Speech { t_ms: 300, end_ms: 2_700, text: text.into() }).unwrap();
         a.stop(false).unwrap().expect("a stop that saves");
         a.last_id.lock().unwrap().clone().expect("a History entry")
+    }
+
+    #[test]
+    fn a_question_is_handed_to_the_ask_loop_once_and_never_saved_counted_or_delivered_and_a_dictation_hands_over_nothing() {
+        let a = app("ask-purpose");
+        let out = std::env::temp_dir().join(format!("pc-session-ask-purpose-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        a.practice.store(false, Ordering::SeqCst);
+        folder_only(&a, &out);
+        // A question being said, as `start_for(Purpose::Ask)` leaves it.
+        let asking = |text: &str| {
+            *a.purpose.lock().unwrap() = Purpose::Ask;
+            a.items.lock().unwrap().clear();
+            *a.t0.lock().unwrap() = Some(now_ms() - 3_000);
+            a.state.lock().unwrap().phase = Phase::Recording;
+            a.history.append_audio(&bursts(8.5, &SPANS)).unwrap();
+            a.push(Item::Speech { t_ms: 300, end_ms: 2_700, text: text.into() }).unwrap();
+        };
+        asking("what is this");
+        assert!(a.stop(false).unwrap().is_none(), "a question exports no prompt");
+        let said = a.take_said().expect("the question");
+        assert_eq!(texts(&said.items), ["what is this"]);
+        assert!(said.duration_ms >= 3_000 && said.audio.is_some(), "its recording comes with it");
+        assert!(a.take_said().is_none(), "handed over once");
+        // Nothing of it is in History, its recovery area, the counts, the last prompt or the Save folder.
+        assert!(a.history.list().is_empty() && !a.history.kept_audio() && a.history.recover().is_none());
+        assert_eq!(a.stats.get().total, crate::stats::Total::default());
+        assert!(a.last_id.lock().unwrap().is_none() && a.last_export().is_none() && !out.exists());
+        assert_eq!(a.ui().phase, Phase::Idle);
+        // Discarded, it is handed to nobody.
+        asking("never mind");
+        assert!(a.stop(true).unwrap().is_none() && a.take_said().is_none());
+        assert!(a.history.list().is_empty() && !a.history.kept_audio());
+        // A dictation goes to History as ever and hands the Ask loop nothing.
+        *a.purpose.lock().unwrap() = Purpose::Dictate;
+        recorded(&a, &out, now_ms() - 60_000, "move the button left");
+        assert!(a.take_said().is_none());
+        assert_eq!((a.history.list().len(), a.stats.get().total.recordings), (1, 1));
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_crash_while_a_question_is_said_leaves_nothing_for_history_or_the_counts_and_a_dictation_is_recovered_as_ever() {
+        let mut a = app("ask-crash");
+        let dir = std::env::temp_dir().join(format!("pc-session-ask-crash-{}", std::process::id()));
+        {
+            let m = Arc::get_mut(&mut a).expect("not shared yet");
+            m.open_mic = slow_mic;
+            m.settings.get_mut().unwrap().device = None;
+        }
+        // What the next launch does with whatever the recovery area holds.
+        let launch = || {
+            let back = crate::history::Store::new(&dir).recover();
+            if let Some(m) = &back {
+                a.stats.count(m);
+            }
+            back
+        };
+        let said = |text: &str| {
+            a.history.append_audio(&bursts(8.5, &SPANS)).unwrap();
+            a.push(Item::Speech { t_ms: 300, end_ms: 2_700, text: text.into() }).unwrap();
+            assert!(dir.join("recovery").join("items.json").exists() && a.history.kept_audio(), "{text}: checkpointed");
+        };
+        assert!(a.start_for(Purpose::Ask).unwrap());
+        said("what is this");
+        // The process dies here.
+        assert!(launch().is_none(), "a question is not recovered");
+        assert!(a.history.list().is_empty() && !a.history.kept_audio(), "nothing of it is in History or left behind");
+        assert_eq!(a.stats.get().total, crate::stats::Total::default());
+        a.stop(true).unwrap();
+        // A dictation cut off the same way comes back, marked recovered, and is counted.
+        a.start().unwrap();
+        said("move the button left");
+        let back = launch().expect("a dictation is recovered");
+        assert!(back.recovered && back.has_audio);
+        assert_eq!(a.history.list().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [back.id.as_str()]);
+        assert_eq!(a.stats.get().total.recordings, 1);
+        a.stop(true).unwrap();
     }
 
     #[test]

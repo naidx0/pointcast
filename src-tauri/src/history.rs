@@ -18,6 +18,9 @@ pub const KEEP_AUDIO: usize = 10;
 const AUDIO: &str = "audio.wav";
 const AUDIO_PCM: &str = "audio.pcm";
 
+/// In the recovery area while the recording in progress is a question for the assistant.
+const QUESTION: &str = "question";
+
 pub const NO_AUDIO: &str = "This recording has no audio kept to transcribe again.";
 
 /// The list's preview for an entry that kept its audio and has no words.
@@ -442,9 +445,21 @@ impl Store {
         let _ = std::fs::remove_dir_all(self.recovery());
     }
 
+    /// The recording in progress is a question, not a dictation: whatever a crash leaves of it never reaches History.
+    pub fn mark_question(&self) -> Result<(), String> {
+        let dir = self.recovery();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(QUESTION), b"").map_err(|e| e.to_string())
+    }
+
     /// At launch: turn a checkpoint left by a crash into a history entry marked recovered.
     pub fn recover(&self) -> Option<Meta> {
         let dir = self.recovery();
+        // A question cut off by a crash was never a dictation: it is let go.
+        if dir.join(QUESTION).exists() {
+            self.clear_checkpoint();
+            return None;
+        }
         let items = read_items(&dir).unwrap_or_default();
         // Audio alone is kept too: what was said can be transcribed again.
         let audio = self.recorded();
@@ -1106,6 +1121,23 @@ mod tests {
         s.clear_checkpoint();
         assert!(s.recover().is_none());
         assert!(s.list().is_empty());
+    }
+
+    #[test]
+    fn a_question_cut_off_by_a_crash_is_let_go_at_the_next_launch_and_the_dictation_after_it_recovers_as_ever() {
+        let s = store("crash-question");
+        s.mark_question().unwrap();
+        s.append_audio(&tone(16_000)).unwrap();
+        s.checkpoint(&items(), 1_793_000_123_000).unwrap();
+        // The process dies here. Next launch: nothing of the question is in History or left in the recovery area.
+        assert!(s.recover().is_none());
+        assert!(s.list().is_empty() && !s.kept_audio() && !s.recovery().exists());
+        // The mark went with it: a dictation cut off after that is recovered, words and audio.
+        s.append_audio(&tone(16_000)).unwrap();
+        s.checkpoint(&items(), 1_793_000_456_000).unwrap();
+        let m = s.recover().expect("recovered");
+        assert!(m.recovered && m.has_audio);
+        assert_eq!((s.items(&m.id).unwrap(), s.list().len()), (items(), 1));
     }
 
     #[test]
