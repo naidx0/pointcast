@@ -85,11 +85,24 @@ pub struct Run {
 
 pub struct Store {
     root: PathBuf,
+    /// How many entries are kept, and how many of the newest keep their audio.
+    keep: usize,
+    keep_audio: usize,
 }
 
 impl Store {
     pub fn new(data_dir: &Path) -> Self {
-        Store { root: data_dir.to_path_buf() }
+        Self::with_keep(data_dir, KEEP, KEEP_AUDIO)
+    }
+
+    /// A store that keeps `entries` entries and the audio of its newest `audio`: a session keeps every turn.
+    pub fn with_keep(root: &Path, entries: usize, audio: usize) -> Self {
+        Store { root: root.to_path_buf(), keep: entries, keep_audio: audio }
+    }
+
+    /// Where entry `id` is, when there is one.
+    pub fn dir(&self, id: &str) -> Result<PathBuf, String> {
+        self.entry_dir(id)
     }
 
     fn history(&self) -> PathBuf {
@@ -115,6 +128,11 @@ impl Store {
         self.save_with(items, created_ms, duration_ms, self.recorded(), true)
     }
 
+    /// Keep a finished recording with `audio`, a WAV file another store's recovery area held (`recorded`).
+    pub fn save_heard(&self, items: &[Item], created_ms: u64, duration_ms: u64, audio: Option<Vec<u8>>) -> Result<Meta, String> {
+        self.save_with(items, created_ms, duration_ms, audio, false)
+    }
+
     fn save_with(&self, items: &[Item], created_ms: u64, duration_ms: u64, audio: Option<Vec<u8>>, partial: bool) -> Result<Meta, String> {
         let mut meta = meta_for(items, created_ms, duration_ms, false);
         meta.partial = partial;
@@ -127,8 +145,8 @@ impl Store {
         write_entry(&tmp, items, &meta)?;
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&tmp, &dir).map_err(|e| e.to_string())?;
-        self.prune(KEEP);
-        self.prune_audio(KEEP_AUDIO);
+        self.prune(self.keep);
+        self.prune_audio(self.keep_audio);
         Ok(meta)
     }
 
@@ -162,7 +180,7 @@ impl Store {
     }
 
     /// The recording in progress as a WAV file, when its audio was kept.
-    fn recorded(&self) -> Option<Vec<u8>> {
+    pub fn recorded(&self) -> Option<Vec<u8>> {
         std::fs::read(self.recovery().join(AUDIO_PCM)).ok().filter(|b| b.len() >= 2).map(|b| wav(&b))
     }
 
@@ -625,7 +643,7 @@ fn read_items(dir: &Path) -> Result<Vec<Item>, String> {
     Ok(items)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
@@ -861,6 +879,32 @@ mod tests {
         assert_eq!(l.len(), KEEP);
         assert!(l.windows(2).all(|w| w[0].created_ms > w[1].created_ms));
         assert_eq!(l[0].created_ms, 1_793_000_000_000 + (KEEP as u64 + 2) * 1000);
+    }
+
+    #[test]
+    fn a_store_keeps_as_many_entries_and_as_much_audio_as_it_was_made_for() {
+        let d = std::env::temp_dir().join(format!("pc-hist-with-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        // Three entries, the audio of the newest one; and a store told to keep everything.
+        let (few, all) = (Store::with_keep(&d.join("few"), 3, 1), Store::with_keep(&d.join("all"), usize::MAX, usize::MAX));
+        for i in 0..5u64 {
+            for s in [&few, &all] {
+                s.append_audio(&tone(1_600)).unwrap();
+                s.save_recorded(&items()[..1], 1_793_000_000_000 + i * 1000, 10).unwrap();
+                s.clear_checkpoint();
+            }
+        }
+        assert_eq!(few.list().iter().map(|m| m.has_audio).collect::<Vec<_>>(), [true, false, false]);
+        assert_eq!(few.list()[2].created_ms, 1_793_000_000_000 + 2000, "the two oldest went");
+        assert_eq!(all.list().iter().map(|m| m.has_audio).collect::<Vec<_>>(), [true; 5]);
+        // Audio handed over from elsewhere is kept like audio recorded here.
+        few.append_audio(&tone(800)).unwrap();
+        let m = all.save_heard(&items()[..1], 1_793_000_009_000, 10, few.recorded()).unwrap();
+        assert!(m.has_audio);
+        assert_eq!(all.audio(&m.id).unwrap().len(), 800);
+        assert_eq!(all.dir(&m.id).unwrap(), all.history().join(&m.id));
+        assert!(all.dir("nope").is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -19,7 +19,14 @@ pub const DEFAULT_HIDDEN: &[&str] = &[
     "Passwords",
     "SecurityAgent",
     "Secret Service",
+    "InPrivate",
+    "Incognito",
+    "Private Browsing",
 ];
+
+/// The titles a browser gives its private windows, added to the defaults when a question could first send a picture
+/// by itself. A list saved before that gains them once (`Settings::load`).
+pub const PRIVATE_WINDOWS: &[&str] = &["InPrivate", "Incognito", "Private Browsing"];
 
 /// A window's rectangle in the picture's pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +86,12 @@ mod tests {
         assert!(hides("Passwords", "", &list));
         assert!(hides("SecurityAgent", "", &list));
         assert!(!hides("Notepad", "notes.txt", &list));
+        // A browser's private window, by the words its title carries; its ordinary windows are left alone.
+        assert!(hides("Microsoft Edge", "New InPrivate tab - [InPrivate] - Microsoft Edge", &list));
+        assert!(hides("Google Chrome", "New Incognito Tab - Google Chrome", &list));
+        assert!(hides("Firefox", "Bank - Mozilla Firefox Private Browsing", &list));
+        assert!(!hides("Google Chrome", "Lecture 4.pdf - Google Chrome", &list));
+        assert!(PRIVATE_WINDOWS.iter().all(|p| DEFAULT_HIDDEN.contains(p)), "each private-window title is a default");
         assert!(!hides("Notepad", "x", &["  ".into()]));
 
         let (w, h) = (4u32, 3u32);
