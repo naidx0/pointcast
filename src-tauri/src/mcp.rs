@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -120,7 +120,9 @@ fn read_token(path: &Path) -> Option<String> {
     (t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())).then(|| t.to_string())
 }
 
-/// What a coding agent needs to connect (Claude Code `.mcp.json`, Cursor `mcp.json`).
+/// What a coding agent needs to connect (Claude Code `.mcp.json`, Cursor `mcp.json`). Settings now writes each agent's
+/// own entry (`agents.rs`); this whole-file shape stays for the wire test below.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn client_config(bind: &str, token: &str) -> Value {
     json!({
         "mcpServers": {
@@ -134,6 +136,11 @@ pub fn client_config(bind: &str, token: &str) -> Value {
 }
 
 pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, String> {
+    spawn_stoppable(bind, latest, token, Arc::new(AtomicBool::new(false)))
+}
+
+/// Like `spawn`, and the server stops accepting once `stop` is set and one more connection arrives (`stop_at` makes it).
+pub fn spawn_stoppable(bind: &str, latest: Latest, token: String, stop: Arc<AtomicBool>) -> Result<SocketAddr, String> {
     if token.len() < 16 {
         return Err("the MCP token is missing".into());
     }
@@ -150,6 +157,9 @@ pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, St
         .name("pointcast-mcp".into())
         .spawn(move || {
             for mut stream in listener.incoming().flatten() {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
                 if open.fetch_add(1, Ordering::SeqCst) >= MAX_OPEN {
                     open.fetch_sub(1, Ordering::SeqCst);
                     busy(&mut stream);
@@ -168,6 +178,52 @@ pub fn spawn(bind: &str, latest: Latest, token: String) -> Result<SocketAddr, St
         })
         .map_err(|e| e.to_string())?;
     Ok(addr)
+}
+
+/// Stop a server started with `spawn_stoppable`: set its flag, then wake its accept loop.
+pub fn stop_at(addr: SocketAddr, stop: &AtomicBool) {
+    stop.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+}
+
+/// Ask the server at `addr` what an MCP client would: `initialize`, then `tools/list`, with this install's token. The
+/// names of the tools it lists, or what went wrong in plain words (never the token).
+pub fn probe(addr: SocketAddr, token: &str) -> Result<Vec<String>, String> {
+    let ask = |body: &str| -> Result<Value, String> {
+        let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
+            .map_err(|_| "Pointcast's agent server is not answering".to_string())?;
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).map_err(|_| "Pointcast's agent server closed the connection".to_string())?;
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        let (head, body) = out.split_once("\r\n\r\n").unwrap_or((out.as_str(), ""));
+        match head.split(' ').nth(1) {
+            Some("200") => serde_json::from_str(body).map_err(|_| "Pointcast's agent server gave an answer that is not JSON".to_string()),
+            Some("401") => Err("Pointcast's agent server refused this computer's key".into()),
+            _ => Err("Pointcast's agent server gave an unexpected answer".into()),
+        }
+    };
+    let init = ask(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "pointcast-check", "version": "1"}
+    }})
+    .to_string())?;
+    if init.pointer("/result/protocolVersion").and_then(Value::as_str).is_none() {
+        return Err("Pointcast's agent server did not start an MCP session".into());
+    }
+    let list = ask(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).to_string())?;
+    let names: Vec<String> = list
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .map(|t| t.iter().filter_map(|t| t["name"].as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if names.len() != 5 || !names.iter().any(|n| n == "pointcast_latest") {
+        return Err("Pointcast's agent server did not list its tools".into());
+    }
+    Ok(names)
 }
 
 const MAX_REQUEST: usize = 1024 * 1024;
@@ -315,8 +371,11 @@ fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant
             ),
         }
     } else if method_line.starts_with("POST /mcp") || method_line.starts_with("POST /") {
-        let reply = mcp_rpc(body, latest);
-        (200, "application/json", reply)
+        let (code, reply) = rpc(body, latest);
+        (code, "application/json", reply)
+    } else if method_line.starts_with("GET /mcp") || method_line.starts_with("DELETE /mcp") {
+        // No server-sent event stream and no sessions to end.
+        (405, "text/plain", "method not allowed".into())
     } else if method_line.starts_with("GET /health") {
         (200, "text/plain", "ok".into())
     } else {
@@ -324,15 +383,18 @@ fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant
     };
     let reason = match code {
         200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        405 => "Method Not Allowed",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         _ => "Error",
     };
-    let challenge = if code == 401 {
-        "WWW-Authenticate: Bearer realm=\"pointcast\"\r\n"
-    } else {
-        ""
+    let challenge = match code {
+        401 => "WWW-Authenticate: Bearer realm=\"pointcast\"\r\n",
+        405 => "Allow: POST\r\n",
+        _ => "",
     };
     let resp = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{challenge}Connection: close\r\n\r\n{body}",
@@ -347,41 +409,80 @@ fn split_http(req: &str) -> (&str, &str) {
     (method_line, body)
 }
 
+/// One JSON-RPC message in, the reply out ("" for a notification, which gets none).
 fn mcp_rpc(body: &str, latest: &Latest) -> String {
-    let v: Value = serde_json::from_str(body).unwrap_or(json!({}));
-    let id = v.get("id").cloned().unwrap_or(Value::Null);
-    let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    rpc(body, latest).1
+}
+
+fn rpc_error(id: Value, code: i64, message: &str) -> String {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
+}
+
+/// The HTTP status and the JSON-RPC reply. A body that is not JSON (-32700) or not a request (-32600) is a 400 with a
+/// null id; a notification or a client's response is a 202 with no body; every request gets a 200 with a result or an
+/// error from the JSON-RPC and MCP specs (-32601 unknown method, -32602 bad params or unknown tool). A tool that runs
+/// but cannot do what was asked answers with an `isError` result the model reads.
+fn rpc(body: &str, latest: &Latest) -> (u16, String) {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return (400, rpc_error(Value::Null, -32700, "parse error"));
+    };
+    let Some(msg) = v.as_object() else {
+        // Batches went in 2025-06-18; a bare value is no request.
+        return (400, rpc_error(Value::Null, -32600, "invalid request: send one JSON-RPC object"));
+    };
+    let id = msg.get("id").cloned();
+    let id_ok = matches!(id, None | Some(Value::String(_) | Value::Number(_)));
+    if msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || !id_ok {
+        let id = if id_ok { id.unwrap_or(Value::Null) } else { Value::Null };
+        return (400, rpc_error(id, -32600, "invalid request"));
+    }
+    let Some(method) = msg.get("method").and_then(Value::as_str) else {
+        // A response sent to the server: nothing to answer.
+        if id.is_some() && (msg.contains_key("result") || msg.contains_key("error")) {
+            return (202, String::new());
+        }
+        return (400, rpc_error(id.unwrap_or(Value::Null), -32600, "invalid request: no method"));
+    };
+    let Some(id) = id else {
+        // A notification (notifications/initialized, notifications/cancelled, ...): never answered.
+        return (202, String::new());
+    };
+    if msg.get("params").is_some_and(|p| !p.is_object() && !p.is_null()) {
+        return (200, rpc_error(id, -32602, "invalid params: params must be an object"));
+    }
     let result = match method {
         "initialize" => json!({
             "protocolVersion": protocol_for(v.pointer("/params/protocolVersion").and_then(|x| x.as_str())),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "pointcast", "version": "0.1.0" }
         }),
+        "ping" => json!({}),
         "tools/list" | "list_tools" => json!({ "tools": tools() }),
         "tools/call" | "call_tool" => {
-            let name = v
-                .pointer("/params/name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let args = v.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+            let Some(name) = v.pointer("/params/name").and_then(|x| x.as_str()) else {
+                return (200, rpc_error(id, -32602, "invalid params: tools/call needs a tool name"));
+            };
+            if !TOOL_NAMES.contains(&name) {
+                return (200, rpc_error(id, -32602, &format!("unknown tool: {}", cut(name, 80))));
+            }
+            let args = match v.pointer("/params/arguments") {
+                None | Some(Value::Null) => json!({}),
+                Some(a @ Value::Object(_)) => a.clone(),
+                Some(_) => return (200, rpc_error(id, -32602, "invalid params: arguments must be an object")),
+            };
             // A tool that cannot do what was asked answers with an error result the model reads, never a panic.
             match call_tool(name, &args, latest) {
                 Ok(r) => r,
                 Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
             }
         }
-        "notifications/initialized" => return "{}".into(),
-        _ => {
-            return serde_json::to_string(&json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": "method not found" }
-            }))
-            .unwrap();
-        }
+        _ => return (200, rpc_error(id, -32601, "method not found")),
     };
-    serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "result": result })).unwrap()
+    (200, json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string())
 }
+
+/// Every tool `tools/list` names; `tools/call` with any other name is an unknown tool.
+const TOOL_NAMES: [&str; 5] = ["pointcast_latest", "get_latest_session", "pointcast_get", "pointcast_list", "pointcast_shot"];
 
 /// The protocol this server speaks, and the one it gave every client before (still given to a client that asks for
 /// an older version).
@@ -1782,5 +1883,169 @@ mod tests {
         let (code, resp) = request(addr, "POST /mcp", &format!("Authorization: {auth}\r\n"), CALL);
         assert_eq!(code, 200, "{resp}");
         assert!(resp.contains(SECRET), "{resp}");
+    }
+
+    // MCP conformance: the real server over loopback, driven the way a client drives it. Every answer to a request is
+    // JSON-RPC 2.0 (the id echoed, a result or an error, never both, error codes from the spec).
+
+    fn body_of(resp: &str) -> &str {
+        resp.split_once("\r\n\r\n").map_or("", |(_, b)| b)
+    }
+
+    fn rpc_over(addr: SocketAddr, body: &str) -> (u16, String) {
+        request(addr, "POST /mcp", &format!("Accept: application/json, text/event-stream\r\n{}", bearer(TOKEN)), body)
+    }
+
+    /// The response to the request with `id`, checked against JSON-RPC 2.0.
+    fn response(resp: &str, id: &Value) -> Value {
+        let v: Value = serde_json::from_str(body_of(resp)).unwrap_or_else(|e| panic!("not JSON ({e}): {resp}"));
+        assert_eq!(v["jsonrpc"], "2.0", "{v}");
+        assert_eq!(&v["id"], id, "the id is echoed: {v}");
+        let o = v.as_object().unwrap();
+        assert!(o.contains_key("result") ^ o.contains_key("error"), "result xor error: {v}");
+        if let Some(e) = o.get("error") {
+            let code = e["code"].as_i64().unwrap_or_else(|| panic!("an integer code: {v}"));
+            assert!([-32700, -32600, -32601, -32602, -32603].contains(&code), "a code from the spec: {v}");
+            assert!(e["message"].as_str().is_some_and(|m| !m.is_empty()), "{v}");
+        }
+        v
+    }
+
+    fn error_code(v: &Value) -> i64 {
+        v["error"]["code"].as_i64().unwrap_or_else(|| panic!("an error: {v}"))
+    }
+
+    #[test]
+    fn mcp_conformance_over_loopback() {
+        let lab = lab("conformance");
+        let items = [words(0, 900, "the save button is grey"), pic(1000, &noisy_png(64, 48, 3), vec![])];
+        let (latest, id) = saved(&lab, &items, CREATED, false);
+        let addr = spawn("127.0.0.1:0", latest, TOKEN.into()).unwrap();
+        let mut n = 0u64;
+        let mut ask = |method: &str, params: Value| -> Value {
+            n += 1;
+            let rid = json!(n);
+            let body = json!({ "jsonrpc": "2.0", "id": rid, "method": method, "params": params }).to_string();
+            let (code, resp) = rpc_over(addr, &body);
+            assert_eq!(code, 200, "{method}: {resp}");
+            assert!(resp.split("\r\n\r\n").next().unwrap().to_ascii_lowercase().contains("content-type: application/json"), "{resp}");
+            response(&resp, &rid)
+        };
+
+        // The handshake, at this protocol and at older ones.
+        for (asked, answered) in [("2025-06-18", "2025-06-18"), ("2025-03-26", "2025-03-26"), ("2024-11-05", "2025-03-26")] {
+            let r = ask("initialize", json!({ "protocolVersion": asked, "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }));
+            assert_eq!(r["result"]["protocolVersion"], answered, "{r}");
+            assert!(r["result"]["capabilities"]["tools"].is_object(), "{r}");
+            assert_eq!(r["result"]["serverInfo"]["name"], "pointcast");
+        }
+        for note in [
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+            r#"{"jsonrpc":"2.0","id":99,"result":{}}"#,
+        ] {
+            let (code, resp) = rpc_over(addr, note);
+            assert_eq!(code, 202, "a notification or response is accepted: {resp}");
+            assert!(body_of(&resp).is_empty(), "and never answered: {resp}");
+        }
+        assert_eq!(ask("ping", json!({}))["result"], json!({}));
+
+        let r = ask("tools/list", json!({}));
+        let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names.len(), 5, "{names:?}");
+
+        // Each tool with arguments it takes: a result that is not an error, with content.
+        let valid = [
+            ("pointcast_latest", json!({ "images": "links" })),
+            ("get_latest_session", json!({})),
+            ("pointcast_get", json!({ "id": id, "images": "none" })),
+            ("pointcast_list", json!({ "limit": 1 })),
+            ("pointcast_shot", json!({ "id": id, "n": 1 })),
+        ];
+        for (name, args) in valid.iter() {
+            let r = ask("tools/call", json!({ "name": name, "arguments": args }));
+            assert_ne!(r["result"]["isError"], json!(true), "{name}: {r}");
+            assert!(r["result"]["content"].as_array().is_some_and(|c| !c.is_empty()), "{name}: {r}");
+        }
+        assert!(names.iter().all(|n| valid.iter().any(|(v, _)| v == n)), "every listed tool was called");
+
+        // Each tool with arguments it cannot use: an isError result the model reads, not a protocol error.
+        let invalid = [
+            ("pointcast_latest", json!({ "images": "sideways" })),
+            ("get_latest_session", json!({ "copy_to": 5 })),
+            ("pointcast_get", json!({})),
+            ("pointcast_get", json!({ "id": "no-such-prompt" })),
+            ("pointcast_list", json!({ "limit": "ten" })),
+            ("pointcast_shot", json!({ "id": id })),
+            ("pointcast_shot", json!({ "id": id, "n": 99 })),
+        ];
+        for (name, args) in invalid {
+            let r = ask("tools/call", json!({ "name": name, "arguments": args }));
+            assert_eq!(r["result"]["isError"], json!(true), "{name}: {r}");
+            assert_eq!(r["result"]["content"][0]["type"], "text", "{name}: {r}");
+            assert!(r["result"]["content"][0]["text"].as_str().is_some_and(|t| !t.is_empty()), "{name}: {r}");
+        }
+
+        // Protocol errors.
+        assert_eq!(error_code(&ask("tools/call", json!({ "name": "no_such_tool", "arguments": {} }))), -32602);
+        assert_eq!(error_code(&ask("tools/call", json!({ "arguments": {} }))), -32602);
+        assert_eq!(error_code(&ask("tools/call", json!({ "name": "pointcast_list", "arguments": 5 }))), -32602);
+        assert_eq!(error_code(&ask("tools/call", json!([1, 2]))), -32602);
+        assert_eq!(error_code(&ask("resources/list", json!({}))), -32601);
+        assert_eq!(error_code(&ask("no/such/method", json!({}))), -32601);
+
+        // A string id comes back as the same string.
+        let (code, resp) = rpc_over(addr, r#"{"jsonrpc":"2.0","id":"abc-1","method":"ping"}"#);
+        assert_eq!(code, 200);
+        response(&resp, &json!("abc-1"));
+
+        // Bodies that are not requests: a 400 with a JSON-RPC error.
+        for (body, code, id) in [
+            ("{not json", -32700, Value::Null),
+            ("", -32700, Value::Null),
+            ("[]", -32600, Value::Null),
+            (r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#, -32600, Value::Null),
+            ("42", -32600, Value::Null),
+            (r#"{"jsonrpc":"1.0","id":5,"method":"ping"}"#, -32600, json!(5)),
+            (r#"{"id":6,"method":"ping"}"#, -32600, json!(6)),
+            (r#"{"jsonrpc":"2.0","id":{"x":1},"method":"ping"}"#, -32600, Value::Null),
+            (r#"{"jsonrpc":"2.0","id":7}"#, -32600, json!(7)),
+        ] {
+            let (status, resp) = rpc_over(addr, body);
+            assert_eq!(status, 400, "{body}: {resp}");
+            assert_eq!(error_code(&response(&resp, &id)), code, "{body}: {resp}");
+        }
+
+        // No event stream to open, so GET is not allowed.
+        let (code, resp) = request(addr, "GET /mcp", &bearer(TOKEN), "");
+        assert_eq!(code, 405, "{resp}");
+        assert!(resp.contains("Allow: POST"), "{resp}");
+
+        // Refused before anything is read: a wrong token, a web page's Origin.
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let (code, resp) = request(addr, "POST /mcp", &bearer("wrong-token-000000000000"), ping);
+        assert_eq!(code, 401, "{resp}");
+        assert!(resp.contains("WWW-Authenticate: Bearer"), "{resp}");
+        let (code, resp) = request(addr, "POST /mcp", &format!("Origin: {EVIL}\r\n{}", bearer(TOKEN)), ping);
+        assert_eq!(code, 403, "{resp}");
+        assert!(!allows_cors(&resp), "{resp}");
+
+        // After all of that the server still answers.
+        assert_eq!(ask("ping", json!({}))["result"], json!({}));
+    }
+
+    #[test]
+    fn the_probe_sees_the_five_tools_and_a_stopped_server_is_gone() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let addr = spawn_stoppable("127.0.0.1:0", Latest::default(), TOKEN.into(), stop.clone()).unwrap();
+        assert_eq!(probe(addr, TOKEN).unwrap().len(), 5);
+        let e = probe(addr, "wrong-token-000000000000").unwrap_err();
+        assert!(e.contains("refused") && !e.contains(TOKEN), "{e}");
+        stop_at(addr, &stop);
+        let t = Instant::now();
+        while probe(addr, TOKEN).is_ok() {
+            assert!(t.elapsed() < Duration::from_secs(3), "still answering after stop");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }

@@ -119,8 +119,20 @@ and you can hold the key while you talk instead of tapping it.
 ## Coding agents over MCP
 
 With **Share over MCP** on, Pointcast runs an MCP server on this computer (`http://127.0.0.1:47821/mcp`,
-protocol 2025-06-18). **Agent setup** copies the command for Claude Code or the entry for Cursor, with
-this computer's key. Four tools:
+streamable HTTP, protocol 2025-06-18). In Settings › Output › Agents, **Set up** adds a `pointcast` entry
+with this computer's key to the agent's own user settings, changes nothing else in that file (the first
+change keeps a `.pointcast-backup` copy), then checks that the server answers. **Remove** takes out only
+that entry. Set up turns sharing on if it was off.
+
+| Agent | File | Entry |
+|---|---|---|
+| Claude Code | `~/.claude.json` | `mcpServers.pointcast`: `type: "http"`, `url`, `headers.Authorization` |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers.pointcast`: `url`, `headers.Authorization` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.pointcast]`: `url`, `http_headers = { Authorization = ... }` |
+
+An agent that is not on this computer is never set up (Pointcast does not make its folder); **Copy command**
+or **Copy entry** gives you the same entry to add by hand. Never put it in a project file: the key is this
+computer's. Four tools:
 
 | Tool | Arguments | Returns |
 |---|---|---|
@@ -149,7 +161,8 @@ nothing else there. Add `.pointcast/` to your `.gitignore`.
 Agents that limit file reads to the project can also be allowed to read `~/Pointcast`, where the
 pictures are kept:
 
-- Claude Code: `"permissions": { "additionalDirectories": ["~/Pointcast"] }` in `~/.claude/settings.json`.
+- Claude Code: `"permissions": { "additionalDirectories": ["~/Pointcast"] }` in `~/.claude/settings.json`
+  (**Let Claude Code open the pictures folder** in Settings adds it for you).
 - Gemini CLI: `gemini --include-directories ~/Pointcast`.
 - OpenCode: `"permission": { "external_directory": "allow" }` in `opencode.json`.
 
