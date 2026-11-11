@@ -906,119 +906,234 @@ html.win .prefs-pane {
   max-width: 760px;
 }
 
-/* —— Usage: a few large numbers with small labels, then when in the week they were made —— */
-.usage {
+/* —— Home: a few large numbers, when in the week, the last recordings, the two shortcuts. Flat on both skins: type and
+   hairlines do the work, two greys of text, nothing drawn for decoration. —— */
+.home {
   padding-top: 4px;
 }
-.usage-head {
+.home > section + section,
+.home > .home-quiet + section {
+  margin-top: 40px;
+}
+.home-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
-.usage-streak {
+.home-streak {
   font-size: var(--fs-caption);
   color: var(--label-2);
 }
-.usage-figures {
+.home-figures {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
-  margin-top: 28px;
+  margin-top: 24px;
 }
-.usage-figures .n {
+.home-figures .n {
   font-family: var(--font-display);
   font-size: var(--fs-hero);
   font-weight: 600;
-  line-height: 1.1;
+  line-height: 32px;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.usage-figures .n span + span {
+.home-figures .n span + span {
   margin-left: 6px;
 }
-.usage-figures small {
+/* The unit sits on the number's baseline inside its line: a figure with a unit is as tall as one without. */
+.home-figures small {
   margin-left: 3px;
   font-family: var(--font);
   font-size: var(--fs-body);
+  line-height: 1;
   font-weight: 400;
   letter-spacing: 0;
   color: var(--label-2);
 }
-.usage-figures .l {
+.home-figures .l {
   margin-top: 4px;
   font-size: var(--fs-caption);
-  color: var(--label-3);
-}
-.usage-note {
-  margin: 16px 0 0;
-  font-size: var(--fs-small);
-  line-height: 1.5;
-  color: var(--label-3);
-}
-.usage-note:empty {
-  display: none;
-}
-.usage-quiet {
-  margin: 28px 0 0;
   color: var(--label-2);
 }
-.usage-title {
-  margin: 36px 0 12px;
+.home-note {
+  margin: 16px 0 0;
+  font-size: var(--fs-small);
+  line-height: 16px;
+  color: var(--label-2);
+}
+.home-note:empty {
+  display: none;
+}
+.home-quiet {
+  margin: 24px 0 0;
+  color: var(--label-2);
+}
+.home > .home-quiet:first-child {
+  margin-top: 0;
+}
+.home-title {
+  margin: 0 0 12px;
   font-size: var(--fs-body);
   font-weight: 600;
 }
-/* Seven rows of 24 hours in one tint of the accent: the more recordings, the less see-through. */
-.usage-grid,
-.usage-row {
-  display: grid;
-  gap: 3px;
+.home-sec {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
 }
-.usage-row {
+.home-sec .home-title {
+  margin: 0;
+}
+/* The page's links and its Reset are grey, as the rest of its quiet text: no colour but the sidebar's, and AA on
+   either skin (the system blue on light grey is not). */
+.home-sec .link,
+.home-foot .btn.plain:not(.danger) {
+  color: var(--label-2);
+}
+.home-sec .link:hover {
+  color: var(--label);
+  text-decoration: none;
+}
+/* Seven rows of 24 hours in one grey: the more recordings, the darker. */
+.home-grid,
+.home-row {
+  display: grid;
+  gap: 4px;
+}
+/* A band, not a wall of squares: each hour is 12 px tall, the week 108 px. */
+.home-row {
   grid-template-columns: 36px repeat(24, minmax(0, 1fr));
   align-items: center;
 }
-.usage-row span {
+.home-row span {
   font-size: var(--fs-small);
-  color: var(--label-3);
+  line-height: 12px;
+  color: var(--label-2);
   font-variant-numeric: tabular-nums;
 }
-.usage-row i {
-  aspect-ratio: 1;
-  border-radius: 3px;
-  background: var(--accent);
-}
-.usage-row i[data-l="0"] {
+.home-row i {
+  height: 12px;
+  border-radius: 2px;
   background: var(--label);
+  opacity: 0.9;
+}
+.home-row i[data-l="0"] {
   opacity: 0.06;
 }
-.usage-row i[data-l="1"] {
+.home-row i[data-l="1"] {
   opacity: 0.22;
 }
-.usage-row i[data-l="2"] {
-  opacity: 0.45;
+.home-row i[data-l="2"] {
+  opacity: 0.42;
 }
-.usage-row i[data-l="3"] {
-  opacity: 0.7;
+.home-row i[data-l="3"] {
+  opacity: 0.66;
 }
-.usage-row.hours span + span {
+.home-row.hours span + span {
   grid-column: span 6;
 }
-.usage-foot {
+/* Plain rows on hairlines; a row's highlight reaches 8 px past the column, its words do not. */
+.home-recent {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+}
+.home-recent li {
+  position: relative;
+}
+.home-recent li + li::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .home-recent li + li::before {
+  border-top-width: 1px;
+}
+.home-recent li:hover::before,
+.home-recent li:hover + li::before {
+  opacity: 0;
+}
+.home-recent button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 40px;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--label);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+html.win .home-recent button {
+  height: 40px;
+}
+.home-recent button:hover {
+  background: var(--fill);
+}
+.home-recent .t {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.home-recent .t > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Pictures: one small mark after the words, the count is in the row's label. */
+.home-recent .t svg {
+  flex: none;
+}
+.home-recent .t.empty,
+.home-recent .t svg,
+.home-recent .len,
+.home-recent .when {
+  color: var(--label-2);
+}
+.home-recent .len,
+.home-recent .when {
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.home-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 32px;
+}
+.home-keys > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.home-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 36px;
+  margin-top: 40px;
   font-size: var(--fs-small);
-  color: var(--label-3);
+  color: var(--label-2);
 }
-/* The quiet button's words, not its padding, end where the grid does. */
-.usage-foot .btn {
+/* The quiet button's words, not its padding, end where the column does. */
+.home-foot .btn {
   margin-right: -12px;
   font-size: inherit;
 }
-html.win .usage-foot .btn {
+html.win .home-foot .btn {
   margin-right: -14px;
 }
 

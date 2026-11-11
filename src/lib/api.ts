@@ -410,6 +410,31 @@ export function ranText(m: Pick<HistoryMeta, "engine" | "device" | "transcribe_m
   return `Transcribed on your processor ${speed}${hint}`;
 }
 export const historyList = () => invoke<{ entries: HistoryMeta[]; last: string | null }>("history_list");
+/** History's entries for Home; in the browser preview, a few made-up recordings (none with `usage=empty`). */
+export const historyRecent = (): Promise<HistoryMeta[]> =>
+  inTauri ? historyList().then((h) => h.entries) : Promise.resolve(location.search.includes("usage=empty") ? [] : previewHistory(Date.now()));
+
+/** Browser preview: six recordings over the last ten days, the newest a few minutes ago. */
+export function previewHistory(now: number): HistoryMeta[] {
+  const min = 60_000;
+  const said: [number, number, number, string][] = [
+    // minutes ago, seconds long, pictures, first words
+    [7, 18, 2, "Move the save button to the right of the title and give it the primary style, same height as the search field"],
+    [134, 42, 1, "The chart labels overlap on small screens, wrap them under the axis instead of rotating them"],
+    [26 * 60 + 25, 9, 0, "Reply to Sam: the build is ready for review tomorrow morning"],
+    [50 * 60 + 10, 96, 3, "Walk through the onboarding again and note every step where the copy runs longer than one line"],
+    [4 * 24 * 60 + 300, 27, 0, "Rename the export setting to Save to folder and keep the old key working"],
+    [9 * 24 * 60 + 90, 64, 1, "This error appears when the network drops during upload, retry once before showing it"],
+  ];
+  return said.map(([ago, s, images, preview], i) => ({
+    id: `preview-${i}`,
+    created_ms: now - ago * min,
+    duration_ms: s * 1000,
+    preview: preview.split(" ").slice(0, 24).join(" "),
+    images,
+    recovered: false,
+  }));
+}
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
 /** Reopen picture n (as `[image n]` numbers it) of a past prompt in the overlay to mark it up again. */
 export const historyEdit = (id: string, n: number) => invoke<void>("history_edit", { id, n });

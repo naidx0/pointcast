@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, ChartNoAxesColumn, Check, Info, Keyboard, Settings2, Share } from "lucide-react";
-import { ACTIONS, ShortcutField } from "@/components/Shortcut";
+import { AudioLines, Camera, Check, House, Image, Info, Keyboard, Settings2, Share } from "lucide-react";
+import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
 import {
@@ -14,6 +14,8 @@ import {
   gpuRetry,
   historyClear,
   historyList,
+  historyOpen,
+  historyRecent,
   inTauri,
   loginGet,
   loginSet,
@@ -39,26 +41,27 @@ import { computerView, micStatus } from "@/lib/hardware";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
+import { recentRows, type RecentRow } from "@/lib/home";
 
 const PANES = [
+  { id: "home", name: "Home", icon: House, tile: "tile-teal" },
   { id: "general", name: "General", icon: Settings2, tile: "tile-gray" },
   { id: "shortcuts", name: "Shortcuts", icon: Keyboard, tile: "tile-indigo" },
   { id: "speech", name: "Speech", icon: AudioLines, tile: "tile-orange" },
   { id: "capture", name: "Capture", icon: Camera, tile: "tile-purple" },
   { id: "output", name: "Output", icon: Share, tile: "tile-green" },
-  { id: "usage", name: "Usage", icon: ChartNoAxesColumn, tile: "tile-teal" },
   { id: "about", name: "About", icon: Info, tile: "tile-blue" },
 ] as const;
 type Pane = (typeof PANES)[number]["id"];
+
+/** A pane by its id; "usage" names the pane Home took over, so an old link still lands. */
+const paneOf = (q: string | null): Pane | null => (q === "usage" ? "home" : PANES.some((p) => p.id === q) ? (q as Pane) : null);
 
 type Patch = (p: Record<string, unknown>) => Promise<string | null>;
 
 export function Settings() {
   const { cfg, setCfg, patch, refresh, error } = useConfig();
-  const [pane, setPane] = useState<Pane>(() => {
-    const q = new URLSearchParams(location.search).get("pane");
-    return PANES.some((p) => p.id === q) ? (q as Pane) : "general";
-  });
+  const [pane, setPane] = useState<Pane>(() => paneOf(new URLSearchParams(location.search).get("pane")) ?? "home");
   const [scrolled, setScrolled] = useState(false);
   const main = useRef<HTMLElement | null>(null);
   const mac = platform() === "mac";
@@ -69,7 +72,16 @@ export function Settings() {
     setScrolled(false);
   }, [pane]);
   // The menu's update item brings Settings forward on the pane that has Updates.
-  useEffect(() => subscribe(onSettingsPane((p) => PANES.some((x) => x.id === p) && setPane(p as Pane))), []);
+  useEffect(
+    () =>
+      subscribe(
+        onSettingsPane((p) => {
+          const to = paneOf(p);
+          if (to) setPane(to);
+        }),
+      ),
+    [],
+  );
 
   return (
     <div className="prefs">
@@ -110,7 +122,9 @@ export function Settings() {
               {error.replace(/^Error:\s*/, "")}
             </div>
           ) : null}
-          {!cfg ? null : pane === "general" ? (
+          {!cfg ? null : pane === "home" ? (
+            <Home cfg={cfg} go={setPane} />
+          ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
             <Shortcuts cfg={cfg} patch={patch} setCfg={setCfg} />
@@ -120,8 +134,6 @@ export function Settings() {
             <Capture cfg={cfg} patch={patch} />
           ) : pane === "output" ? (
             <Output cfg={cfg} patch={patch} refresh={refresh} />
-          ) : pane === "usage" ? (
-            <Usage />
           ) : (
             <About cfg={cfg} />
           )}
@@ -396,96 +408,143 @@ const RANGES = [
   ["all", "All time"],
 ] as const;
 
-/** What was dictated: four numbers for the week or for all time, then when in the week, the streak, and since when.
- * Read once, as the pane opens. */
-function Usage() {
+/** The first pane: what was dictated (four numbers for the week or for all time, then when in the week), the last few
+ * recordings, and the two shortcuts that start everything. Read once, as the pane opens. */
+function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   const [counts, setCounts] = useState<Counts | null>(null);
+  const [recent, setRecent] = useState<RecentRow[]>([]);
   const [range, setRange] = useState<Range>("week");
   const [sure, setSure] = useState(false);
   useEffect(() => {
     statsGet()
       .catch(() => null)
       .then((u) => setCounts(readUsage(u, Date.now())));
+    historyRecent()
+      .then((e) => setRecent(recentRows(e, new Date())))
+      .catch(() => undefined);
   }, []);
   if (!counts) return null;
   const v = usageView(counts, new Date(), range);
   const days = weekdayNames("short");
-  const foot = (
-    <div className="usage-foot">
-      <span>{v.since}</span>
-      <button
-        type="button"
-        className={`btn plain ${sure ? "danger" : ""}`}
-        disabled={v.empty}
-        onBlur={() => setSure(false)}
-        onClick={async () => {
-          if (!sure) return setSure(true);
-          setSure(false);
-          await statsReset()
-            .then((u) => setCounts(readUsage(u, Date.now())))
-            .catch(() => undefined);
-        }}
-      >
-        {sure ? "Click again to reset" : "Reset…"}
-      </button>
-    </div>
-  );
-  if (v.empty)
-    return (
-      <div className="usage">
-        <p className="usage-quiet">{v.quiet}</p>
-        {foot}
-      </div>
-    );
+  const saved = v.figures.some((f) => f.label === "Saved");
+  const show = (id: string | null) => {
+    if (inTauri) historyOpen(id).catch(() => undefined);
+  };
   return (
-    <div className="usage">
-      <div className="usage-head">
-        <Seg value={range} options={RANGES} set={setRange} label="Range" />
-        {v.streak ? <span className="usage-streak">{v.streak}</span> : null}
-      </div>
-      {v.quiet ? (
-        <p className="usage-quiet">{v.quiet}</p>
+    <div className="home">
+      {v.empty ? (
+        <p className="home-quiet">{v.quiet}</p>
       ) : (
-        <div className="usage-figures">
-          {v.figures.map((f) => (
-            <div key={f.label} title={f.title}>
-              <div className="n">
-                {f.parts.map((p) => (
-                  <span key={p.u ?? ""}>
-                    {p.n}
-                    {p.u ? <small>{p.u}</small> : null}
-                  </span>
+        <section aria-label="Usage">
+          <div className="home-head">
+            <Seg value={range} options={RANGES} set={setRange} label="Range" />
+            {v.streak || v.longest ? <span className="home-streak">{[v.streak, v.longest].filter(Boolean).join(" · ")}</span> : null}
+          </div>
+          {v.quiet ? (
+            <p className="home-quiet">{v.quiet}</p>
+          ) : (
+            <div className="home-figures">
+              {v.figures.map((f) => (
+                <div key={f.label} title={f.title}>
+                  <div className="n">
+                    {f.parts.map((p) => (
+                      <span key={p.u ?? ""}>
+                        {p.n}
+                        {p.u ? <small>{p.u}</small> : null}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="l">{f.label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="home-note">
+            {v.rate}
+            {v.rate && saved ? " " : null}
+            {saved ? SAVED_NOTE : null}
+          </p>
+        </section>
+      )}
+      {v.empty ? null : (
+        <section>
+          <h2 className="home-title">When you dictate</h2>
+          <div className="home-grid" role="img" aria-label="Recordings by weekday and hour">
+            {v.cells.map((row, d) => (
+              <div key={d} className="home-row">
+                <span className="d">{days[d]}</span>
+                {row.map((c, h) => (
+                  <i key={h} data-l={c.level} title={c.title} />
                 ))}
               </div>
-              <div className="l">{f.label}</div>
-            </div>
-          ))}
-        </div>
-      )}
-      <p className="usage-note">
-        {v.rate}
-        {v.rate && v.figures.some((f) => f.label === "Saved") ? " " : null}
-        {v.figures.some((f) => f.label === "Saved") ? SAVED_NOTE : null}
-      </p>
-      <h2 className="usage-title">When you dictate</h2>
-      <div className="usage-grid" role="img" aria-label="Recordings by weekday and hour">
-        {v.cells.map((row, d) => (
-          <div key={d} className="usage-row">
-            <span className="d">{days[d]}</span>
-            {row.map((c, h) => (
-              <i key={h} data-l={c.level} title={c.title} />
             ))}
+            <div className="home-row hours" aria-hidden="true">
+              <span className="d" />
+              {["00", "06", "12", "18"].map((h) => (
+                <span key={h}>{h}</span>
+              ))}
+            </div>
           </div>
-        ))}
-        <div className="usage-row hours" aria-hidden="true">
-          <span className="d" />
-          {["00", "06", "12", "18"].map((h) => (
-            <span key={h}>{h}</span>
-          ))}
+        </section>
+      )}
+      {recent.length ? (
+        <section>
+          <div className="home-sec">
+            <h2 className="home-title">Recent</h2>
+            <button type="button" className="link" onClick={() => show(null)}>
+              All history
+            </button>
+          </div>
+          <ul className="home-recent">
+            {recent.map((r) => (
+              <li key={r.id}>
+                <button type="button" aria-label={r.label} onClick={() => show(r.id)}>
+                  <span className={r.empty ? "t empty" : "t"}>
+                    <span>{r.text}</span>
+                    {r.pictures ? <Image size={13} strokeWidth={1.75} aria-hidden="true" /> : null}
+                  </span>
+                  <span className="when">{r.when}</span>
+                  <span className="len">{r.length}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      <section>
+        <div className="home-sec">
+          <h2 className="home-title">Shortcuts</h2>
+          <button type="button" className="link" onClick={() => go("shortcuts")}>
+            Change
+          </button>
         </div>
+        <div className="home-keys">
+          <span>
+            Dictate <Keycaps label={cfg.hotkeys.session.label} />
+          </span>
+          <span>
+            Mark up <Keycaps label={cfg.hotkeys.region.label} />
+          </span>
+        </div>
+      </section>
+      <div className="home-foot">
+        <span>{v.since}</span>
+        <button
+          type="button"
+          className={`btn plain ${sure ? "danger" : ""}`}
+          disabled={v.empty}
+          onBlur={() => setSure(false)}
+          onClick={async () => {
+            if (!sure) return setSure(true);
+            setSure(false);
+            await statsReset()
+              .then((u) => setCounts(readUsage(u, Date.now())))
+              .catch(() => undefined);
+          }}
+        >
+          {sure ? "Click again to reset" : "Reset…"}
+        </button>
       </div>
-      {v.longest ? <p className="usage-note">{v.longest}</p> : null}
-      {foot}
     </div>
   );
 }
