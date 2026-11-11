@@ -391,10 +391,9 @@ fn assist_change(svc: &App, change: impl FnOnce(&mut Settings) -> Result<(), Str
 
 #[tauri::command]
 fn assist_choose(svc: tauri::State<'_, Arc<App>>, id: String, base: Option<String>, model: Option<String>, consent: bool) -> Result<(), String> {
-    // The typed address of the custom route; wired when the catalogue's choose_at lands.
-    let _ = base;
+    // `base` is the address the person typed for the custom route; every other route ignores it.
     let mut s = svc.settings.lock().unwrap().clone();
-    assist::catalog::choose(&mut s, &id, model, consent, now_ms())?;
+    assist::catalog::choose_at(&mut s, &id, base.as_deref(), model, consent, now_ms())?;
     svc.save_settings(s)
 }
 

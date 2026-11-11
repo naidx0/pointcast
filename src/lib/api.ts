@@ -3,7 +3,7 @@ import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import { PREVIEW_ANSWER, levelOf, previewChunks, previewLevel, previewPicture, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
+import { LEVEL_FIELDS, PREVIEW_ANSWER, levelOf, previewChunks, previewLevel, previewPicture, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
 import { normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -507,7 +507,7 @@ export const LIVE = {
   level: "session://state",
   /** The level's fields on UiState, first found wins: an engine-smoothed level if the engine sends one, else the raw
    * meter level (0 to 1 over 50 dB). */
-  levelFields: ["level_smooth", "voice", "level"],
+  levelFields: LEVEL_FIELDS,
 } as const;
 
 

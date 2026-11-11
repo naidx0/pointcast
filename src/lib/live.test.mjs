@@ -10,6 +10,7 @@ import {
   initialLive,
   isPinned,
   levelOf,
+  LEVEL_FIELDS,
   liveReduce,
   liveView,
   previewChunks,
@@ -281,4 +282,7 @@ test("the level prefers an engine-smoothed field, falls back to the raw level, a
   assert.equal(levelOf({ level: 7 }, fields), 1);
   assert.equal(levelOf({ level: "loud" }, fields), 0);
   assert.equal(levelOf(null, fields), 0);
+  // The engine names its smoothed Ask level `loudness`; the panel reads it before the raw level.
+  assert.equal(levelOf({ mic: true, level: 0.4, loudness: 0.7 }, LEVEL_FIELDS), 0.7);
+  assert.equal(levelOf({ mic: true, level: 0.4 }, LEVEL_FIELDS), 0.4);
 });

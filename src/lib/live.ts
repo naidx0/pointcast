@@ -110,6 +110,10 @@ export function liveReduce(m: LiveModel, a: LiveAction): LiveModel {
 
 /** The microphone level in the session stream's payload (UiState), 0 to 1: the first of `fields` that is a number, so
  * an engine-smoothed level is preferred when the engine sends one. 0 when the microphone is off or nothing fits. */
+/** The fields of `session://state` the line reads, first found wins: the engine's Ask loudness (RMS over 50 ms,
+ * rising at once and falling over about 150 ms), then older names, then the raw level. */
+export const LEVEL_FIELDS = ["loudness", "level_smooth", "voice", "level"] as const;
+
 export function levelOf(p: unknown, fields: readonly string[]): number {
   const u = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
   if (u.mic === false) return 0;
