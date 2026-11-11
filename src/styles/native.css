@@ -10,8 +10,9 @@
   --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Cascadia Code", Consolas, Menlo, monospace;
 
+  /* Five sizes per skin (small and caption are one size), weights 400 / 500 / 600, tracking tightening as size grows. */
   --fs-body: 13px;
-  --fs-small: 11px;
+  --fs-small: 12px;
   --fs-caption: 12px;
   --fs-head: 15px;
   --fs-title: 22px;
@@ -33,7 +34,7 @@
   --label: rgba(0, 0, 0, 0.88);
   --label-2: rgba(0, 0, 0, 0.6);
   --label-3: rgba(0, 0, 0, 0.45);
-  --sep: rgba(0, 0, 0, 0.1);
+  --sep: rgba(0, 0, 0, 0.08);
   --fill: rgba(0, 0, 0, 0.05);
   --fill-2: rgba(0, 0, 0, 0.08);
 
@@ -45,6 +46,15 @@
   --control: #ffffff;
   --control-line: rgba(0, 0, 0, 0.14);
   --control-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.18);
+
+  /* One spacing scale on a 4 px grid; one icon stroke; hairlines that separate and never frame. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --icon-stroke: 1.5;
 
   --r-control: 6px;
   --r-box: 10px;
@@ -80,7 +90,7 @@ html[data-theme="dark"] {
   --label: rgba(255, 255, 255, 0.9);
   --label-2: rgba(255, 255, 255, 0.62);
   --label-3: rgba(255, 255, 255, 0.45);
-  --sep: rgba(255, 255, 255, 0.1);
+  --sep: rgba(255, 255, 255, 0.08);
   --fill: rgba(255, 255, 255, 0.06);
   --fill-2: rgba(255, 255, 255, 0.1);
 
@@ -200,12 +210,16 @@ textarea {
   user-select: text;
 }
 :focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  outline-offset: 1px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
 }
 html.win :focus-visible {
   outline: 2px solid var(--label);
   outline-offset: 2px;
+}
+/* Line icons at one stroke everywhere (a filled glyph, drawn with stroke 0, keeps its shape). */
+svg.lucide:not([stroke-width="0"]) {
+  stroke-width: var(--icon-stroke);
 }
 .mono {
   font-family: var(--mono);
@@ -229,22 +243,19 @@ html.win :focus-visible {
 /* —— Type —— */
 .t-hero {
   margin: 0;
-  font: 700 var(--fs-hero) / 1.15 var(--font-display);
-  letter-spacing: -0.022em;
+  font: 600 var(--fs-hero) / 1.15 var(--font-display);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 .t-title {
   margin: 0;
-  font: 700 var(--fs-title) / 1.2 var(--font-display);
-  letter-spacing: -0.018em;
-}
-html.win .t-hero,
-html.win .t-title {
-  font-weight: 600;
-  letter-spacing: 0;
+  font: 600 var(--fs-title) / 1.2 var(--font-display);
+  letter-spacing: -0.02em;
 }
 .t-head {
   margin: 0;
   font: 600 var(--fs-head) / 1.3 var(--font-display);
+  letter-spacing: -0.01em;
 }
 .t-body {
   margin: 0;
@@ -1306,6 +1317,16 @@ html.win .ai-route {
 }
 .ai-cmd .btn {
   height: 100%;
+}
+
+/* The routes did not load: one quiet line and Try again, never an empty pane. */
+.ai-fail {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0;
+  padding: var(--s-1) 0;
+  color: var(--label-2);
 }
 
 /* —— Sheet: a Mac sheet drops from under the toolbar; a Windows dialog sits in the middle over a dimmed window, its

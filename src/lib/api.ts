@@ -692,7 +692,12 @@ const pvDo = (c: Parameters<typeof previewApply>[1]): Promise<void> => {
 const pvLater = <T,>(ms: number, f: () => T | Promise<T>) => new Promise<T>((res, rej) => setTimeout(() => Promise.resolve().then(f).then(res, rej), ms));
 
 export const assistProviders = (): Promise<Assist> =>
-  (inTauri ? invoke<unknown>(ASSIST.providers) : Promise.resolve(pvAssist())).then(normalizeAssist);
+  (inTauri
+    ? invoke<unknown>(ASSIST.providers)
+    : new URLSearchParams(location.search).get("assist") === "fail"
+      ? Promise.reject("assist_providers failed (preview)")
+      : Promise.resolve(pvAssist())
+  ).then(normalizeAssist);
 export const assistModels = (id: string): Promise<AssistModel[]> =>
   inTauri ? invoke<unknown>(ASSIST.models, { id }).then(normalizeModels) : pvLater(1200, () => previewModels(id));
 /** `base` reaches the engine only for the other service (`custom`); every other route has its own address. */

@@ -703,10 +703,15 @@ function Ai() {
   const [consent, setConsent] = useState<{ route: Route; model?: string; base?: string } | null>(null);
   const [found, setFound] = useState<{ id: string; list: AssistModel[] } | null>(null);
   const [finding, setFinding] = useState(false);
+  // The routes did not come: one quiet line with Try again, never an empty pane.
+  const [failed, setFailed] = useState(false);
   const load = () =>
     assistProviders()
-      .then(setA)
-      .catch(() => undefined);
+      .then((x) => {
+        setA(x);
+        setFailed(false);
+      })
+      .catch(() => setFailed(true));
   useEffect(() => {
     load();
     window.addEventListener("focus", load);
@@ -727,7 +732,15 @@ function Ai() {
       live = false;
     };
   }, [chosen?.id]);
-  if (!a) return null;
+  if (!a)
+    return failed ? (
+      <p className="ai-fail" role="status">
+        <span>The list of AIs didn’t load.</span>
+        <button type="button" className="btn" onClick={load}>
+          Try again
+        </button>
+      </p>
+    ) : null;
 
   const run = async (id: string, job: () => Promise<unknown>) => {
     setErrs((e) => ({ ...e, [id]: "" }));
