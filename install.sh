@@ -15,6 +15,10 @@ fail() {
   [ "${quit:-0}" = 1 ] && [ -d "${dest:-}/Pointcast.app" ] && open "$dest/Pointcast.app" >/dev/null 2>&1
   exit 1
 }
+# What macOS knows an app by when it keeps Screen Recording and Accessibility for it: the designated requirement of
+# its signature. A build signed with Pointcast's certificate names the certificate, the same in every version; a
+# build signed ad hoc names only itself.
+requirement() { { codesign -d -r- "$1" 2>/dev/null || true; } | sed -n 's/^[# ]*designated => //p'; }
 
 printf '\n  Pointcast\n'
 [ "$(uname -s)" = Darwin ] || fail "this script is for macOS. On Windows, in PowerShell: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"
@@ -39,6 +43,24 @@ if [ -n "${POINTCAST_DMG:-}" ]; then
   [ -f "$dmg" ] || fail "no file at $dmg."
 else
   say "Finding the latest version..."
+  # Each release lists its own installers in latest.json. Reading it is a download, which GitHub does not count
+  # against the requests an hour it allows a network, so it also works in an office, a school or behind a VPN.
+  url=""
+  want=""
+  list=$(curl -fsSL -H 'User-Agent: pointcast-installer' "${POINTCAST_MANIFEST:-$RELEASES/download/latest.json}" 2>/dev/null) || list=""
+  mac=$(printf '%s' "$list" | tr -d ' \t\r\n' | sed -n 's/.*"macos":{\([^}]*\)}.*/\1/p')
+  listed=$(printf '%s' "$mac" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+  sum=$(printf '%s' "$mac" | sed -n 's/.*"sha256":"\([0-9a-f]*\)".*/\1/p')
+  case $listed in
+  "https://github.com/$REPO/releases/download/"*)
+    if [ ${#sum} = 64 ]; then
+      url=$listed
+      want=$sum
+    fi
+    ;;
+  esac
+  # A release from before the list: ask GitHub's API for it.
+  if [ -z "$url" ]; then
   resp=$(curl -sSL -H 'User-Agent: pointcast-installer' -w '\n%{http_code}' \
     "${POINTCAST_API:-https://api.github.com/repos/$REPO/releases/latest}" 2>/dev/null) ||
     fail "can't reach GitHub. Check your internet connection and run this again."
@@ -70,6 +92,7 @@ else
   printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' ||
     fail "GitHub lists no SHA-256 for this download, so it cannot be checked. See $RELEASES."
   fi
+  fi
   say "Downloading $(basename "$url")..."
   curl -fL --progress-bar -o "$tmp/Pointcast.dmg" "$url" ||
     fail "the download did not finish. Check your connection and run this again."
@@ -87,12 +110,28 @@ app=$(find "$tmp/mnt" -maxdepth 1 -name '*.app' -print -quit)
 
 say "$([ $had = 1 ] && echo Updating || echo Installing)..."
 # Copy first, then swap, so a failed copy never leaves the Mac without Pointcast.
-ditto "$app" "$dest/.Pointcast.app.new" || fail "could not copy Pointcast into $dest (is the disk full?)."
+new="$dest/.Pointcast.app.new"
+ditto "$app" "$new" || fail "could not copy Pointcast into $dest (is the disk full?)."
 # Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
-xattr -dr com.apple.quarantine "$dest/.Pointcast.app.new" 2>/dev/null || true
-# Release builds are ad-hoc signed; re-sign only if that signature did not survive the copy.
-codesign --verify "$dest/.Pointcast.app.new" >/dev/null 2>&1 ||
-  codesign --force --deep --sign - "$dest/.Pointcast.app.new" >/dev/null 2>&1 || true
+xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
+if ! codesign --verify "$new" >/dev/null 2>&1; then
+  # A build signed with the certificate has to arrive whole: signing it again here would replace the certificate's
+  # signature with an ad hoc one, and macOS would no longer know the app. Only an ad hoc build is signed again.
+  case $(requirement "$app") in
+  *certificate* | *anchor*) fail "the new version's signature did not survive the copy. The Pointcast you had is still there." ;;
+  esac
+  codesign --force --deep --sign - "$new" >/dev/null 2>&1 || true
+fi
+
+# macOS keeps what it was allowed when the new version meets the requirement of the one it replaces: so it is from
+# one certificate-signed version to the next, and not when the signer changed (an ad hoc build on either side).
+kept=0
+if [ $had = 1 ]; then
+  was=$(requirement "$dest/Pointcast.app")
+  if [ -n "$was" ] && codesign --verify -R="$was" "$new" >/dev/null 2>&1; then
+    kept=1
+  fi
+fi
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
 if pgrep -x pointcast >/dev/null 2>&1; then
@@ -100,20 +139,48 @@ if pgrep -x pointcast >/dev/null 2>&1; then
   osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
   sleep 1
   pkill -x pointcast >/dev/null 2>&1 || true
+  # Wait until it has gone: opened while the old copy is still closing, the new one would hand over to it and
+  # close too, and nothing would be left running.
+  n=0
+  while pgrep -x pointcast >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [ $n -ge 40 ]; then
+      pkill -9 -x pointcast >/dev/null 2>&1 || true
+    fi
+    if [ $n -ge 60 ]; then
+      break
+    fi
+    sleep 0.25
+  done
 fi
 rm -rf "$dest/Pointcast.app" || fail "could not replace the Pointcast in $dest (it may belong to another user)."
-mv "$dest/.Pointcast.app.new" "$dest/Pointcast.app" || fail "could not move Pointcast into $dest."
+mv "$new" "$dest/Pointcast.app" || fail "could not move Pointcast into $dest."
 
-if [ $had = 1 ]; then
-  # Each build is signed ad hoc, so macOS treats an update as a new app: clear the old grants so
-  # it asks cleanly instead of showing them on while they no longer apply.
+if [ $had = 1 ] && [ $kept = 0 ]; then
+  # The signer changed, so macOS no longer matches what it allowed to this app: clear the old grants so it asks
+  # cleanly instead of showing them on while they no longer apply.
   tccutil reset ScreenCapture dev.pointcast.app >/dev/null 2>&1 || true
   tccutil reset Accessibility dev.pointcast.app >/dev/null 2>&1 || true
 fi
 
 open "$dest/Pointcast.app"
-if [ $had = 1 ]; then
-  say "Updated. macOS may ask again for Screen Recording and Accessibility: each update is a new build."
+if [ "${quit:-0}" = 1 ]; then
+  # It was running, so it has to be running again: ask once more if macOS did not start it.
+  n=0
+  until pgrep -x pointcast >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [ $n -ge 40 ]; then
+      open -n "$dest/Pointcast.app" >/dev/null 2>&1 || true
+      break
+    fi
+    sleep 0.25
+  done
+fi
+now=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$dest/Pointcast.app/Contents/Info.plist" 2>/dev/null) || now=""
+if [ $had = 1 ] && [ $kept = 1 ]; then
+  say "Updated${now:+ to $now}."
+elif [ $had = 1 ]; then
+  say "Updated${now:+ to $now}. macOS may ask again for Screen Recording and Accessibility: this version is signed differently from the one it replaced."
 else
   say "Installed to $dest/Pointcast.app."
   say "Pointcast is in the menu bar (top right). The setup assistant opens now."
