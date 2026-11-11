@@ -1,6 +1,6 @@
 //! Cross-platform screen grab via xcap. Hidden (password-manager) windows are painted over.
 //! Pointcast's own windows are treated as hidden unless `include_app` is on: the protected ones are left out by the
-//! OS, the others are painted over here.
+//! OS. The answer panel is never protected and is always painted over here.
 use crate::assist::Mime;
 use crate::element::{self, Element, ElementMark};
 use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
@@ -245,12 +245,12 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let mon = xcap::Monitor::from_point(cx, cy).map_err(|e| e.to_string())?;
     let mx = mon.x().unwrap_or(0);
     let my = mon.y().unwrap_or(0);
-    // Pointcast's protected windows (see platform::protect) are left out of the frame by the OS. Its other windows,
-    // the answer panel among them, are painted over here with the password managers and the hide-list, so an earlier
-    // answer is never in a later picture; with "include Pointcast" on they stay, as the person asked.
+    // Pointcast's protected windows (see platform::protect) are left out of the frame by the OS. The answer panel is
+    // never protected, so it is painted over here with the password managers and the hide-list, whatever "include
+    // Pointcast" says: an earlier answer is never in a later picture.
     let seen = listed();
     let hide = settings.hidden_list();
-    let (rects, windows) = sort_out(&seen, &hide, std::process::id(), !settings.include_app);
+    let (rects, windows) = sort_out(&seen, &hide, std::process::id(), panel());
     let titles = titles(&seen, &hide);
     let img = mon.capture_image().map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
@@ -292,8 +292,21 @@ struct Listed {
     pid: Option<u32>,
     /// Only painted over, never what a close-up centres on: a window xcap would not list, having no title or app name.
     paint_only: bool,
-    /// Never painted as one of Pointcast's own: content-protected, so the OS keeps it out of the frame already.
-    protected: bool,
+    /// The OS's own name for the window (its handle on Windows, its window number on macOS), where it was read.
+    id: Option<u64>,
+}
+
+/// The answer panel as the OS names it (see `Listed::id`); 0 while there is none.
+static PANEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The answer panel was built (its handle or window number) or is gone: the one window of Pointcast's own that every
+/// capture paints over.
+pub fn set_panel(id: Option<u64>) {
+    PANEL.store(id.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn panel() -> Option<u64> {
+    Some(PANEL.load(std::sync::atomic::Ordering::SeqCst)).filter(|id| *id != 0)
 }
 
 impl Listed {
@@ -307,16 +320,15 @@ impl Listed {
             rect,
             minimized: minimized.unwrap_or(false),
             pid,
-            protected: false,
+            id: None,
         }
     }
 }
 
-/// From one read of the window list: what to paint over (visible windows the hide-list names and, with `paint_own`,
-/// this process's own windows that are not content-protected) and the windows a close-up can centre on. `me` is this
-/// process.
-fn sort_out(seen: &[Listed], hidden: &[String], me: u32, paint_own: bool) -> (Vec<Rect>, Vec<Win>) {
-    let ours = |w: &Listed| paint_own && w.pid == Some(me) && !w.protected;
+/// From one read of the window list: what to paint over (visible windows the hide-list names and the answer panel,
+/// the window of this process the OS names `panel`) and the windows a close-up can centre on. `me` is this process.
+fn sort_out(seen: &[Listed], hidden: &[String], me: u32, panel: Option<u64>) -> (Vec<Rect>, Vec<Win>) {
+    let ours = |w: &Listed| panel.is_some() && w.id == panel && w.pid == Some(me);
     let rects = seen
         .iter()
         .filter(|w| !w.minimized && (privacy::hides(&w.app, &w.title, hidden) || ours(w)))
@@ -361,44 +373,31 @@ fn listed() -> Vec<Listed> {
         })
         .collect();
     #[cfg(windows)]
-    let seen = seen.into_iter().chain(untitled_tools(std::process::id())).chain(own_windows(std::process::id())).collect();
+    let seen = seen.into_iter().chain(untitled_tools(std::process::id())).chain(panel().and_then(panel_window)).collect();
     seen
 }
 
-/// Windows: this process's own windows, which xcap leaves out of its list. Read without their titles (reading one
-/// sends the window a message), each with whether it is content-protected, so the ones that are not can be painted.
+/// Windows: the answer panel, which xcap leaves out of its list with the rest of this process's windows. Read by its
+/// handle and without its title (reading one sends the window a message), so it can be painted.
 #[cfg(windows)]
-fn own_windows(me: u32) -> Vec<Listed> {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowDisplayAffinity, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    };
-    unsafe extern "system" fn each(h: HWND, all: LPARAM) -> BOOL {
-        (*(all.0 as *mut Vec<HWND>)).push(h);
-        true.into()
-    }
-    let mut all: Vec<HWND> = vec![];
+fn panel_window(id: u64) -> Option<Listed> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible};
+    let h = HWND(id as usize as *mut std::ffi::c_void);
     unsafe {
-        let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut Vec<HWND> as isize));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        // A handle from a panel that is gone can name another program's window by now.
+        if pid != std::process::id() || !IsWindowVisible(h).as_bool() {
+            return None;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(h, &mut r).is_err() || r.right <= r.left || r.bottom <= r.top {
+            return None;
+        }
+        let rect = Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+        Some(Listed { id: Some(id), ..Listed::seen(Some(String::new()), None, rect, Some(IsIconic(h).as_bool()), Some(pid)) })
     }
-    all.into_iter()
-        .filter_map(|h| unsafe {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(h, Some(&mut pid));
-            if pid != me || !IsWindowVisible(h).as_bool() {
-                return None;
-            }
-            let mut r = RECT::default();
-            if GetWindowRect(h, &mut r).is_err() || r.right <= r.left || r.bottom <= r.top {
-                return None;
-            }
-            // An affinity that cannot be read counts as none: the window is painted.
-            let mut affinity = 0u32;
-            let protected = GetWindowDisplayAffinity(h, &mut affinity).is_ok() && affinity != 0;
-            let rect = Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
-            Some(Listed { protected, ..Listed::seen(Some(String::new()), None, rect, Some(IsIconic(h).as_bool()), Some(pid)) })
-        })
-        .collect()
 }
 
 /// Windows: the untitled tool windows xcap leaves out of its list (a password manager's quick-access panel can be one),
@@ -490,9 +489,8 @@ fn listed() -> Vec<Listed> {
             let at = |k: &str| number(&bounds, k).unwrap_or(0.0);
             let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).map(bool::from);
             let rect = Rect { x: at("X") as i32, y: at("Y") as i32, w: at("Width") as i32, h: at("Height") as i32 };
-            // A menu bar item is a window too (level 25, the height of the bar): Pointcast's own is never painted.
-            let bar_item = number(&d, "kCGWindowLayer") == Some(25.0) && rect.h <= 40;
-            Some(Listed { protected: bar_item, ..Listed::seen(app, title, rect, shown.map(|s| !s), number(&d, "kCGWindowOwnerPID").map(|p| p as u32)) })
+            let id = number(&d, "kCGWindowNumber").map(|n| n as u64);
+            Some(Listed { id, ..Listed::seen(app, title, rect, shown.map(|s| !s), number(&d, "kCGWindowOwnerPID").map(|p| p as u32)) })
         })
         .collect()
 }
@@ -840,7 +838,7 @@ mod tests {
 
     #[test]
     fn one_read_of_the_window_list_gives_what_to_paint_over_and_what_to_zoom_to() {
-        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid, paint_only: false, protected: true };
+        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid, paint_only: false, id: None };
         let seen = [
             w("Bitwarden", "Vault", r(0, 0, 400, 300), false, Some(7)),
             w("1Password", "", r(10, 10, 50, 50), true, Some(8)),
@@ -848,7 +846,7 @@ mod tests {
             w("Notes", "Bitwarden Web Vault", r(500, 0, 300, 300), false, None),
             w("Dock", "", r(0, 1000, 1920, 80), false, Some(9)),
         ];
-        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, true);
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, None);
         assert_eq!(rects, vec![r(0, 0, 400, 300), r(500, 0, 300, 300)], "a minimised password manager shows nothing");
         // The Dock is never "the window" on macOS; elsewhere it is an ordinary name.
         assert_eq!(wins.len(), if cfg!(target_os = "macos") { 4 } else { 5 });
@@ -868,7 +866,7 @@ mod tests {
             Listed::seen(s("Notes"), None, r(900, 900, 100, 100), None, Some(9)),
             Listed::seen(s("1Password"), None, r(10, 10, 50, 50), Some(true), Some(8)),
         ];
-        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, true);
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, None);
         assert_eq!(rects, vec![r(700, 200, 600, 400), r(0, 0, 400, 300), r(0, 500, 300, 200)]);
         // A window xcap would not list is only painted over, never the window a close-up centres on.
         assert_eq!(wins.iter().map(|w| w.rect).collect::<Vec<_>>(), vec![r(0, 0, 400, 300)]);
@@ -876,37 +874,44 @@ mod tests {
     }
 
     #[test]
-    fn pointcasts_own_unprotected_window_is_painted_and_another_programs_is_left_alone() {
+    fn only_the_answer_panel_of_pointcasts_own_windows_is_painted_whatever_include_pointcast_says() {
         let me = 42;
-        let w = |title: &str, rect, pid, protected| Listed { protected, ..Listed::seen(Some("Pointcast".into()), Some(title.into()), rect, Some(false), Some(pid)) };
+        let w = |app: &str, rect, pid, id| Listed { id, ..Listed::seen(Some(app.into()), Some("A window".into()), rect, Some(false), Some(pid)) };
+        let panel = Some(77);
         let seen = [
-            // The answer panel: ours and not protected. The HUD: ours, protected, so the OS left it out already.
-            w("Pointcast", r(1500, 0, 380, 1000), me, false),
-            w("HUD", r(700, 900, 392, 64), me, true),
-            // The same window from another program, and a minimised one of ours.
-            w("Pointcast", r(100, 100, 380, 500), 7, false),
-            Listed { minimized: true, ..w("Settings", r(0, 0, 50, 50), me, false) },
+            // The answer panel: ours, and the window the OS names 77.
+            w("Pointcast", r(1500, 0, 380, 1000), me, panel),
+            // Settings: ours too, and left alone as it was before there was a panel.
+            w("Pointcast", r(700, 900, 392, 64), me, Some(78)),
+            // Another program's window, even one the OS gave the panel's number, and the panel minimised.
+            w("Pointcast", r(100, 100, 380, 500), 7, panel),
+            Listed { minimized: true, ..w("Pointcast", r(0, 0, 50, 50), me, panel) },
         ];
-        let (rects, wins) = sort_out(&seen, &[], me, true);
-        assert_eq!(rects, vec![r(1500, 0, 380, 1000)], "only our own window that the OS would show");
+        let (rects, wins) = sort_out(&seen, &[], me, panel);
+        assert_eq!(rects, vec![r(1500, 0, 380, 1000)], "only the answer panel");
         assert_eq!(wins.iter().map(|w| w.own).collect::<Vec<_>>(), [true, true, false, true]);
-        // In the picture: the panel's pixels are paint, the other program's window is as it was.
+        // In the picture: the panel's pixels are paint; Settings and the other program's window are as they were.
         let map = screen((0, 0), 1.0, 1920, 1080);
         let mut buf = vec![255u8; 1920 * 1080 * 4];
         paint_out(&mut buf, &map, &rects);
         let px = |x: usize, y: usize| buf[(y * 1920 + x) * 4];
         assert_eq!((px(1500, 0), px(1879, 999), px(1700, 500)), (24, 24, 24));
         assert_eq!((px(1499, 0), px(1880, 0), px(1700, 1000)), (255, 255, 255));
-        assert_eq!((px(100, 100), px(300, 400), px(900, 930)), (255, 255, 255), "a foreign window and the protected HUD are not painted");
-        // "Include Pointcast" on: its windows stay in the picture, and the hide-list still paints.
-        let seen = [w("Pointcast", r(1500, 0, 380, 1000), me, false), w("Vault", r(0, 0, 10, 10), 9, false)];
-        assert_eq!(sort_out(&seen, &["Vault".into()], me, false).0, vec![r(0, 0, 10, 10)]);
-        assert_eq!(sort_out(&seen, &["Vault".into()], me, true).0, vec![r(1500, 0, 380, 1000), r(0, 0, 10, 10)]);
+        assert_eq!((px(100, 100), px(300, 400), px(900, 930)), (255, 255, 255), "another program's window and Settings are not painted");
+        // What the frame path takes from the settings is the hide-list and nothing else, so the panel is painted with
+        // "Include Pointcast" on and off, beside a password manager.
+        let seen = [w("Pointcast", r(1500, 0, 380, 1000), me, panel), w("Bitwarden", r(0, 0, 10, 10), 9, None)];
+        for include_app in [false, true] {
+            let s = Settings { include_app, ..Settings::default() };
+            assert_eq!(sort_out(&seen, &s.hidden_list(), me, panel).0, vec![r(1500, 0, 380, 1000), r(0, 0, 10, 10)], "include_app {include_app}");
+        }
+        // With no panel built, none of Pointcast's windows is painted.
+        assert_eq!(sort_out(&seen, &Settings::default().hidden_list(), me, None).0, vec![r(0, 0, 10, 10)]);
     }
 
     fn frame(width: u32, height: u32, at: (i32, i32), seen: &[Listed], hidden: &[String]) -> Frame {
         let map = screen((0, 0), 1.0, width, height);
-        let (rects, windows) = sort_out(seen, hidden, 42, true);
+        let (rects, windows) = sort_out(seen, hidden, 42, None);
         // Every pixel names its place, so a cut is known by its corner.
         let mut buf: Vec<u8> = (0..width * height).flat_map(|i| [(i % width) as u8, (i / width) as u8, 7, 255]).collect();
         paint_out(&mut buf, &map, &rects);
@@ -1039,7 +1044,7 @@ mod tests {
         let exe = std::env::current_exe().unwrap().file_stem().unwrap().to_string_lossy().into_owned();
         let panel = seen.iter().find(|w| w.pid == Some(me) && w.rect == rect).expect("the untitled tool window is read");
         assert_eq!((panel.app.as_str(), panel.title.as_str(), panel.minimized, panel.paint_only), (exe.as_str(), "", false, true));
-        let (rects, wins) = sort_out(&seen, &[exe], 0, true);
+        let (rects, wins) = sort_out(&seen, &[exe], 0, None);
         assert!(rects.contains(&rect) && wins.iter().all(|w| w.rect != rect));
         assert!(own.iter().all(|w| w.pid != Some(me)));
     }
