@@ -368,7 +368,7 @@ export function previewAssist(kind: string): Assist {
     plan: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
   });
-  const missing = (cli: string) => `${cli} is not installed on this computer. Install the ${cli} first.`;
+  const missing = (cli: string) => `${cli} is not installed on this computer. Install it first.`;
   const a: Assist = {
     chosen: null,
     model: null,

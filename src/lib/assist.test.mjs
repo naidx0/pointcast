@@ -140,7 +140,7 @@ test("an agent shows the engine's line as is, offers Use when installed, Check a
   assert.deepEqual([gemini.name, gemini.line, gemini.action, gemini.label], ["Gemini", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.", "use", "Use"]);
   const copilot = routeView(byId(a, "copilot"), a);
   assert.deepEqual([copilot.line, copilot.action, copilot.label, copilot.help], [
-    "GitHub Copilot CLI is not installed on this computer. Install the GitHub Copilot CLI first.",
+    "GitHub Copilot CLI is not installed on this computer. Install it first.",
     "check",
     "Check again",
     null,
