@@ -3,6 +3,8 @@
 // it without a window (src/lib/line.test.mjs). The panel draws it 1.5 px wide with round caps (src/styles/live.css).
 
 export type Box = { w: number; h: number };
+/** What the line does: the voice draws it, it loops while the words are finished or the AI thinks, or it rests flat. */
+export type LineMode = "listen" | "think" | "rest";
 export type Pt = { x: number; y: number };
 
 /** One decimal, and never "-0". */

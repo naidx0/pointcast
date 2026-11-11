@@ -1778,6 +1778,9 @@ html.win .prompt-doc .pd-chip {
   /* The capsule is dark on both skins and in light and dark mode: its warning colour is one light orange that reads on it
    * over a white page too (5:1 or more). */
   --hud-warn: #ffb340;
+  --line-ink: var(--hud-ink);
+  --line-warn: var(--hud-warn);
+  --line-faint: var(--hud-ink-2);
   position: relative;
   display: flex;
   flex-wrap: nowrap;
@@ -1839,20 +1842,51 @@ html.win .hud {
   min-width: 38px;
   margin: 0 8px 0 10px;
 }
-.hud .wave {
+/* The line the voice draws, Ask's line in the capsule's ink. Its past fades out to the left; on hover (and from a minute
+   on) the fade widens and the time shows over it, so nothing moves. */
+.hud .scribe {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: 22px;
-  width: 44px;
-  margin-right: 6px;
+  width: 92px;
+  height: 28px;
+  margin: 0 6px 0 10px;
 }
-.hud .wave i {
-  flex: 1;
-  border-radius: 2px;
-  background: var(--hud-ink);
-  min-height: 3px;
-  transition: height 90ms linear;
+.hud .scribe .line-voice {
+  width: 100%;
+  height: 100%;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, transparent 40px, #000 66px);
+  mask-image: linear-gradient(to right, transparent 0, transparent 40px, #000 66px);
+  -webkit-mask-size: calc(100% + 40px) 100%;
+  mask-size: calc(100% + 40px) 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: -40px 0;
+  mask-position: -40px 0;
+  transition:
+    -webkit-mask-position 180ms var(--ease),
+    mask-position 180ms var(--ease);
+}
+.hud .scribe .time {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  min-width: 0;
+  margin: -8px 0 0;
+  line-height: 16px;
+  opacity: 0;
+  transition: opacity 180ms var(--ease);
+}
+.hud:hover .scribe .line-voice,
+.hud:focus-within .scribe .line-voice,
+.hud .scribe.timed .line-voice {
+  -webkit-mask-position: 0 0;
+  mask-position: 0 0;
+}
+.hud:hover .scribe .time,
+.hud:focus-within .scribe .time,
+.hud .scribe.timed .time {
+  opacity: 1;
 }
 .hud .sep {
   width: 1px;
@@ -1897,13 +1931,11 @@ html.win .hud .hb {
 html.win .hud .count {
   border-radius: 4px;
 }
-/* A quiet microphone: the time and the bars stay, lifted a little, and one line in the warning colour sits under them. */
-.hud .time,
-.hud .wave {
+/* A quiet microphone: the time and the line stay, lifted a little, and one line in the warning colour sits under them. */
+.hud .scribe {
   transition: transform 160ms ease-out;
 }
-.hud.warned .time,
-.hud.warned .wave {
+.hud.warned .scribe {
   transform: translateY(-6px);
 }
 .hud .cap {
@@ -2199,43 +2231,28 @@ button.hud.done:focus-visible {
   outline-offset: 2px;
 }
 
-/* —— HUD while the last words are written down: one line, a determinate bar, Paste what's done —— */
+/* —— HUD while the last words are written down: the line looping, how far in words, Paste what's done —— */
+/* As wide as its words, up to the window's width less the shadow's room. */
 .hud.finishing {
-  width: 360px;
-  gap: 12px;
+  max-width: 100%;
+  gap: 10px;
   padding: 0 7px 0 18px;
 }
 html.win .hud.finishing {
   padding: 0 8px 0 16px;
 }
-.hud .fin-main {
-  flex: 1;
-  min-width: 0;
+.hud .fin-line {
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  align-items: center;
+  height: 28px;
 }
 .hud .fin-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
-}
-/* macOS: a slim rounded track with the accent fill, as NSProgressIndicator draws it on a dark material. */
-.progress.on-hud {
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.16);
-}
-.progress.on-hud > i {
-  background: var(--hud-accent);
-  transition: width 300ms linear;
-}
-/* Windows: Fluent's ProgressBar, a 1 px rail under a 3 px rounded indicator. */
-html.win .progress.on-hud {
-  height: 3px;
-  border-radius: 1.5px;
-  background: linear-gradient(transparent 1px, rgba(255, 255, 255, 0.54) 1px, rgba(255, 255, 255, 0.54) 2px, transparent 2px);
 }
 .hud .fin-cancel {
   height: 28px;

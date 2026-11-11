@@ -15,11 +15,14 @@ import {
   subscribe,
 } from "@/lib/api";
 import { ENDED_MS, initialLive, isPinned, liveReduce, liveView, sentLine, type LiveDelta, type LivePicture, type LiveView } from "@/lib/live";
-import { VOICE_DX, VOICE_STEP_MS, loopsPath, marginPath, meterLevel, meterStart, meterStep, restPath, smoothLevel, voicePath } from "@/lib/line";
+import { marginPath, restPath } from "@/lib/line";
+import { Line, type LevelSource } from "@/components/Line";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
 import { pressOnce } from "@/lib/press";
 
 const noop = () => undefined;
+/** The panel's line hears the engine's `loudness` stream (the preview's made-up voice in a browser). */
+const liveLevels: LevelSource = (set) => subscribe(onLiveLevel(set));
 
 /** A button that acts on the press itself: the panel is shown without focus, and on Windows the first click on an
  * inactive window only focuses it (see press.ts). Enter and Space act as on any button. */
@@ -177,7 +180,9 @@ export function Live() {
           ) : (
             <>
               <StopButton stop />
-              <div className="live-row-line">{v.line === "voice" ? <VoiceLine /> : <LineRow v={v} />}</div>
+              <div className="live-row-line">
+                {v.line === "voice" ? <Line mode="listen" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
+              </div>
               {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : null}
             </>
           )}
@@ -311,90 +316,9 @@ function BigPicture({ pic, close }: { pic: LivePicture; close: () => void }) {
   );
 }
 
-/** Listening: the line drawn by the voice. The level is eased toward the voice every frame (quick to rise, slow to
- * fall) and laid down as one broad stroke every VOICE_STEP_MS while the paper moves smoothly under the pen. Drawn
- * straight into the SVG, so React does not render 60 times a second. Reduced motion: a still line and the dot. */
-function VoiceLine() {
-  const ref = useRef<HTMLDivElement>(null);
-  const path = useRef<SVGPathElement>(null);
-  const dot = useRef<SVGCircleElement>(null);
-  const [w, setW] = useState(0);
-  // What the pen has written survives a change of width (the picture taken out, a longer app name).
-  const pen = useRef({ raw: 0, meter: meterStart(), env: 0, acc: 0, first: 0, hist: [] as number[] });
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const size = () => setW(Math.max(80, Math.round(el.clientWidth)));
-    size();
-    const ro = new ResizeObserver(size);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  useEffect(() => {
-    if (!w) return;
-    const box = { w, h: VOICE_H };
-    const paint = (d: string, tip: { x: number; y: number }) => {
-      path.current?.setAttribute("d", d);
-      dot.current?.setAttribute("cx", String(tip.x));
-      dot.current?.setAttribute("cy", String(tip.y));
-    };
-    const still = voicePath([], box);
-    paint(still.d, still.tip);
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const s = pen.current;
-    let last = performance.now();
-    const keep = Math.ceil(w / VOICE_DX) + 2;
-    const off = subscribe(onLiveLevel((x) => (s.raw = x)));
-    let raf = 0;
-    const draw = (t: number) => {
-      raf = requestAnimationFrame(draw);
-      const dt = Math.min(100, Math.max(0, t - last));
-      last = t;
-      if (document.hidden) return;
-      s.meter = meterStep(s.meter, s.raw, dt);
-      s.env = smoothLevel(s.env, meterLevel(s.meter, s.raw), dt);
-      s.acc += dt;
-      while (s.acc >= VOICE_STEP_MS) {
-        s.acc -= VOICE_STEP_MS;
-        s.hist.push(s.env);
-      }
-      while (s.hist.length > keep) {
-        s.hist.shift();
-        s.first++;
-      }
-      const { d, tip } = voicePath(s.hist, box, { first: s.first, shift: s.acc / VOICE_STEP_MS, live: s.env });
-      paint(d, tip);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => {
-      off();
-      cancelAnimationFrame(raf);
-    };
-  }, [w]);
-  return (
-    <div className="live-voice" ref={ref} aria-hidden="true">
-      {w ? (
-        <svg className="ln ink" width={w} height={VOICE_H} viewBox={`0 0 ${w} ${VOICE_H}`}>
-          <path ref={path} />
-          <circle className="tip" ref={dot} r={3} />
-        </svg>
-      ) : null}
-    </div>
-  );
-}
-
 /** Finishing and thinking: the line looping while the words are finished or the AI is asked. */
 function LineRow({ v }: { v: LiveView }) {
-  const { d, width } = loopsPath({ w: 220, h: ROW }, { n: v.compact ? 5 : 7, pitch: 19 });
-  return (
-    <div className="live-line live-in" aria-hidden="true">
-      <svg className={`ln loops ${v.tone}`} width={width} height={ROW} viewBox={`0 0 ${width} ${ROW}`}>
-        <path className="ghost" d={d} />
-        <path className="tail" pathLength={100} d={d} />
-        <path className="head" pathLength={100} d={d} />
-      </svg>
-    </div>
-  );
+  return <Line mode="think" className="live-line live-in" tone={v.tone} height={ROW} loops={v.compact ? 5 : 7} />;
 }
 
 function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {

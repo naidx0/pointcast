@@ -101,3 +101,31 @@ test("only a microphone slow to start is said, and never in the first moment", (
   assert.equal(readyNote({ phase: "transcribing", mic: false }, 9_000), null);
   assert.equal(readyNote({ phase: "idle", mic: false }, 9_000), null);
 });
+
+test("the capsule's line: the voice draws it once the microphone is live, flat before, loops while finishing", async () => {
+  const { capsuleLine } = await import("./capsule.ts");
+  assert.equal(capsuleLine({ phase: "recording", mic: true }), "listen");
+  assert.equal(capsuleLine({ phase: "loading", mic: true }), "listen");
+  assert.equal(capsuleLine({ phase: "recording", mic: false }), "rest");
+  assert.equal(capsuleLine({ phase: "loading", mic: false }), "rest");
+  assert.equal(capsuleLine({ phase: "transcribing", mic: false }), "think");
+  assert.equal(capsuleLine({ phase: "transcribing", mic: true }), "think");
+  assert.equal(capsuleLine({ phase: "ready", mic: true }), "rest");
+});
+
+test("the time shows on hover until a minute, then stays; a quiet-mic warning keeps it", async () => {
+  const { TIME_STAYS_MS, timeStays } = await import("./capsule.ts");
+  assert.equal(timeStays(0, false), false);
+  assert.equal(timeStays(TIME_STAYS_MS - 1, false), false);
+  assert.equal(timeStays(TIME_STAYS_MS, false), true);
+  assert.equal(timeStays(5_000, true), true);
+});
+
+test("the capsule's line reads the same level as Ask's: loudness before the raw meter, nothing while the mic is not live", async () => {
+  const { LEVEL_FIELDS, levelOf } = await import("./live.ts");
+  // A session state carries both: level (0 to 1 over -60..-10 dBFS) and loudness (over -50..-10 dBFS), as Ask reads it.
+  assert.equal(levelOf({ phase: "recording", mic: true, level: 0.62, loudness: 0.5 }, LEVEL_FIELDS), 0.5);
+  assert.equal(levelOf({ phase: "recording", mic: false, level: 0.62, loudness: 0.5 }, LEVEL_FIELDS), 0);
+  // An engine without loudness still moves the line.
+  assert.equal(levelOf({ phase: "recording", mic: true, level: 0.62 }, LEVEL_FIELDS), 0.62);
+});

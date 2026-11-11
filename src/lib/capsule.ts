@@ -1,6 +1,7 @@
 // What the capsule says and does at the end of a recording, while it is written down, and when Discard is pressed.
 // Pure, so node --test reads it without a window (src/lib/capsule.test.mjs).
 import type { UiState } from "./api";
+import type { LineMode } from "./line";
 
 export type Notice = NonNullable<UiState["notice"]>;
 
@@ -66,6 +67,20 @@ export function discardClick(armedUntil: number | null, now: number): { discard:
 export function micCaption(quiet: NonNullable<UiState["quiet_mic"]>): string {
   return quiet === "silent" ? "No sound from the mic" : "Mic is very quiet";
 }
+
+/** What the capsule's line does, the same line as Ask's: the voice draws it once the microphone is live, it rests flat
+ * before that (nothing is recorded yet), and it loops while the last words are written down. */
+export function capsuleLine(s: { phase: string; mic: boolean }): LineMode {
+  if (s.phase === "transcribing") return "think";
+  return (s.phase === "recording" || s.phase === "loading") && s.mic ? "listen" : "rest";
+}
+
+/** From this long on the recording's time stays beside the line; before, it shows over the line's faded end on hover. */
+export const TIME_STAYS_MS = 60_000;
+
+/** Whether the time stays shown without hover: from a minute on, and while the microphone warning is up (the time is
+ * then the evidence that the recording runs). */
+export const timeStays = (durationMs: number, warned: boolean): boolean => warned || durationMs >= TIME_STAYS_MS;
 
 /** How long the microphone may take to start before the capsule says anything about it. */
 export const READY_WAIT_MS = 600;
