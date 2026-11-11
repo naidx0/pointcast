@@ -80,8 +80,8 @@ html.win .live-hb:not(.stop) {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 60px;
-  padding: 8px 12px 8px 14px;
+  min-height: 58px;
+  padding: 7px 12px 7px 14px;
 }
 html.win .live-row {
   padding-left: 16px;
