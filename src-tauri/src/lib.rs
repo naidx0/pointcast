@@ -2569,7 +2569,7 @@ mod tests {
         let p = |v: Value| v.as_object().unwrap().clone();
         assert_eq!(merge(&cur, p(json!({ "ask_hotkey": "Ctrl+Shift+F7" }))).unwrap().ask_chord().label(), "Ctrl+Shift+F7");
         // Refused the way the others are: a chord saved for another shortcut cannot also be the Ask key.
-        let err = merge(&cur, p(json!({ "session_hotkey": "Ctrl+Alt+F9", "ask_hotkey": "Ctrl+Alt+F9" }))).unwrap_err();
+        let err = merge(&cur, p(json!({ "session_hotkey": "Ctrl+Shift+F9", "ask_hotkey": "Ctrl+Shift+F9" }))).unwrap_err();
         assert!(err.contains("already Start / stop"), "{err}");
         let taken = Settings { zoom_hotkey: Some("Ctrl+Shift+F8".into()), ..Settings::default() };
         let err = merge(&taken, p(json!({ "ask_hotkey": "Ctrl+Shift+F8" }))).unwrap_err();
