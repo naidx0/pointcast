@@ -126,7 +126,9 @@ fn usual() -> Vec<PathBuf> {
 pub fn native_behind(shim: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) { "codex.exe" } else { "codex" };
     let resolved = std::fs::canonicalize(shim).ok()?;
-    // Beside a Windows shim, or up from `node_modules/@openai/codex/bin/codex.js` on Unix.
+    // Beside a Windows shim, or up from `node_modules/@openai/codex/bin/codex.js` on Unix. Seen on Windows with
+    // 0.164.0: `@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe`
+    // under npm's `node_modules`. The layouts on macOS and Linux are UNCONFIRMED.
     let mut scopes = vec![resolved.parent()?.join("node_modules").join("@openai")];
     scopes.extend(resolved.ancestors().filter(|a| a.file_name().is_some_and(|n| n == "@openai")).map(Path::to_owned));
     for scope in scopes.clone() {

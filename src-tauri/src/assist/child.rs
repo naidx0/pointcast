@@ -362,6 +362,8 @@ pub mod tests {
     #[ignore]
     fn kid() {
         let Ok(mode) = std::env::var("POINTCAST_KID") else { return };
+        // On one test thread the harness leaves "test <name> ... " unfinished on stdout: end that line first.
+        println!();
         match mode.as_str() {
             "tree" => {
                 let l = helper("sleep");

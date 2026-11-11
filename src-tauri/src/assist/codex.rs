@@ -50,6 +50,11 @@ pub const KEEP_PICTURES: usize = 2;
 
 /// The parameters of `thread/start`: the fence around the conversation.
 fn thread_start(cwd: &Path, system: &str, model: Option<&str>) -> Value {
+    // Checked against Codex 0.164.0: its generated schema takes `config` here as a free table and names
+    // `model_provider` and `web_search` among the keys of a config; every name in `FEATURES_OFF` is in
+    // `codex features list`. UNCONFIRMED, since no schema lists them and no real app-server has been asked: that
+    // `mcp_servers`, `notify` and `project_doc_max_bytes` are honoured when they arrive this way, and that a dotted
+    // `features.<name>` key is read as that feature's switch.
     let mut config = serde_json::Map::new();
     config.insert("mcp_servers".into(), json!({}));
     config.insert("model_provider".into(), json!(OPENAI));
@@ -816,6 +821,9 @@ pub mod tests {
     #[ignore]
     fn stand_in() {
         let Ok(mode) = std::env::var("POINTCAST_FAKE_CODEX") else { return };
+        // On one test thread the harness leaves "test <name> ... " unfinished on stdout: end that line, so the
+        // first answer is a line of its own.
+        println!();
         match fake::serve(&mode, std::io::stdin().lock(), std::io::stdout(), |_| {}) {
             fake::Exit::Crash => {
                 eprintln!("{}", fake::LAST_WORDS);
@@ -1071,6 +1079,23 @@ pub mod tests {
         answer(&mut b, said("summarize"));
         assert_eq!(sent(&seen_a, "turn/start")[0]["threadId"], a.thread());
         assert_eq!(sent(&seen_b, "turn/start")[0]["threadId"], b.thread());
+    }
+
+    #[test]
+    fn once_runs_on_a_helper_of_its_own_beside_an_open_conversation() {
+        let p = child("normal", "once");
+        let mut study = p.start("", &[]).ok().unwrap();
+        let pid = study.pid().unwrap();
+        let mut summary = p.once("", &[]).ok().unwrap();
+        let (tx, rx) = channel();
+        summary.ask(said("summarize"), tx).unwrap();
+        assert_eq!(collect(&rx).last(), Some(&Kind::Done));
+        // Closing a conversation ends its helper, so one that shared the study conversation's would take it along.
+        summary.close();
+        assert!(child::start_time(pid).is_some(), "the open conversation's helper is not the summary's");
+        assert_eq!(answer(&mut study, said("study")).last(), Some(&Kind::Done));
+        study.close();
+        assert!(child::start_time(pid).is_none());
     }
 
     #[test]
