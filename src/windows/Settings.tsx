@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, Info, Keyboard, Settings2, Share } from "lucide-react";
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker } from "@/components/Models";
 import {
   HOTKEY_FIELD,
+  agentConnect,
+  agentFolder,
+  agentRemove,
+  agentsStatus,
   historyClear,
   historyList,
   inTauri,
@@ -16,10 +20,14 @@ import {
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
+  relaunch,
   subscribe,
   updateCheck,
   updateInstall,
   windowOpen,
+  type AgentId,
+  type Agents,
+  type AgentView,
   type Config,
   type Login,
 } from "@/lib/api";
@@ -104,7 +112,7 @@ export function Settings() {
           ) : pane === "capture" ? (
             <Capture cfg={cfg} patch={patch} />
           ) : pane === "output" ? (
-            <Output cfg={cfg} patch={patch} />
+            <Output cfg={cfg} patch={patch} refresh={refresh} />
           ) : (
             <About cfg={cfg} />
           )}
@@ -613,21 +621,9 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
   );
 }
 
-function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function Output({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const needsAx = mac && cfg.permissions.accessibility !== "granted";
-  const [copied, setCopied] = useState<"" | "claude" | "cursor">("");
-  const [copyErr, setCopyErr] = useState("");
-  const copy = (agent: "claude" | "cursor") => {
-    setCopyErr("");
-    if (!inTauri) return;
-    mcpCopySetup(agent)
-      .then(() => {
-        setCopied(agent);
-        setTimeout(() => setCopied(""), 1600);
-      })
-      .catch((e) => setCopyErr(String(e)));
-  };
   return (
     <>
       <div className="group">
@@ -691,6 +687,80 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
           />
         </Row>
       </div>
+      <AgentsPart cfg={cfg} patch={patch} refresh={refresh} />
+    </>
+  );
+}
+
+/** Settings › Output › Agents: each coding agent set up in one click, in its own user settings. */
+function AgentsPart({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+  const [st, setSt] = useState<Agents | null>(null);
+  const [busy, setBusy] = useState<AgentId | "">("");
+  const [errs, setErrs] = useState<Partial<Record<AgentId, string>>>({});
+  const [copied, setCopied] = useState<AgentId | "">("");
+  // Claude Code's pictures folder, chosen before its first Set up.
+  const [folder, setFolder] = useState(true);
+  const load = () => {
+    agentsStatus()
+      .then(setSt)
+      .catch(() => undefined);
+  };
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [cfg.mcp_enabled, cfg.mcp_bind]);
+
+  const run = (id: AgentId, job: () => Promise<Agents>, preview: (s: Agents) => Agents) => {
+    setErrs((e) => ({ ...e, [id]: "" }));
+    if (!inTauri) {
+      setSt((s) => (s ? preview(s) : s));
+      return;
+    }
+    setBusy(id);
+    job()
+      .then(setSt)
+      .catch((e) => {
+        setErrs((x) => ({ ...x, [id]: String(e) }));
+        load();
+      })
+      .finally(() => {
+        setBusy("");
+        refresh();
+      });
+  };
+  const mark = (s: Agents, id: AgentId, entry: AgentView["entry"]): Agents => ({
+    ...s,
+    server_ok: true,
+    server_error: null,
+    agents: s.agents.map((a) => (a.id === id ? { ...a, entry, error: null } : a)),
+  });
+  const connect = (id: AgentId) =>
+    run(
+      id,
+      () => agentConnect(id, folder),
+      (s) => ({ ...mark(s, id, "current"), folder_allowed: s.folder_allowed || (id === "claude" && folder) }),
+    );
+  const remove = (id: AgentId) => run(id, () => agentRemove(id), (s) => mark(s, id, "missing"));
+  const copy = (id: AgentId) => {
+    setErrs((e) => ({ ...e, [id]: "" }));
+    if (!inTauri) return;
+    mcpCopySetup(id)
+      .then(() => {
+        setCopied(id);
+        setTimeout(() => setCopied(""), 1600);
+      })
+      .catch((e) => setErrs((x) => ({ ...x, [id]: String(e) })));
+  };
+  const claude = st?.agents.find((a) => a.id === "claude");
+  const claudeOn = claude?.entry === "current";
+  const setFolderAllowed = (on: boolean) => {
+    if (!claudeOn) return setFolder(on);
+    run("claude", () => agentFolder(on), (s) => ({ ...s, folder_allowed: on }));
+  };
+
+  return (
+    <>
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Agents
       </h2>
@@ -705,32 +775,93 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
               </span>
             ) : (
               <>
-                Claude Code, Cursor and Codex can read it over MCP at{" "}
-                <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
-                Pointcast reopens.
+                Coding agents read it over MCP at <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this
+                computer can connect.
               </>
             )
           }
         >
+          {cfg.mcp_enabled && cfg.mcp_error ? (
+            <button type="button" className="btn" onClick={() => inTauri && relaunch()}>
+              Reopen Pointcast
+            </button>
+          ) : null}
           <Toggle label="Share over MCP" on={cfg.mcp_enabled} set={(v) => patch({ mcp_enabled: v })} />
         </Row>
-        {cfg.mcp_enabled ? (
+        {(st?.agents ?? []).map((a) => {
+          const err = errs[a.id] || a.error;
+          const set = a.entry === "current";
+          const connected = set && cfg.mcp_enabled && st?.server_ok;
+          const down = set && cfg.mcp_enabled && !st?.server_ok;
+          const sub = err ? (
+            <span style={{ color: "var(--red-ink)" }}>{err}</span>
+          ) : !a.found && !set ? (
+            `${a.name} was not found on this computer. Once it is installed, Set up appears here, or copy the ${
+              a.id === "claude" ? "command" : "entry"
+            } now.`
+          ) : connected ? (
+            `Connected in ${a.path}. New ${a.name} sessions can read your last prompt.`
+          ) : down ? (
+            <span style={{ color: "var(--red-ink)" }}>
+              Set up, but Pointcast's agent server is not answering{st?.server_error ? `: ${st.server_error}` : ""}.
+            </span>
+          ) : set ? (
+            `Set up in ${a.path}. Turn on sharing above so ${a.name} can read your prompts.`
+          ) : a.entry === "other" ? (
+            `${a.path} has an older Pointcast entry. Set up again to update it.`
+          ) : (
+            `Not set up. Set up adds Pointcast to ${a.path} and changes nothing else there.`
+          );
+          return (
+            <Row key={a.id} label={a.name} sub={sub}>
+              {connected ? (
+                <span className="badge ok">
+                  <Check size={12} strokeWidth={3} aria-hidden />
+                  Connected
+                </span>
+              ) : null}
+              {down ? (
+                <button type="button" className="btn primary" onClick={() => inTauri && relaunch()}>
+                  Reopen Pointcast
+                </button>
+              ) : null}
+              {a.found && !set ? (
+                <button type="button" className="btn primary" disabled={busy === a.id} onClick={() => connect(a.id)}>
+                  {busy === a.id ? "Setting up…" : a.entry === "other" ? "Set up again" : "Set up"}
+                </button>
+              ) : null}
+              {set ? (
+                <button type="button" className="btn plain" disabled={busy === a.id} onClick={() => remove(a.id)}>
+                  Remove
+                </button>
+              ) : null}
+              <button type="button" className="btn plain" onClick={() => copy(a.id)}>
+                {copied === a.id ? "Copied" : a.id === "claude" ? "Copy command" : "Copy entry"}
+              </button>
+            </Row>
+          );
+        })}
+        {claude?.found ? (
           <Row
-            label="Agent setup"
+            label="Let Claude Code open the pictures folder"
             sub={
-              copyErr ||
-              "For your user settings only: run the Claude Code command in a terminal, or paste the Cursor entry into mcpServers in ~/.cursor/mcp.json. It holds this computer's key, so never put it in a project file."
+              <>
+                Each recording's pictures are in <span className="mono">{st?.folder}</span>. Adds it to
+                additionalDirectories in ~/.claude/settings.json{claudeOn ? "" : " when you set up Claude Code"}.
+              </>
             }
           >
-            <button type="button" className="btn" onClick={() => copy("claude")}>
-              {copied === "claude" ? "Copied" : "Claude Code"}
-            </button>
-            <button type="button" className="btn" onClick={() => copy("cursor")}>
-              {copied === "cursor" ? "Copied" : "Cursor"}
-            </button>
+            <Toggle
+              label="Let Claude Code open the pictures folder"
+              on={claudeOn ? !!st?.folder_allowed : folder}
+              set={setFolderAllowed}
+            />
           </Row>
         ) : null}
       </div>
+      <p className="group-note">
+        Set up writes to each agent's own user settings, never a project folder: the entry holds this computer's key.
+      </p>
     </>
   );
 }

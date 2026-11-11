@@ -3778,6 +3778,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "toml_edit 0.25.17+spec-1.1.0",
  "windows 0.58.0",
  "xcap",
 ]
@@ -5591,6 +5592,7 @@ dependencies = [
  "indexmap 2.14.2",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

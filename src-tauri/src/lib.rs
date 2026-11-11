@@ -1,3 +1,4 @@
+mod agents;
 mod anchor;
 mod capture;
 mod chord;
@@ -610,7 +611,7 @@ fn settings_view(svc: &App) -> Value {
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
         "mcp_enabled": s.mcp_enabled,
-        "mcp_error": MCP_ERROR.get(),
+        "mcp_error": MCP_ERROR.lock().unwrap().clone(),
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
@@ -697,6 +698,13 @@ fn settings_patch(
     }
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
+    }
+    // Sharing with agents starts and stops with its switch, no reopening.
+    if cur.mcp_enabled != next.mcp_enabled || cur.mcp_bind != next.mcp_bind {
+        mcp_stop();
+        if next.mcp_enabled {
+            let _ = mcp_start(&svc, &next.mcp_bind);
+        }
     }
     if cur.model != next.model && !recording(&svc) {
         let svc = svc.inner().clone();
@@ -1054,24 +1062,120 @@ fn copy_again(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 /// Copy the MCP setup for coding agents, token included. The token never passes through a window.
 #[tauri::command]
 fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), String> {
+    let agent = agents::Agent::parse(&agent)?;
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
-    let text = agent_setup(&agent, &bind, &token)?;
-    clipboard::copy_secret(&text)
+    clipboard::copy_secret(&agents::copy_text(agent, &mcp_url(&bind), &token))
 }
 
-/// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets
-/// its user-scope command, Cursor the one server entry for `~/.cursor/mcp.json`.
-fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
-    let all = mcp::client_config(bind, token);
-    let server = &all["mcpServers"]["pointcast"];
-    let url = server["url"].as_str().ok_or("no MCP address")?;
-    let auth = server["headers"]["Authorization"].as_str().ok_or("no MCP key")?;
-    match agent {
-        "claude" => Ok(format!("claude mcp add --transport http --scope user pointcast {url} --header {q}Authorization: {auth}{q}", q = '"')),
-        "cursor" => Ok(format!("{q}pointcast{q}: {}", serde_json::to_string_pretty(server).map_err(|e| e.to_string())?, q = '"')),
-        _ => Err("Unknown agent.".into()),
+fn mcp_url(bind: &str) -> String {
+    format!("http://{bind}/mcp")
+}
+
+fn home() -> Result<std::path::PathBuf, String> {
+    dirs::home_dir().ok_or_else(|| "Pointcast could not find your home folder.".to_string())
+}
+
+/// The running agent server: its address and the flag that stops it.
+static MCP_SERVER: std::sync::Mutex<Option<(std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>)>> = std::sync::Mutex::new(None);
+
+/// Start sharing with coding agents unless it is already running. Errors name the problem, never the token.
+fn mcp_start(svc: &App, bind: &str) -> Result<std::net::SocketAddr, String> {
+    let mut server = MCP_SERVER.lock().unwrap();
+    if let Some((addr, _)) = server.as_ref() {
+        return Ok(*addr);
     }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn_stoppable(bind, svc.latest.clone(), t, stop.clone()));
+    *MCP_ERROR.lock().unwrap() = started.as_ref().err().cloned();
+    let addr = started?;
+    *server = Some((addr, stop));
+    Ok(addr)
+}
+
+fn mcp_stop() {
+    if let Some((addr, stop)) = MCP_SERVER.lock().unwrap().take() {
+        mcp::stop_at(addr, &stop);
+    }
+    *MCP_ERROR.lock().unwrap() = None;
+}
+
+/// Turn sharing on (saved, so it stays on) and make sure the server runs.
+fn mcp_on(svc: &App) -> Result<std::net::SocketAddr, String> {
+    let mut s = svc.settings.lock().unwrap().clone();
+    if !s.mcp_enabled {
+        s.mcp_enabled = true;
+        svc.save_settings(s.clone())?;
+    }
+    mcp_start(svc, &s.mcp_bind).map_err(|e| format!("Pointcast's agent server did not start: {e}."))
+}
+
+/// Each agent's state for Settings › Output, plus Claude Code's pictures folder and whether the server answers.
+fn agents_view(svc: &App, home: &std::path::Path) -> Result<Value, String> {
+    let s = svc.settings.lock().unwrap().clone();
+    let token = mcp::token(&mcp::token_path())?;
+    let url = mcp_url(&s.mcp_bind);
+    let folder = prompt::handoff_root(&s).to_string_lossy().into_owned();
+    let running = MCP_SERVER.lock().unwrap().as_ref().map(|(a, _)| *a);
+    let server = match running {
+        Some(addr) => mcp::probe(addr, &token).map(|_| ()),
+        None if s.mcp_enabled => Err(MCP_ERROR.lock().unwrap().clone().unwrap_or_else(|| "it is not running".into())),
+        None => Err("sharing is off".into()),
+    };
+    Ok(json!({
+        "agents": agents::ALL.iter().map(|a| agents::view(*a, home, &url, &token)).collect::<Vec<_>>(),
+        "server_ok": server.is_ok(),
+        "server_error": server.err(),
+        "folder": folder,
+        "folder_allowed": agents::folder_allowed(home, &folder),
+    }))
+}
+
+#[tauri::command]
+fn agents_status(svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
+    agents_view(&svc, &home()?)
+}
+
+/// Set up one agent in one click: sharing on, the entry written into the agent's user settings, then checked (the
+/// entry is in the file and the server answers an MCP client with its five tools).
+#[tauri::command]
+fn agent_connect(svc: tauri::State<'_, Arc<App>>, agent: String, folder: bool) -> Result<Value, String> {
+    let agent = agents::Agent::parse(&agent)?;
+    let home = home()?;
+    if !agent.installed(&home) {
+        return Err(agent.not_found());
+    }
+    let addr = mcp_on(&svc)?;
+    let token = mcp::token(&mcp::token_path())?;
+    let url = mcp_url(&svc.settings.lock().unwrap().mcp_bind);
+    agents::set_up(agent, &home, &url, &token)?;
+    if agent == agents::Agent::Claude && folder {
+        let dir = prompt::handoff_root(&svc.settings.lock().unwrap()).to_string_lossy().into_owned();
+        agents::allow_folder(&home, &dir, true)?;
+    }
+    if agents::entry(agent, &home, &url, &token)? != agents::Entry::Current {
+        return Err(format!("Pointcast wrote {} but could not find its entry there afterwards.", agent.shown()));
+    }
+    mcp::probe(addr, &token)?;
+    agents_view(&svc, &home)
+}
+
+/// Take Pointcast's entry out of one agent's settings, and nothing else.
+#[tauri::command]
+fn agent_remove(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<Value, String> {
+    let agent = agents::Agent::parse(&agent)?;
+    let home = home()?;
+    agents::remove(agent, &home)?;
+    agents_view(&svc, &home)
+}
+
+/// Let Claude Code open the pictures folder without asking, or stop it.
+#[tauri::command]
+fn agent_folder(svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<Value, String> {
+    let home = home()?;
+    let dir = prompt::handoff_root(&svc.settings.lock().unwrap()).to_string_lossy().into_owned();
+    agents::allow_folder(&home, &dir, on)?;
+    agents_view(&svc, &home)
 }
 
 #[tauri::command]
@@ -1080,8 +1184,8 @@ fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), St
     paste_from_history(&app)
 }
 
-/// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
-static MCP_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Why sharing with coding agents did not start (the address is taken, say), for Settings.
+static MCP_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The latest setup progress, so a window opened mid-download picks it up.
 static SPEECH: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
@@ -1606,12 +1710,9 @@ pub fn run() {
     let svc = App::new(settings.clone(), settings_path);
     if settings.mcp_enabled {
         // Errors name the problem, never the token.
-        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, svc.latest.clone(), t)) {
+        match mcp_start(&svc, &settings.mcp_bind) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
-            Err(e) => {
-                eprintln!("Pointcast MCP did not start: {e}");
-                let _ = MCP_ERROR.set(e);
-            }
+            Err(e) => eprintln!("Pointcast MCP did not start: {e}"),
         }
     }
 
@@ -1650,6 +1751,10 @@ pub fn run() {
             open_folder,
             copy_again,
             mcp_copy_setup,
+            agents_status,
+            agent_connect,
+            agent_remove,
+            agent_folder,
             paste_again,
             speech_setup,
             history_list,
@@ -2231,20 +2336,6 @@ mod tests {
         log.borrow_mut().clear();
         assert!(paste_out_of(true, || step("hide"), pasted, || step("back")).is_ok());
         assert_eq!(*log.borrow(), ["hide", "paste"]);
-    }
-
-    #[test]
-    fn agent_setup_is_the_one_server_for_user_settings_not_a_whole_project_file() {
-        let token = "ab".repeat(32);
-        let claude = agent_setup("claude", "127.0.0.1:47821", &token).unwrap();
-        assert_eq!(
-            claude,
-            format!("claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp --header {q}Authorization: Bearer {token}{q}", q = '"')
-        );
-        let cursor = agent_setup("cursor", "127.0.0.1:47821", &token).unwrap();
-        assert!(cursor.starts_with(r#""pointcast": {"#) && cursor.contains(&token) && cursor.contains("http://127.0.0.1:47821/mcp"));
-        assert!(!cursor.contains("mcpServers"), "{cursor}");
-        assert!(agent_setup("vim", "127.0.0.1:47821", &token).is_err());
     }
 
     #[test]

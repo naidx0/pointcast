@@ -222,8 +222,67 @@ export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
 export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 export const copyAgain = () => invoke<void>("copy_again");
+export type AgentId = "claude" | "cursor" | "codex";
+/** One coding agent as Settings shows it. Never carries the key. */
+export type AgentView = {
+  id: AgentId;
+  name: string;
+  /** The user-scope file Pointcast writes, as people know it ("~/.claude.json"). */
+  path: string;
+  /** The agent has run on this computer (its folder is there). */
+  found: boolean;
+  /** "current": this address and key; "other": a pointcast entry with an old address or key. */
+  entry: "missing" | "current" | "other";
+  /** The file could not be read, in plain words. */
+  error: string | null;
+};
+export type Agents = {
+  agents: AgentView[];
+  /** The agent server answered an MCP client just now. */
+  server_ok: boolean;
+  server_error: string | null;
+  /** Where each recording's pictures go, and whether Claude Code may open it without asking. */
+  folder: string;
+  folder_allowed: boolean;
+};
 /** Copies the MCP setup for one coding agent, with this install's key, straight to the clipboard. */
-export const mcpCopySetup = (agent: "claude" | "cursor") => invoke<void>("mcp_copy_setup", { agent });
+export const mcpCopySetup = (agent: AgentId) => invoke<void>("mcp_copy_setup", { agent });
+/** Outside Tauri: a stand-in, `?agents=none|connected|notfound|error` picks which. */
+export const agentsStatus = () => (inTauri ? invoke<Agents>("agents_status") : Promise.resolve(previewAgents()));
+/** Writes Pointcast into the agent's user settings (turning sharing on first), then checks it answers. */
+export const agentConnect = (agent: AgentId, folder: boolean) => invoke<Agents>("agent_connect", { agent, folder });
+/** Takes only Pointcast's entry out of the agent's settings. */
+export const agentRemove = (agent: AgentId) => invoke<Agents>("agent_remove", { agent });
+/** Lets Claude Code open the pictures folder without asking, or stops it. */
+export const agentFolder = (on: boolean) => invoke<Agents>("agent_folder", { on });
+
+export function previewAgents(): Agents {
+  const state = typeof location !== "undefined" ? new URLSearchParams(location.search).get("agents") ?? "none" : "none";
+  const row = (id: AgentId, name: string, path: string): AgentView => ({ id, name, path, found: true, entry: "missing", error: null });
+  const agents = [
+    row("claude", "Claude Code", "~/.claude.json"),
+    row("cursor", "Cursor", "~/.cursor/mcp.json"),
+    row("codex", "Codex", "~/.codex/config.toml"),
+  ];
+  if (state === "connected") agents.forEach((a) => (a.entry = "current"));
+  if (state === "notfound") {
+    agents[0].entry = "current";
+    agents[1].found = false;
+    agents[2].found = false;
+  }
+  if (state === "error") {
+    agents[0].entry = "other";
+    agents[1].error = "~/.cursor/mcp.json is not plain JSON (it may have comments), so Pointcast left it unchanged.";
+    agents[2].entry = "current";
+  }
+  return {
+    agents,
+    server_ok: state !== "error",
+    server_error: state === "error" ? "127.0.0.1:47821 is already in use" : null,
+    folder: "~/Pointcast",
+    folder_allowed: state === "connected" || state === "notfound",
+  };
+}
 export const pasteAgain = () => invoke<void>("paste_again");
 export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: string; received?: number; total?: number };
 export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
