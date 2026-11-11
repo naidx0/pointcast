@@ -53,7 +53,10 @@ the first time (on macOS 15: **System Settings → Privacy & Security → Open A
 
 A setup assistant then takes about a minute: allow access, try the shortcuts and make a practice
 recording while the recommended speech model downloads. Pointcast opens at login from then
-on and updates itself from **Settings → General**.
+on and updates itself from **Settings → General**: **Check Now**, then **Update**. It closes, updates and opens
+again by itself. On macOS an update keeps the access you gave: versions are signed with one certificate, so macOS
+asks one last time on the update to the first version signed with it and not after
+([how](docs/SIGNING.md)).
 
 ## How it works
 
@@ -229,8 +232,11 @@ pictures are kept:
   Pick **Moonshine Base** in **Settings → Speech**.
 - **Transcribing at the end takes long.** The capsule shows a progress bar; **Cancel** saves what is
   done and keeps the audio so you can **Transcribe again**.
-- **macOS, after an update.** macOS asks again for Screen Recording and Accessibility. Turn them back on
-  in **System Settings → Privacy & Security**, then reopen Pointcast.
+- **macOS, after an update.** Pointcast keeps Screen Recording and Accessibility from one version to the next.
+  The one exception is the update to the first version signed with Pointcast's certificate (0.4.8), from an older
+  one: macOS asks one last time. Turn them back on in **System Settings → Privacy & Security**, then reopen Pointcast.
+- **Checking for updates fails.** "Could not check: GitHub did not answer" means just that, not that you are up to
+  date. Try again in a minute.
 - **Run the setup again.** Menu bar or tray icon → **Setup Assistant…**
 
 Still stuck? [Open an issue](https://github.com/naidx0/pointcast/issues/new/choose).
