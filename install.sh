@@ -134,18 +134,20 @@ if [ $had = 1 ]; then
 fi
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
-if pgrep -x pointcast >/dev/null 2>&1; then
+# -a: pgrep and pkill leave out their own ancestors unless told otherwise, and when Pointcast updates itself it is
+# this script's ancestor. Without it the running Pointcast was never found or closed, and never became the new one.
+if pgrep -a -x pointcast >/dev/null 2>&1; then
   quit=1
   osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
   sleep 1
-  pkill -x pointcast >/dev/null 2>&1 || true
+  pkill -a -x pointcast >/dev/null 2>&1 || true
   # Wait until it has gone: opened while the old copy is still closing, the new one would hand over to it and
   # close too, and nothing would be left running.
   n=0
-  while pgrep -x pointcast >/dev/null 2>&1; do
+  while pgrep -a -x pointcast >/dev/null 2>&1; do
     n=$((n + 1))
     if [ $n -ge 40 ]; then
-      pkill -9 -x pointcast >/dev/null 2>&1 || true
+      pkill -9 -a -x pointcast >/dev/null 2>&1 || true
     fi
     if [ $n -ge 60 ]; then
       break
@@ -167,7 +169,7 @@ open "$dest/Pointcast.app"
 if [ "${quit:-0}" = 1 ]; then
   # It was running, so it has to be running again: ask once more if macOS did not start it.
   n=0
-  until pgrep -x pointcast >/dev/null 2>&1; do
+  until pgrep -a -x pointcast >/dev/null 2>&1; do
     n=$((n + 1))
     if [ $n -ge 40 ]; then
       open -n "$dest/Pointcast.app" >/dev/null 2>&1 || true

@@ -828,13 +828,13 @@ mod tests {
         assert!(!data.join(LOG).exists() && !data.join(RECORD).exists(), "the installer never ran");
     }
 
-    /// Live, on a Mac, in a process named `pointcast`: start the built-in installer on `POINTCAST_TEST_DMG` exactly
+    /// On a Mac, in a process named `pointcast` (its name keeps it out of the `live_` tests CI runs): start the built-in installer on `POINTCAST_TEST_DMG` exactly
     /// as an update does. The installer closes every Pointcast, this process included, so the test never returns:
     /// `scripts/mac-update-test.sh` checks that it was closed and that the installer went on to open the new app.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore]
-    fn live_mac_the_installer_outlives_the_pointcast_that_started_it() {
+    fn on_a_mac_the_installer_outlives_the_pointcast_that_started_it() {
         let dmg = PathBuf::from(std::env::var("POINTCAST_TEST_DMG").expect("POINTCAST_TEST_DMG names the new version's dmg"));
         let log = PathBuf::from(std::env::var("POINTCAST_TEST_LOG").expect("POINTCAST_TEST_LOG names the installer's log"));
         let script = scratch("live-mac").join("install.sh");

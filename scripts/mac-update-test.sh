@@ -12,6 +12,8 @@
 #   b  N+1 meets N's requirement, and an ad hoc copy of it does not;
 #   c  install.sh over a certificate-signed N leaves N+1 running and resets no permission; over an ad hoc N,
 #      or from an ad hoc N to a signed N+1, it resets them and says macOS may ask again;
+#   d0 the reason install.sh asks pgrep and pkill for ancestors: without -a, a script that Pointcast started does
+#      not see Pointcast at all;
 #   d  started as the app starts it (update.rs `run`, from a process named pointcast that the installer closes),
 #      the installer lives on, swaps the app and opens N+1: one Pointcast, the new one, and no permission reset;
 #   e  the one-line install finds its download in a release's latest.json without GitHub's API.
@@ -28,7 +30,7 @@ root=$(cd "$here/.." && pwd)
 work=$(mktemp -d)
 logs=${POINTCAST_TEST_LOGS:-$work/logs}
 NEXT=99.0.0
-LIVE=update::tests::live_mac_the_installer_outlives_the_pointcast_that_started_it
+LIVE=update::tests::on_a_mac_the_installer_outlives_the_pointcast_that_started_it
 dest=/Applications
 [ -w "$dest" ] || dest="$HOME/Applications"
 mkdir -p "$logs" "$work/bin" "$work/n" "$work/n1" "$work/adhoc-n" "$work/adhoc-n1"
@@ -189,6 +191,19 @@ installed_is "$NEXT" "$h_n1"
 one_running >/dev/null || die "N+1 is not running"
 reset_permissions c3-update
 pass "ad hoc to certificate: tccutil reset both, and the installer said so"
+
+echo "== d0 (control): a script started by Pointcast does not see Pointcast unless it asks for its ancestors"
+# A shell under Pointcast's name, asking as install.sh asked before and as it asks now.
+mkdir -p "$work/as-pointcast"
+cp /bin/bash "$work/as-pointcast/pointcast"
+fresh
+seen=$("$work/as-pointcast/pointcast" -c 'a=$(pgrep -x pointcast | grep -c .); b=$(pgrep -a -x pointcast | grep -c .); echo "$a $b"' || true)
+# With -a it counts that shell, and the copies of it that run the two commands.
+case $seen in
+"0 "[1-9]*) ;;
+*) die "from a child of a process named pointcast, pgrep should count none without -a and some with it; got: $seen" ;;
+esac
+pass "from a child of a process named pointcast, pgrep -x counts 0 and pgrep -a -x counts ${seen#0 }"
 
 echo "== d: the update as the app runs it"
 fresh
