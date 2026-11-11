@@ -25,11 +25,30 @@ impl CaptureKind {
     }
 }
 
-/// A numbered pin or typed note on a capture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What a numbered label marks: a pin or typed note (a remark of its own), or a step of an ordered walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelKind {
+    #[default]
+    Pin,
+    Step,
+}
+
+impl LabelKind {
+    fn is_pin(&self) -> bool {
+        *self == LabelKind::Pin
+    }
+}
+
+/// A numbered pin, step or typed note on a capture. Pins and steps share one number sequence on a picture, so each
+/// number drawn into it names one mark. A label numbered 0 is a note on the whole picture (areas hidden).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Label {
     pub n: u32,
     pub text: String,
+    /// Stored entries from before steps have no kind: they are pins.
+    #[serde(default, skip_serializing_if = "LabelKind::is_pin")]
+    pub kind: LabelKind,
 }
 
 /// One screenshot held with the session (PNG bytes stay with it until export).
@@ -104,7 +123,10 @@ pub const NAME_MAX: usize = 60;
 /// left]`.
 fn marker(n: u32, c: &Capture) -> String {
     let mut bits: Vec<String> = c.element.iter().map(named).filter(|b| !b.is_empty()).collect();
-    bits.extend(pins(c));
+    let m = marks(&c.labels);
+    bits.extend(m.pins);
+    bits.extend(m.steps);
+    bits.extend(m.notes);
     if bits.is_empty() {
         return format!("[image {n}]");
     }
@@ -131,25 +153,43 @@ pub fn note_hidden(labels: &mut Vec<Label>, more: u32) {
         labels.push(Label {
             n: 0,
             text: format!("{n} {}{HIDDEN}", if n == 1 { "area" } else { "areas" }),
+            kind: LabelKind::Pin,
         });
     }
 }
 
-/// A capture's pins as `1=too far left`, or the bare number for a pin without words; a note (0) as its words.
-fn pins(c: &Capture) -> Vec<String> {
-    c.labels
-        .iter()
-        .map(|l| {
-            let t = l.text.trim();
-            if l.n == 0 {
-                t.to_string()
-            } else if t.is_empty() {
-                format!("{}", l.n)
-            } else {
-                format!("{}={}", l.n, t)
-            }
-        })
-        .collect()
+/// A picture's labels in words. `pins`: each pin as `1=too far left`, or the bare number for one without words.
+/// `steps`: one entry for the whole walk, `steps: 2=open the menu, 3, 4=save`. `notes`: each note (0) as its words.
+pub struct Marks {
+    pub pins: Vec<String>,
+    pub steps: Option<String>,
+    pub notes: Vec<String>,
+}
+
+pub fn marks(labels: &[Label]) -> Marks {
+    let one = |l: &Label| match l.text.trim() {
+        "" => l.n.to_string(),
+        t => format!("{}={t}", l.n),
+    };
+    let numbered = |k: LabelKind| labels.iter().filter(move |l| l.n != 0 && l.kind == k);
+    let steps: Vec<String> = numbered(LabelKind::Step).map(one).collect();
+    Marks {
+        pins: numbered(LabelKind::Pin).map(one).collect(),
+        steps: (!steps.is_empty()).then(|| format!("steps: {}", steps.join(", "))),
+        notes: labels.iter().filter(|l| l.n == 0).map(|l| l.text.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+    }
+}
+
+/// The labels as a picture's caption has them: `pins: 1=too far left; 2`, `steps: 3, 4=save`, then each note.
+pub fn caption_marks(labels: &[Label]) -> Vec<String> {
+    let m = marks(labels);
+    let mut bits = Vec::new();
+    if !m.pins.is_empty() {
+        bits.push(format!("pins: {}", m.pins.join("; ")));
+    }
+    bits.extend(m.steps);
+    bits.extend(m.notes);
+    bits
 }
 
 /// `button "Place order"`: the role, then the name in quotes on one line, its own double quotes made single and cut to
@@ -730,10 +770,7 @@ fn picture_list(captures: &[Capture], files: &[String]) -> String {
 fn caption(c: &Capture) -> String {
     let mut bits = vec![format!("{} {}x{}", c.kind.as_str(), c.width, c.height)];
     bits.extend(c.element.iter().map(named).filter(|n| !n.is_empty()).map(|n| format!("pointing at {n}")));
-    let p = pins(c);
-    if !p.is_empty() {
-        bits.push(format!("pins: {}", p.join("; ")));
-    }
+    bits.extend(caption_marks(&c.labels));
     bits.join(" · ")
 }
 
@@ -1143,10 +1180,12 @@ mod tests {
             Label {
                 n: 1,
                 text: "Save".into(),
+                ..Default::default()
             },
             Label {
                 n: 2,
                 text: "too far left".into(),
+                ..Default::default()
             },
         ];
         let (text, _) = compose(&[
@@ -1156,9 +1195,52 @@ mod tests {
         assert_eq!(text, "this [image 1: 1=Save; 2=too far left] button");
     }
 
+    fn step(n: u32, text: &str) -> Label {
+        Label { n, text: text.into(), kind: LabelKind::Step }
+    }
+
+    #[test]
+    fn steps_are_one_ordered_entry_apart_from_the_pins_on_the_marker_the_list_and_the_manifest() {
+        let mut labels = vec![
+            Label { n: 1, text: "too far left".into(), ..Default::default() },
+            step(2, "open the menu"),
+            step(3, " "),
+            step(4, "save"),
+        ];
+        note_hidden(&mut labels, 1);
+        let items = [said(0, 1_000, "do this"), shot(400, CaptureKind::Region, labels.clone())];
+        let (text, caps) = compose(&items);
+        assert_eq!(text, "do [image 1: 1=too far left; steps: 2=open the menu, 3, 4=save; 1 area hidden] this");
+        assert_eq!(caption(&caps[0]), "region 1x1 · pins: 1=too far left · steps: 2=open the menu, 3, 4=save · 1 area hidden");
+        // Steps without words are their numbers; a picture with no pins says nothing of pins.
+        assert_eq!(caption_marks(&[step(1, ""), step(2, ""), step(3, "")]), ["steps: 1, 2, 3"]);
+        assert_eq!(caption_marks(&[Label { n: 1, text: "pin 1".into(), ..Default::default() }]), ["pins: 1=pin 1"]);
+        // The hidden note alone is its words, never "pins: 1 area hidden".
+        let mut only = vec![];
+        note_hidden(&mut only, 1);
+        assert_eq!(caption_marks(&only), ["1 area hidden"]);
+        // The manifest keeps which labels are steps.
+        let root = tmp("steps");
+        let h = write_handoff(&root, "steps", CREATED, &items, CREATED, false).unwrap();
+        assert_eq!(manifest(&h.dir).pictures[0].labels, labels);
+        let raw = std::fs::read_to_string(h.dir.join("manifest.json")).unwrap();
+        assert!(raw.contains(r#""kind": "step""#), "{raw}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_label_stored_without_a_kind_is_a_pin_and_a_pin_is_stored_without_one() {
+        let old: Label = serde_json::from_str(r#"{"n":1,"text":"too far left"}"#).unwrap();
+        assert_eq!(old.kind, LabelKind::Pin);
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"n":1,"text":"too far left"}"#);
+        let s = serde_json::to_string(&step(2, "save")).unwrap();
+        assert_eq!(s, r#"{"n":2,"text":"save","kind":"step"}"#);
+        assert_eq!(serde_json::from_str::<Label>(&s).unwrap(), step(2, "save"));
+    }
+
     #[test]
     fn hidden_areas_are_one_note_on_the_marker_counted_in_plain_words() {
-        let mut labels = vec![Label { n: 1, text: "Save".into() }];
+        let mut labels = vec![Label { n: 1, text: "Save".into(), ..Default::default() }];
         note_hidden(&mut labels, 0);
         assert_eq!(labels.len(), 1, "no hidden area, no note");
         note_hidden(&mut labels, 1);
@@ -1187,7 +1269,7 @@ mod tests {
 
     #[test]
     fn the_control_pointed_at_is_named_first_on_the_marker() {
-        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let pin = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let (text, _) = compose(&[said(0, 1_000, "this one"), pointed(400, "button", "Place order", pin.clone())]);
         assert_eq!(text, r#"this [image 1: button "Place order"; 1=too far left] one"#);
         let one = |it: Item| compose(&[it]).0;
@@ -1206,7 +1288,7 @@ mod tests {
 
     #[test]
     fn markdown_and_html_carry_the_named_control() {
-        let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", vec![Label { n: 1, text: "too far left".into() }])];
+        let items = [said(0, 1_000, "this one"), pointed(400, "button", "Place order", vec![Label { n: 1, text: "too far left".into(), ..Default::default() }])];
         let (md, _) = assemble_markdown(&items, false);
         assert_eq!(md, r#"this ![image 1: button "Place order"; 1=too far left](images/01-full.png) one"#);
         let clip = assemble_clipboard(&items);
@@ -1226,7 +1308,7 @@ mod tests {
 
     #[test]
     fn the_plain_prompt_closes_with_one_list_of_pictures_and_the_html_shows_them() {
-        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let pin = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let items = [
             said(0, 1_000, "the save button sits too far left"),
             sized(900, CaptureKind::Full, 1813, 989, vec![]),
@@ -1310,7 +1392,7 @@ mod tests {
     #[test]
     fn the_handoff_folder_holds_numbered_pictures_a_linked_prompt_and_a_manifest() {
         let root = tmp("folder");
-        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let pin = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let items = [
             said(0, 1_000, "the save button sits too far left"),
             sized(900, CaptureKind::Full, 1813, 989, vec![]),
@@ -1446,6 +1528,7 @@ mod tests {
                 vec![Label {
                     n: 1,
                     text: "misaligned".into(),
+                    ..Default::default()
                 }],
             ),
             shot(900, CaptureKind::Zoom, vec![]),

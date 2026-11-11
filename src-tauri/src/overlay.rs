@@ -12,6 +12,8 @@ pub enum Tool {
     Text,
     /// A box drawn solid over everything; the pixels under it are written over in the saved picture.
     Redact,
+    /// A numbered circle that counts up by itself, no text asked for; pins and steps share one number sequence.
+    Step,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -63,6 +65,9 @@ pub fn hint(layer: OverlayLayer, tool: Tool) -> &'static str {
         (OverlayLayer::Annotating, Tool::Redact) => {
             "Drag over what to hide · Enter capture · Esc back"
         }
+        (OverlayLayer::Annotating, Tool::Step) => {
+            "Click to drop the next step · Drag for a leader · C crop · Enter capture"
+        }
         (OverlayLayer::Pinning, _) => "Click to drop pin · Esc cancel pin",
         (OverlayLayer::Drawing, _) => "Release to finish stroke · Esc cancel stroke",
     }
@@ -95,5 +100,7 @@ mod tests {
         assert!(hint(OverlayLayer::Idle, Tool::Pin).is_empty());
         assert!(hint(OverlayLayer::Annotating, Tool::Redact).contains("hide"));
         assert_eq!(serde_json::to_string(&Tool::Redact).unwrap(), "\"redact\"", "named as the overlay names it");
+        assert!(hint(OverlayLayer::Annotating, Tool::Step).contains("step"));
+        assert_eq!(serde_json::to_string(&Tool::Step).unwrap(), "\"step\"");
     }
 }

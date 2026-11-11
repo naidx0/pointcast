@@ -28,6 +28,7 @@ import {
   type SessionExport,
 } from "@/lib/api";
 import { micText } from "@/lib/hardware";
+import { captionMarks } from "@/lib/marks";
 import { platform } from "@/lib/theme";
 import { UNDO_MS, close as closeUndo, due, startDelete, undo as undoDelete, undoView, visible, type Pending } from "@/lib/undo";
 
@@ -638,7 +639,7 @@ export function PromptDoc({
         )}
         <figcaption>
           [image {n}]
-          {img?.labels.length ? ` · ${img.labels.map((l) => (l.n ? `${l.n} ${l.text}` : l.text)).join(" · ")}` : ""}
+          {img?.labels.length ? ` · ${captionMarks(img.labels).join(" · ")}` : ""}
         </figcaption>
       </figure>
     );

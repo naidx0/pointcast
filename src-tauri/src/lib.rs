@@ -2231,6 +2231,9 @@ mod tests {
         assert!(old.element.is_none());
         let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
         assert!(gone.element.is_none());
+        let steps: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "labels": [{ "n": 1, "text": "x" }, { "n": 2, "text": "", "kind": "step" }] })).unwrap();
+        let kinds: Vec<_> = steps.labels.iter().map(|l| l.kind).collect();
+        assert_eq!(kinds, [prompt::LabelKind::Pin, prompt::LabelKind::Step]);
     }
 
     #[test]
@@ -2291,7 +2294,7 @@ mod tests {
             png: png(2, 200),
             width: 2,
             height: 1,
-            labels: vec![Label { n: 1, text: "old".into() }],
+            labels: vec![Label { n: 1, text: "old".into(), ..Default::default() }],
             pointer: None,
             trail: vec![],
             element: None,
@@ -2321,7 +2324,7 @@ mod tests {
         ed.begin(&store, &m.id, 1).unwrap();
         assert!(ed.commit(&store, b"not a png", vec![]).unwrap().is_err());
         assert!(ed.0.lock().unwrap().is_some(), "a failed write keeps the edit open");
-        let (id, cap) = ed.commit(&store, &png(3, 1), vec![Label { n: 1, text: "new".into() }]).unwrap().unwrap();
+        let (id, cap) = ed.commit(&store, &png(3, 1), vec![Label { n: 1, text: "new".into(), ..Default::default() }]).unwrap().unwrap();
         assert_eq!((id.as_str(), cap.width, cap.labels.len()), (m.id.as_str(), 3, 2));
         assert_eq!(store.picture(&m.id, 1).unwrap().png, png(3, 1));
         assert!(ed.commit(&store, &png(4, 1), vec![]).is_none(), "written once; the next commit is the recording's again");

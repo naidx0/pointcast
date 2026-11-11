@@ -659,7 +659,7 @@ mod tests {
                     png: png(200),
                     width: 1,
                     height: 1,
-                    labels: vec![Label { n: 1, text: "this one".into() }],
+                    labels: vec![Label { n: 1, text: "this one".into(), ..Default::default() }],
                     pointer: None,
                     trail: vec![],
                     element: Some(crate::element::ElementMark {
@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     fn label(n: u32, text: &str) -> Label {
-        Label { n, text: text.into() }
+        Label { n, text: text.into(), ..Default::default() }
     }
 
     #[test]
@@ -1137,6 +1137,19 @@ mod tests {
         let after = s.export(&m.id).unwrap();
         assert_eq!(after.images[0].labels, vec![label(1, "this one"), label(2, "too far left"), label(0, "3 areas hidden")]);
         assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; 2=too far left; 3 areas hidden]"#), "{}", after.plain);
+    }
+
+    #[test]
+    fn steps_added_to_a_stored_picture_stay_steps_and_are_numbered_on_from_its_labels() {
+        let s = store("replace-steps");
+        let m = s.save(&two_pictures(), 1_793_000_000_000, 2000).unwrap();
+        let step = |n: u32, text: &str| Label { n, text: text.into(), kind: prompt::LabelKind::Step };
+        s.replace(&m.id, 1, &png_of(3, 2, 10), vec![step(1, ""), step(2, "save")]).unwrap();
+        let after = s.export(&m.id).unwrap();
+        assert_eq!(after.images[0].labels, vec![label(1, "this one"), step(2, ""), step(3, "save")]);
+        assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; steps: 2, 3=save]"#), "{}", after.plain);
+        // Read back from disk, the stored pin (written before steps had a kind) is still a pin.
+        assert_eq!(s.picture(&m.id, 1).unwrap().labels[0].kind, prompt::LabelKind::Pin);
     }
 
     #[test]

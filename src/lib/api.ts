@@ -49,7 +49,8 @@ export type Progress = {
   left_ms?: number | null;
 };
 
-export type Label = { n: number; text: string };
+/** A numbered pin, step or note on a picture; pins and steps share one number sequence. 0 is a note on the whole picture. */
+export type Label = { n: number; text: string; kind?: "step" };
 
 export type SessionExport = {
   plain: string;

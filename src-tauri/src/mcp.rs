@@ -701,21 +701,12 @@ fn get_prompt(latest: &Latest, id: &str) -> Result<Prompt, String> {
     }
 }
 
-/// `region 933x73 · pointing at button "Save" · pins: 1=too far left`.
+/// `region 933x73 · pointing at button "Save" · pins: 1=too far left · steps: 2, 3=save · 1 area hidden`, worded as
+/// the prompt's picture list words it: a note (label 0) is its words alone.
 fn caption(p: &Pic) -> String {
     let mut bits = vec![format!("{} {}x{}", p.kind.as_str(), p.width, p.height)];
     bits.extend(p.pointing_at.iter().map(|e| format!("pointing at {e}")));
-    let pins: Vec<String> = p
-        .labels
-        .iter()
-        .map(|l| match l.text.trim() {
-            "" => l.n.to_string(),
-            t => format!("{}={t}", l.n),
-        })
-        .collect();
-    if !pins.is_empty() {
-        bits.push(format!("pins: {}", pins.join("; ")));
-    }
+    bits.extend(crate::prompt::caption_marks(&p.labels));
     bits.join(" · ")
 }
 
@@ -1291,7 +1282,7 @@ mod tests {
     fn a_prompt_with_two_pictures_returns_text_then_caption_and_image_for_each() {
         let lab = lab("two");
         let (a, b) = (noisy_png(40, 30, 1), noisy_png(50, 20, 2));
-        let pin = vec![crate::prompt::Label { n: 1, text: "too far left".into() }];
+        let pin = vec![crate::prompt::Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let items = [words(0, 4_000, "the save button sits here and the toast covers it"), pic(1_000, &a, pin), pic(3_000, &b, vec![])];
         let (latest, id) = saved(&lab, &items, CREATED, true);
         for name in ["pointcast_latest", "get_latest_session"] {
@@ -2047,5 +2038,18 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(3), "still answering after stop");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_caption_names_steps_apart_from_pins_and_a_note_by_its_words_alone() {
+        use crate::prompt::{Label, LabelKind};
+        let mut labels = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
+        labels.extend([(2, "open the menu"), (3, ""), (4, "save")].map(|(n, t)| Label { n, text: t.into(), kind: LabelKind::Step }));
+        crate::prompt::note_hidden(&mut labels, 1);
+        let p = |labels| Pic { n: 1, kind: crate::prompt::CaptureKind::Region, width: 40, height: 30, labels, pointing_at: None, file: None, png: vec![] };
+        assert_eq!(caption(&p(labels)), "region 40x30 · pins: 1=too far left · steps: 2=open the menu, 3, 4=save · 1 area hidden");
+        let mut hidden = vec![];
+        crate::prompt::note_hidden(&mut hidden, 1);
+        assert_eq!(caption(&p(hidden)), "region 40x30 · 1 area hidden", "never 0=1 area hidden");
     }
 }
