@@ -200,7 +200,7 @@ pub fn probe(addr: SocketAddr, token: &str) -> Result<Vec<String>, String> {
         s.write_all(req.as_bytes()).map_err(|_| "Pointcast's agent server closed the connection".to_string())?;
         let mut out = String::new();
         let _ = s.read_to_string(&mut out);
-        let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+        let (head, body) = out.split_once("\r\n\r\n").unwrap_or((out.as_str(), ""));
         match head.split(' ').nth(1) {
             Some("200") => serde_json::from_str(body).map_err(|_| "Pointcast's agent server gave an answer that is not JSON".to_string()),
             Some("401") => Err("Pointcast's agent server refused this computer's key".into()),
@@ -1962,7 +1962,7 @@ mod tests {
             ("pointcast_list", json!({ "limit": 1 })),
             ("pointcast_shot", json!({ "id": id, "n": 1 })),
         ];
-        for (name, args) in valid {
+        for (name, args) in valid.iter() {
             let r = ask("tools/call", json!({ "name": name, "arguments": args }));
             assert_ne!(r["result"]["isError"], json!(true), "{name}: {r}");
             assert!(r["result"]["content"].as_array().is_some_and(|c| !c.is_empty()), "{name}: {r}");

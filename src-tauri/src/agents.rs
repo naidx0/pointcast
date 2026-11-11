@@ -707,7 +707,6 @@ mod tests {
                 let p = self.0.join(rel);
                 if let Ok(m) = fs::metadata(&p) {
                     let mut perm = m.permissions();
-                    #[allow(clippy::permissions_set_readonly_false)]
                     perm.set_readonly(false);
                     let _ = fs::set_permissions(&p, perm);
                 }
