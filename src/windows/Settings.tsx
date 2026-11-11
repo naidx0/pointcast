@@ -796,21 +796,19 @@ function AgentsPart({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refres
           const sub = err ? (
             <span style={{ color: "var(--red-ink)" }}>{err}</span>
           ) : !a.found && !set ? (
-            `${a.name} was not found on this computer. Once it is installed, Set up appears here, or copy the ${
-              a.id === "claude" ? "command" : "entry"
-            } now.`
+            `${a.name} was not found on this computer. Copy the ${a.id === "claude" ? "command" : "entry"} to set it up by hand.`
           ) : connected ? (
-            `Connected in ${a.path}. New ${a.name} sessions can read your last prompt.`
+            "New sessions can read your last prompt."
           ) : down ? (
             <span style={{ color: "var(--red-ink)" }}>
-              Set up, but Pointcast's agent server is not answering{st?.server_error ? `: ${st.server_error}` : ""}.
+              Pointcast's agent server is not answering{st?.server_error ? `: ${st.server_error}` : ""}.
             </span>
           ) : set ? (
-            `Set up in ${a.path}. Turn on sharing above so ${a.name} can read your prompts.`
+            "Set up. Turn on sharing above so it can read your prompts."
           ) : a.entry === "other" ? (
-            `${a.path} has an older Pointcast entry. Set up again to update it.`
+            `${a.path} has an older Pointcast entry.`
           ) : (
-            `Not set up. Set up adds Pointcast to ${a.path} and changes nothing else there.`
+            `Adds Pointcast to ${a.path}, nothing else.`
           );
           return (
             <Row key={a.id} label={a.name} sub={sub}>
