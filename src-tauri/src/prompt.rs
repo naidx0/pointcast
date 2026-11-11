@@ -25,13 +25,15 @@ impl CaptureKind {
     }
 }
 
-/// What a numbered label marks: a pin or typed note (a remark of its own), or a step of an ordered walk.
+/// What a label marks: a pin or typed note (a remark of its own), a step of an ordered walk, or a note on the whole
+/// picture (numbered 0: how many areas were hidden), which is never a pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LabelKind {
     #[default]
     Pin,
     Step,
+    Note,
 }
 
 impl LabelKind {
@@ -41,14 +43,32 @@ impl LabelKind {
 }
 
 /// A numbered pin, step or typed note on a capture. Pins and steps share one number sequence on a picture, so each
-/// number drawn into it names one mark. A label numbered 0 is a note on the whole picture (areas hidden).
+/// number drawn into it names one mark. A note on the whole picture (areas hidden) is numbered 0 and has kind note.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredLabel")]
 pub struct Label {
     pub n: u32,
     pub text: String,
-    /// Stored entries from before steps have no kind: they are pins.
+    /// Stored entries from before steps have no kind: they are pins (or notes, when numbered 0).
     #[serde(default, skip_serializing_if = "LabelKind::is_pin")]
     pub kind: LabelKind,
+}
+
+/// A label as stored. The one place an old entry is read: one numbered 0 without a kind (written by builds before
+/// notes had a kind, `{"n":0,"text":"1 area hidden"}`) is a note, never a pin.
+#[derive(Deserialize)]
+struct StoredLabel {
+    n: u32,
+    text: String,
+    #[serde(default)]
+    kind: LabelKind,
+}
+
+impl From<StoredLabel> for Label {
+    fn from(l: StoredLabel) -> Label {
+        let kind = if l.n == 0 && l.kind == LabelKind::Pin { LabelKind::Note } else { l.kind };
+        Label { n: l.n, text: l.text, kind }
+    }
 }
 
 /// One screenshot held with the session (PNG bytes stay with it until export).
@@ -133,14 +153,14 @@ fn marker(n: u32, c: &Capture) -> String {
     format!("[image {n}: {}]", bits.join("; "))
 }
 
-/// A label numbered 0 is a note on the whole picture, not a pin: how many areas the person blacked out.
+/// A note (kind note, numbered 0) on the whole picture, not a pin: how many areas the person blacked out.
 const HIDDEN: &str = " hidden";
 
 /// How many areas of the picture were blacked out, from its note.
 pub fn hidden_count(labels: &[Label]) -> u32 {
     labels
         .iter()
-        .filter(|l| l.n == 0)
+        .filter(|l| l.kind == LabelKind::Note)
         .filter_map(|l| l.text.strip_suffix(HIDDEN)?.split_whitespace().next()?.parse::<u32>().ok())
         .sum()
 }
@@ -148,18 +168,18 @@ pub fn hidden_count(labels: &[Label]) -> u32 {
 /// Add `more` blacked-out areas to the picture's note ("1 area hidden", "3 areas hidden"), one note at most.
 pub fn note_hidden(labels: &mut Vec<Label>, more: u32) {
     let n = hidden_count(labels) + more;
-    labels.retain(|l| !(l.n == 0 && l.text.ends_with(HIDDEN)));
+    labels.retain(|l| !(l.kind == LabelKind::Note && l.text.ends_with(HIDDEN)));
     if n > 0 {
         labels.push(Label {
             n: 0,
             text: format!("{n} {}{HIDDEN}", if n == 1 { "area" } else { "areas" }),
-            kind: LabelKind::Pin,
+            kind: LabelKind::Note,
         });
     }
 }
 
 /// A picture's labels in words. `pins`: each pin as `1=too far left`, or the bare number for one without words.
-/// `steps`: one entry for the whole walk, `steps: 2=open the menu, 3, 4=save`. `notes`: each note (0) as its words.
+/// `steps`: one entry for the whole walk, `steps: 2=open the menu, 3, 4=save`. `notes`: each note as its words.
 pub struct Marks {
     pub pins: Vec<String>,
     pub steps: Option<String>,
@@ -171,12 +191,12 @@ pub fn marks(labels: &[Label]) -> Marks {
         "" => l.n.to_string(),
         t => format!("{}={t}", l.n),
     };
-    let numbered = |k: LabelKind| labels.iter().filter(move |l| l.n != 0 && l.kind == k);
+    let numbered = |k: LabelKind| labels.iter().filter(move |l| l.kind == k);
     let steps: Vec<String> = numbered(LabelKind::Step).map(one).collect();
     Marks {
         pins: numbered(LabelKind::Pin).map(one).collect(),
         steps: (!steps.is_empty()).then(|| format!("steps: {}", steps.join(", "))),
-        notes: labels.iter().filter(|l| l.n == 0).map(|l| l.text.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+        notes: labels.iter().filter(|l| l.kind == LabelKind::Note).map(|l| l.text.trim().to_string()).filter(|t| !t.is_empty()).collect(),
     }
 }
 
@@ -826,7 +846,7 @@ pub fn handoff_root(s: &crate::settings::Settings) -> std::path::PathBuf {
     if cfg!(test) {
         return std::env::temp_dir().join(format!("pointcast-test-handoff-{}", std::process::id()));
     }
-    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("Pointcast")
+    crate::settings::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("Pointcast")
 }
 
 /// A folder name `YYYY-MM-DD_HHMM`, with a `-n` suffix for another recording in the same minute.
@@ -1236,6 +1256,47 @@ mod tests {
         let s = serde_json::to_string(&step(2, "save")).unwrap();
         assert_eq!(s, r#"{"n":2,"text":"save","kind":"step"}"#);
         assert_eq!(serde_json::from_str::<Label>(&s).unwrap(), step(2, "save"));
+    }
+
+    #[test]
+    fn an_old_stored_hidden_note_without_a_kind_loads_as_a_note_and_a_new_one_is_stored_with_kind_note() {
+        let old: Label = serde_json::from_str(r#"{"n":0,"text":"1 area hidden"}"#).unwrap();
+        assert_eq!(old.kind, LabelKind::Note);
+        assert_eq!(caption_marks(std::slice::from_ref(&old)), ["1 area hidden"]);
+        assert_eq!(hidden_count(std::slice::from_ref(&old)), 1);
+        // Marking again adds to the old note: still one note, now with its kind.
+        let mut labels = vec![old];
+        note_hidden(&mut labels, 1);
+        assert_eq!(labels, [Label { n: 0, text: "2 areas hidden".into(), kind: LabelKind::Note }]);
+        let mut fresh = vec![];
+        note_hidden(&mut fresh, 1);
+        assert_eq!(serde_json::to_string(&fresh).unwrap(), r#"[{"n":0,"text":"1 area hidden","kind":"note"}]"#);
+        // Pins and steps are stored byte for byte as before.
+        let pins = r#"[{"n":1,"text":"too far left"},{"n":2,"text":"save","kind":"step"},{"n":3,"text":""}]"#;
+        let read: Vec<Label> = serde_json::from_str(pins).unwrap();
+        assert_eq!(read.iter().map(|l| l.kind).collect::<Vec<_>>(), [LabelKind::Pin, LabelKind::Step, LabelKind::Pin]);
+        assert_eq!(serde_json::to_string(&read).unwrap(), pins);
+    }
+
+    #[test]
+    fn a_hidden_note_old_or_new_never_reads_as_pin_zero_on_the_marker_the_list_or_the_manifest() {
+        let old: Label = serde_json::from_str(r#"{"n":0,"text":"1 area hidden"}"#).unwrap();
+        let mut new = vec![Label { n: 1, text: "Save".into(), ..Default::default() }];
+        note_hidden(&mut new, 2);
+        for labels in [vec![old], new] {
+            let items = [said(0, 1_000, "this button"), shot(400, CaptureKind::Region, labels.clone())];
+            let (text, caps) = compose(&items);
+            assert!(!text.contains("0="), "{text}");
+            assert!(text.contains("hidden]"), "{text}");
+            let list = picture_list(&caps, &["C:/p/01.png".to_string()]);
+            assert!(!list.contains("0=") && list.contains(" hidden"), "{list}");
+            let root = tmp("note-kind");
+            let h = write_handoff(&root, "note-kind", CREATED, &items, CREATED, false).unwrap();
+            let raw = std::fs::read_to_string(h.dir.join("manifest.json")).unwrap();
+            assert!(raw.contains(r#""kind": "note""#), "{raw}");
+            assert_eq!(manifest(&h.dir).pictures[0].labels.last().unwrap().kind, LabelKind::Note);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]

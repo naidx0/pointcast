@@ -1135,7 +1135,8 @@ mod tests {
         prompt::note_hidden(&mut again, 2);
         s.replace(&m.id, 1, &new, again).unwrap();
         let after = s.export(&m.id).unwrap();
-        assert_eq!(after.images[0].labels, vec![label(1, "this one"), label(2, "too far left"), label(0, "3 areas hidden")]);
+        let note = Label { n: 0, text: "3 areas hidden".into(), kind: prompt::LabelKind::Note };
+        assert_eq!(after.images[0].labels, vec![label(1, "this one"), label(2, "too far left"), note]);
         assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; 2=too far left; 3 areas hidden]"#), "{}", after.plain);
     }
 

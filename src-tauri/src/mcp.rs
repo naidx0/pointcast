@@ -2051,5 +2051,10 @@ mod tests {
         let mut hidden = vec![];
         crate::prompt::note_hidden(&mut hidden, 1);
         assert_eq!(caption(&p(hidden)), "region 40x30 · 1 area hidden", "never 0=1 area hidden");
+        // A note stored by the previous build (no kind) captions the same, never as pin 0.
+        let old: Label = serde_json::from_str(r#"{"n":0,"text":"1 area hidden"}"#).unwrap();
+        let got = caption(&p(vec![old]));
+        assert_eq!(got, "region 40x30 · 1 area hidden");
+        assert!(!got.contains("0="), "{got}");
     }
 }

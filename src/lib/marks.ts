@@ -65,13 +65,16 @@ export function labelsFor(list: readonly Mark[], base = 0): LabelOut[] {
 
 /**
  * The labels in the words the prompt's picture list uses (prompt.rs `caption_marks`): `pins: 1=too far left; 2`,
- * `steps: 3, 4=save`, then each note on the whole picture (label 0) as its words.
+ * `steps: 3, 4=save`, then each note on the whole picture (kind "note") as its words. A label numbered 0 without a
+ * kind (stored by builds before notes had one) is a note too, never pin 0.
  */
+export const isNote = (l: { n: number; kind?: string }) => l.kind === "note" || (!l.n && !l.kind);
+
 export function captionMarks(labels: readonly { n: number; text: string; kind?: string }[]): string[] {
   const one = (l: { n: number; text: string }) => (l.text.trim() ? `${l.n}=${l.text.trim()}` : `${l.n}`);
-  const pins = labels.filter((l) => l.n && l.kind !== "step").map(one);
-  const steps = labels.filter((l) => l.n && l.kind === "step").map(one);
-  const notes = labels.filter((l) => !l.n).map((l) => l.text.trim()).filter(Boolean);
+  const pins = labels.filter((l) => !isNote(l) && l.kind !== "step").map(one);
+  const steps = labels.filter((l) => !isNote(l) && l.kind === "step").map(one);
+  const notes = labels.filter(isNote).map((l) => l.text.trim()).filter(Boolean);
   return [...(pins.length ? [`pins: ${pins.join("; ")}`] : []), ...(steps.length ? [`steps: ${steps.join(", ")}`] : []), ...notes];
 }
 

@@ -1083,7 +1083,7 @@ fn mcp_url(bind: &str) -> String {
 }
 
 fn home() -> Result<std::path::PathBuf, String> {
-    dirs::home_dir().ok_or_else(|| "Pointcast could not find your home folder.".to_string())
+    settings::home_dir().ok_or_else(|| "Pointcast could not find your home folder.".to_string())
 }
 
 /// The running agent server: its address and the flag that stops it.
@@ -1133,7 +1133,7 @@ fn agents_view(svc: &App, home: &std::path::Path) -> Result<Value, String> {
         None => Err("sharing is off".into()),
     };
     Ok(json!({
-        "agents": agents::ALL.iter().map(|a| agents::view(*a, home, &url, &token)).collect::<Vec<_>>(),
+        "agents": agents::ALL.iter().map(|a| agents::view(*a, home, settings::home_is_custom(), &url, &token)).collect::<Vec<_>>(),
         "server_ok": server.is_ok(),
         "server_error": server.err(),
         "folder": folder,
