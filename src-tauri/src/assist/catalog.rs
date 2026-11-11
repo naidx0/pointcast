@@ -741,8 +741,7 @@ mod tests {
 
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    fn forgetting_a_route
-_removes_its_key_its_yes_and_the_choice_and_a_key_is_never_in_a_setting_list_or_error() {
+    fn forgetting_a_route_removes_its_key_its_yes_and_the_choice_and_a_key_is_never_in_a_setting_list_or_error() {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let keys = Keys::named(&format!("pointcast-test-{}-{nanos}/", std::process::id()));
         struct Gone<'a>(&'a Keys);

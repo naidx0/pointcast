@@ -221,7 +221,9 @@ mod tests {
             assert_eq!(endings(&got), 1, "{got:?}");
             got.last().cloned().unwrap()
         };
-        let err = |kind: &str, message: &str| ev(json!({ "type": "error", "error": { "type": kind, "message": message } }));
+        fn err(kind: &str, message: &str) -> String {
+            ev(json!({ "type": "error", "error": { "type": kind, "message": message } }))
+        }
         assert_eq!(refused(|| Reply::Whole(401, "", r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#.into())), Kind::Failed(Failure::SignedOut));
         assert!(matches!(refused(|| Reply::Whole(429, "retry-after: 30\r\n", "{}".into())), Kind::Failed(Failure::Limit { resets: Some(_) })));
         assert_eq!(
