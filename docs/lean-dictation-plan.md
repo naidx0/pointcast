@@ -56,7 +56,7 @@ no stray "Thank you." or "Um..." piece, 10 to 16x real time.
 | 13 | Step markers and crop | A numbered step marker that counts up by itself (1, 2, 3) and is named in the picture list; crop after capture | `Overlay.tsx`, `image_ops.rs`, `prompt.rs` | Tests on numbering and the caption; the crop keeps mark positions |
 | 14 | The app knows this computer | Settings › Speech shows the microphone in use with a live level and says when it is silent or slow to open, with the device named; each recording keeps how long its microphone took to open; one line for the graphics card, engine and measured speed | `Settings.tsx`, `session.rs`, `voice/audio.rs`, `history.rs` | Tests on the meta fields; preview walk; a real recording shows the fields |
 | 15 | Agent setup in one click | Settings writes the user-scope MCP config for Claude Code, Cursor and Codex and checks it answers; an MCP conformance test in CI | `lib.rs` (agent setup), `Settings.tsx`, `mcp.rs` tests | The check passes against the running server; a wrong token is reported |
-| 16 | Release 0.5.0 | Version, notes, README (size budget, handoff folder, tidy), a cross-platform pass: install tests on fresh macOS and Windows runners | release files | Draft release green; the owner's yes to publish |
+| 16 | Release 0.4.8 | Version, notes, README (size budget, handoff folder, tidy), a cross-platform pass: install tests on fresh macOS and Windows runners | release files | Draft release green; the owner's yes to publish |
 
 ## Order
 
