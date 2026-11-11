@@ -311,6 +311,10 @@ function arrow(a: Pt, b: Pt, c: string, w: number, head: number, s: number): Op[
   ];
 }
 
+// Drawing order: marks, then pins and steps with a label (so a label is never under the next step's circle), then
+// hidden areas over everything.
+const tier = (sh: Shape) => (sh.kind === "redact" ? 2 : (sh.kind === "pin" || sh.kind === "step") && sh.text ? 1 : 0);
+
 const dstr = (d: Seg[]) => d.map((g) => g[0] + (g.slice(1) as number[]).join(" ")).join("");
 
 function Ops({ list, id, src, nat }: { list: Op[]; id: number; src: string; nat: { w: number; h: number } }) {
@@ -440,7 +444,7 @@ async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: M
   ctx.beginPath();
   ctx.rect(x0, y0, w, h);
   ctx.clip();
-  for (const sh of list) if (sh.kind !== "redact") for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
+  for (const sh of [...list].sort((p, q) => tier(p) - tier(q))) if (sh.kind !== "redact") for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
   if (hide.length) {
     const d = ctx.getImageData(0, 0, w, h);
     redact(d.data, w, h, hide.map((r) => ({ ...r, x: r.x - x0, y: r.y - y0 })), s);
@@ -1066,7 +1070,7 @@ export function Overlay() {
               ) : null}
             </defs>
             <g clipPath={box ? "url(#ov-clip)" : undefined}>
-              {[...vis, ...(live ? [live] : [])].sort((p, q) => +(p.kind === "redact") - +(q.kind === "redact")).map((sh) => (
+              {[...vis, ...(live ? [live] : [])].sort((p, q) => tier(p) - tier(q)).map((sh) => (
                 <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? (sh === live ? base + nums.size + 1 : 0), sh.id === editing, box ?? full)} />
               ))}
             </g>
