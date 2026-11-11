@@ -2,9 +2,10 @@
 //! Gemini key through Google's compatible endpoint, and a model on this computer served by Ollama, LM Studio or
 //! llama.cpp, which costs nothing and sends nothing anywhere. The API keeps no conversation, so the adapter does:
 //! every question goes out with the instructions, what was said before it and the pictures of only the last
-//! questions. A pasted key comes from the system's store (`vault`) and is never held in a setting.
+//! questions. A pasted key comes from the system's store (`vault`) and is never held in a setting. Anthropic's own
+//! API differs only in how a request is written and an answer read (`anthropic`), so it rides the same machinery.
 
-use super::http::{self, Ask, Line, Piece, Stopper, Trouble};
+use super::http::{self, Ask, Line, Piece, Stopper, Trouble, Wire};
 use super::vault::{self, Secret};
 use super::{replay, Caps, Chat, Event, Failure, Health, Kind, Mime, Part, Provider, Role, State, Turn, TurnId, Usage};
 use base64::Engine;
@@ -35,20 +36,21 @@ pub struct Config {
     pub base_url: String,
     pub model: String,
     pub needs_key: bool,
+    pub wire: Wire,
 }
 
 /// A service asked with the key the person pasted for `id`.
 pub fn remote(id: &'static str, base_url: &str, model: &str) -> Config {
-    Config { id, base_url: base_url.into(), model: model.into(), needs_key: true }
+    Config { id, base_url: base_url.into(), model: model.into(), needs_key: true, wire: Wire::OpenAi }
 }
 
 /// A model server that takes no key.
 pub fn local(id: &'static str, base_url: &str, model: &str) -> Config {
-    Config { id, base_url: base_url.into(), model: model.into(), needs_key: false }
+    Config { id, base_url: base_url.into(), model: model.into(), needs_key: false, wire: Wire::OpenAi }
 }
 
 /// Whether `url` names this computer itself.
-fn loopback(url: &reqwest::Url) -> bool {
+pub(crate) fn loopback(url: &reqwest::Url) -> bool {
     let host = url.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
     host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
 }
@@ -158,7 +160,7 @@ impl OpenAi {
     }
 
     fn line(&self) -> Result<&Line, Failure> {
-        self.line.get_or_init(|| Line::new(self.offline)).as_ref().ok_or(Failure::Offline)
+        self.line.get_or_init(|| Line::new(self.offline).map(|l| l.speaking(self.cfg.wire))).as_ref().ok_or(Failure::Offline)
     }
 
     /// Read the service's list of models; how many it has, or `None` when it did not answer.
@@ -249,7 +251,11 @@ impl Provider for OpenAi {
         let pictures = self.caps(None).images;
         Ok(Box::new(OpenAiChat {
             line: self.line()?.clone(),
-            url: format!("{}/chat/completions", self.base),
+            url: match self.cfg.wire {
+                Wire::OpenAi => format!("{}/chat/completions", self.base),
+                Wire::Anthropic => format!("{}/messages", self.base),
+            },
+            wire: self.cfg.wire,
             key,
             quiet: self.quiet,
             model: self.cfg.model.clone(),
@@ -265,18 +271,18 @@ impl Provider for OpenAi {
 
 /// One piece of what was said, as it is sent: a picture is already the address that holds its bytes.
 #[derive(Clone)]
-enum Bit {
+pub(super) enum Bit {
     Words(String),
     Picture(String),
 }
 
 #[derive(Clone)]
-struct Said {
-    by: Role,
-    bits: Vec<Bit>,
+pub(super) struct Said {
+    pub(super) by: Role,
+    pub(super) bits: Vec<Bit>,
 }
 
-fn has_picture(parts: &[Part]) -> bool {
+pub(super) fn has_picture(parts: &[Part]) -> bool {
     parts.iter().any(|p| matches!(p, Part::Picture { .. }))
 }
 
@@ -341,7 +347,7 @@ fn usage_of(u: &Value) -> Option<Usage> {
 }
 
 /// What a refusal means for the person. `pictures` says the question carried one.
-fn refusal(code: u16, resets: Option<i64>, said: &str, pictures: bool) -> Failure {
+pub(super) fn refusal(code: u16, resets: Option<i64>, said: &str, pictures: bool) -> Failure {
     let low = said.to_lowercase();
     let says = |words: &[&str]| words.iter().any(|w| low.contains(w));
     match code {
@@ -350,8 +356,9 @@ fn refusal(code: u16, resets: Option<i64>, said: &str, pictures: bool) -> Failur
         429 => Failure::Limit { resets },
         // Out of credit: asking again does not help until the person adds some.
         402 => Failure::Limit { resets: None },
+        _ if says(&["credit balance"]) => Failure::Limit { resets: None },
         413 => Failure::ContextFull,
-        _ if says(&["context length", "context_length", "context size", "context window", "context overflow", "maximum number of tokens", "too many tokens"]) => {
+        _ if says(&["context length", "context_length", "context size", "context window", "context overflow", "maximum number of tokens", "too many tokens", "prompt is too long"]) => {
             Failure::ContextFull
         }
         _ if pictures && code < 500 && says(&["image", "vision", "multimodal", "multi-modal"]) => Failure::NoPictures,
@@ -370,22 +377,23 @@ fn failure_of(t: Trouble, pictures: bool) -> Failure {
 }
 
 /// One answer as it streams in.
-struct Answer {
+pub(super) struct Answer {
     id: TurnId,
     out: Sender<Event>,
     history: Arc<Mutex<Vec<Said>>>,
     asked: Option<Said>,
-    pictures: bool,
-    words: String,
-    usage: Option<Usage>,
-    thought: bool,
+    pub(super) pictures: bool,
+    pub(super) words: String,
+    pub(super) usage: Option<Usage>,
+    pub(super) thought: bool,
     /// The model said it was done; the count of what it cost may still follow.
-    finished: bool,
+    pub(super) finished: bool,
     over: bool,
+    wire: Wire,
 }
 
 impl Answer {
-    fn tell(&self, kind: Kind) {
+    pub(super) fn tell(&self, kind: Kind) {
         let _ = self.out.send(Event { turn: self.id, kind });
     }
 
@@ -405,6 +413,12 @@ impl Answer {
     }
 
     fn data(&mut self, d: &str) {
+        if self.wire == Wire::Anthropic {
+            if let Ok(v) = serde_json::from_str::<Value>(d) {
+                super::anthropic::take(self, &v);
+            }
+            return;
+        }
         if d.trim() == "[DONE]" {
             return self.end(None);
         }
@@ -438,7 +452,7 @@ impl Answer {
 
     /// End the answer, once. What the person saw of it is what the next question follows: a question that got no
     /// words back is not kept.
-    fn end(&mut self, failed: Option<Failure>) {
+    pub(super) fn end(&mut self, failed: Option<Failure>) {
         self.over = true;
         if let Some(asked) = self.asked.take().filter(|_| !self.words.is_empty()) {
             let mut history = self.history.lock().unwrap();
@@ -460,6 +474,7 @@ impl Answer {
 pub struct OpenAiChat {
     line: Line,
     url: String,
+    wire: Wire,
     key: Option<Arc<Secret>>,
     quiet: Duration,
     model: String,
@@ -487,12 +502,15 @@ impl Chat for OpenAiChat {
         if let Some(old) = old {
             old.stop();
         }
-        let body = request(&self.model, &self.system, &self.history.lock().unwrap(), &new);
+        let body = match self.wire {
+            Wire::OpenAi => request(&self.model, &self.system, &self.history.lock().unwrap(), &new),
+            Wire::Anthropic => super::anthropic::request(&self.model, &self.system, &self.history.lock().unwrap(), &new),
+        };
         self.context.clear();
         self.serial += 1;
         let id = TurnId(self.serial);
         let history = self.history.clone();
-        let mut answer = Answer { id, out, history, asked: Some(new), pictures, words: String::new(), usage: None, thought: false, finished: false, over: false };
+        let mut answer = Answer { id, out, history, asked: Some(new), pictures, words: String::new(), usage: None, thought: false, finished: false, over: false, wire: self.wire };
         let ask = Ask { url: self.url.clone(), key: self.key.clone(), body: Some(body), within: self.quiet };
         let stopper = self.line.stream(ask, Box::new(move |piece| answer.take(piece)));
         *self.live.lock().unwrap() = Some(stopper);

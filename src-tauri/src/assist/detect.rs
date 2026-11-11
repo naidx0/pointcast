@@ -166,6 +166,13 @@ pub fn locate() -> Option<PathBuf> {
     Some(native_behind(&found).unwrap_or(found))
 }
 
+/// Where the program `name` is, on PATH or in the usual folders: the way the agents spoken to over ACP are found.
+pub fn on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let ends = if cfg!(windows) { endings(std::env::var("PATHEXT").ok().as_deref()) } else { Vec::new() };
+    find_in(name, std::env::split_paths(&path).chain(usual()), &ends)
+}
+
 /// What `exe --version` prints.
 pub fn version_of(exe: &Path) -> Result<String, String> {
     said_by(exe, &["--version"]).map(|(_, said)| said)
