@@ -210,7 +210,11 @@ pub fn show_window(app: &AppHandle, label: &str) {
 
 fn hide_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
-        let _ = w.hide();
+        if label == platform::PANEL {
+            platform::hide_quietly(&w);
+        } else {
+            let _ = w.hide();
+        }
         if platform::DESK.contains(&label) {
             platform::dock(app, Some(label));
         }

@@ -331,6 +331,23 @@ pub fn show_panel(app: &AppHandle) {
     show_quietly(&w);
 }
 
+/// Take a window shown by `show_quietly` off screen. On Windows that window was shown with `ShowWindow` directly, so
+/// Tauri still records it as hidden and its own `hide()` does nothing (seen 2026-11-11: an empty answer panel stayed
+/// on screen after "Not sent"); it is hidden the same way it was shown.
+pub fn hide_quietly(w: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        if let Ok(h) = w.hwnd() {
+            unsafe {
+                let _ = ShowWindow(HWND(h.0 as _), SW_HIDE);
+            }
+        }
+    }
+    let _ = w.hide();
+}
+
 /// Put a window on screen without making it the one that takes keys.
 fn show_quietly(w: &WebviewWindow) {
     #[cfg(windows)]
