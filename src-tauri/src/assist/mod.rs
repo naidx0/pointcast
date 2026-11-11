@@ -1,8 +1,9 @@
 //! The assistant: a question in words and pictures goes to an AI the person already has, and the answer streams back
 //! as text. One contract serves every route (`Provider` opens a conversation, `Chat` asks and cancels); the routes
-//! are the vendors' own command-line tools run as a child (`child`, `jsonl`, then `codex`) and, later, keys and
-//! local models. Pointcast never reads, stores or forwards another program's sign-in: a test below fails the build
-//! if this folder names a vendor's sign-in file.
+//! are the vendors' own command-line tools run as a child (`child`, `jsonl`, then `codex`), and any service that
+//! speaks OpenAI's chat API over HTTP (`http`, then `openai`): one the person pasted a key for (`vault`), or a model
+//! on this computer. Pointcast never reads, stores or forwards another program's sign-in: a test below fails the
+//! build if this folder names a vendor's sign-in file.
 
 // Nothing calls this module yet: slice 3 wires it to commands and Settings, and removes this line.
 #![allow(dead_code)]
@@ -12,7 +13,10 @@ pub mod codex;
 pub mod detect;
 #[cfg(test)]
 pub mod fake;
+pub mod http;
 pub mod jsonl;
+pub mod openai;
+pub mod vault;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -221,6 +225,12 @@ pub fn close_if_idle(chat: &mut dyn Chat, now: Instant, last_used: Instant) -> b
         chat.close();
     }
     due
+}
+
+/// Whether a provider that takes `caps` may be offered. With "Only on this computer" on, only one that sends
+/// nothing off it.
+pub fn allowed(caps: Caps, offline_only: bool) -> bool {
+    !offline_only || caps.offline
 }
 
 /// The providers Pointcast can offer, by id.
@@ -565,7 +575,7 @@ pub mod tests {
 
         let mut files = Vec::new();
         sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("assist"), &mut files);
-        assert!(files.len() >= 6, "the scan read the folder it meant to: {files:?}");
+        assert!(files.len() >= 9, "the scan read the folder it meant to: {files:?}");
         for f in files {
             let found = hits(&std::fs::read_to_string(&f).unwrap(), &needles);
             assert!(found.is_empty(), "{} names {found:?}", f.display());
