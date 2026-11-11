@@ -193,10 +193,12 @@ pub fn pick(frames: &[u64], wanted: &[u64], taken: &[u64]) -> Vec<(u64, usize)> 
 
 /// At stop: add the frames at the moments the person talked about as pictures marked `auto`. Pointing words come
 /// first, then the longest rests (at their end), then the biggest screen changes. Each is marked where the person
-/// pointed then, as a capture is (`how`). Returns how many were added.
+/// pointed then, as a capture is (`how`). Returns how many were added. None once a picture the person took has an
+/// area blacked out: a frame of the same screen would show what they hid.
 pub fn add(items: &mut Vec<Item>, buf: &Buffer, trail: &[Point], tokens: &[(u64, Vec<Token>)], how: MarkPoint) -> usize {
     let frames: Vec<&Still> = buf.frames().iter().collect();
-    if frames.is_empty() {
+    let hid = items.iter().any(|i| matches!(i, Item::Image { capture, .. } if prompt::hidden_count(&capture.labels) > 0));
+    if frames.is_empty() || hid {
         return 0;
     }
     let mut rests = pointer::rests(trail);
@@ -460,6 +462,24 @@ mod tests {
         let mut none = vec![speech(1_000, 3_000, "put this here.")];
         assert_eq!(add(&mut none, &Buffer::default(), &trail, &[], MarkPoint::Ring), 0);
         assert_eq!(none.len(), 1);
+    }
+
+    #[test]
+    fn a_picture_with_a_hidden_area_keeps_every_key_frame_out() {
+        let mut b = Buffer::default();
+        for s in 0..30 {
+            b.push(sized(s * 1_000, 10));
+        }
+        let rest: Vec<Point> = (0..=60).map(|i| p(20_000 + i * 33, 20, 20)).collect();
+        let mut plain = vec![speech(1_000, 3_000, "put this here."), taken(10_000)];
+        assert!(add(&mut plain, &b, &rest, &[], MarkPoint::Off) > 0, "control: frames are added without a hidden area");
+        let mut hid = taken(10_000);
+        if let Item::Image { capture, .. } = &mut hid {
+            prompt::note_hidden(&mut capture.labels, 1);
+        }
+        let mut items = vec![speech(1_000, 3_000, "put this here."), hid];
+        assert_eq!(add(&mut items, &b, &rest, &[], MarkPoint::Off), 0);
+        assert_eq!(items.len(), 2);
     }
 
     #[test]

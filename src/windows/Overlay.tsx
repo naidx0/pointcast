@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useReducer, useRef, useState, type PointerEvent as PE } from "react";
 import {
   Check,
+  EyeOff,
   Highlighter,
   MapPin,
   MousePointer2,
@@ -24,10 +25,11 @@ import {
   type ElementMark,
   type Label,
 } from "@/lib/api";
+import { REDACT_EDGE_CSS, REDACT_FILL_CSS, edgeWidth, hiddenNote, overlaps, redact } from "@/lib/redact";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
-type Tool = "move" | "pin" | "arrow" | "rect" | "highlight" | "pen" | "text" | "magnify";
+type Tool = "move" | "pin" | "arrow" | "rect" | "redact" | "highlight" | "pen" | "text" | "magnify";
 type Pt = { x: number; y: number };
 type Rect = { x: number; y: number; w: number; h: number };
 type Handle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -35,7 +37,8 @@ type Handle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 // Every shape lives in frame-pixel space (the physical pixels of the frozen PNG).
 type Shape =
   | { id: number; kind: "pin" | "text"; c: string; at: Pt; text: string }
-  | { id: number; kind: "arrow" | "rect"; c: string; a: Pt; b: Pt }
+  // A redaction ("redact") is a box drawn solid over everything else; the pixels under it are written over when saved.
+  | { id: number; kind: "arrow" | "rect" | "redact"; c: string; a: Pt; b: Pt }
   | { id: number; kind: "pen" | "highlight"; c: string; pts: Pt[] }
   | { id: number; kind: "magnify"; at: Pt }
   // Where the person pointed when the frame froze; placed for them, theirs to move or remove.
@@ -58,12 +61,18 @@ type Ix =
   | { k: "move"; a: Pt; o: Rect }
   | { k: "draw"; shape: Shape }
   | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" }
-  | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt };
+  | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt }
+  // A rectangle or a hidden area: moved by its body, resized by a handle.
+  | { k: "grab"; o: Box2; a: Pt; cx: number; cy: number; moved: boolean; d?: Box2 }
+  | { k: "reshape"; o: Box2; h: Handle; d?: Box2 };
+
+type Box2 = Extract<Shape, { a: Pt }> & { kind: "rect" | "redact" };
+const isBox = (x: Shape | undefined): x is Box2 => x?.kind === "rect" || x?.kind === "redact";
 
 // `edit`: a picture from History, its labels already drawn in; new pins are numbered on from `base`.
 type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null; edit?: boolean; base?: number };
 
-type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null };
+type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null; hidden: number };
 
 const PREVIEW = typeof location !== "undefined" && location.search.includes("preview=1");
 const PREVIEW_EDIT = PREVIEW && location.search.includes("edit=1");
@@ -82,11 +91,14 @@ const TOOLS: { id: Tool; Icon: LucideIcon; label: string; key: string }[] = [
   { id: "pin", Icon: MapPin, label: "Pin", key: "P" },
   { id: "arrow", Icon: MoveUpRight, label: "Arrow", key: "A" },
   { id: "rect", Icon: Square, label: "Rectangle", key: "R" },
+  { id: "redact", Icon: EyeOff, label: "Redact", key: "X" },
   { id: "highlight", Icon: Highlighter, label: "Highlighter", key: "H" },
   { id: "pen", Icon: Pencil, label: "Pen", key: "D" },
   { id: "text", Icon: Type, label: "Text", key: "T" },
   { id: "magnify", Icon: ZoomIn, label: "Magnify 2x", key: "M" },
 ];
+// Tools that draw where they are dragged; pressing with one starts a stroke, not a grab.
+const DRAWS = new Set<Tool>(["arrow", "rect", "redact", "highlight", "pen"]);
 const KEYS = Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.id])) as Record<string, Tool>;
 
 function esc(layer: Layer): Layer | "idle" {
@@ -100,6 +112,7 @@ const GESTURE: Record<Tool, string> = {
   pin: "Click to drop a numbered pin",
   arrow: "Drag an arrow",
   rect: "Drag a rectangle",
+  redact: "Drag over what to hide",
   highlight: "Drag to highlight",
   pen: "Draw freehand",
   text: "Click to place a label",
@@ -111,6 +124,7 @@ function hint(layer: Layer, tool: Tool, picked?: Shape["kind"], edit = false): s
   if (layer === "selecting") return "Drag to select · Click for full screen · Esc cancel";
   if (picked === "ring" && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
   if (picked === "element" && layer === "annotating") return "Delete removes the outline · Enter capture";
+  if ((picked === "redact" || picked === "rect") && layer === "annotating") return "Drag to move · Drag a handle to resize · Delete removes it · Enter capture";
   if (layer === "pinning") return "Type a label · Enter or Esc to finish";
   if (layer === "drawing") return "Release to finish · Esc discard";
   return `${GESTURE[tool]} · Enter capture · Esc back`;
@@ -124,6 +138,7 @@ type A =
   | { t: "drop"; id: number }
   | { t: "move"; id: number; at: Pt }
   | { t: "remove"; id: number }
+  | { t: "put"; s: Shape }
   | { t: "seed"; base: Shape[]; s: Shape[] }
   | { t: "undo" }
   | { t: "redo" }
@@ -143,6 +158,8 @@ function hist(h: H, a: A): H {
     }
     case "move":
       return { past: [...h.past, h.now], now: h.now.map((x) => (x.id === a.id && "at" in x ? { ...x, at: a.at } : x)), future: [] };
+    case "put":
+      return { past: [...h.past, h.now], now: h.now.map((x) => (x.id === a.s.id ? a.s : x)), future: [] };
     case "remove":
       return { past: [...h.past, h.now], now: h.now.filter((x) => x.id !== a.id), future: [] };
     // Each shape placed for the person counts as one step, so undo takes them away one at a time.
@@ -276,6 +293,14 @@ function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
     }
     case "rect":
       return [{ k: "box", ...norm(sh.a, sh.b), r: 4 * s, stroke: sh.c, sw: M.rect * s }];
+    case "redact": {
+      const r = norm(sh.a, sh.b);
+      const e = edgeWidth(s);
+      return [
+        { k: "box", ...r, r: 0, fill: REDACT_FILL_CSS },
+        { k: "box", x: r.x + e / 2, y: r.y + e / 2, w: Math.max(0, r.w - e), h: Math.max(0, r.h - e), r: 0, stroke: REDACT_EDGE_CSS, sw: e },
+      ];
+    }
     case "pen":
       return [{ k: "path", d: smooth(sh.pts), stroke: sh.c, w: M.pen * s }];
     case "highlight":
@@ -344,7 +369,7 @@ function Ops({ list, id, src, nat }: { list: Op[]; id: number; src: string; nat:
   );
 }
 
-function paint(ctx: CanvasRenderingContext2D, img: HTMLImageElement, o: Op, s: number) {
+function paint(ctx: CanvasRenderingContext2D, img: CanvasImageSource, o: Op, s: number) {
   ctx.save();
   if ("shadow" in o && o.shadow) {
     ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -405,8 +430,23 @@ function paint(ctx: CanvasRenderingContext2D, img: HTMLImageElement, o: Op, s: n
   ctx.restore();
 }
 
+// Hidden areas last, written into the pixels; the loupes read a frame they are already written into, so none can
+// show what is under one.
 async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: Map<number, number>): Promise<string> {
-  const img = await loadImg(src);
+  const raw = await loadImg(src);
+  const hide = list.flatMap((x) => (x.kind === "redact" ? [norm(x.a, x.b)] : []));
+  let img: CanvasImageSource = raw;
+  if (hide.length) {
+    const f = document.createElement("canvas");
+    f.width = raw.naturalWidth;
+    f.height = raw.naturalHeight;
+    const fx = f.getContext("2d")!;
+    fx.drawImage(raw, 0, 0);
+    const d = fx.getImageData(0, 0, f.width, f.height);
+    redact(d.data, f.width, f.height, hide, s);
+    fx.putImageData(d, 0, 0);
+    img = f;
+  }
   const x0 = Math.round(b.x);
   const y0 = Math.round(b.y);
   const w = Math.max(1, Math.round(b.x + b.w) - x0);
@@ -421,7 +461,12 @@ async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: M
   ctx.beginPath();
   ctx.rect(x0, y0, w, h);
   ctx.clip();
-  for (const sh of list) for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
+  for (const sh of list) if (sh.kind !== "redact") for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
+  if (hide.length) {
+    const d = ctx.getImageData(0, 0, w, h);
+    redact(d.data, w, h, hide.map((r) => ({ ...r, x: r.x - x0, y: r.y - y0 })), s);
+    ctx.putImageData(d, 0, 0);
+  }
   const url = c.toDataURL("image/png");
   return url.slice(url.indexOf(",") + 1);
 }
@@ -494,6 +539,8 @@ export function Overlay() {
   const [out, setOut] = useState<Out | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [nudge, setNudge] = useState<{ id: number; at: Pt } | null>(null);
+  // A rectangle or hidden area being moved or resized, shown in place of the stored one until release.
+  const [drag, setDrag] = useState<Box2 | null>(null);
   const [edit, setEdit] = useState(false);
   const [base, setBase] = useState(0);
   const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
@@ -524,6 +571,7 @@ export function Overlay() {
       setOut(null);
       setPicked(null);
       setNudge(null);
+      setDrag(null);
       editRef.current = null;
       ix.current = null;
       seed.current = f.edit ? [] : placed(f.element, f.pointer, colorRef.current);
@@ -598,7 +646,7 @@ export function Overlay() {
   const toScr = (r: Rect): Rect => ({ x: ox + r.x * fit, y: oy + r.y * fit, w: r.w * fit, h: r.h * fit });
   const full: Rect = { x: 0, y: 0, w: natural.w, h: natural.h };
 
-  const shapes = nudge ? hs.now.map((x) => (x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : x)) : hs.now;
+  const shapes = hs.now.map((x) => (nudge && x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : drag && x.id === drag.id ? drag : x));
   const vis = box ? shapes.filter((x) => seen(x, box)) : shapes;
   const nums = numbering(vis, base);
   const sb = box ? toScr(box) : null;
@@ -669,11 +717,13 @@ export function Overlay() {
         ...pins.map((p, i) => ({ n: base + i + 1, text: ("text" in p && p.text.trim()) || `pin ${base + i + 1}` })),
         ...notes.map((t, i) => ({ n: base + pins.length + i + 1, text: "text" in t ? t.text.trim() : "" })),
       ];
+      const hidden = list.flatMap((x) => (x.kind === "redact" ? [norm(x.a, x.b)] : [])).filter((r) => r.w > 0 && r.h > 0 && overlaps(r, b));
       const el = list.find((x) => x.kind === "element");
       const rect = el?.kind === "element" ? within(el.r, b) : null;
-      const element = el?.kind === "element" && rect ? { role: el.role, name: el.name, rect } : null;
-      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels, element });
-      else await regionCommit(png, labels, element);
+      // A control under a hidden area keeps its name to itself: its words could be what was hidden.
+      const element = el?.kind === "element" && rect && !hidden.some((r) => overlaps(r, el.r)) ? { role: el.role, name: el.name, rect } : null;
+      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels, element, hidden: hidden.length });
+      else await regionCommit(png, labels, element, hidden.length);
     } catch (err) {
       console.error("pointcast overlay commit failed", err);
     }
@@ -734,7 +784,7 @@ export function Overlay() {
     }
     const id = ++ids.current;
     const shape: Shape =
-      tool === "arrow" || tool === "rect" ? { id, kind: tool, c: color, a: p, b: p } : { id, kind: tool, c: tool === "highlight" ? HL : color, pts: [p] };
+      tool === "arrow" || tool === "rect" || tool === "redact" ? { id, kind: tool, c: color, a: p, b: p } : { id, kind: tool, c: tool === "highlight" ? HL : color, pts: [p] };
     ix.current = { k: "draw", shape };
     setLive(shape);
     setLayer("drawing");
@@ -746,6 +796,24 @@ export function Overlay() {
     if (e.button !== 0) return;
     ix.current = { k: "shift", id: sh.id, a: toImg(e), o: sh.at, at: sh.at };
     setPicked(sh.id);
+    grab(e);
+  }
+
+  // A hidden area is grabbed whatever the tool (it sits on top of everything); a rectangle's edge only when the tool
+  // would not draw there.
+  function startGrab(e: PE<SVGRectElement>, sh: Box2) {
+    if (sh.kind === "rect" && DRAWS.has(tool)) return;
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    ix.current = { k: "grab", o: sh, a: toImg(e), cx: e.clientX, cy: e.clientY, moved: false };
+    setPicked(sh.id);
+    grab(e);
+  }
+
+  function startReshape(e: PE<HTMLDivElement>, sh: Box2, h: Handle) {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    ix.current = { k: "reshape", o: sh, h };
     grab(e);
   }
 
@@ -785,9 +853,23 @@ export function Overlay() {
       const pad = Math.min(M.mark * s, b.w / 2, b.h / 2);
       m.at = { x: clamp(m.o.x + q.x - m.a.x, b.x + pad, b.x + b.w - pad), y: clamp(m.o.y + q.y - m.a.y, b.y + pad, b.y + b.h - pad) };
       setNudge({ id: m.id, at: m.at });
+    } else if (m.k === "grab") {
+      if (!m.moved && Math.hypot(e.clientX - m.cx, e.clientY - m.cy) < 3) return;
+      m.moved = true;
+      const q = toImg(e);
+      const r = norm(m.o.a, m.o.b);
+      const b = box ?? full;
+      const dx = clamp(q.x - m.a.x, b.x - r.x - r.w + 4 * s, b.x + b.w - r.x - 4 * s);
+      const dy = clamp(q.y - m.a.y, b.y - r.y - r.h + 4 * s, b.y + b.h - r.y - 4 * s);
+      m.d = { ...m.o, a: { x: m.o.a.x + dx, y: m.o.a.y + dy }, b: { x: m.o.b.x + dx, y: m.o.b.y + dy } };
+      setDrag(m.d);
+    } else if (m.k === "reshape") {
+      const r = resize(norm(m.o.a, m.o.b), m.h, p, 4 * s);
+      m.d = { ...m.o, a: { x: r.x, y: r.y }, b: { x: r.x + r.w, y: r.y + r.h } };
+      setDrag(m.d);
     } else if (m.k === "draw") {
       const sh = m.shape;
-      if (sh.kind === "arrow" || sh.kind === "rect") m.shape = { ...sh, b: p };
+      if (sh.kind === "arrow" || sh.kind === "rect" || sh.kind === "redact") m.shape = { ...sh, b: p };
       else if (sh.kind === "pen" || sh.kind === "highlight") {
         const l = sh.pts[sh.pts.length - 1];
         if (Math.hypot(p.x - l.x, p.y - l.y) < 1.2 * s) return;
@@ -807,7 +889,11 @@ export function Overlay() {
       /* not captured */
     }
     if (!m) return;
-    if (m.k === "shift") {
+    if (m.k === "grab" || m.k === "reshape") {
+      const d = m.d;
+      setDrag(null);
+      if (d && (d.a.x !== m.o.a.x || d.a.y !== m.o.a.y || d.b.x !== m.o.b.x || d.b.y !== m.o.b.y)) dispatch({ t: "put", s: d });
+    } else if (m.k === "shift") {
       setNudge(null);
       if (Math.hypot(m.at.x - m.o.x, m.at.y - m.o.y) >= 1) dispatch({ t: "move", id: m.id, at: m.at });
     } else if (m.k === "sel") {
@@ -820,7 +906,12 @@ export function Overlay() {
       const sh = m.shape;
       setLive(null);
       setLayer("annotating");
-      const long = sh.kind === "arrow" || sh.kind === "rect" ? Math.hypot(sh.b.x - sh.a.x, sh.b.y - sh.a.y) >= 6 * s : true;
+      const long =
+        sh.kind === "redact"
+          ? Math.min(Math.abs(sh.b.x - sh.a.x), Math.abs(sh.b.y - sh.a.y)) >= 4 * s
+          : sh.kind === "arrow" || sh.kind === "rect"
+            ? Math.hypot(sh.b.x - sh.a.x, sh.b.y - sh.a.y) >= 6 * s
+            : true;
       if (long) dispatch({ t: "add", s: sh });
     } else if (m.k === "drop") {
       const id = ++ids.current;
@@ -834,6 +925,7 @@ export function Overlay() {
 
   function cancel() {
     if (ix.current?.k === "shift") setNudge(null);
+    setDrag(null);
     if (ix.current?.k === "draw") {
       setLive(null);
       setLayer("annotating");
@@ -862,6 +954,8 @@ export function Overlay() {
   const cursor = layer === "selecting" ? "crosshair" : tool === "move" ? "move" : tool === "text" ? "text" : "crosshair";
   const dim = `M0 0H${vp.w}V${vp.h}H0Z${sb ? `M${sb.x} ${sb.y}h${sb.w}v${sb.h}h${-sb.w}Z` : ""}`;
   const canEdit = tool === "pin" || tool === "text";
+  const pickedShape = vis.find((x) => x.id === picked);
+  const pickedBox = isBox(pickedShape) ? pickedShape : null;
 
   return (
     <div
@@ -892,7 +986,7 @@ export function Overlay() {
               ) : null}
             </defs>
             <g clipPath={box ? "url(#ov-clip)" : undefined}>
-              {[...vis, ...(live ? [live] : [])].map((sh) => (
+              {[...vis, ...(live ? [live] : [])].sort((p, q) => +(p.kind === "redact") - +(q.kind === "redact")).map((sh) => (
                 <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? 0, sh.id === editing, box ?? full)} />
               ))}
             </g>
@@ -900,7 +994,7 @@ export function Overlay() {
           {sb ? <div className="ov-sel" style={{ left: sb.x, top: sb.y, width: sb.w, height: sb.h }} /> : null}
           {layer === "annotating" ? (
             <svg className="ov-grips" style={{ left: ox, top: oy, width: dw, height: dh }} viewBox={`0 0 ${natural.w} ${natural.h}`}>
-              {vis.map((sh) =>
+              {[...vis].sort((p, q) => +(p.kind === "redact") - +(q.kind === "redact")).map((sh) =>
                 sh.kind === "element" ? (
                   <g key={sh.id}>
                     {picked === sh.id ? (
@@ -922,6 +1016,21 @@ export function Overlay() {
                       stroke="transparent"
                       strokeWidth={M.grip * s}
                       onPointerDown={(e) => pick(e, sh.id)}
+                    />
+                  </g>
+                ) : isBox(sh) ? (
+                  <g key={sh.id}>
+                    {picked === sh.id ? (
+                      <rect {...svgRect(norm(sh.a, sh.b))} fill="none" stroke="#fff" strokeWidth={1.5 * s} strokeDasharray={`${4 * s} ${3 * s}`} />
+                    ) : null}
+                    <rect
+                      className={sh.kind === "redact" ? "ov-grip ov-fill" : DRAWS.has(tool) ? "ov-grip ov-off" : "ov-grip"}
+                      aria-label={sh.kind === "redact" ? "Hidden area" : "Rectangle"}
+                      {...svgRect(norm(sh.a, sh.b))}
+                      fill="transparent"
+                      stroke="transparent"
+                      strokeWidth={M.grip * s}
+                      onPointerDown={(e) => startGrab(e, sh)}
                     />
                   </g>
                 ) : sh.kind === "ring" ? (
@@ -949,6 +1058,19 @@ export function Overlay() {
             ? HANDLES.map((h) => (
                 <div key={h} className={`ov-h ov-h-${h}`} style={{ left: sb.x + sb.w * HX[h], top: sb.y + sb.h * HY[h] }} onPointerDown={(e) => startSize(e, h)} />
               ))
+            : null}
+          {pickedBox && layer === "annotating"
+            ? HANDLES.map((h) => {
+                const r = toScr(norm(pickedBox.a, pickedBox.b));
+                return (
+                  <div
+                    key={`s-${h}`}
+                    className={`ov-h ov-h-sm ov-h-${h}`}
+                    style={{ left: r.x + r.w * HX[h], top: r.y + r.h * HY[h] }}
+                    onPointerDown={(e) => startReshape(e, pickedBox, h)}
+                  />
+                );
+              })
             : null}
           {canEdit && layer !== "drawing"
             ? vis.map((sh) => {
@@ -1041,7 +1163,7 @@ export function Overlay() {
           <img src={out.url} alt="Captured result" />
           <p>
             Preview capture {out.w} × {out.h} px ·{" "}
-            {[out.element ? `${out.element.role} “${out.element.name}”` : "", ...out.labels.map((l) => `${l.n}. ${l.text}`)].filter(Boolean).join(" · ") ||
+            {[out.element ? `${out.element.role} “${out.element.name}”` : "", ...out.labels.map((l) => `${l.n}. ${l.text}`), hiddenNote(out.hidden)].filter(Boolean).join(" · ") ||
               "no labels"}
           </p>
         </div>

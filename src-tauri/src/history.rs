@@ -296,7 +296,10 @@ impl Store {
         let (i, k) = locate(&dir, &items, n)?;
         let Item::Image { capture: c, .. } = &mut items[i] else { unreachable!() };
         let base = c.labels.iter().map(|l| l.n).max().unwrap_or(0);
-        c.labels.extend(labels.into_iter().zip(base + 1..).map(|(l, n)| prompt::Label { n, ..l }));
+        // A note (0: areas hidden) adds to the picture's one note; pins are numbered on.
+        let hidden = prompt::hidden_count(&labels);
+        c.labels.extend(labels.into_iter().filter(|l| l.n != 0).zip(base + 1..).map(|(l, n)| prompt::Label { n, ..l }));
+        prompt::note_hidden(&mut c.labels, hidden);
         (c.width, c.height) = (width, height);
         let out = prompt::Capture { png: png.to_vec(), ..c.clone() };
         write_together(&[
@@ -1056,6 +1059,22 @@ mod tests {
         let dir = s.history().join(&m.id);
         let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(left.iter().all(|f| !f.ends_with(".tmp")), "{left:?}");
+    }
+
+    #[test]
+    fn hidden_areas_marked_again_add_to_the_one_note_and_take_no_pin_number() {
+        let s = store("replace-hidden");
+        let m = s.save(&two_pictures(), 1_793_000_000_000, 2000).unwrap();
+        let new = png_of(3, 2, 10);
+        let mut first = vec![label(1, "too far left")];
+        prompt::note_hidden(&mut first, 1);
+        s.replace(&m.id, 1, &new, first).unwrap();
+        let mut again = vec![];
+        prompt::note_hidden(&mut again, 2);
+        s.replace(&m.id, 1, &new, again).unwrap();
+        let after = s.export(&m.id).unwrap();
+        assert_eq!(after.images[0].labels, vec![label(1, "this one"), label(2, "too far left"), label(0, "3 areas hidden")]);
+        assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; 2=too far left; 3 areas hidden]"#), "{}", after.plain);
     }
 
     #[test]

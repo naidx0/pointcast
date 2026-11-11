@@ -111,13 +111,39 @@ fn marker(n: u32, c: &Capture) -> String {
     format!("[image {n}: {}]", bits.join("; "))
 }
 
-/// A capture's pins as `1=too far left`, or the bare number for a pin without words.
+/// A label numbered 0 is a note on the whole picture, not a pin: how many areas the person blacked out.
+const HIDDEN: &str = " hidden";
+
+/// How many areas of the picture were blacked out, from its note.
+pub fn hidden_count(labels: &[Label]) -> u32 {
+    labels
+        .iter()
+        .filter(|l| l.n == 0)
+        .filter_map(|l| l.text.strip_suffix(HIDDEN)?.split_whitespace().next()?.parse::<u32>().ok())
+        .sum()
+}
+
+/// Add `more` blacked-out areas to the picture's note ("1 area hidden", "3 areas hidden"), one note at most.
+pub fn note_hidden(labels: &mut Vec<Label>, more: u32) {
+    let n = hidden_count(labels) + more;
+    labels.retain(|l| !(l.n == 0 && l.text.ends_with(HIDDEN)));
+    if n > 0 {
+        labels.push(Label {
+            n: 0,
+            text: format!("{n} {}{HIDDEN}", if n == 1 { "area" } else { "areas" }),
+        });
+    }
+}
+
+/// A capture's pins as `1=too far left`, or the bare number for a pin without words; a note (0) as its words.
 fn pins(c: &Capture) -> Vec<String> {
     c.labels
         .iter()
         .map(|l| {
             let t = l.text.trim();
-            if t.is_empty() {
+            if l.n == 0 {
+                t.to_string()
+            } else if t.is_empty() {
                 format!("{}", l.n)
             } else {
                 format!("{}={}", l.n, t)
@@ -1128,6 +1154,22 @@ mod tests {
             shot(400, CaptureKind::Region, labels),
         ]);
         assert_eq!(text, "this [image 1: 1=Save; 2=too far left] button");
+    }
+
+    #[test]
+    fn hidden_areas_are_one_note_on_the_marker_counted_in_plain_words() {
+        let mut labels = vec![Label { n: 1, text: "Save".into() }];
+        note_hidden(&mut labels, 0);
+        assert_eq!(labels.len(), 1, "no hidden area, no note");
+        note_hidden(&mut labels, 1);
+        assert_eq!(hidden_count(&labels), 1);
+        let (text, _) = compose(&[said(0, 1_000, "this button"), shot(400, CaptureKind::Region, labels.clone())]);
+        assert_eq!(text, "this [image 1: 1=Save; 1 area hidden] button");
+        // Marking the picture again from History adds to the one note.
+        note_hidden(&mut labels, 2);
+        assert_eq!(labels.iter().filter(|l| l.n == 0).count(), 1);
+        assert_eq!(labels.last().unwrap().text, "3 areas hidden");
+        assert_eq!(hidden_count(&labels), 3);
     }
 
     fn pointed(t: u64, role: &str, name: &str, labels: Vec<Label>) -> Item {
