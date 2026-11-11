@@ -33,6 +33,14 @@ jobs:
       - run: npm ci
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      # With the two secrets set, the Mac build is signed with Pointcast's own certificate, so macOS keeps Screen
+      # Recording and Accessibility from one version to the next (docs/SIGNING.md). Without them it is signed ad hoc.
+      - name: Signing certificate (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          MAC_SIGN_P12: ${{ secrets.MAC_SIGN_P12 }}
+          MAC_SIGN_PASSWORD: ${{ secrets.MAC_SIGN_PASSWORD }}
+        run: bash scripts/mac-signing.sh setup
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (action-v0.6.2)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -46,6 +54,17 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+      # Prints what macOS will know this build by, and stops the release if a certificate was set up and the app
+      # in the dmg is not signed with it.
+      - name: What was signed (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          bash scripts/mac-signing.sh check \
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/Pointcast.app \
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+      - name: Remove the signing keychain (macOS)
+        if: always() && matrix.platform == 'macos'
+        run: bash scripts/mac-signing.sh cleanup
       # The same installer under a name that never changes, so the page's Download buttons always point at the newest.
       - name: Upload the installer under its fixed name
         shell: bash
@@ -60,3 +79,24 @@ jobs:
           fi
           cp "$SRC" "$NAME"
           gh release upload "v$VERSION" "$NAME" --clobber
+
+  # latest.json: the installers this release has, each with its SHA-256, taken from the files as they were
+  # uploaded. Pointcast and install.sh read it to find a newer version without GitHub's API, which allows a whole
+  # network only 60 requests an hour. It runs only when every build asked for succeeded, so a build that failed its
+  # signature check never ends up listed; a system with no installer on the release is left out of the list.
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Write latest.json and add it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          mkdir installers
+          gh release download "v$VERSION" -D installers -p Pointcast-macOS.dmg || echo "No macOS installer on v$VERSION."
+          gh release download "v$VERSION" -D installers -p Pointcast-Windows-setup.exe || echo "No Windows installer on v$VERSION."
+          bash scripts/release-manifest.sh "$VERSION" installers > latest.json
+          cat latest.json
+          gh release upload "v$VERSION" latest.json --clobber

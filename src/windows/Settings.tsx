@@ -262,7 +262,6 @@ function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
 }
 
 function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
-  const mac = platform() === "mac";
   const [found, setFound] = useState<string | null>(cfg.update);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installing">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -311,13 +310,13 @@ function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
     : (error ??
       cfg.update_failure ??
       (found
-        ? `You have ${cfg.version}.${mac ? " After updating, macOS asks again for Screen Recording and Accessibility." : ""}`
+        ? `You have ${cfg.version}. Pointcast closes, updates and opens again by itself.`
         : state === "checking"
           ? "Checking…"
           : state === "latest"
             ? `${cfg.version} is the latest version.`
             : checked?.error
-              ? `Could not check for updates: ${checked.error}`
+              ? checked.error
               : checked && !checked.version
                 ? `${cfg.version} is the latest version.`
                 : `Version ${cfg.version}.`));

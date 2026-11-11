@@ -1,7 +1,12 @@
 name: Update test
 
-# On a fresh Mac: installs the previous release, waits for Pointcast's own update check, and reads what the menu bar
-# item offers. Run by hand.
+# On a fresh Mac, two things, run by hand.
+# macos: installs the previous release, waits for Pointcast's own update check, and reads what the menu bar item
+# offers.
+# signed-update: builds the app signed with a certificate made for this run alone, through the steps the release
+# uses (scripts/mac-signing.sh), and updates it to a next version signed with the same certificate, with the real
+# install.sh and as the app itself starts it: the new version runs, alone, and no permission is reset
+# (scripts/mac-update-test.sh says what is checked, and what cannot be).
 on:
   workflow_dispatch:
     inputs:
@@ -66,4 +71,62 @@ jobs:
           path: |
             menu.txt
             menu-*.png
+          if-no-files-found: ignore
+
+  signed-update:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Made by the script the real certificate is made with, handed over as the two secrets are, then deleted:
+      # it never leaves this step, and the keychain that holds it goes before the tests run.
+      - name: A certificate for this run alone, set up as the release sets up the real one
+        run: |
+          bash scripts/make-signing-cert.sh "$RUNNER_TEMP/throwaway.p12"
+          export MAC_SIGN_PASSWORD="$(cat "$RUNNER_TEMP/throwaway.p12.password")"
+          export MAC_SIGN_P12="$(openssl base64 -A -in "$RUNNER_TEMP/throwaway.p12")"
+          rm -f "$RUNNER_TEMP/throwaway.p12" "$RUNNER_TEMP/throwaway.p12.password"
+          bash scripts/mac-signing.sh setup
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0 (action-v0.6.2)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles app,dmg
+      - name: What was signed
+        run: |
+          bash scripts/mac-signing.sh check \
+            src-tauri/target/release/bundle/macos/Pointcast.app \
+            src-tauri/target/release/bundle/dmg/*.dmg
+      # update.rs starts the installer; the test starts it through that same code, from the library's test binary.
+      - name: Build the library's test binary
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run --message-format=json > "$RUNNER_TEMP/cargo.json"
+          BIN=$(jq -rs 'map(select(.reason == "compiler-artifact" and .profile.test and .executable != null)) | last | .executable' "$RUNNER_TEMP/cargo.json")
+          test -x "$BIN"
+          echo "TEST_BINARY=$BIN" >> "$GITHUB_ENV"
+      - name: Update N to N+1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POINTCAST_TEST_LOGS: ${{ runner.temp }}/update-test-logs
+        run: bash scripts/mac-update-test.sh src-tauri/target/release/bundle/macos/Pointcast.app "$TEST_BINARY"
+      - name: Remove the signing keychain
+        if: always()
+        run: bash scripts/mac-signing.sh cleanup
+      - name: Screenshot
+        if: always()
+        run: screencapture -x signed-update.png || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: update-test-signed
+          path: |
+            ${{ runner.temp }}/update-test-logs
+            signed-update.png
           if-no-files-found: ignore
