@@ -1070,27 +1070,26 @@ impl App {
     /// starts; a refusal or failure leaves the entry as it was.
     pub fn retranscribe(&self, id: &str, progress: impl FnMut(u64, u64)) -> Result<(), String> {
         crate::voice::upgrade::pause();
-        let hear = |s: &[f32], voiced: u64| -> Result<Option<Heard>, String> {
+        self.again(id, || self.ensure_engine(), self.hearing(), progress)
+    }
+
+    /// How a recording transcribed again hears its pieces: each piece `r` of the whole recording `x` through the engine
+    /// in memory, by `hear_range` as it was heard live, from a fresh start (so its language is detected again).
+    fn hearing(&self) -> impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String> + '_ {
+        let mut last = Before::default();
+        move |x: &[f32], r: std::ops::Range<usize>, voiced: u64| {
             let g = self.engine.lock().unwrap();
             let eng = g.as_ref().ok_or(NO_MODEL)?;
             let began = std::time::Instant::now();
-            let heard = crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p));
-            self.timed(eng.model(), s.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
+            let held = |q: std::ops::Range<usize>| x.get(q).map_or_else(Vec::new, <[f32]>::to_vec);
+            let heard = hear_range(eng, &mut last, &r, &x[r.clone()], voiced, held);
+            self.timed(eng.model(), r.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
             // An engine that stopped working would leave the entry without words: it stays as it was.
             match self.after_piece(eng) {
                 Some(e) => Err(e),
                 None => Ok(heard),
             }
-        };
-        // A recording heard again has its language detected again.
-        let load = || {
-            self.ensure_engine()?;
-            if let Some(e) = self.engine.lock().unwrap().as_ref() {
-                e.new_recording();
-            }
-            Ok(())
-        };
-        self.again(id, load, hear, progress)
+        }
     }
 
     /// `model` transcribed `heard_ms` of audio in `spent_ms`.
@@ -1117,12 +1116,12 @@ impl App {
         self.ran.lock().unwrap().as_ref().and_then(|r| r.1.clone())
     }
 
-    /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`.
+    /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`, as `transcribe_all` hears it.
     fn again(
         &self,
         id: &str,
         load: impl FnOnce() -> Result<(), String>,
-        mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+        mut hear: impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String>,
         progress: impl FnMut(u64, u64),
     ) -> Result<(), String> {
         let busy = || match self.state.lock().unwrap().phase {
@@ -1140,11 +1139,11 @@ impl App {
             let mut x = self.history.audio(id)?;
             load()?;
             let mut spent = 0u64;
-            let piece = |s: &[f32], voiced: u64| match busy() {
+            let piece = |x: &[f32], r: std::ops::Range<usize>, voiced: u64| match busy() {
                 Ok(()) if stopped() => Err(AGAIN_CANCELLED.into()),
                 Ok(()) => {
                     let began = std::time::Instant::now();
-                    let h = hear(s, voiced);
+                    let h = hear(x, r, voiced);
                     spent += began.elapsed().as_millis() as u64;
                     h
                 }
@@ -1309,9 +1308,7 @@ impl App {
 
     /// Transcribe pieces of the take for recording `no`, cut from what the worker `heard` against a room at `floor`; the
     /// worker has read the take up to `pos`. Once that recording is no longer the current one, the pieces left are not.
-    /// Through the helper, a short piece is heard again joined to the audio before it, back to the `last` kept piece's
-    /// start (`stt::in_context`); `last` moves on with each piece kept. The engine hears its first piece as a new
-    /// recording's.
+    /// Each piece is heard through `hear_range`, given what the recording kept before it (`last`).
     #[allow(clippy::too_many_arguments)]
     fn decode_ranges(
         &self,
@@ -1340,19 +1337,7 @@ impl App {
                 let g = self.engine.lock().unwrap();
                 g.as_ref().and_then(|eng| {
                     model = Some(eng.model().to_string());
-                    if !last.begun {
-                        eng.new_recording();
-                        last.begun = true;
-                    }
-                    let mut h = crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s));
-                    if eng.hears_in_context() {
-                        h = h.and_then(|h| {
-                            let before = last.kept.as_ref().and_then(|k| k.before(heard, r));
-                            let said = before.as_ref().map(|b| b.1.as_str());
-                            let joined = || before.as_ref().map_or_else(String::new, |b| eng.hear_joined(&audio::louder(&b.0, false)).text);
-                            crate::voice::stt::in_context(h, heard_ms, voiced, said, joined)
-                        });
-                    }
+                    let h = hear_range(eng, last, r, &samples, voiced, |q| heard.copy(q));
                     self.after_piece(eng);
                     h
                 })
@@ -1374,7 +1359,6 @@ impl App {
             }
             let Some(heard) = heard else { continue };
             let text = heard.text;
-            last.kept = Some(Kept { range: r.clone(), text: text.clone() });
             let at = self.audio_at.load(Ordering::SeqCst);
             let t_ms = at + (r.start as u64) * 1000 / audio::RATE as u64;
             let end_ms = at + (r.end as u64) * 1000 / audio::RATE as u64;
@@ -1488,16 +1472,51 @@ struct Kept {
 }
 
 impl Kept {
-    /// The audio from this piece's start, or from `CONTEXT` before `r` when that is later, through the end of `r`, with
-    /// what this piece said; None when nothing of this piece lies within `CONTEXT` before `r` or none of it is held.
-    fn before(&self, heard: &audio::Tail, r: &std::ops::Range<usize>) -> Option<(Vec<f32>, String)> {
+    /// The audio from this piece's start, or from `CONTEXT` before `r` when that is later, through the end of `r` (from
+    /// `held`, which copies what is held of a span of the recording), with what this piece said; None when nothing of this
+    /// piece lies within `CONTEXT` before `r` or none of it is held.
+    fn before(&self, held: impl Fn(std::ops::Range<usize>) -> Vec<f32>, r: &std::ops::Range<usize>) -> Option<(Vec<f32>, String)> {
         let from = self.range.start.max(r.start.saturating_sub(CONTEXT));
         if self.range.end <= from || from >= r.start {
             return None;
         }
-        let joined = heard.copy(from..r.end);
+        let joined = held(from..r.end);
         (joined.len() > r.len()).then(|| (joined, self.text.clone()))
     }
+}
+
+/// Hear piece `r` of a recording (`samples`, with `voiced` ms of voice) through `eng`, given what the recording kept
+/// before it (`last`), the one way a recording is heard, live and when transcribed again. The first piece starts a new
+/// recording, so the helper settles its language again (on the first piece of `engine::SETTLE_MS`). Through the helper, a
+/// short piece is heard again joined to the audio before it, back to the last kept piece's start (`stt::in_context`,
+/// with that audio from `held`), and only its new words are kept; on the processor each piece is heard once. `last`
+/// moves on with each piece kept.
+fn hear_range(
+    eng: &Engine,
+    last: &mut Before,
+    r: &std::ops::Range<usize>,
+    samples: &[f32],
+    voiced: u64,
+    held: impl Fn(std::ops::Range<usize>) -> Vec<f32>,
+) -> Option<Heard> {
+    if !last.begun {
+        eng.new_recording();
+        last.begun = true;
+    }
+    let heard_ms = r.len() as u64 * 1000 / audio::RATE as u64;
+    let mut h = crate::voice::stt::hear_piece(samples, voiced, |s| eng.hear(s));
+    if eng.hears_in_context() {
+        h = h.and_then(|h| {
+            let before = last.kept.as_ref().and_then(|k| k.before(&held, r));
+            let said = before.as_ref().map(|b| b.1.as_str());
+            let joined = || before.as_ref().map_or_else(String::new, |b| eng.hear_joined(&audio::louder(&b.0, false)).text);
+            crate::voice::stt::in_context(h, heard_ms, voiced, said, joined)
+        });
+    }
+    if let Some(h) = &h {
+        last.kept = Some(Kept { range: r.clone(), text: h.text.clone() });
+    }
+    h
 }
 
 /// Slower than real time, judged once 5 s of audio has been transcribed.
@@ -1613,13 +1632,13 @@ const LOOK: usize = audio::RATE as usize * 120 / 1000;
 
 /// A whole recording, 16 kHz mono from the session's start, transcribed as it was live: through the front end when
 /// `boost` is on (in place), cut by the same segmenter, fed in the same small steps, each piece with how long it is voice
-/// against the room's level then, through `hear` (which may refuse and so stop it). Its words at their times in the
-/// session. `progress(done_ms, total_ms)` before each piece, done being where that piece starts, and at the end with done
-/// the total.
+/// against the room's level then, through `hear(x, piece, voiced_ms)` with the whole recording as heard (which may refuse
+/// and so stop it). Its words at their times in the session. `progress(done_ms, total_ms)` before each piece, done being
+/// where that piece starts, and at the end with done the total.
 pub fn transcribe_all(
     x: &mut [f32],
     boost: bool,
-    mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+    mut hear: impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String>,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Vec<Item>, String> {
     let ms = |n: usize| n as u64 * 1000 / audio::RATE as u64;
@@ -1629,6 +1648,22 @@ pub fn transcribe_all(
         audio::Boost::default().process(&mut x[from..]);
     }
     let x = &*x;
+    let total = ms(x.len());
+    let mut said = vec![];
+    for (r, floor) in cut(x, from) {
+        progress(ms(r.start), total);
+        let r = r.start.min(x.len())..r.end.min(x.len());
+        let samples = &x[r.clone()];
+        if let Some(h) = hear(x, r.clone(), audio::voiced_ms(samples, floor))? {
+            said.push(Item::Speech { t_ms: ms(r.start), end_ms: ms(r.end), text: h.text });
+        }
+    }
+    progress(total, total);
+    Ok(said)
+}
+
+/// The pieces of recording `x` from sample `from` on, cut as the worker cuts them live, each with the room's level then.
+fn cut(x: &[f32], from: usize) -> Vec<(std::ops::Range<usize>, f32)> {
     let mut seg = segmenter();
     let mut pieces = vec![];
     for step in x[from..].chunks(LOOK) {
@@ -1637,17 +1672,7 @@ pub fn transcribe_all(
     }
     let last = seg.close();
     pieces.extend(last.into_iter().map(|r| (r.start + from..r.end + from, seg.floor())));
-    let total = ms(x.len());
-    let mut said = vec![];
-    for (r, floor) in pieces {
-        progress(ms(r.start), total);
-        let samples = &x[r.start.min(x.len())..r.end.min(x.len())];
-        if let Some(h) = hear(samples, audio::voiced_ms(samples, floor))? {
-            said.push(Item::Speech { t_ms: ms(r.start), end_ms: ms(r.end), text: h.text });
-        }
-    }
-    progress(total, total);
-    Ok(said)
+    pieces
 }
 
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
@@ -1820,10 +1845,10 @@ mod tests {
         let (id, _) = kept(&a);
         let hear = |_: &[f32], _: u64| -> Result<Option<Heard>, String> { Ok(None) };
         *a.used.lock().unwrap() = long_ago();
-        a.again(&id, || Ok(()), hear, |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(hear), |_, _| {}).unwrap();
         assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a Transcribe again's end");
         *a.used.lock().unwrap() = long_ago();
-        let _ = a.again(&id, || Err("the speech model did not load".into()), hear, |_, _| {});
+        let _ = a.again(&id, || Err("the speech model did not load".into()), each(hear), |_, _| {});
         assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "and one that failed");
         // A load outside a recording (a model change, Settings' check, the GPU version set up).
         *a.used.lock().unwrap() = long_ago();
@@ -1936,7 +1961,7 @@ mod tests {
         let mic = crate::history::MicRun { mic: "Microphone (Realtek(R) Audio)".into(), open_ms: 1_400, peak_db: -31 };
         a.history.note_mic(&id, &mic).unwrap();
         let hear = counting();
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
         let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"], "transcribed again");
         assert_eq!((m.mic, m.mic_open_ms, m.mic_peak_db), (mic.mic, 1_400, -31));
@@ -2483,7 +2508,7 @@ mod tests {
                 levels.borrow_mut().push(audio::rms(s));
                 Ok(Some(Heard { text: "said".into(), tokens: None }))
             };
-            a.again(&m.id, || Ok(()), hear, |_, _| {}).unwrap();
+            a.again(&m.id, || Ok(()), each(hear), |_, _| {}).unwrap();
             let l = levels.take();
             assert!(!l.is_empty() && l.iter().all(|r| if boost { *r > 0.03 } else { *r < 0.005 }), "boost {boost}: {l:?}");
             let kept = a.history.audio(&m.id).unwrap();
@@ -2578,6 +2603,150 @@ mod tests {
         assert_eq!(posts, 2, "only the two tries of the first piece");
     }
 
+    /// A model of single pieces as `transcribe_all` and `again` call one: with the whole recording and a piece of it.
+    fn each<R>(mut f: impl FnMut(&[f32], u64) -> R) -> impl FnMut(&[f32], std::ops::Range<usize>, u64) -> R {
+        move |x: &[f32], r: std::ops::Range<usize>, v: u64| f(&x[r], v)
+    }
+
+    /// An engine through a stand-in helper at `path` answering `answers` in turn (a JSON answer as it is, other words as
+    /// `{"text": ...}`, a slow one where `slow` says), with `backup` on the processor.
+    fn through_helper(path: &str, answers: &[&str], slow: Option<usize>, backup: Option<&'static str>) -> (Engine, crate::voice::whisper_server::tests::Fake) {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Server};
+        struct Cpu(&'static str);
+        impl engine::Backup for Cpu {
+            fn hear(&self, _: &[f32]) -> Heard {
+                Heard { text: self.0.into(), tokens: None }
+            }
+        }
+        let answer = |(i, a): (usize, &&str)| match a {
+            _ if slow == Some(i) => Answer::Slow(std::time::Duration::from_secs(10)),
+            a if a.starts_with('{') => Answer::Json(a.to_string()),
+            a if a.is_empty() => Answer::Die,
+            a => Answer::Json(serde_json::json!({ "text": a }).to_string()),
+        };
+        let f = fake(path, answers.iter().enumerate().map(answer).collect());
+        let load: engine::LoadBackup = Box::new(move || backup.map(|t| Box::new(Cpu(t)) as Box<dyn engine::Backup>).ok_or_else(|| "none".to_string()));
+        (Engine::Gpu(engine::Gpu::new("whisper-turbo", Server::at(f.port, path), load)), f)
+    }
+
+    /// `x` kept in History with its words unclear, on an app with `eng` in memory: the app and the entry.
+    fn kept_audio(name: &str, x: &[f32], eng: Engine) -> (Arc<App>, String) {
+        let a = app(name);
+        a.settings.lock().unwrap().voice_boost = false;
+        *a.aborter.lock().unwrap() = eng.aborter();
+        *a.engine.lock().unwrap() = Some(eng);
+        a.history.append_audio(x).unwrap();
+        let ms = x.len() as u64 * 1000 / audio::RATE as u64;
+        let m = a.history.save_recorded(&[Item::Speech { t_ms: 300, end_ms: ms, text: crate::voice::stt::UNCLEAR.into() }], 1_793_000_000_000, ms).unwrap();
+        a.history.clear_checkpoint();
+        (a, m.id)
+    }
+
+    /// The same audio `x` heard live, piece by piece as the worker cuts it, and kept then transcribed again, each through
+    /// its own stand-in helper answering `answers` (with `backup` on the processor): what each kept and the requests each
+    /// helper had.
+    fn live_and_again(name: &str, x: &[f32], answers: &[&str], backup: Option<&'static str>) -> [(Vec<String>, Vec<String>); 2] {
+        let (eng, f) = through_helper("/i-live", answers, None, backup);
+        let a = app(&format!("{name}-live"));
+        *a.engine.lock().unwrap() = Some(eng);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let take = Take::default();
+        take.samples.lock().unwrap().extend_from_slice(x);
+        let mut heard = audio::Tail::default();
+        heard.push(x);
+        let mut last = Before::default();
+        let from = x.iter().position(|v| *v != 0.0).unwrap_or(x.len());
+        for (r, floor) in cut(x, from) {
+            a.decode_ranges(0, &take, &heard, &mut last, &[r], floor, x.len());
+        }
+        a.state.lock().unwrap().phase = Phase::Idle;
+        let live = (texts(&a.items.lock().unwrap()), f.posts.lock().unwrap().clone());
+        let (eng, f) = through_helper("/i-again", answers, None, backup);
+        let (b, id) = kept_audio(&format!("{name}-again"), x, eng);
+        b.again(&id, || Ok(()), b.hearing(), |_, _| {}).unwrap();
+        let again = (texts(&b.history.items(&id).unwrap()), f.posts.lock().unwrap().clone());
+        [live, again]
+    }
+
+    /// A sentence (1 to 3.5 s) and a short sound (4.5 to 5.3 s), after 0.3 s from before the microphone opened.
+    fn sentence_and_short() -> Vec<f32> {
+        bursts(10.0, &[(1.0, 3.5), (4.5, 5.3)])
+    }
+
+    /// A field of a request sent to the helper.
+    fn field(post: &str, name: &str) -> String {
+        let crlf = String::from_utf8(vec![13, 10]).unwrap();
+        let at = post.find(&format!("name={q}{name}{q}{crlf}{crlf}", q = '"')).unwrap_or_else(|| panic!("no {name} in {post}"));
+        post[at..].split(crlf.as_str()).nth(2).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_stray_thank_you_goes_the_same_live_and_when_transcribed_again() {
+        let answers = ["Make the header sticky.", "Thank you.", "Make the header sticky."];
+        let [live, again] = live_and_again("same-stray", &sentence_and_short(), &answers, None);
+        assert_eq!(live.0, ["Make the header sticky."]);
+        assert_eq!(again.0, live.0, "the same audio gives the same words");
+        assert_eq!((live.1.len(), again.1.len()), (3, 3), "the sentence, the short piece, and the two as one");
+    }
+
+    #[test]
+    fn a_real_short_reply_is_kept_the_same_live_and_when_transcribed_again() {
+        let answers = ["Make the header sticky.", "okay yeah", "Make the header sticky. Okay, yeah."];
+        let [live, again] = live_and_again("same-okay", &sentence_and_short(), &answers, None);
+        assert_eq!(live.0, ["Make the header sticky.", "Okay, yeah."]);
+        assert_eq!(again.0, live.0);
+        // On the processor each piece is heard once, as it is, both ways.
+        let [live, again] = live_and_again("same-cpu", &sentence_and_short(), &["", ""], Some("Thank you."));
+        assert_eq!(live.0, ["Thank you.", "Thank you."]);
+        assert_eq!((again.0, again.1.len()), (live.0, 2), "only the two tries of the first piece");
+    }
+
+    #[test]
+    fn transcribing_again_hears_each_short_piece_joined_once_and_settles_the_language_once_per_run() {
+        // A sentence of over five seconds, then two short replies.
+        let x = bursts(14.0, &[(1.5, 7.0), (8.0, 8.8), (9.8, 10.6)]);
+        let verbose = r#"{"language":"spanish","text":" Abre la configuracion."}"#;
+        let run = [verbose, "Vale.", "Abre la configuracion. Vale.", "Vale.", "Vale. Vale."];
+        let answers = [run, run].concat();
+        let [live, again] = live_and_again("settle", &x, &answers[..5], None);
+        assert_eq!(live.0, ["Abre la configuracion.", "Vale.", "Vale."]);
+        assert_eq!(again.0, live.0);
+        let sent = |posts: &[String]| posts.iter().map(|p| (field(p, "language"), field(p, "response_format"))).collect::<Vec<_>>();
+        let pair = |l: &str, r: &str| (l.to_string(), r.to_string());
+        let once = [pair("auto", "verbose_json"), pair("spanish", "json"), pair("spanish", "json"), pair("spanish", "json"), pair("spanish", "json")];
+        assert_eq!(sent(&again.1), once, "three pieces and one joined request for each short one; the language settled by the first");
+        assert_eq!(sent(&live.1), sent(&again.1));
+        // Transcribed again once more on the same engine: its language is detected again from the start.
+        let (eng, f) = through_helper("/i-twice", &answers, None, None);
+        let (b, id) = kept_audio("settle-twice", &x, eng);
+        for _ in 0..2 {
+            b.again(&id, || Ok(()), b.hearing(), |_, _| {}).unwrap();
+            assert_eq!(texts(&b.history.items(&id).unwrap()), live.0);
+        }
+        let posts = f.posts.lock().unwrap().clone();
+        assert_eq!(sent(&posts), [once.clone(), once].concat());
+    }
+
+    #[test]
+    fn cancel_during_the_joined_request_of_transcribing_again_leaves_the_entry_as_it_was() {
+        let answers = ["Make the header sticky.", "Thank you.", "Make the header sticky."];
+        let (eng, f) = through_helper("/i-cancel", &answers, Some(2), None);
+        let (a, id) = kept_audio("again-cancel-joined", &sentence_and_short(), eng);
+        let before = a.history.items(&id).unwrap();
+        let t = std::time::Instant::now();
+        let run = {
+            let (a, id) = (a.clone(), id.clone());
+            std::thread::spawn(move || a.again(&id, || Ok(()), a.hearing(), |_, _| {}))
+        };
+        until("the joined request to be sent", || f.posts.lock().unwrap().len() == 3);
+        assert!(a.again_cancel());
+        assert_eq!(run.join().unwrap().unwrap_err(), AGAIN_CANCELLED);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "it stopped with the piece under way: {:?}", t.elapsed());
+        assert_eq!(a.history.items(&id).unwrap(), before);
+        assert_eq!(f.posts.lock().unwrap().len(), 3, "nothing more was sent");
+        assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
+    }
+
     /// Two sentences and a short word: under `SURE_VOICE_MS` of voice, enough to be sent (`MIN_VOICED_MS`).
     const SPANS: [(f32, f32); 3] = [(1.0, 3.0), (4.0, 6.0), (6.9, 7.6)];
 
@@ -2606,7 +2775,7 @@ mod tests {
         let total = 8_500;
         let hear = counting();
         let mut seen = vec![];
-        let said = transcribe_all(&mut x.clone(), boost, |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        let said = transcribe_all(&mut x.clone(), boost, each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |d, t| seen.push((d, t))).unwrap();
         assert_eq!(texts(&said), ["piece 1", "piece 2", "piece 3"]);
         let at: Vec<(u64, u64)> = said.iter().map(|i| if let Item::Speech { t_ms, end_ms, .. } = i { (*t_ms, *end_ms) } else { panic!() }).collect();
         for ((t, end), (a, b)) in at.iter().zip(SPANS) {
@@ -2619,7 +2788,7 @@ mod tests {
         assert_eq!((seen[0].0, seen[3]), (at[0].0, (total, total)));
         // A model that hears nothing: the sentences are kept as [unclear], the short sound is let go.
         let deaf = |s: &[f32], v: u64| Ok(crate::voice::stt::hear_piece(s, v, |_| Heard::default()));
-        let said = transcribe_all(&mut x.clone(), boost, deaf, |_, _| {}).unwrap();
+        let said = transcribe_all(&mut x.clone(), boost, each(deaf), |_, _| {}).unwrap();
         assert_eq!(texts(&said), [crate::voice::stt::UNCLEAR; 2]);
         // Refused part way: it stops there, short of the end.
         let mut seen = vec![];
@@ -2628,11 +2797,11 @@ mod tests {
             calls += 1;
             if calls > 1 { Err(INTERRUPTED.to_string()) } else { Ok(Some(Heard { text: "one".into(), tokens: None })) }
         };
-        assert_eq!(transcribe_all(&mut x.clone(), boost, refuse, |d, t| seen.push((d, t))).unwrap_err(), INTERRUPTED);
+        assert_eq!(transcribe_all(&mut x.clone(), boost, each(refuse), |d, t| seen.push((d, t))).unwrap_err(), INTERRUPTED);
         assert!(seen.iter().all(|p| p.0 < total), "{seen:?}");
         // Nothing but a quiet room: no pieces, and done at once.
         let mut seen = vec![];
-        assert!(transcribe_all(&mut bursts(3.0, &[]), boost, |_, _| panic!("nothing to hear"), |d, t| seen.push((d, t))).unwrap().is_empty());
+        assert!(transcribe_all(&mut bursts(3.0, &[]), boost, |_, _, _| panic!("nothing to hear"), |d, t| seen.push((d, t))).unwrap().is_empty());
         assert_eq!(seen, [(3_000, 3_000)]);
     }
 
@@ -2663,7 +2832,7 @@ mod tests {
         a.latest.set(Some(id.clone()), a.last_export().unwrap());
         let hear = counting();
         let mut seen = vec![];
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |d, t| seen.push((d, t))).unwrap();
         let after = a.history.items(&id).unwrap();
         assert_eq!(texts(&after), ["piece 1", "piece 2", "piece 3"], "no [unclear] left");
         assert_eq!(pictures(&after), pictures(&before), "the pictures, in order, at their times");
@@ -2676,7 +2845,7 @@ mod tests {
         // Another entry is the last prompt: it stays the last prompt, untouched.
         let other = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "other".into() }], 1_793_000_100_000, 9).unwrap();
         a.set_last(&other.id).unwrap();
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 4", "piece 5", "piece 6"]);
         assert_eq!(a.last_export().unwrap().plain, "other");
     }
@@ -2689,16 +2858,16 @@ mod tests {
         let ok = || Ok(());
         for (phase, why) in [(Phase::Recording, RECORDING_NOW), (Phase::Loading, RECORDING_NOW), (Phase::Transcribing, BUSY)] {
             a.state.lock().unwrap().phase = phase;
-            assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), why, "{phase:?}");
+            assert_eq!(a.again(&id, ok, each(hear), |_, _| {}).unwrap_err(), why, "{phase:?}");
         }
         a.state.lock().unwrap().phase = Phase::Ready;
         let words = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "no audio kept".into() }], 1_793_000_100_000, 9).unwrap();
-        assert_eq!(a.again(&words.id, ok, hear, |_, _| {}).unwrap_err(), crate::history::NO_AUDIO);
-        assert_eq!(a.again("nope", ok, hear, |_, _| {}).unwrap_err(), "no such prompt");
+        assert_eq!(a.again(&words.id, ok, each(hear), |_, _| {}).unwrap_err(), crate::history::NO_AUDIO);
+        assert_eq!(a.again("nope", ok, each(hear), |_, _| {}).unwrap_err(), "no such prompt");
         a.retranscribing.store(true, Ordering::SeqCst);
-        assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), AGAIN_BUSY, "one at a time");
+        assert_eq!(a.again(&id, ok, each(hear), |_, _| {}).unwrap_err(), AGAIN_BUSY, "one at a time");
         a.retranscribing.store(false, Ordering::SeqCst);
-        assert_eq!(a.again(&id, || Err("the speech model did not load".into()), hear, |_, _| {}).unwrap_err(), "the speech model did not load");
+        assert_eq!(a.again(&id, || Err("the speech model did not load".into()), each(hear), |_, _| {}).unwrap_err(), "the speech model did not load");
         // Without a model here, the real one cannot start either.
         assert!(a.retranscribe(&id, |_, _| {}).is_err());
         // A recording starts after the first piece: it stops there and keeps nothing of it.
@@ -2706,7 +2875,7 @@ mod tests {
             a.state.lock().unwrap().phase = Phase::Recording;
             Ok(Some(Heard { text: "half".into(), tokens: None }))
         };
-        assert_eq!(a.again(&id, ok, start, |_, _| {}).unwrap_err(), INTERRUPTED);
+        assert_eq!(a.again(&id, ok, each(start), |_, _| {}).unwrap_err(), INTERRUPTED);
         assert_eq!(a.history.items(&id).unwrap(), before, "every refusal left the entry as it was");
         assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
     }
@@ -2748,7 +2917,7 @@ mod tests {
             assert_eq!(a.last_id.lock().unwrap().as_deref(), Some(l[0].id.as_str()));
             // Transcribed again with a model that hears: the words arrive.
             let hear = counting();
-            a.again(&l[0].id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+            a.again(&l[0].id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
             assert_eq!(a.last_export().unwrap().plain, "piece 1 piece 2 piece 3");
         }
         let _ = std::fs::remove_dir_all(&out);
@@ -2974,7 +3143,7 @@ mod tests {
             assert!(a.again_cancel());
             Ok(Some(Heard { text: "half".into(), tokens: None }))
         };
-        assert_eq!(a.again(&id, || Ok(()), hear, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(a.again(&id, || Ok(()), each(hear), |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
         assert_eq!(calls, 1, "the piece under way finished and no other began");
         assert_eq!(a.history.items(&id).unwrap(), before);
         // Cancelled while the model loads: nothing is heard.
@@ -2983,11 +3152,11 @@ mod tests {
             a.again_cancel();
             Ok(())
         };
-        assert_eq!(a.again(&id, load, never, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(a.again(&id, load, each(never), |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
         assert_eq!(a.history.items(&id).unwrap(), before);
         assert!(!a.retranscribing.load(Ordering::SeqCst) && !a.again_cancel(), "and the next one may run");
         let hear = counting();
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
     }
 
@@ -3021,7 +3190,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(15));
             Ok(crate::voice::stt::hear_piece(s, v, counting()))
         };
-        a.again(&id, || Ok(()), slow, |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(slow), |_, _| {}).unwrap();
         let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!((m.engine.as_str(), m.device.as_str(), m.audio_ms), ("cpu-sherpa", "", 8_500));
         assert!(m.transcribe_ms >= 45 && m.transcribe_ms < 5_000, "three pieces of 15 ms or more: {}", m.transcribe_ms);
