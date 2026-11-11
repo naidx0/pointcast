@@ -48,11 +48,10 @@ jobs:
         run: |
           # The runner's Azure mirror can stall on every package (2026-11-11: 20 s a package for 40 minutes). The
           # runner reads its mirrors from apt-mirrors.txt: Ubuntu's own archive goes first, Azure stays as the
-          # fallback, and every request gets retries and a timeout.
+          # fallback (apt tries the listed mirrors in order), and every request gets retries and a timeout.
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf 'http://archive.ubuntu.com/ubuntu/	priority:1
-http://azure.archive.ubuntu.com/ubuntu/	priority:2
-' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            echo "http://azure.archive.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
           fi
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20"
