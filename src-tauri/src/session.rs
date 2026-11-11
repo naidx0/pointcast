@@ -1658,7 +1658,7 @@ mod tests {
         a.state.lock().unwrap().phase = Phase::Recording;
         let rect = crate::element::Bounds { x: 4, y: 6, w: 116, h: 41 };
         let mark = ElementMark { role: "button".into(), name: "Place order".into(), rect };
-        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let pin = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let cap = a.commit_region(png(), pin, Some(mark.clone())).unwrap();
         assert_eq!(cap.element, Some(mark));
         assert_eq!(a.ui().text, r#"[image 1: button "Place order"; 1=too far left]"#);
@@ -2035,7 +2035,7 @@ mod tests {
         let rec = a.history.save(&items, 3_000, 9).unwrap();
         a.latest.set(Some(rec.id.clone()), a.set_last(&rec.id).unwrap());
         // A picture in it marked up again: agents read the new one.
-        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
+        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into(), ..Default::default() }]).unwrap();
         a.set_last(&rec.id).unwrap();
         // Their plain text closes with the list of pictures: its folder, then the picture's file in History.
         let file = a.history.files(&rec.id)[0].clone();

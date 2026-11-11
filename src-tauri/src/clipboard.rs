@@ -289,6 +289,7 @@ mod tests {
         let _ = (OutputMode::Clipboard, png(), Label {
             n: 1,
             text: "x".into(),
+            ..Default::default()
         }, CaptureKind::Full, Capture {
             id: 1,
             kind: CaptureKind::Full,
