@@ -1145,6 +1145,8 @@ impl App {
         // it came. Only the part the pieces still to come are cut from is held.
         let mut boost = self.settings.lock().unwrap().voice_boost.then(audio::Boost::default);
         let mut heard = audio::Tail::default();
+        // The last piece of this recording that was kept, to hear a short piece after it with: none at its start.
+        let mut last: Option<Kept> = None;
         *self.pace.lock().unwrap() = (0, 0);
         self.state.lock().unwrap().quiet_mic = None;
         loop {
@@ -1170,7 +1172,7 @@ impl App {
                 None => audio::mic_note(&seg.recent(), seg.floor()),
             };
             self.state.lock().unwrap().quiet_mic = note.map(String::from);
-            self.decode_ranges(no, &take, &heard, &ranges, seg.floor(), pos);
+            self.decode_ranges(no, &take, &heard, &mut last, &ranges, seg.floor(), pos);
             // A live caption only when one is due and nothing waits to be transcribed: the last few seconds of the open
             // sentence.
             let due = self.engine.lock().unwrap().as_ref().is_some_and(|e| e.wants_partial());
@@ -1185,7 +1187,8 @@ impl App {
             if self.take_no.load(Ordering::SeqCst) != no {
                 break;
             }
-            heard.drop_before(seg.keep_from());
+            // Held from up to `CONTEXT_MS` before the open piece: a short piece is heard again with that audio.
+            heard.drop_before(seg.keep_from().saturating_sub(CONTEXT));
             self.behind.store(take.len().saturating_sub(pos) as u64, Ordering::SeqCst);
             // The next look in 120 ms, or at once when stop is pressed: the stop waits only for the last words.
             let looked = std::time::Instant::now();
@@ -1215,7 +1218,7 @@ impl App {
         if let Some(p) = self.progress.lock().unwrap().as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) {
             p.rest(rest.iter().map(|r| r.len() as u64 * 1000 / audio::RATE as u64).sum());
         }
-        self.decode_ranges(no, &take, &heard, &rest, seg.floor(), pos + new.len());
+        self.decode_ranges(no, &take, &heard, &mut last, &rest, seg.floor(), pos + new.len());
         if self.take_no.load(Ordering::SeqCst) == no {
             self.behind.store(0, Ordering::SeqCst);
             self.state.lock().unwrap().partial.clear();
@@ -1241,7 +1244,19 @@ impl App {
 
     /// Transcribe pieces of the take for recording `no`, cut from what the worker `heard` against a room at `floor`; the
     /// worker has read the take up to `pos`. Once that recording is no longer the current one, the pieces left are not.
-    fn decode_ranges(&self, no: u64, take: &Take, heard: &audio::Tail, ranges: &[std::ops::Range<usize>], floor: f32, pos: usize) {
+    /// Through the helper, a short piece is heard again joined to the audio before it, back to the `last` kept piece's
+    /// start (`stt::in_context`); `last` moves on with each piece kept.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_ranges(
+        &self,
+        no: u64,
+        take: &Take,
+        heard: &audio::Tail,
+        last: &mut Option<Kept>,
+        ranges: &[std::ops::Range<usize>],
+        floor: f32,
+        pos: usize,
+    ) {
         let mine = || self.take_no.load(Ordering::SeqCst) == no;
         for (i, r) in ranges.iter().enumerate() {
             if !mine() {
@@ -1259,7 +1274,15 @@ impl App {
                 let g = self.engine.lock().unwrap();
                 g.as_ref().and_then(|eng| {
                     model = Some(eng.model().to_string());
-                    let h = crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s));
+                    let mut h = crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s));
+                    if eng.hears_in_context() {
+                        h = h.and_then(|h| {
+                            let before = last.as_ref().and_then(|k| k.before(heard, r));
+                            let said = before.as_ref().map(|b| b.1.as_str());
+                            let joined = || before.as_ref().map_or_else(String::new, |b| eng.hear(&audio::louder(&b.0, false)).text);
+                            crate::voice::stt::in_context(h, heard_ms, voiced, said, joined)
+                        });
+                    }
                     self.after_piece(eng);
                     h
                 })
@@ -1281,6 +1304,7 @@ impl App {
             }
             let Some(heard) = heard else { continue };
             let text = heard.text;
+            *last = Some(Kept { range: r.clone(), text: text.clone() });
             let at = self.audio_at.load(Ordering::SeqCst);
             let t_ms = at + (r.start as u64) * 1000 / audio::RATE as u64;
             let end_ms = at + (r.end as u64) * 1000 / audio::RATE as u64;
@@ -1375,6 +1399,28 @@ pub fn sherpa_threads(cores: usize) -> i32 {
 
 /// A model's pace is judged once this much audio (5 s) has been transcribed.
 const JUDGED_MS: u64 = 5_000;
+
+/// `stt::CONTEXT_MS` in samples: how far before the open piece the worker holds audio.
+const CONTEXT: usize = (crate::voice::stt::CONTEXT_MS * audio::RATE as u64 / 1000) as usize;
+
+/// A piece of a recording that was kept: where it was cut from and what it said.
+struct Kept {
+    range: std::ops::Range<usize>,
+    text: String,
+}
+
+impl Kept {
+    /// The audio from this piece's start, or from `CONTEXT` before `r` when that is later, through the end of `r`, with
+    /// what this piece said; None when nothing of this piece lies within `CONTEXT` before `r` or none of it is held.
+    fn before(&self, heard: &audio::Tail, r: &std::ops::Range<usize>) -> Option<(Vec<f32>, String)> {
+        let from = self.range.start.max(r.start.saturating_sub(CONTEXT));
+        if self.range.end <= from || from >= r.start {
+            return None;
+        }
+        let joined = heard.copy(from..r.end);
+        (joined.len() > r.len()).then(|| (joined, self.text.clone()))
+    }
+}
 
 /// Slower than real time, judged once 5 s of audio has been transcribed.
 pub fn slow(heard_ms: u64, spent_ms: u64) -> bool {
@@ -2156,7 +2202,7 @@ mod tests {
         let mut heard = audio::Tail::default();
         heard.push(&[0.0f32; 40_000]);
         // Read to 40 000; two pieces of 8 000 and 4 000 wait (no model here, so each is let go at once).
-        a.decode_ranges(0, &take, &heard, &[0..8_000, 8_000..12_000], 0.0, 40_000);
+        a.decode_ranges(0, &take, &heard, &mut None, &[0..8_000, 8_000..12_000], 0.0, 40_000);
         assert_eq!(a.behind.load(Ordering::SeqCst), 4_000 + 8_000, "the last piece and what is unread");
         assert_eq!(a.ui().behind_ms, 750);
         assert!(!slow(4_000, 9_000), "too little heard to judge");
@@ -2283,6 +2329,81 @@ mod tests {
                 _ => 0.0005,
             })
             .collect()
+    }
+
+    /// A recording heard through a stand-in helper answering `answers` in turn, with `backup` on the processor: its
+    /// pieces `ranges` of 10 s with a sentence (0.5 to 3 s) and a short word (4 to 4.8 s). What it kept, and how many
+    /// requests the helper had.
+    fn heard_through_helper(name: &str, answers: &[&str], backup: Option<&'static str>, ranges: &[std::ops::Range<usize>]) -> (Vec<String>, usize) {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Server};
+        struct Cpu(&'static str);
+        impl engine::Backup for Cpu {
+            fn hear(&self, _: &[f32]) -> Heard {
+                Heard { text: self.0.into(), tokens: None }
+            }
+        }
+        let path = "/i-short";
+        let f = fake(path, answers.iter().map(|a| if a.is_empty() { Answer::Die } else { Answer::Json(serde_json::json!({ "text": a }).to_string()) }).collect());
+        let load: engine::LoadBackup = Box::new(move || backup.map(|t| Box::new(Cpu(t)) as Box<dyn engine::Backup>).ok_or_else(|| "none".to_string()));
+        let a = app(name);
+        *a.engine.lock().unwrap() = Some(Engine::Gpu(engine::Gpu::new("whisper-turbo", Server::at(f.port, path), load)));
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let x = bursts(10.0, &[(0.5, 3.0), (4.0, 4.8)]);
+        let take = Take::default();
+        take.samples.lock().unwrap().extend_from_slice(&x);
+        let mut heard = audio::Tail::default();
+        heard.push(&x);
+        a.decode_ranges(0, &take, &heard, &mut None, ranges, 0.0, x.len());
+        let said = a.items.lock().unwrap().iter().filter_map(|i| if let Item::Speech { text, .. } = i { Some(text.clone()) } else { None }).collect();
+        a.state.lock().unwrap().phase = Phase::Idle;
+        let posts = f.posts.lock().unwrap().len();
+        (said, posts)
+    }
+
+    /// The sentence (0.3 to 3.5 s) and the short word (3.8 to 5 s).
+    const SENTENCE: std::ops::Range<usize> = 4_800..56_000;
+    const SHORT: std::ops::Range<usize> = 60_800..80_000;
+
+    #[test]
+    fn a_stray_thank_you_after_a_sentence_goes_when_heard_with_the_sentence() {
+        let (said, posts) = heard_through_helper("stray", &["Make the header sticky.", "Thank you.", "Make the header sticky."], None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky."]);
+        assert_eq!(posts, 3, "the sentence, the short piece, and the two as one");
+    }
+
+    #[test]
+    fn a_real_short_reply_after_a_sentence_is_kept_as_its_own_words() {
+        let answers = ["Make the header sticky.", "okay yeah", "Make the header sticky. Okay, yeah."];
+        let (said, posts) = heard_through_helper("okay", &answers, None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky.", "Okay, yeah."]);
+        assert_eq!(posts, 3);
+        // Words the two cannot be lined up by keep the short piece as it was heard.
+        let answers = ["Make the header sticky.", "Okay, yeah.", "Totally different words. Okay yeah."];
+        let (said, _) = heard_through_helper("miss", &answers, None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky.", "Okay, yeah."]);
+    }
+
+    #[test]
+    fn a_first_piece_is_dropped_only_as_a_brief_stray_phrase_and_never_heard_again() {
+        let (said, posts) = heard_through_helper("first-stray", &["Thank you."], None, &[SHORT]);
+        assert_eq!((said.len(), posts), (0, 1));
+        let (said, posts) = heard_through_helper("first-real", &["Okay, yeah."], None, &[SHORT]);
+        assert_eq!((said, posts), (vec!["Okay, yeah.".to_string()], 1));
+    }
+
+    #[test]
+    fn long_pieces_are_heard_once_each() {
+        let (said, posts) = heard_through_helper("long", &["Make the header sticky.", "And the footer too."], None, &[SENTENCE, 56_000..96_000]);
+        assert_eq!(said, ["Make the header sticky.", "And the footer too."]);
+        assert_eq!(posts, 2);
+    }
+
+    #[test]
+    fn on_the_processor_a_short_piece_is_kept_as_it_was_heard() {
+        // The helper dies on the first piece, twice: the processor engine hears everything from then on.
+        let (said, posts) = heard_through_helper("cpu", &["", ""], Some("Thank you."), &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Thank you.", "Thank you."]);
+        assert_eq!(posts, 2, "only the two tries of the first piece");
     }
 
     /// Two sentences and a short word: under `SURE_VOICE_MS` of voice, enough to be sent (`MIN_VOICED_MS`).

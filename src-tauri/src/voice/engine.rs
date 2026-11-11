@@ -209,6 +209,12 @@ impl Engine {
     pub fn is_gpu(&self) -> bool {
         matches!(self, Engine::Gpu(_))
     }
+
+    /// Whether a short piece is heard again with the audio before it: only through the helper, which answers in a
+    /// fraction of a second; never on the processor, nor once the processor took over from the helper.
+    pub fn hears_in_context(&self) -> bool {
+        matches!(self, Engine::Gpu(g) if g.backup.lock().unwrap().is_none())
+    }
 }
 
 /// A development build may run a helper from `POINTCAST_WHISPER_HELPER=<dir>`, unpinned; a release never does.
