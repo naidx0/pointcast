@@ -17,6 +17,7 @@ mod pointer;
 mod privacy;
 mod prompt;
 mod session;
+mod sessions;
 mod settings;
 mod stats;
 mod tools;

@@ -47,6 +47,17 @@ pub enum ZoomTarget {
     Window,
 }
 
+/// What the picture of a question shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskTarget {
+    /// The window under the pointer, else the pointer's screen.
+    #[default]
+    Window,
+    /// The pointer's whole screen.
+    Screen,
+}
+
 /// Permissions this computer has given Pointcast at some point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Granted {
@@ -123,6 +134,10 @@ pub struct Settings {
     pub include_app: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<Vec<String>>,
+    /// Which never-capture defaults a saved `hidden` list has taken: 0 before the private-window titles were added, 1
+    /// since.
+    #[serde(default)]
+    pub hidden_default: u8,
     /// MCP HTTP bind, default 127.0.0.1:47821.
     #[serde(default = "default_mcp")]
     pub mcp_bind: String,
@@ -163,6 +178,9 @@ pub struct Settings {
     /// Where each recording's pictures are copied for agents, one folder per recording; none is `~/Pointcast`.
     #[serde(default)]
     pub handoff_dir: Option<String>,
+    /// What the picture of a question shows: the window under the pointer or the whole screen.
+    #[serde(default)]
+    pub ask_target: AskTarget,
 }
 
 fn default_model() -> String {
@@ -205,6 +223,7 @@ impl Default for Settings {
             check_updates: true,
             include_app: false,
             hidden: None,
+            hidden_default: 1,
             mcp_bind: default_mcp(),
             mcp_enabled: true,
             onboarded: false,
@@ -218,6 +237,7 @@ impl Default for Settings {
             free_memory_minutes: default_free_minutes(),
             free_default: 1,
             handoff_dir: None,
+            ask_target: AskTarget::default(),
         }
     }
 }
@@ -234,6 +254,18 @@ impl Settings {
                 s.free_memory_minutes = default_free_minutes();
             }
             s.free_default = 1;
+        }
+        // A list saved before the private-window titles were defaults gains them once; one taken out after that
+        // stays out, and the person's own entries are kept as they are.
+        if s.hidden_default < 1 {
+            if let Some(list) = s.hidden.as_mut() {
+                for p in privacy::PRIVATE_WINDOWS {
+                    if !list.iter().any(|h| h.trim().eq_ignore_ascii_case(p)) {
+                        list.push((*p).to_string());
+                    }
+                }
+            }
+            s.hidden_default = 1;
         }
         s
     }
@@ -487,6 +519,39 @@ mod tests {
         for m in [0, 2, 5, 30] {
             assert_eq!(load(&format!(r#"{{"free_memory_minutes":{m}}}"#)).free_memory_minutes, m);
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_saved_never_capture_list_gains_the_private_window_titles_once_and_keeps_its_own_edits() {
+        let d = std::env::temp_dir().join(format!("pc-settings-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("settings.json");
+        let load = |json: &str| {
+            std::fs::write(&file, json).unwrap();
+            Settings::load(&file)
+        };
+        let private = |s: &Settings| privacy::PRIVATE_WINDOWS.iter().filter(|p| s.hidden_list().iter().any(|h| h == *p)).count();
+        // No list saved: the defaults, which hold them.
+        assert_eq!(private(&Settings::default()), 3);
+        let unset = load(r#"{"onboarded":true}"#);
+        assert_eq!((unset.hidden.clone(), private(&unset)), (None, 3));
+        // A list saved before they were defaults, edited by the person: it gains them after its own entries.
+        let old = load(r#"{"hidden":["1Password","My Bank","incognito"]}"#);
+        assert_eq!(old.hidden_list(), ["1Password", "My Bank", "incognito", "InPrivate", "Private Browsing"], "one already there is not added twice");
+        old.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).hidden_list(), old.hidden_list(), "once");
+        // Taken out after that, they stay out: the list is the person's.
+        let edited = Settings { hidden: Some(vec!["My Bank".into()]), ..Settings::load(&file) };
+        edited.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).hidden_list(), ["My Bank"]);
+        assert_eq!(Settings::load(&file).hidden_list(), ["My Bank"], "and on every later load");
+        // A list emptied before still gains the private windows, once; one emptied since stays empty.
+        assert_eq!(load(r#"{"hidden":[]}"#).hidden_list(), privacy::PRIVATE_WINDOWS);
+        let fresh = Settings { hidden: Some(vec![]), ..Settings::default() };
+        fresh.save(&file).unwrap();
+        assert!(Settings::load(&file).hidden_list().is_empty(), "a list emptied on a new install stays empty");
         let _ = std::fs::remove_dir_all(&d);
     }
 

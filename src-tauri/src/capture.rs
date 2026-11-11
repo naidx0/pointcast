@@ -1,12 +1,14 @@
 //! Cross-platform screen grab via xcap. Hidden (password-manager) windows are painted over.
-//! Pointcast's own windows are treated as hidden unless `include_app` is on.
+//! Pointcast's own windows are treated as hidden unless `include_app` is on: the protected ones are left out by the
+//! OS, the others are painted over here.
+use crate::assist::Mime;
 use crate::element::{self, Element, ElementMark};
 use crate::image_ops::{self, crop, crop_rect, encode_png, enlarge, sharpen_factor};
 use crate::keyframes;
 use crate::pointer::{self, dwell, Point};
 use crate::privacy::{self, Rect};
 use crate::prompt::CaptureKind;
-use crate::settings::{MarkPoint, Settings, ZoomTarget};
+use crate::settings::{AskTarget, MarkPoint, Settings, ZoomTarget};
 use mouse_position::mouse_position::Mouse;
 use serde::{Deserialize, Serialize};
 
@@ -204,6 +206,8 @@ struct Frame {
     windows: Vec<Win>,
     /// The windows painted over, in screen coordinates.
     hidden: Vec<Rect>,
+    /// The title of each window a caption may name, by its rect.
+    titles: Vec<(Rect, String)>,
 }
 
 impl Frame {
@@ -241,9 +245,13 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
     let mon = xcap::Monitor::from_point(cx, cy).map_err(|e| e.to_string())?;
     let mx = mon.x().unwrap_or(0);
     let my = mon.y().unwrap_or(0);
-    // Pointcast's own windows are content-protected (see platform::protect), so the OS leaves
-    // them out of the frame; only password managers and the hide-list are painted over here.
-    let (rects, windows) = sort_out(&listed(), &settings.hidden_list(), std::process::id());
+    // Pointcast's protected windows (see platform::protect) are left out of the frame by the OS. Its other windows,
+    // the answer panel among them, are painted over here with the password managers and the hide-list, so an earlier
+    // answer is never in a later picture; with "include Pointcast" on they stay, as the person asked.
+    let seen = listed();
+    let hide = settings.hidden_list();
+    let (rects, windows) = sort_out(&seen, &hide, std::process::id(), !settings.include_app);
+    let titles = titles(&seen, &hide);
     let img = mon.capture_image().map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
     let mut buf = img.into_raw();
@@ -264,6 +272,7 @@ fn grab_frame(settings: &Settings) -> Result<Frame, String> {
         map,
         windows,
         hidden: rects,
+        titles,
     })
 }
 
@@ -283,6 +292,8 @@ struct Listed {
     pid: Option<u32>,
     /// Only painted over, never what a close-up centres on: a window xcap would not list, having no title or app name.
     paint_only: bool,
+    /// Never painted as one of Pointcast's own: content-protected, so the OS keeps it out of the frame already.
+    protected: bool,
 }
 
 impl Listed {
@@ -296,16 +307,19 @@ impl Listed {
             rect,
             minimized: minimized.unwrap_or(false),
             pid,
+            protected: false,
         }
     }
 }
 
-/// From one read of the window list: what to paint over (visible windows the hide-list names) and the windows a
-/// close-up can centre on. `me` is this process.
-fn sort_out(seen: &[Listed], hidden: &[String], me: u32) -> (Vec<Rect>, Vec<Win>) {
+/// From one read of the window list: what to paint over (visible windows the hide-list names and, with `paint_own`,
+/// this process's own windows that are not content-protected) and the windows a close-up can centre on. `me` is this
+/// process.
+fn sort_out(seen: &[Listed], hidden: &[String], me: u32, paint_own: bool) -> (Vec<Rect>, Vec<Win>) {
+    let ours = |w: &Listed| paint_own && w.pid == Some(me) && !w.protected;
     let rects = seen
         .iter()
-        .filter(|w| !w.minimized && privacy::hides(&w.app, &w.title, hidden))
+        .filter(|w| !w.minimized && (privacy::hides(&w.app, &w.title, hidden) || ours(w)))
         .map(|w| w.rect)
         .collect();
     let windows = seen
@@ -314,6 +328,14 @@ fn sort_out(seen: &[Listed], hidden: &[String], me: u32) -> (Vec<Rect>, Vec<Win>
         .map(|w| Win { rect: w.rect, minimized: w.minimized, own: w.pid == Some(me) })
         .collect();
     (rects, windows)
+}
+
+/// The title of each window a caption may name, by its rect: never one the hide-list names.
+fn titles(seen: &[Listed], hidden: &[String]) -> Vec<(Rect, String)> {
+    seen.iter()
+        .filter(|w| !w.minimized && !w.paint_only && !w.title.trim().is_empty() && !privacy::hides(&w.app, &w.title, hidden))
+        .map(|w| (w.rect, w.title.trim().to_string()))
+        .collect()
 }
 
 /// Every window on screen, front to back (the order both xcap backends list them in).
@@ -339,8 +361,44 @@ fn listed() -> Vec<Listed> {
         })
         .collect();
     #[cfg(windows)]
-    let seen = seen.into_iter().chain(untitled_tools(std::process::id())).collect();
+    let seen = seen.into_iter().chain(untitled_tools(std::process::id())).chain(own_windows(std::process::id())).collect();
     seen
+}
+
+/// Windows: this process's own windows, which xcap leaves out of its list. Read without their titles (reading one
+/// sends the window a message), each with whether it is content-protected, so the ones that are not can be painted.
+#[cfg(windows)]
+fn own_windows(me: u32) -> Vec<Listed> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowDisplayAffinity, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    };
+    unsafe extern "system" fn each(h: HWND, all: LPARAM) -> BOOL {
+        (*(all.0 as *mut Vec<HWND>)).push(h);
+        true.into()
+    }
+    let mut all: Vec<HWND> = vec![];
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut Vec<HWND> as isize));
+    }
+    all.into_iter()
+        .filter_map(|h| unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid != me || !IsWindowVisible(h).as_bool() {
+                return None;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_err() || r.right <= r.left || r.bottom <= r.top {
+                return None;
+            }
+            // An affinity that cannot be read counts as none: the window is painted.
+            let mut affinity = 0u32;
+            let protected = GetWindowDisplayAffinity(h, &mut affinity).is_ok() && affinity != 0;
+            let rect = Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+            Some(Listed { protected, ..Listed::seen(Some(String::new()), None, rect, Some(IsIconic(h).as_bool()), Some(pid)) })
+        })
+        .collect()
 }
 
 /// Windows: the untitled tool windows xcap leaves out of its list (a password manager's quick-access panel can be one),
@@ -432,7 +490,9 @@ fn listed() -> Vec<Listed> {
             let at = |k: &str| number(&bounds, k).unwrap_or(0.0);
             let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).map(bool::from);
             let rect = Rect { x: at("X") as i32, y: at("Y") as i32, w: at("Width") as i32, h: at("Height") as i32 };
-            Some(Listed::seen(app, title, rect, shown.map(|s| !s), number(&d, "kCGWindowOwnerPID").map(|p| p as u32)))
+            // A menu bar item is a window too (level 25, the height of the bar): Pointcast's own is never painted.
+            let bar_item = number(&d, "kCGWindowLayer") == Some(25.0) && rect.h <= 40;
+            Some(Listed { protected: bar_item, ..Listed::seen(app, title, rect, shown.map(|s| !s), number(&d, "kCGWindowOwnerPID").map(|p| p as u32)) })
         })
         .collect()
 }
@@ -526,6 +586,104 @@ pub fn grab_freeze(settings: &Settings, recent: &[Point], t_ms: u64) -> Result<S
 pub fn grab_key(settings: &Settings, t_ms: u64) -> Result<keyframes::Still, String> {
     let f = grab_frame(settings)?;
     keyframes::still(f.buf, f.width, f.height, f.map, f.density, t_ms)
+}
+
+/// The long side a question's picture is fitted to when its provider names none.
+pub const ASK_EDGE: u32 = 1568;
+
+/// A sent picture stays a PNG under this many bytes (text keeps its edges); over it, it goes as a JPEG.
+pub const WIRE_PNG: usize = 600 * 1024;
+
+/// A question's picture: what the session keeps and the copy that is sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asked {
+    /// The picture as taken: the window under the pointer, else the pointer's screen.
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// The copy for the provider, fitted to its long side, with its size and kind.
+    pub wire: Vec<u8>,
+    pub wire_w: u32,
+    pub wire_h: u32,
+    pub mime: Mime,
+    /// The title of the window it shows; none for a whole screen or a window without one.
+    pub window: Option<String>,
+    /// The control under the pointer, when the OS names one.
+    pub element: Option<ElementMark>,
+    /// How many painted-over areas are in it.
+    pub hidden: usize,
+}
+
+/// The screen as it was when the Ask key went down, not yet cut or encoded: taking it is all that has to happen
+/// before the panel shows.
+pub struct AskFrame(Frame);
+
+/// One frame at the press, through the same path as every capture, so the never-capture list is honoured.
+pub fn grab_ask_frame(settings: &Settings) -> Result<AskFrame, String> {
+    grab_frame(settings).map(AskFrame)
+}
+
+impl AskFrame {
+    /// Cut it to `target`, mark it as any capture is marked, and fit the copy to send to `edge` on its long side.
+    pub fn finish(self, settings: &Settings, target: AskTarget, edge: u32) -> Result<Asked, String> {
+        ask_from(self.0, settings, target, edge, element::at)
+    }
+}
+
+/// A question's picture in one step.
+pub fn grab_ask(settings: &Settings, target: AskTarget, edge: u32) -> Result<Asked, String> {
+    grab_ask_frame(settings)?.finish(settings, target, edge)
+}
+
+fn ask_from(mut f: Frame, settings: &Settings, target: AskTarget, edge: u32, ask: impl FnOnce(i32, i32) -> Option<Element>) -> Result<Asked, String> {
+    let now = f.now(0);
+    let window = match target {
+        AskTarget::Window => window_at(&f.windows, now.x, now.y),
+        AskTarget::Screen => None,
+    };
+    let cut_to = window.and_then(|r| match cut(&f.map, Focus::Window(r), f.cursor) {
+        Cut::Rect(c) => Some((r, c)),
+        Cut::Around(..) => None,
+    });
+    let (mut buf, ox, oy, width, height) = match cut_to {
+        Some((_, c)) => crop_rect(&f.buf, f.width, f.height, c),
+        None => (std::mem::take(&mut f.buf), 0, 0, f.width, f.height),
+    };
+    let map = Mapping { crop: (ox as i32, oy as i32), size: (width, height), ..f.map };
+    let (pointer, trail) = pointing(&map, &[], now);
+    let element = element_at(settings, &map, now, &f.hidden, ask);
+    outline(&mut buf, width, height, element.as_ref(), f.density);
+    mark(&mut buf, width, height, settings.mark_point, pointer, &trail, f.density);
+    let window = cut_to.and_then(|(r, _)| f.titles.iter().find(|t| t.0 == r).map(|t| t.1.clone()));
+    let hidden = f.hidden.iter().filter(|r| map.place_rect(**r).is_some()).count();
+    let png = encode_png(&buf, width, height)?;
+    let (wire, wire_w, wire_h, mime) = wire(buf, width, height, edge)?;
+    Ok(Asked { png, width, height, wire, wire_w, wire_h, mime, window, element, hidden })
+}
+
+/// The copy of a picture that is sent: made smaller, when it has to be, to fit `edge` on its long side; a PNG when
+/// that comes under `WIRE_PNG`, else a JPEG at quality 90.
+pub fn wire(buf: Vec<u8>, width: u32, height: u32, edge: u32) -> Result<(Vec<u8>, u32, u32, Mime), String> {
+    let long = width.max(height);
+    let (buf, w, h) = if long > edge.max(1) && buf.len() == (width as usize * height as usize * 4) {
+        let side = |n: u32| ((n as u64 * edge.max(1) as u64 / long as u64) as u32).max(1);
+        let (w, h) = (side(width), side(height));
+        let img = image::RgbaImage::from_raw(width, height, buf).expect("length checked");
+        (image::imageops::resize(&img, w, h, image::imageops::FilterType::CatmullRom).into_raw(), w, h)
+    } else {
+        (buf, width, height)
+    };
+    let png = encode_png(&buf, w, h)?;
+    if png.len() < WIRE_PNG {
+        return Ok((png, w, h, Mime::Png));
+    }
+    // A capture is opaque, so the three colours are all of it.
+    let rgb: Vec<u8> = buf.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| e.to_string())?;
+    Ok((jpeg, w, h, Mime::Jpeg))
 }
 
 /// Crop `png` to `rect` (in image pixels). Used after the overlay confirms a box.
@@ -682,7 +840,7 @@ mod tests {
 
     #[test]
     fn one_read_of_the_window_list_gives_what_to_paint_over_and_what_to_zoom_to() {
-        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid, paint_only: false };
+        let w = |app: &str, title: &str, rect, minimized, pid| Listed { app: app.into(), title: title.into(), rect, minimized, pid, paint_only: false, protected: true };
         let seen = [
             w("Bitwarden", "Vault", r(0, 0, 400, 300), false, Some(7)),
             w("1Password", "", r(10, 10, 50, 50), true, Some(8)),
@@ -690,7 +848,7 @@ mod tests {
             w("Notes", "Bitwarden Web Vault", r(500, 0, 300, 300), false, None),
             w("Dock", "", r(0, 1000, 1920, 80), false, Some(9)),
         ];
-        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42);
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, true);
         assert_eq!(rects, vec![r(0, 0, 400, 300), r(500, 0, 300, 300)], "a minimised password manager shows nothing");
         // The Dock is never "the window" on macOS; elsewhere it is an ordinary name.
         assert_eq!(wins.len(), if cfg!(target_os = "macos") { 4 } else { 5 });
@@ -710,11 +868,120 @@ mod tests {
             Listed::seen(s("Notes"), None, r(900, 900, 100, 100), None, Some(9)),
             Listed::seen(s("1Password"), None, r(10, 10, 50, 50), Some(true), Some(8)),
         ];
-        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42);
+        let (rects, wins) = sort_out(&seen, &privacy::default_hidden_list(), 42, true);
         assert_eq!(rects, vec![r(700, 200, 600, 400), r(0, 0, 400, 300), r(0, 500, 300, 200)]);
         // A window xcap would not list is only painted over, never the window a close-up centres on.
         assert_eq!(wins.iter().map(|w| w.rect).collect::<Vec<_>>(), vec![r(0, 0, 400, 300)]);
         assert!(!wins[0].minimized, "a minimised state that could not be read counts as on screen");
+    }
+
+    #[test]
+    fn pointcasts_own_unprotected_window_is_painted_and_another_programs_is_left_alone() {
+        let me = 42;
+        let w = |title: &str, rect, pid, protected| Listed { protected, ..Listed::seen(Some("Pointcast".into()), Some(title.into()), rect, Some(false), Some(pid)) };
+        let seen = [
+            // The answer panel: ours and not protected. The HUD: ours, protected, so the OS left it out already.
+            w("Pointcast", r(1500, 0, 380, 1000), me, false),
+            w("HUD", r(700, 900, 392, 64), me, true),
+            // The same window from another program, and a minimised one of ours.
+            w("Pointcast", r(100, 100, 380, 500), 7, false),
+            Listed { minimized: true, ..w("Settings", r(0, 0, 50, 50), me, false) },
+        ];
+        let (rects, wins) = sort_out(&seen, &[], me, true);
+        assert_eq!(rects, vec![r(1500, 0, 380, 1000)], "only our own window that the OS would show");
+        assert_eq!(wins.iter().map(|w| w.own).collect::<Vec<_>>(), [true, true, false, true]);
+        // In the picture: the panel's pixels are paint, the other program's window is as it was.
+        let map = screen((0, 0), 1.0, 1920, 1080);
+        let mut buf = vec![255u8; 1920 * 1080 * 4];
+        paint_out(&mut buf, &map, &rects);
+        let px = |x: usize, y: usize| buf[(y * 1920 + x) * 4];
+        assert_eq!((px(1500, 0), px(1879, 999), px(1700, 500)), (24, 24, 24));
+        assert_eq!((px(1499, 0), px(1880, 0), px(1700, 1000)), (255, 255, 255));
+        assert_eq!((px(100, 100), px(300, 400), px(900, 930)), (255, 255, 255), "a foreign window and the protected HUD are not painted");
+        // "Include Pointcast" on: its windows stay in the picture, and the hide-list still paints.
+        let seen = [w("Pointcast", r(1500, 0, 380, 1000), me, false), w("Vault", r(0, 0, 10, 10), 9, false)];
+        assert_eq!(sort_out(&seen, &["Vault".into()], me, false).0, vec![r(0, 0, 10, 10)]);
+        assert_eq!(sort_out(&seen, &["Vault".into()], me, true).0, vec![r(1500, 0, 380, 1000), r(0, 0, 10, 10)]);
+    }
+
+    fn frame(width: u32, height: u32, at: (i32, i32), seen: &[Listed], hidden: &[String]) -> Frame {
+        let map = screen((0, 0), 1.0, width, height);
+        let (rects, windows) = sort_out(seen, hidden, 42, true);
+        // Every pixel names its place, so a cut is known by its corner.
+        let mut buf: Vec<u8> = (0..width * height).flat_map(|i| [(i % width) as u8, (i / width) as u8, 7, 255]).collect();
+        paint_out(&mut buf, &map, &rects);
+        Frame { buf, width, height, cursor: at, screen: at, density: 1.0, map, windows, hidden: rects, titles: titles(seen, hidden) }
+    }
+
+    #[test]
+    fn a_questions_picture_is_the_window_under_the_pointer_else_the_screen_with_what_a_caption_may_say() {
+        let s = |s: &str| Some(s.to_string());
+        let seen = [
+            Listed::seen(s("Pointcast"), s("Pointcast"), r(150, 0, 50, 100), Some(false), Some(42)),
+            Listed::seen(s("Preview"), s(" Lecture 4.pdf "), r(20, 10, 120, 60), Some(false), Some(7)),
+            Listed::seen(s("1Password"), s("Vault"), r(0, 80, 40, 20), Some(false), Some(8)),
+        ];
+        let hide = privacy::default_hidden_list();
+        let plain = Settings { mark_point: MarkPoint::Off, outline_element: false, ..Settings::default() };
+        // The window under the pointer: its pixels, its title.
+        let a = ask_from(frame(200, 100, (30, 20), &seen, &hide), &plain, AskTarget::Window, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!((a.width, a.height, a.window.as_deref(), a.hidden), (120, 60, Some("Lecture 4.pdf"), 0));
+        let (px, w, h) = image_ops::decode_rgba(&a.png).unwrap();
+        assert_eq!((w, h, &px[..4]), (120, 60, &[20u8, 10, 7, 255][..]), "cut at the window's corner");
+        assert_eq!((a.mime, a.wire_w, a.wire_h), (Mime::Png, 120, 60));
+        assert_eq!(a.wire, a.png, "a small picture is sent as it was taken");
+        // The whole screen when asked for, or with no window there: no title, and the painted areas counted.
+        let whole = ask_from(frame(200, 100, (30, 20), &seen, &hide), &plain, AskTarget::Screen, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!((whole.width, whole.height, whole.window, whole.hidden), (200, 100, None, 2), "the vault and our own panel");
+        let bare = ask_from(frame(200, 100, (145, 90), &seen, &hide), &plain, AskTarget::Window, ASK_EDGE, |_, _| None).unwrap();
+        assert_eq!((bare.width, bare.height, bare.window), (200, 100, None));
+        // Pointcast's own panel under the pointer is passed over; it is paint in the picture.
+        let own = ask_from(frame(200, 100, (160, 50), &seen, &hide), &plain, AskTarget::Window, ASK_EDGE, |_, _| None).unwrap();
+        let (px, _, _) = image_ops::decode_rgba(&own.png).unwrap();
+        assert_eq!((own.width, own.window, &px[(50 * 200 + 160) * 4..][..3]), (200, None, &[24u8, 24, 27][..]));
+        // A window on the never-capture list: paint, and neither its title nor a control in it is named.
+        let asked = Cell::new(0);
+        let on = Settings { mark_point: MarkPoint::Off, ..Settings::default() };
+        let vault = ask_from(frame(200, 100, (10, 90), &seen, &hide), &on, AskTarget::Window, ASK_EDGE, |_, _| {
+            asked.set(asked.get() + 1);
+            None
+        })
+        .unwrap();
+        let (px, _, _) = image_ops::decode_rgba(&vault.png).unwrap();
+        assert_eq!((vault.width, vault.height, vault.window, vault.element, vault.hidden), (40, 20, None, None, 1));
+        assert!(px.chunks_exact(4).all(|p| p == [24, 24, 27, 255]) && asked.get() == 0);
+    }
+
+    #[test]
+    fn the_copy_that_is_sent_fits_the_long_side_and_is_a_png_while_small_else_a_jpeg() {
+        // Flat colour: tiny as a PNG at any size, and made smaller to fit, never larger.
+        let flat = |w: u32, h: u32| vec![90u8; (w * h * 4) as usize];
+        assert_eq!(ASK_EDGE, 1568);
+        let (png, w, h, mime) = wire(flat(400, 225), 400, 225, 200).unwrap();
+        assert_eq!((w, h, mime, image_ops::png_size(&png)), (200, 112, Mime::Png, Some((200, 112))));
+        let (_, w, h, _) = wire(flat(225, 400), 225, 400, 200).unwrap();
+        assert_eq!((w, h), (112, 200), "the long side is the one that is fitted");
+        let (_, w, h, _) = wire(flat(400, 225), 400, 225, ASK_EDGE).unwrap();
+        assert_eq!((w, h), (400, 225), "a small picture is not enlarged");
+        let (_, w, h, _) = wire(flat(400, 225), 400, 225, 400).unwrap();
+        assert_eq!((w, h), (400, 225), "nor one that fits exactly");
+        // Noise does not compress: over the limit as a PNG, so it goes as a JPEG of the same size.
+        let mut seed = 1u32;
+        let noise: Vec<u8> = (0..600 * 400 * 4)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if i % 4 == 3 {
+                    255
+                } else {
+                    (seed >> 24) as u8
+                }
+            })
+            .collect();
+        assert!(encode_png(&noise, 600, 400).unwrap().len() >= WIRE_PNG, "the specimen is over the limit as a PNG");
+        let (jpeg, w, h, mime) = wire(noise, 600, 400, ASK_EDGE).unwrap();
+        assert_eq!((w, h, mime, &jpeg[..3]), (600, 400, Mime::Jpeg, &[0xFFu8, 0xD8, 0xFF][..]));
+        let back = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!((back.width(), back.height()), (600, 400));
     }
 
     #[cfg(windows)]
@@ -772,7 +1039,7 @@ mod tests {
         let exe = std::env::current_exe().unwrap().file_stem().unwrap().to_string_lossy().into_owned();
         let panel = seen.iter().find(|w| w.pid == Some(me) && w.rect == rect).expect("the untitled tool window is read");
         assert_eq!((panel.app.as_str(), panel.title.as_str(), panel.minimized, panel.paint_only), (exe.as_str(), "", false, true));
-        let (rects, wins) = sort_out(&seen, &[exe], 0);
+        let (rects, wins) = sort_out(&seen, &[exe], 0, true);
         assert!(rects.contains(&rect) && wins.iter().all(|w| w.rect != rect));
         assert!(own.iter().all(|w| w.pid != Some(me)));
     }
