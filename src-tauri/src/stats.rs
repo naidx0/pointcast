@@ -91,14 +91,18 @@ pub struct Counts {
 }
 
 /// The words said, the time they took and the pictures taken. Only speech has words: a picture's marker, labels and
-/// control name are not counted, nor is the placeholder for speech that could not be made out.
+/// control name are not counted, nor is the placeholder for speech that could not be made out. Speech with no words in
+/// it (only that placeholder) takes no time either: Speed is words over the time they took.
 pub fn counts(items: &[Item]) -> Counts {
     let mut c = Counts::default();
     for it in items {
         match it {
             Item::Speech { t_ms, end_ms, text } => {
-                c.words += text.split_whitespace().filter(|w| *w != crate::voice::stt::UNCLEAR).count() as u64;
-                c.speech_ms += end_ms.saturating_sub(*t_ms);
+                let n = text.split_whitespace().filter(|w| *w != crate::voice::stt::UNCLEAR).count() as u64;
+                c.words += n;
+                if n > 0 {
+                    c.speech_ms += end_ms.saturating_sub(*t_ms);
+                }
             }
             Item::Image { .. } => c.pictures += 1,
         }
@@ -403,13 +407,39 @@ mod tests {
             said(1_200, 3_200, unclear),
             said(3_300, 4_000, &format!("move it {unclear} left")),
         ];
-        assert_eq!(counts(&items), Counts { words: 7, speech_ms: 900 + 2_000 + 700, pictures: 1 });
+        // The unclear item's 2 s is not time spent saying words; the item with words and a placeholder keeps its time.
+        assert_eq!(counts(&items), Counts { words: 7, speech_ms: 900 + 700, pictures: 1 });
         // The prompt has a marker with the picture's labels and control in it; none of that was said.
         let plain = crate::prompt::assemble_export(&items).plain;
         assert!(plain.contains("[image 1") && plain.contains("this one here"), "{plain}");
         assert_eq!(counts(&[picture(0)]), Counts { words: 0, speech_ms: 0, pictures: 1 });
-        assert_eq!(counts(&[said(0, 5_000, unclear)]), Counts { words: 0, speech_ms: 5_000, pictures: 0 });
+        assert_eq!(counts(&[said(0, 5_000, unclear)]), Counts { words: 0, speech_ms: 0, pictures: 0 });
         assert_eq!(counts(&[said(900, 100, "  two   words ")]).words, 2);
+    }
+
+    #[test]
+    fn unclear_speech_does_not_lower_speed_when_counted_transcribed_again_or_counted_from_history() {
+        let d = dir("unclear-speed");
+        let store = Store::new(&d);
+        let stats = Stats { offset: |_| 0, ..Stats::new(&d) };
+        let unclear = crate::voice::stt::UNCLEAR;
+        let wpm = |t: &Total| t.words * 60_000 / t.speech_ms.max(1);
+        assert_eq!(stats.get().total, Total::default(), "counting begins on an empty History");
+        // 60 words over 30 s, then 30 s nobody could make out: 120 words a minute, not 60.
+        let first = vec![said(0, 30_000, &"word ".repeat(60)), said(30_000, 60_000, unclear)];
+        let m = store.save(&first, nov(9) + 10 * HOUR, 61_000).unwrap();
+        stats.count(&m);
+        let counted = stats.get().total;
+        assert_eq!((counted.words, counted.speech_ms, wpm(&counted)), (60, 30_000, 120), "counted at the stop");
+        // Transcribed again: 90 words over 45 s and 15 s unclear, still 120 words a minute.
+        let better = vec![said(0, 45_000, &"word ".repeat(90)), said(45_000, 60_000, unclear)];
+        store.replace_speech(&m.id, &better).unwrap();
+        stats.again(&m.id);
+        let again = stats.get().total;
+        assert_eq!((again.recordings, again.words, again.speech_ms, wpm(&again)), (1, 90, 45_000, 120), "transcribed again");
+        // A first count from History says the same.
+        std::fs::remove_file(d.join(FILE)).unwrap();
+        assert_eq!(stats.get().total, again, "counted from History");
     }
 
     #[test]
