@@ -87,9 +87,9 @@ and you can hold the key while you talk instead of tapping it.
   processor, and Settings says which one it runs on. If you start on the processor version, Pointcast fetches the
   graphics card version in the background while you are not recording and checks once that your card runs
   it. Turn that off with "Get the faster GPU version by itself" in Settings › Speech.
-- **The same audio gives the same words.** Transcribing a recording again gives the same text.
-- **Every word after the press.** The microphone opens first. Until audio is flowing the capsule says
-  "Getting ready…", so you know when to start.
+- **The same audio gives the same words.** Transcribing a recording again gives the same text every time.
+- **Every word after the press.** The microphone opens first, and the red dot shows as soon as audio is
+  flowing. A microphone that is slow to start gets a "Getting ready…" line until it is.
 - **Short replies are heard in context.** A short piece ("yes", "no, the other one") is decoded with the
   audio before it, so it is not guessed from a second of sound.
 - **Tidy the text.** Paragraphs at your pauses, repeated words and a standalone "um" removed. Nothing is
@@ -217,8 +217,8 @@ pictures are kept:
   and farther speech** on. Turn it off if it ever makes your voice sound wrong.
 - **A shortcut does nothing.** Another app may own it. **Settings → Shortcuts** says which one is taken;
   click it and press new keys.
-- **The first words are missing.** Wait for the red dot before you talk; the capsule says "Getting ready…"
-  until audio flows. **Settings › Speech** says when a microphone is slow to start (Bluetooth headsets
+- **The first words are missing.** Wait for the red dot before you talk; a microphone that is slow to
+  start shows "Getting ready…" until audio flows. **Settings › Speech** says when a microphone is slow to start (Bluetooth headsets
   are); a wired one starts at once.
 - **No sound from this microphone.** Check it is not muted, or pick another one in **Settings › Speech**,
   which also shows its live level.
