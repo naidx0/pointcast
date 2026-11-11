@@ -101,6 +101,7 @@ pub struct Snapshot {
     pub words: String,
     pub picture: Option<Picture>,
     pub dropped: bool,
+    /// The AI being asked, as the person knows it ("ChatGPT"); empty when none is.
     pub provider: String,
     pub error: Option<String>,
     /// The model is working and has said nothing yet.
@@ -204,6 +205,15 @@ pub fn line(f: &Failure) -> String {
     }
 }
 
+/// What the person calls the AI behind provider `id`: the panel never shows an id, so one with no name here shows
+/// nothing.
+pub fn name_of(id: &str) -> &'static str {
+    match id {
+        assist::codex::ID => "ChatGPT",
+        _ => "",
+    }
+}
+
 /// One line about the picture, sent with the question: its size, the window it shows, the control pointed at when the
 /// OS names one, and how much of it is painted over.
 pub fn caption(a: &Asked) -> String {
@@ -302,7 +312,7 @@ impl Live {
         let run = g.run;
         g.press_ms = (self.deps.now)();
         g.halt = false;
-        g.snap.provider = provider.id().into();
+        g.snap.provider = name_of(provider.id()).into();
         g.provider = Some(provider);
         g.snap.error = None;
         g.snap.words.clear();
@@ -775,6 +785,8 @@ mod tests {
         voice: Arc<FakeVoice>,
         outs: Arc<Mutex<Vec<Out>>>,
         grabs: Arc<AtomicUsize>,
+        /// Held by a test, the frame taken at the press is not cut until it lets go.
+        gate: Arc<Mutex<()>>,
         dir: PathBuf,
     }
 
@@ -789,11 +801,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (voice, outs, grabs) = (Arc::new(FakeVoice::default()), Arc::new(Mutex::new(vec![])), Arc::new(AtomicUsize::new(0)));
         let (o, g, clock) = (outs.clone(), grabs.clone(), AtomicU64::new(1_700_000_000_000));
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.clone();
         let deps = Deps {
             voice: voice.clone(),
             grab: Box::new(move || {
                 g.fetch_add(1, Ordering::SeqCst);
-                let cut: Frame = Box::new(|| Ok(shot()));
+                let held = held.clone();
+                let cut: Frame = Box::new(move || {
+                    let _open = held.lock().unwrap();
+                    Ok(shot())
+                });
                 Ok(cut)
             }),
             provider: Box::new(move || provider.clone()),
@@ -802,7 +820,7 @@ mod tests {
             now: Box::new(move || clock.fetch_add(1, Ordering::SeqCst)),
             tidy: Box::new(|| false),
         };
-        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, dir }
+        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, dir }
     }
 
     impl Rig {
@@ -810,6 +828,14 @@ mod tests {
             let t = Instant::now();
             while self.live.snapshot().state != what {
                 assert!(t.elapsed() < Duration::from_secs(10), "never {what:?}: {:?}", self.live.snapshot());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn wait(&self, what: &str, ok: impl Fn() -> bool) {
+            let t = Instant::now();
+            while !ok() {
+                assert!(t.elapsed() < Duration::from_secs(10), "never {what}: {:?}", self.live.snapshot());
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -868,8 +894,8 @@ mod tests {
 
     #[test]
     fn a_question_is_answered_in_the_panel_and_kept_with_its_picture_what_was_sent_and_six_times() {
-        let (script, provider) = scripted(&[(5, "Hel"), (5, "lo")]);
-        let r = rig("asked", provider, FIRST_WAIT);
+        let script = Scripted { id: assist::codex::ID, ..Scripted::new(&[(5, "Hel"), (5, "lo")]) };
+        let r = rig("asked", Some(Arc::new(script.clone())), FIRST_WAIT);
         r.ask("what is this", State::Shown);
         assert_eq!(r.grabs.load(Ordering::SeqCst), 1, "one frame, at the press");
         assert_eq!(r.outs.lock().unwrap().iter().filter(|o| **o == Out::Show).count(), 1);
@@ -881,7 +907,9 @@ mod tests {
         assert_eq!((kept.len(), turns.len(), session.turns), (1, 1, 1));
         assert!(session.title.contains("what is this") && r.live.snapshot().session.title == session.title, "{session:?}");
         let snap = r.live.snapshot();
-        assert_eq!((snap.session.id.as_str(), snap.turn, snap.words.as_str(), snap.provider.as_str()), (session.id.as_str(), 1, "what is this", "scripted"));
+        // The panel names the AI as the person knows it; what is kept names the provider.
+        assert_eq!((snap.session.id.as_str(), snap.turn, snap.words.as_str(), snap.provider.as_str()), (session.id.as_str(), 1, "what is this", "ChatGPT"));
+        assert_eq!(turns[0].answer.as_ref().unwrap().provider, assist::codex::ID);
         assert!(snap.picture.as_ref().is_some_and(|p| p.src.starts_with("data:image/jpeg;base64,") && (p.w, p.h) == (4, 2)), "{snap:?}");
         let a = turns[0].answer.clone().unwrap();
         assert_eq!((a.text.as_str(), a.error.clone(), a.stopped), ("Hello", None, false));
@@ -921,7 +949,11 @@ mod tests {
     fn an_ask_with_nothing_said_keeps_and_sends_nothing_drops_its_frame_and_just_opens_the_panel() {
         let (script, provider) = scripted(&[(0, "never")]);
         let r = rig("empty", provider, FIRST_WAIT);
-        r.ask("", State::Shown);
+        assert!(r.live.press());
+        // The picture is in the panel by the time the key comes up: it is there to be taken away.
+        r.wait("the picture in the panel", || r.live.snapshot().picture.is_some());
+        r.live.release();
+        r.until(State::Shown);
         assert_eq!(r.states(), [State::Listening, State::Finishing, State::Shown]);
         assert!(r.outs.lock().unwrap().contains(&Out::Show), "the panel opened");
         assert!(r.kept().is_empty() && script.asked.lock().unwrap().is_empty() && script.opened.lock().unwrap().is_empty());
@@ -939,6 +971,32 @@ mod tests {
         *r.voice.say.lock().unwrap() = "what is this".into();
         r.live.release();
         r.until(State::Shown);
+        let kept = r.kept();
+        let a = kept[0].1[0].answer.clone().unwrap();
+        assert_eq!((a.sent.text.as_str(), a.sent.pictures.len()), ("what is this", 0));
+        assert!(Sessions::new(&r.dir).sent_picture(&kept[0].0.id, &kept[0].1[0].meta.id, 1).is_err(), "no picture file");
+        assert_eq!(script.asked.lock().unwrap()[0].parts, [Part::Text("what is this".into())]);
+        r.end();
+    }
+
+    #[test]
+    fn a_picture_dropped_after_release_while_it_is_still_being_cut_is_neither_kept_nor_sent() {
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("dropped-late", provider, FIRST_WAIT);
+        // The frame is slow to cut: the key comes up, the words are finished, and the question waits for its picture.
+        let slow = r.gate.lock().unwrap();
+        assert!(r.live.press());
+        *r.voice.say.lock().unwrap() = "what is this".into();
+        r.live.release();
+        r.wait("the question waiting for its picture", || {
+            let g = r.live.inner.lock().unwrap();
+            g.snap.state == State::Finishing && g.picture.is_none()
+        });
+        r.live.drop_picture();
+        assert!(r.live.snapshot().dropped);
+        drop(slow);
+        r.until(State::Shown);
+        assert!(r.live.snapshot().dropped && r.live.snapshot().picture.is_none(), "{:?}", r.live.snapshot());
         let kept = r.kept();
         let a = kept[0].1[0].answer.clone().unwrap();
         assert_eq!((a.sent.text.as_str(), a.sent.pictures.len()), ("what is this", 0));
@@ -1019,11 +1077,24 @@ mod tests {
         let r = rig("none", None, FIRST_WAIT);
         assert!(!r.live.press());
         let snap = r.live.snapshot();
-        assert_eq!((snap.state, snap.error.as_deref()), (State::Error, Some(NO_PROVIDER)));
+        assert_eq!((snap.state, snap.error.as_deref(), snap.provider.as_str()), (State::Error, Some(NO_PROVIDER), ""));
         assert_eq!(NO_PROVIDER, "Choose an AI in Settings first");
         assert_eq!(r.grabs.load(Ordering::SeqCst), 0, "the screen was not grabbed");
         assert!(!r.voice.busy() && r.voice.stops.lock().unwrap().is_empty(), "the microphone never opened");
         assert!(r.kept().is_empty() && r.outs.lock().unwrap().contains(&Out::Show));
+        r.end();
+    }
+
+    #[test]
+    fn the_panel_names_the_ai_as_the_person_knows_it_and_never_shows_a_provider_id() {
+        assert_eq!(name_of(assist::codex::ID), "ChatGPT");
+        // A provider with no name for the person shows nothing in every state the panel is told of, never its id.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("unnamed", provider, FIRST_WAIT);
+        r.ask("what is this", State::Shown);
+        let told: Vec<String> = r.outs.lock().unwrap().iter().filter_map(|o| if let Out::State(s) = o { Some(s.provider.clone()) } else { None }).collect();
+        assert!(told.len() >= 5 && told.iter().all(String::is_empty), "{told:?}");
+        assert_eq!(r.kept()[0].1[0].answer.clone().unwrap().provider, script.id);
         r.end();
     }
 
