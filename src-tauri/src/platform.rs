@@ -719,7 +719,7 @@ mod tests {
         // The owner's 1080p screen under its taskbar: docked 12 px in from the top right, 120 tall, not 649.
         let area = (0, 0, 1920, 1040);
         let spot = panel_spot(area, 1.0, PANEL_WIDTH, PANEL_MARGIN);
-        assert!(near((spot.0, spot.1, spot.2), (1528.0, 12.0, 380.0)) && spot.3 >= PANEL_START, "{spot:?}");
+        assert!(near((spot.0, spot.1, spot.2, 0.0), (1528.0, 12.0, 380.0, 0.0)) && spot.3 >= PANEL_START, "{spot:?}");
         let at = |area, scale| panel_fit(area, scale, PANEL_WIDTH, PANEL_MARGIN, opening_height(false, 649.0));
         assert!(near(at(area, 1.0), (1528.0, 12.0, 380.0, 120.0)), "{:?}", at(area, 1.0));
         // At 150 % and on a Retina screen, in logical pixels of that screen.

@@ -1236,7 +1236,7 @@ mod tests {
         assert!(r.live.inner.lock().unwrap().picture.is_none() && r.live.snapshot().picture.is_none());
         // Nothing in what the panel draws from can say the question went: no words, picture, AI or turn.
         let s = r.live.snapshot();
-        assert_eq!((s.words.as_str(), s.dropped, s.provider.as_str(), s.turn, s.thinking, s.error), ("", false, "", 0, false, None), "{s:?}");
+        assert_eq!((s.words.as_str(), s.dropped, s.provider.as_str(), s.turn, s.thinking, s.error.as_deref()), ("", false, "", 0, false, None), "{s:?}");
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!((json["state"].as_str(), json["picture"].is_null()), (Some("discarded"), true));
         // The same for a question stopped while its last words were finished.
