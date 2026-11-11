@@ -206,6 +206,31 @@ export function emptyUsage(since_ms: number): Usage {
   };
 }
 
+const num = (x: unknown) => typeof x === "number" && Number.isFinite(x);
+/** An object with a finite number at each of these keys. */
+const nums = (x: unknown, keys: string[]) => typeof x === "object" && x !== null && keys.every((k) => num((x as Record<string, unknown>)[k]));
+const list = (x: unknown, n: number, each: (v: unknown) => boolean) => Array.isArray(x) && x.length === n && x.every(each);
+
+/** The counts as they came when they read as counts; when none came (the app did not answer) or something else did, a
+ * fresh install's, so the pane says its one quiet line and never nothing. */
+export function readUsage(raw: unknown, now_ms: number): Usage {
+  const u = raw as Usage;
+  const sound =
+    nums(raw, ["v", "since_ms"]) &&
+    u.v === 1 &&
+    nums(u.total, ["recordings", "words", "speech_ms", "wall_ms", "pictures"]) &&
+    typeof u.days === "object" &&
+    u.days !== null &&
+    !Array.isArray(u.days) &&
+    Object.values(u.days).every((d) => nums(d, ["r", "w", "speech_ms", "wall_ms", "p"])) &&
+    list(u.hours, 24, (s) => nums(s, ["r", "w"])) &&
+    list(u.weekdays, 7, (s) => nums(s, ["r", "w"])) &&
+    list(u.grid, 7, (row) => list(row, 24, num)) &&
+    nums(u.streak, ["current", "longest"]) &&
+    typeof u.streak.last_day === "string";
+  return sound ? u : emptyUsage(now_ms);
+}
+
 /** Browser preview: ten weeks of a person who dictates most working days, the same every time for a given day. */
 export function previewUsage(today: Date): Usage {
   const u = emptyUsage(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 69, 9, 12).getTime());

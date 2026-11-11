@@ -38,7 +38,7 @@ import { useConfig } from "@/lib/useConfig";
 import { computerView, micStatus } from "@/lib/hardware";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
-import { SAVED_NOTE, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
+import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
 
 const PANES = [
   { id: "general", name: "General", icon: Settings2, tile: "tile-gray" },
@@ -405,8 +405,8 @@ function Usage() {
   const [sure, setSure] = useState(false);
   useEffect(() => {
     statsGet()
-      .then(setCounts)
-      .catch(() => undefined);
+      .catch(() => null)
+      .then((u) => setCounts(readUsage(u, Date.now())));
   }, []);
   if (!counts) return null;
   const v = usageView(counts, new Date(), range);
@@ -423,7 +423,7 @@ function Usage() {
           if (!sure) return setSure(true);
           setSure(false);
           await statsReset()
-            .then(setCounts)
+            .then((u) => setCounts(readUsage(u, Date.now())))
             .catch(() => undefined);
         }}
       >

@@ -15,6 +15,7 @@ import {
   over,
   perDay,
   previewUsage,
+  readUsage,
   savedMinutes,
   shades,
   speed,
@@ -209,6 +210,45 @@ test("a fresh install is one quiet line, and a week off says so without zeros", 
   assert.deepEqual([week.empty, week.figures, week.quiet], [false, [], NOTHING_THIS_WEEK]);
   assert.equal(week.rate, "0.2 recordings a day over the last 30 days.");
   assert.equal(usageView(away, TODAY, "all", "en-GB").quiet, null);
+});
+
+test("counts that did not arrive or do not read show a fresh install's quiet line, never a blank or an error", () => {
+  const now = TODAY.getTime();
+  const good = usage(novDays(9, 10, 11));
+  assert.equal(readUsage(good, now), good, "counts that read are taken as they are");
+  const preview = previewUsage(TODAY);
+  assert.equal(readUsage(preview, now), preview);
+  const unread = [
+    undefined,
+    null,
+    "",
+    "{ not json",
+    7,
+    [],
+    {},
+    { ...good, v: 7 },
+    { ...good, since_ms: "yesterday" },
+    { ...good, total: undefined },
+    { ...good, total: { ...good.total, words: Number.NaN } },
+    { ...good, days: null },
+    { ...good, days: [] },
+    { ...good, days: { "2026-11-11": null } },
+    { ...good, days: { "2026-11-11": { r: "1", w: 1, speech_ms: 1, wall_ms: 1, p: 0 } } },
+    { ...good, hours: [] },
+    { ...good, weekdays: good.weekdays.slice(1) },
+    { ...good, grid: [] },
+    { ...good, grid: good.grid.map((row) => row.slice(1)) },
+    { ...good, grid: good.grid.map((row, d) => (d === 3 ? null : row)) },
+    { ...good, streak: null },
+    { ...good, streak: { ...good.streak, last_day: 11 } },
+  ];
+  for (const range of ["week", "all"]) {
+    const fresh = usageView(emptyUsage(now), TODAY, range, "en-GB");
+    assert.deepEqual([fresh.empty, fresh.quiet], [true, NOTHING_YET]);
+    for (const raw of unread) {
+      assert.deepEqual(usageView(readUsage(raw, now), TODAY, range, "en-GB"), fresh, `${range}: ${JSON.stringify(raw)}`);
+    }
+  }
 });
 
 test("the streak is said only past one day, and the longest only when it says more", () => {
