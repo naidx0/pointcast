@@ -17,7 +17,8 @@ export type RecentRow = {
   empty: boolean;
   /** "Today, 14:02", "Yesterday, 09:30", "Monday, 16:40", "3 Nov, 10:15". */
   when: string;
-  /** How long the recording was: "42 s", "3 min". */
+  /** How many words it kept ("42 words"); how long the recording was ("42 s", "3 min") for an entry from a build that
+   * did not count words, or one without words. */
   length: string;
   pictures: number;
   /** Everything the row says, for a screen reader. */
@@ -60,8 +61,19 @@ export function lengthLabel(ms: number): string {
   return s < 60 ? `${Math.max(1, s)} s` : `${Math.round(s / 60)} min`;
 }
 
+/** A word count as the row says it: "1 word", "42 words", "1,204 words" (grouped as the system writes numbers). */
+export function wordsLabel(n: number, locale?: string): string {
+  const w = Math.max(0, Math.round(n));
+  return `${w.toLocaleString(locale)} ${w === 1 ? "word" : "words"}`;
+}
+
 /** The newest `n` entries, newest first, as Home lists them. */
-export function recentRows(entries: Pick<HistoryMeta, "id" | "created_ms" | "duration_ms" | "preview" | "images">[], now: Date, n = RECENT, locale?: string): RecentRow[] {
+export function recentRows(
+  entries: Pick<HistoryMeta, "id" | "created_ms" | "duration_ms" | "preview" | "images" | "words">[],
+  now: Date,
+  n = RECENT,
+  locale?: string,
+): RecentRow[] {
   return [...entries]
     .sort((a, b) => b.created_ms - a.created_ms)
     .slice(0, n)
@@ -70,7 +82,8 @@ export function recentRows(entries: Pick<HistoryMeta, "id" | "created_ms" | "dur
       const empty = !said || said === NO_WORDS;
       const text = empty ? "No words" : firstWords(said);
       const when = `${dayLabel(e.created_ms, now, locale)}, ${timeLabel(e.created_ms, locale)}`;
-      const length = lengthLabel(e.duration_ms);
+      const words = typeof e.words === "number" && Number.isFinite(e.words) && e.words > 0 ? e.words : 0;
+      const length = words && !empty ? wordsLabel(words, locale) : lengthLabel(e.duration_ms);
       const pictures = Math.max(0, e.images);
       const pics = pictures ? `, ${pictures} ${pictures === 1 ? "picture" : "pictures"}` : "";
       return { id: e.id, text, empty, when, length, pictures, label: `${text}, ${when}, ${length}${pics}` };

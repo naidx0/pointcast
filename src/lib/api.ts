@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { PREVIEW_ANSWER, PREVIEW_WORDS, previewChunks, previewLevel, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
+import { normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const preview = !inTauri && typeof location !== "undefined" && location.search.includes("preview=1");
@@ -129,7 +130,8 @@ export type Config = {
   platform: string;
   materials: boolean;
   version: string;
-  hotkeys: Record<Action, HotkeyView>;
+  /** `ask` is the Ask key; absent from builds before 0.5. */
+  hotkeys: Record<Action, HotkeyView> & { ask?: HotkeyView };
   hotkey_errors: { action: Action; error: string }[];
   talk_mode: TalkMode;
   model: string;
@@ -386,6 +388,8 @@ export type HistoryMeta = {
   mic_open_ms?: number;
   /** The loudest sample of the recording, in dBFS (-100 for nothing but zeros). */
   mic_peak_db?: number;
+  /** How many words the prompt kept; absent from builds before 0.5. */
+  words?: number;
 };
 
 /** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
@@ -436,6 +440,8 @@ export function previewHistory(now: number): HistoryMeta[] {
     preview: preview.split(" ").slice(0, 24).join(" "),
     images,
     recovered: false,
+    // About 150 words a minute; `?words=none` plays a build from before the count.
+    words: location.search.includes("words=none") ? undefined : Math.round(s * 2.5),
   }));
 }
 export const historyGet = (id: string) => invoke<SessionExport>("history_get", { id });
@@ -492,6 +498,8 @@ export const LIVE = {
   delta: "live://delta",
   /** command: the current snapshot */
   get: "live_state",
+  /** command: ask the kept question again after an error */
+  retry: "live_retry",
   drop: "live_drop_picture",
   stop: "live_stop",
   close: "live_close",
@@ -526,14 +534,20 @@ export const onLiveLevel = (fn: Sink<number>) =>
 export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvCommand("drop"));
 export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
 export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
-export const liveOpenSettings = () => (inTauri ? windowOpen("settings") : Promise.resolve());
+export const liveRetry = () => (inTauri ? invoke<void>(LIVE.retry) : pvCommand("retry"));
+/** Every error that asks for Settings is about the AI: Settings opens on that pane. */
+export const liveOpenSettings = () => settingsOpenOn("ai");
 /** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
 export const liveFit = (height: number) =>
   inTauri ? getCurrentWindow().setSize(new LogicalSize(380, Math.round(height))) : Promise.resolve();
 
-function pvCommand(c: "drop" | "stop" | "close"): Promise<void> {
+function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
   const s = livePv.snap;
   if (!s) return Promise.resolve();
+  if (c === "retry") {
+    startLivePreview("answering");
+    return Promise.resolve();
+  }
   if (c === "drop") pvEmit({ ...s, dropped: true });
   else if (c === "close") pvEmit({ ...s, state: "closed" });
   else pvEmit(s.state === "answering" ? { ...s, state: "shown" } : { ...s, state: "closed" });
@@ -578,6 +592,96 @@ export function startLivePreview(kind?: string) {
     later(400, tick);
   }
 }
+
+// —— Opening Settings on a pane from another window. The window may not exist yet, so the ask goes through storage,
+// which every Pointcast window shares (as the theme does): read once as Settings opens, or as a storage event when it
+// is already open. ——
+
+const PANE_KEY = "pointcast.pane";
+/** How long an ask for a pane stays good: long enough for Settings to be built, short enough never to surprise. */
+const PANE_FRESH_MS = 15_000;
+
+export function settingsOpenOn(pane: string): Promise<void> {
+  try {
+    localStorage.setItem(PANE_KEY, `${pane}@${Date.now()}`);
+  } catch {
+    /* private mode: Settings opens where it was */
+  }
+  return inTauri ? windowOpen("settings") : Promise.resolve();
+}
+
+const readPaneAsk = (v: string | null, now: number) => {
+  const m = /^([a-z]+)@(\d+)$/.exec(v ?? "");
+  return m && now - Number(m[2]) < PANE_FRESH_MS ? m[1] : null;
+};
+
+/** Settings, as it opens: the pane another window asked for just now, once. */
+export function takePaneAsk(): string | null {
+  try {
+    const p = readPaneAsk(localStorage.getItem(PANE_KEY), Date.now());
+    localStorage.removeItem(PANE_KEY);
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** Settings, while open: each pane another window asks for. Returns the cleanup. */
+export function onPaneAsk(fn: (pane: string) => void): () => void {
+  const f = (e: StorageEvent) => {
+    if (e.key !== PANE_KEY) return;
+    const p = takePaneAsk();
+    if (p) fn(p);
+  };
+  window.addEventListener("storage", f);
+  return () => window.removeEventListener("storage", f);
+}
+
+// —— Choosing the AI (Settings › AI): the one adapter. Every engine name the pane uses is in ASSIST. Outside Tauri the
+// fixtures in assist.ts play the engine: settings.html?preview=1&pane=ai&assist=fresh|codex-signed-out|codex-ready|key|
+// local|offline. ——
+
+export const ASSIST = {
+  /** command → Assist: the routes, the choice and the offline switch (cheap: on open and after every action) */
+  providers: "assist_providers",
+  /** command { id } → AssistModel[] (may take a few seconds) */
+  models: "assist_models",
+  /** command { id, model, consent }: ok, or an error string */
+  choose: "assist_choose",
+  /** command { id }: the route's key and consent are cleared */
+  forget: "assist_forget",
+  /** command { id, key }: the engine keeps the key in the system's credential store */
+  keySet: "assist_key_set",
+  keyDelete: "assist_key_delete",
+  /** command { id }: opens the browser and resolves when signed in (up to 5 minutes) */
+  signIn: "assist_sign_in",
+  /** command { on } */
+  offlineOnly: "assist_offline_only",
+} as const;
+
+const assistPv = { a: null as Assist | null };
+const pvAssist = () => (assistPv.a ??= previewAssist(new URLSearchParams(location.search).get("assist") ?? "fresh"));
+const pvDo = (c: Parameters<typeof previewApply>[1]): Promise<void> => {
+  const r = previewApply(pvAssist(), c);
+  if (typeof r === "string") return Promise.reject(r);
+  assistPv.a = r;
+  return Promise.resolve();
+};
+const pvLater = <T,>(ms: number, f: () => T | Promise<T>) => new Promise<T>((res, rej) => setTimeout(() => Promise.resolve().then(f).then(res, rej), ms));
+
+export const assistProviders = (): Promise<Assist> =>
+  (inTauri ? invoke<unknown>(ASSIST.providers) : Promise.resolve(pvAssist())).then(normalizeAssist);
+export const assistModels = (id: string): Promise<AssistModel[]> =>
+  inTauri ? invoke<unknown>(ASSIST.models, { id }).then(normalizeModels) : pvLater(1200, () => previewModels(id));
+export const assistChoose = (id: string, model: string | null, consent: boolean) =>
+  inTauri ? invoke<void>(ASSIST.choose, { id, model, consent }) : pvDo({ cmd: "choose", id, model, consent });
+export const assistForget = (id: string) => (inTauri ? invoke<void>(ASSIST.forget, { id }) : pvDo({ cmd: "forget", id }));
+/** The key is handed straight to the engine and never kept, logged or echoed here. */
+export const assistKeySet = (id: string, key: string) =>
+  inTauri ? invoke<void>(ASSIST.keySet, { id, key }) : pvDo({ cmd: "key_set", id });
+export const assistKeyDelete = (id: string) => (inTauri ? invoke<void>(ASSIST.keyDelete, { id }) : pvDo({ cmd: "key_delete", id }));
+export const assistSignIn = (id: string) => (inTauri ? invoke<void>(ASSIST.signIn, { id }) : pvLater(1800, () => pvDo({ cmd: "signed_in", id })));
+export const assistOfflineOnly = (on: boolean) => (inTauri ? invoke<void>(ASSIST.offlineOnly, { on }) : pvDo({ cmd: "offline", on }));
 
 export function stamp(ms: number): string {
   const s = Math.floor(ms / 1000);

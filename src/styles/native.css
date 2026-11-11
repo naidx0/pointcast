@@ -1062,7 +1062,7 @@ html.win .home-recent li + li::before {
 }
 .home-recent button {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px 40px;
+  grid-template-columns: minmax(0, 1fr) 120px 72px;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -1135,6 +1135,200 @@ html.win .home-recent button {
 }
 html.win .home-foot .btn {
   margin-right: -14px;
+}
+/* Before an AI is chosen, Ask is one quiet line under the keys. */
+.home-ask {
+  margin: 12px 0 0;
+  font-size: var(--fs-caption);
+  color: var(--label-2);
+}
+.home-ask .link {
+  font: inherit;
+  color: var(--label);
+  text-decoration: underline;
+  text-decoration-color: var(--label-3);
+  text-underline-offset: 2px;
+}
+
+/* —— AI: the chosen AI on top, then each way to one as a plain row. Rows keep the pane's grouped look on both skins; what
+   a row opens (a key, the install line) sits under its words, inside the same row. —— */
+.ai-model {
+  width: 168px;
+  flex: none;
+}
+.ai-route {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.ai-inuse {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-caption);
+  color: var(--label-2);
+}
+.ai-more {
+  flex-basis: 100%;
+  min-width: 0;
+}
+.ai-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-key .field {
+  flex: 1;
+}
+.ai-help {
+  margin: 0;
+  font-size: var(--fs-small);
+  line-height: 16px;
+  color: var(--label-2);
+}
+.ai-help-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ai-cmd {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--h-control);
+  padding-left: 8px;
+  border-radius: var(--r-control);
+  background: var(--fill);
+}
+.ai-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px / 1 var(--mono);
+  color: var(--label);
+  user-select: all;
+  -webkit-user-select: all;
+}
+.ai-cmd .btn {
+  height: 100%;
+}
+
+/* —— Sheet: a Mac sheet drops from under the toolbar; a Windows dialog sits in the middle over a dimmed window, its
+   buttons in a footer band. Solid on both, so a window material never shows through it. —— */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  justify-items: center;
+  align-items: start;
+  padding: 52px 16px 16px;
+  background: rgba(0, 0, 0, 0.12);
+  animation: sheet-fade 160ms var(--ease);
+}
+html[data-theme="dark"] .sheet-scrim {
+  background: rgba(0, 0, 0, 0.32);
+}
+.sheet {
+  --sheet: #f6f6f6;
+  width: 360px;
+  max-width: 100%;
+  padding: 20px;
+  border-radius: var(--r-card);
+  background: var(--sheet);
+  box-shadow: var(--shadow-pop);
+  color: var(--label);
+  animation: sheet-in 220ms var(--ease);
+}
+html[data-theme="dark"] .sheet {
+  --sheet: #2c2c2e;
+}
+.sheet h2 {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+.sheet p {
+  margin: 8px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: var(--label-2);
+}
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.sheet-actions .btn {
+  min-width: 80px;
+}
+html.win .sheet-scrim {
+  align-items: center;
+  padding-top: 16px;
+  background: rgba(0, 0, 0, 0.3);
+}
+html.win .sheet {
+  --sheet: #f9f9f9;
+  --sheet-foot: #f3f3f3;
+  width: 400px;
+  padding: 24px 24px 0;
+  border-radius: var(--r-box);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+html.win[data-theme="dark"] .sheet {
+  --sheet: #2b2b2b;
+  --sheet-foot: #202020;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+html.win .sheet h2 {
+  font-size: 20px;
+  line-height: 28px;
+}
+html.win .sheet p {
+  margin-top: 12px;
+  font-size: var(--fs-body);
+  line-height: 20px;
+  color: var(--label);
+}
+html.win .sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 24px -24px 0;
+  padding: 24px;
+  background: var(--sheet-foot);
+  border-top: 1px solid var(--box-line);
+}
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+html.win .sheet {
+  animation-name: sheet-pop;
+}
+@keyframes sheet-pop {
+  from {
+    opacity: 0;
+    transform: scale(1.04);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-scrim,
+  .sheet {
+    animation: none;
+  }
 }
 
 /* —— Onboarding —— */

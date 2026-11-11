@@ -1,7 +1,7 @@
 // Run: node --test src/lib/home.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NO_WORDS, RECENT, dayLabel, firstWords, lengthLabel, recentRows, timeLabel } from "./home.ts";
+import { NO_WORDS, RECENT, dayLabel, firstWords, lengthLabel, recentRows, timeLabel, wordsLabel } from "./home.ts";
 
 // Wednesday 11 November 2026, 15:00 local.
 const NOW = new Date(2026, 10, 11, 15, 0);
@@ -95,6 +95,21 @@ test("a row says its first words, when, how long, and its pictures", () => {
   assert.equal(one.label, "hello, Yesterday, 09:30, 12 s, 1 picture");
   const [none] = recentRows([entry("c", at(2026, 11, 10, 9, 30), "hello", 0)], NOW, RECENT, "en-GB");
   assert.equal(none.label, "hello, Yesterday, 09:30, 12 s", "no pictures, nothing said about them");
+});
+
+test("a row counts its words when the entry carries them, and falls back to the length when it does not", () => {
+  const words = (w) => ({ ...entry("w", at(2026, 11, 11, 14, 2), "move the save button", 0, 42_000), words: w });
+  const [r] = recentRows([words(42)], NOW, RECENT, "en-GB");
+  assert.equal(r.length, "42 words");
+  assert.equal(r.label, "move the save button, Today, 14:02, 42 words");
+  assert.equal(recentRows([words(1)], NOW, RECENT, "en-GB")[0].length, "1 word");
+  assert.equal(recentRows([words(1204)], NOW, RECENT, "en-GB")[0].length, "1,204 words");
+  assert.equal(recentRows([words(undefined)], NOW, RECENT, "en-GB")[0].length, "42 s", "an older build sends no count");
+  assert.equal(recentRows([words(0)], NOW, RECENT, "en-GB")[0].length, "42 s", "zero words says how long instead");
+  assert.equal(recentRows([words(Number.NaN)], NOW, RECENT, "en-GB")[0].length, "42 s");
+  const [none] = recentRows([{ ...entry("n", at(2026, 11, 11, 9), ""), words: 3 }], NOW, RECENT, "en-GB");
+  assert.equal(none.length, "12 s", "an entry without words never claims a count");
+  assert.equal(wordsLabel(2.6, "en-GB"), "3 words");
 });
 
 test("an entry without words says so, whether its text is empty or the list's no-words line", () => {

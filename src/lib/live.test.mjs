@@ -162,8 +162,28 @@ test("no AI chosen is the Settings error; any other failure offers Try again", (
   assert.equal(errorView("Choose an AI in Settings first", "").label, "Open Settings");
   const net = errorView({ code: "provider", message: "ChatGPT could not be reached" }, "ChatGPT");
   assert.equal(net.text, "ChatGPT could not be reached");
-  assert.equal(net.action, "close");
+  assert.equal(net.action, "close", "nothing kept: nothing to ask again");
   assert.equal(errorView(null, "Claude").text, "Claude could not answer");
+  const again = errorView({ code: "provider", message: "ChatGPT could not be reached" }, "ChatGPT", true);
+  assert.deepEqual(again, { text: "ChatGPT could not be reached", action: "retry", label: "Try again" });
+  assert.equal(errorView({ code: "no_provider" }, "", true).action, "settings", "Settings wins over Try again");
+});
+
+test("an AI that is not allowed yet sends the person to Settings, whatever was kept", () => {
+  const allow = { text: "Allow ChatGPT in Settings first", action: "settings", label: "Open Settings" };
+  assert.deepEqual(errorView({ code: "not_allowed", message: "Allow ChatGPT in Settings first" }, "ChatGPT", true), allow);
+  assert.deepEqual(errorView("Allow ChatGPT in Settings first", "ChatGPT", true), allow);
+  assert.deepEqual(errorView({ code: "not_allowed" }, "ChatGPT"), allow);
+});
+
+test("the panel's error offers Try again only when the question was kept", () => {
+  const err = { code: "provider", message: "ChatGPT could not be reached" };
+  assert.equal(liveView(at(snap({ state: "error", error: err, words: "why is this red" })), 0).error?.action, "retry");
+  assert.equal(liveView(at(snap({ state: "error", error: err, words: "  " })), 0).error?.action, "close");
+  for (const k of ["provider", "allow", "none"]) {
+    const v = liveView(at(previewSnapshot("error", { error: k })), 0);
+    assert.equal(v.error?.action, k === "provider" ? "retry" : "settings", k);
+  }
 });
 
 test("Esc stops while anything is under way and closes otherwise", () => {
