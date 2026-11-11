@@ -21,7 +21,7 @@ import {
   type Config,
   type UiState,
 } from "@/lib/api";
-import { discardClick, finishingLine, micCaption, noticeView } from "@/lib/capsule";
+import { READY_WAIT_MS, discardClick, finishingLine, micCaption, noticeView, readyNote } from "@/lib/capsule";
 import { chordText } from "@/lib/keys";
 import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
@@ -47,22 +47,6 @@ const BARS = 9;
 function built(): UiState {
   const st = (window as { __POINTCAST_HUD__?: Partial<UiState> }).__POINTCAST_HUD__;
   return { ...idle, phase: "loading", ...st };
-}
-
-/** What the capsule says while a recording gets ready: before the microphone is live nothing is recorded (a neutral
- * dot, no clock); once it is live but the speech model still loads, audio is kept and transcribed after, so it says so. */
-export function readyNote(s: UiState): { lines: [string, string?]; full: string } | null {
-  const live = s.mic;
-  const loading = s.phase === "loading";
-  if (!(s.phase === "loading" || s.phase === "recording")) return null;
-  if (live && !loading) return null;
-  if (s.preparing_gpu) {
-    // The full sentence is too wide for the capsule's two short lines; it is the tooltip and what a screen reader says.
-    const lines: [string, string] = ["Setting up graphics card", live ? "keep talking" : "(first time only)"];
-    return { lines, full: `Setting up your graphics card (first time only)${live ? ", keep talking" : ""}` };
-  }
-  if (live) return { lines: ["Getting ready…", "keep talking"], full: "Getting ready… keep talking" };
-  return { lines: ["Getting ready…"], full: "Getting ready…" };
 }
 
 /** The recording HUD: a small capsule that never takes focus from the app you are talking about. */
@@ -142,6 +126,15 @@ export function Indicator() {
 /** The recording row. A quiet microphone keeps the timer and the bars (flat bars are the evidence) and says so under
  * them; Discard asks once before it throws the recording away. */
 function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null; lv: number[] }) {
+  // How long this recording has waited for its microphone: a normal start is never said, a slow one is.
+  const [waited, setWaited] = useState(0);
+  const waiting = (s.phase === "loading" || s.phase === "recording") && !s.mic;
+  useEffect(() => {
+    setWaited(0);
+    if (!waiting) return;
+    const t = setTimeout(() => setWaited(READY_WAIT_MS), READY_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [waiting]);
   const [armed, setArmed] = useState<number | null>(() =>
     preview && new URLSearchParams(location.search).get("discard") === "1" ? Number.MAX_SAFE_INTEGER : null,
   );
@@ -163,7 +156,7 @@ function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null
 
   const tip = (name: string, label?: string) => (label ? `${name} (${chordText(label)})` : name);
   const problem = s.error;
-  const ready = readyNote(s);
+  const ready = readyNote(s, waited);
   // Nothing is recorded until the microphone's first samples arrive: no red dot and no clock before that.
   const live = s.mic;
   const quiet = s.phase === "recording" && live && s.quiet_mic && !problem && !ready ? s.quiet_mic : null;

@@ -1,7 +1,7 @@
 // Run: node --test src/lib/capsule.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DISCARD_ARM_MS, discardClick, discardLive, finishingLine, micCaption, noticeView } from "./capsule.ts";
+import { DISCARD_ARM_MS, READY_WAIT_MS, discardClick, discardLive, finishingLine, micCaption, noticeView, readyNote } from "./capsule.ts";
 
 const NOTICES = ["pasted", "copied", "saved", "kept", "partial", "cut", "empty"];
 const win = { mac: false, pasteBlocked: false, entry: "e1", error: null };
@@ -84,4 +84,20 @@ test("discard: after 3 s the arm is gone and a click arms again", () => {
 test("the mic caption fits the capsule: one short line per kind", () => {
   assert.equal(micCaption("silent"), "No sound from the mic");
   assert.equal(micCaption("quiet"), "Mic is very quiet");
+});
+
+test("a live microphone looks like recording at once, whatever the speech model is doing", () => {
+  for (const phase of ["loading", "recording"]) {
+    assert.equal(readyNote({ phase, mic: true }, 0), null);
+    assert.equal(readyNote({ phase, mic: true, preparing_gpu: true }, 5_000), null);
+  }
+});
+
+test("only a microphone slow to start is said, and never in the first moment", () => {
+  assert.equal(readyNote({ phase: "loading", mic: false }, 0), null, "no flash of text on a normal start");
+  assert.equal(readyNote({ phase: "loading", mic: false }, READY_WAIT_MS - 1), null);
+  assert.deepEqual(readyNote({ phase: "loading", mic: false }, READY_WAIT_MS)?.lines, ["Getting ready…"]);
+  assert.equal(readyNote({ phase: "loading", mic: false, preparing_gpu: true }, READY_WAIT_MS)?.full, "Setting up your graphics card (first time only)");
+  assert.equal(readyNote({ phase: "transcribing", mic: false }, 9_000), null);
+  assert.equal(readyNote({ phase: "idle", mic: false }, 9_000), null);
 });

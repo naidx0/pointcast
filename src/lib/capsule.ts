@@ -66,3 +66,16 @@ export function discardClick(armedUntil: number | null, now: number): { discard:
 export function micCaption(quiet: NonNullable<UiState["quiet_mic"]>): string {
   return quiet === "silent" ? "No sound from the mic" : "Mic is very quiet";
 }
+
+/** How long the microphone may take to start before the capsule says anything about it. */
+export const READY_WAIT_MS = 600;
+
+/** What the capsule says while a recording gets ready, or null for the plain recording look. Once the microphone is
+ * live it looks like recording at once: the audio is kept and written down when the speech model has loaded, so there
+ * is nothing for the person to wait for. Before that, only a microphone slow to start (a Bluetooth headset) is said. */
+export function readyNote(s: { phase: string; mic: boolean; preparing_gpu?: boolean }, waitedMs: number): { lines: [string, string?]; full: string } | null {
+  if (!(s.phase === "loading" || s.phase === "recording")) return null;
+  if (s.mic || waitedMs < READY_WAIT_MS) return null;
+  if (s.preparing_gpu) return { lines: ["Setting up graphics card", "(first time only)"], full: "Setting up your graphics card (first time only)" };
+  return { lines: ["Getting ready…"], full: "Getting ready…" };
+}
