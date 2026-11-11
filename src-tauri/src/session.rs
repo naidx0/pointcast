@@ -2929,6 +2929,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// Saved to a folder only: a stop in a test never touches the clipboard or pastes.
+    fn folder_only(a: &App, out: &std::path::Path) {
+        let mut s = a.settings.lock().unwrap();
+        (s.output, s.also_clipboard, s.export_dir) = (OutputMode::Folder, false, Some(out.to_string_lossy().into_owned()));
+    }
+
+    /// A real recording (not practice) of `text` begun at `t0`, stopped and saved with its audio, to transcribe again.
+    /// Its History entry's id.
+    fn recorded(a: &Arc<App>, out: &std::path::Path, t0: u64, text: &str) -> String {
+        a.practice.store(false, Ordering::SeqCst);
+        folder_only(a, out);
+        a.items.lock().unwrap().clear();
+        *a.t0.lock().unwrap() = Some(t0);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.history.append_audio(&bursts(8.5, &SPANS)).unwrap();
+        a.push(Item::Speech { t_ms: 300, end_ms: 2_700, text: text.into() }).unwrap();
+        a.stop(false).unwrap().expect("a stop that saves");
+        a.last_id.lock().unwrap().clone().expect("a History entry")
+    }
+
+    #[test]
+    fn a_saved_recording_is_counted_once_by_its_stop_and_the_next_one_counts_again() {
+        let a = app("stats-stop");
+        let out = std::env::temp_dir().join(format!("pc-session-stats-stop-out-{}", std::process::id()));
+        // Counting has begun, on an empty History: from here only the stop can count, never a first count from History.
+        assert_eq!(a.stats.get().total, crate::stats::Total::default());
+        let now = now_ms();
+        let t0 = now - 120_000;
+        let first = recorded(&a, &out, t0, "move the button left");
+        let t = a.stats.get().total;
+        assert_eq!((t.recordings, t.words, t.pictures), (1, 4, 0), "the stop counted it: {t:?}");
+        assert!(t.wall_ms >= 120_000 && t.speech_ms == 2_400, "{t:?}");
+        // A second stop with nothing recording counts nothing more.
+        assert!(a.stop(false).unwrap().is_none());
+        assert_eq!(a.stats.get().total, t);
+        // A crash after the save and before the checkpoint went: the recovery at the next launch saves the same entry
+        // again, and counting it (as launch does) adds nothing.
+        a.history.checkpoint(&[Item::Speech { t_ms: 300, end_ms: 2_700, text: "move the button left".into() }], t0).unwrap();
+        let back = a.history.recover().expect("recovered");
+        assert_eq!(back.id, first);
+        a.stats.count(&back);
+        assert_eq!(a.stats.get().total, t, "a recovered recording already counted is not counted twice");
+        // An unrelated recording counts again.
+        let second = recorded(&a, &out, now - 60_000, "and make it blue");
+        assert_ne!(first, second);
+        let t = a.stats.get().total;
+        assert_eq!((t.recordings, t.words, a.history.list().len()), (2, 8, 2), "{t:?}");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn transcribing_a_saved_recording_again_replaces_its_counted_words_and_never_adds_them() {
+        let a = app("stats-again");
+        let out = std::env::temp_dir().join(format!("pc-session-stats-again-out-{}", std::process::id()));
+        assert_eq!(a.stats.get().total.recordings, 0);
+        let id = recorded(&a, &out, now_ms() - 60_000, "one two three");
+        assert_eq!(a.stats.get().total.words, 3);
+        // Heard again by a model that says "piece 1", "piece 2", "piece 3": six words in place of the three.
+        let hear = counting();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
+        assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
+        let t = a.stats.get().total;
+        assert_eq!((t.recordings, t.words), (1, 6), "replaced, not added: {t:?}");
+        // The same words again change nothing.
+        let hear = counting();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
+        assert_eq!(a.stats.get().total, t);
+        // One that fails, and one cancelled part way, leave the counts as they were.
+        let half = |_: &[f32], _: u64| {
+            assert!(a.again_cancel());
+            Ok(Some(Heard { text: "half".into(), tokens: None }))
+        };
+        assert_eq!(a.again(&id, || Ok(()), each(half), |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        let _ = a.again(&id, || Err("the speech model did not load".into()), each(|_: &[f32], _: u64| -> Result<Option<Heard>, String> { Ok(None) }), |_, _| {});
+        assert_eq!(a.stats.get().total, t);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_cancelled_a_practice_or_an_empty_recording_counts_nothing() {
+        let a = app("stats-nothing");
+        let out = std::env::temp_dir().join(format!("pc-session-stats-nothing-out-{}", std::process::id()));
+        folder_only(&a, &out);
+        let zero = a.stats.get();
+        assert_eq!(zero.total.recordings, 0);
+        let said = || Item::Speech { t_ms: 0, end_ms: 900, text: "never mind this".into() };
+        // Cancelled, with words and audio.
+        a.practice.store(false, Ordering::SeqCst);
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.history.append_audio(&bursts(1.0, &SPANS)).unwrap();
+        a.push(said()).unwrap();
+        assert!(a.stop(true).unwrap().is_none());
+        // A practice run: shown, never kept.
+        a.practice.store(true, Ordering::SeqCst);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.push(said()).unwrap();
+        assert!(a.stop(false).unwrap().is_some());
+        // Nothing said and no audio kept.
+        a.practice.store(false, Ordering::SeqCst);
+        a.items.lock().unwrap().clear();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop(false).unwrap();
+        assert!(a.history.list().is_empty(), "nothing was kept");
+        assert_eq!(a.stats.get(), zero, "and nothing was counted");
+        // The same App counts a recording it keeps: those stops passed the count by, it is there.
+        recorded(&a, &out, now_ms() - 30_000, "this one stays");
+        assert_eq!(a.stats.get().total.recordings, 1);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
     #[test]
     fn a_stop_shows_how_far_the_last_words_are_and_never_claims_done_early() {
         // 40 s of audio waits; the model took 20 s for 10 s of this recording.
