@@ -259,6 +259,61 @@
   box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px #fff;
 }
 
+/* The current colour; the five swatches open from it. */
+.ov-root .ov-pal {
+  position: relative;
+  display: flex;
+  flex: none;
+}
+
+.ov-root .ov-cur i {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px rgba(255, 255, 255, 0.9);
+}
+
+.ov-root .ov-pop {
+  position: absolute;
+  z-index: 31;
+  top: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 12px;
+}
+
+.ov-root .ov-pop-up {
+  top: auto;
+  bottom: calc(100% + 12px);
+}
+
+/* The box's border: drag it to move the box, whatever the tool. Its handles sit above it and resize. */
+.ov-root .ov-edge {
+  position: absolute;
+  z-index: 18;
+  cursor: move;
+}
+
+.ov-root .ov-edge-n,
+.ov-root .ov-edge-s {
+  height: 10px;
+  margin-top: -5px;
+}
+
+.ov-root .ov-edge-e,
+.ov-root .ov-edge-w {
+  width: 10px;
+  margin-left: -5px;
+}
+
+.ov-root .ov-x {
+  margin-left: 2px;
+}
+
 .ov-root .ov-go {
   display: flex;
   align-items: center;

@@ -4,13 +4,13 @@ import {
   EyeOff,
   Highlighter,
   MapPin,
-  MousePointer2,
   MoveUpRight,
   Pencil,
   Redo2,
   Square,
   Type,
   Undo2,
+  X,
   ZoomIn,
   type LucideIcon,
 } from "lucide-react";
@@ -79,6 +79,7 @@ const PREVIEW_EDIT = PREVIEW && location.search.includes("edit=1");
 // Room a picture from History leaves around it (logical px) for the toolbar below and the hint under that.
 const EDGE = { side: 40, top: 40, bottom: 128 };
 const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
+const COLOR_NAMES = ["Red", "Orange", "Yellow", "Green", "Blue"];
 const HL = "#FFCC00";
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 // Sizes in logical (on-screen) px. Everything drawn into the frame is multiplied by s = frame px per logical px.
@@ -86,8 +87,9 @@ const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pill
 const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const HX = { nw: 0, n: 0.5, ne: 1, e: 1, se: 1, s: 0.5, sw: 0, w: 0 };
 const HY = { nw: 0, n: 0, ne: 0, e: 0.5, se: 1, s: 1, sw: 1, w: 0.5 };
+// Moving the box needs no tool: its border always moves it, its handles resize it, and Space or the middle button moves
+// it from inside. V still picks a move mode for those who used it, with no button of its own.
 const TOOLS: { id: Tool; Icon: LucideIcon; label: string; key: string }[] = [
-  { id: "move", Icon: MousePointer2, label: "Move selection", key: "V" },
   { id: "pin", Icon: MapPin, label: "Pin", key: "P" },
   { id: "arrow", Icon: MoveUpRight, label: "Arrow", key: "A" },
   { id: "rect", Icon: Square, label: "Rectangle", key: "R" },
@@ -99,7 +101,8 @@ const TOOLS: { id: Tool; Icon: LucideIcon; label: string; key: string }[] = [
 ];
 // Tools that draw where they are dragged; pressing with one starts a stroke, not a grab.
 const DRAWS = new Set<Tool>(["arrow", "rect", "redact", "highlight", "pen"]);
-const KEYS = Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.id])) as Record<string, Tool>;
+const KEYS = { ...Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.id])), v: "move" } as Record<string, Tool>;
+const SIDES = ["n", "e", "s", "w"] as const;
 
 function esc(layer: Layer): Layer | "idle" {
   if (layer === "drawing" || layer === "pinning") return "annotating";
@@ -108,7 +111,7 @@ function esc(layer: Layer): Layer | "idle" {
 }
 
 const GESTURE: Record<Tool, string> = {
-  move: "Drag inside the box to move it",
+  move: "Drag inside the box to move it · Click a mark to pick it",
   pin: "Click to drop a numbered pin",
   arrow: "Drag an arrow",
   rect: "Drag a rectangle",
@@ -541,6 +544,10 @@ export function Overlay() {
   const [nudge, setNudge] = useState<{ id: number; at: Pt } | null>(null);
   // A rectangle or hidden area being moved or resized, shown in place of the stored one until release.
   const [drag, setDrag] = useState<Box2 | null>(null);
+  const [pal, setPal] = useState(false);
+  const [space, setSpace] = useState(false);
+  const [gone, setGone] = useState(false);
+  const spaceRef = useRef(false);
   const [edit, setEdit] = useState(false);
   const [base, setBase] = useState(0);
   const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
@@ -611,9 +618,19 @@ export function Overlay() {
     window.addEventListener("resize", onResize);
     const onKey = (e: KeyboardEvent) => keyRef.current(e);
     window.addEventListener("keydown", onKey);
+    const spaceUp = (e: KeyboardEvent | FocusEvent) => {
+      if (e.type === "blur" || (e as KeyboardEvent).key === " ") {
+        spaceRef.current = false;
+        setSpace(false);
+      }
+    };
+    window.addEventListener("keyup", spaceUp);
+    window.addEventListener("blur", spaceUp);
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", spaceUp);
+      window.removeEventListener("blur", spaceUp);
       void u.then((fn) => fn?.());
       void f.then((fn) => fn?.());
     };
@@ -673,10 +690,21 @@ export function Overlay() {
     setLayer((l) => (l === "pinning" ? "annotating" : l));
   }
 
+  // Leave without capturing: what Esc does from the selecting layer, and the toolbar's Cancel.
+  function leave() {
+    setPal(false);
+    if (PREVIEW) setGone(true);
+    try {
+      void regionCancel().catch(() => {});
+    } catch {
+      /* plain browser, no Tauri */
+    }
+  }
+
   function back() {
     const next = edit && layer === "annotating" ? "idle" : esc(layer);
     if (next === "idle") {
-      void regionCancel().catch(() => {});
+      leave();
       return;
     }
     if (layer === "drawing") {
@@ -737,6 +765,7 @@ export function Overlay() {
     const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
     if (e.key === "Escape") {
       if (typing) t.blur();
+      else if (pal) setPal(false);
       else back();
       return;
     }
@@ -748,6 +777,20 @@ export function Overlay() {
     if (typing) return;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
+    // Space held: drag inside the box to move it. Kept from pressing a focused toolbar button.
+    if (e.key === " ") {
+      e.preventDefault();
+      if (!spaceRef.current) {
+        spaceRef.current = true;
+        setSpace(true);
+      }
+      return;
+    }
+    const n = "12345".indexOf(e.key);
+    if (!mod && !e.altKey && n >= 0 && e.key.length === 1) {
+      setColor(COLORS[n]);
+      return;
+    }
     if (mod && (k === "z" || k === "y")) {
       e.preventDefault();
       dispatch({ t: k === "y" || e.shiftKey ? "redo" : "undo" });
@@ -759,7 +802,9 @@ export function Overlay() {
   };
 
   function down(e: PE<HTMLDivElement>) {
-    if (e.button !== 0 || !src || !natural.w) return;
+    setPal(false);
+    const middle = e.button === 1;
+    if ((e.button !== 0 && !middle) || !src || !natural.w) return;
     setPicked(null);
     const p = toImg(e);
     if (layer === "selecting") {
@@ -768,7 +813,7 @@ export function Overlay() {
       return;
     }
     if (!box) return;
-    if (tool === "move") {
+    if (tool === "move" || middle || spaceRef.current) {
       if (inside(p, box)) {
         ix.current = { k: "move", a: p, o: box };
         setCur({ x: e.clientX, y: e.clientY });
@@ -822,8 +867,20 @@ export function Overlay() {
     if (e.button === 0) setPicked(id);
   }
 
+  // The box's border moves it, whatever the tool.
+  function startMove(e: PE<HTMLDivElement>) {
+    e.stopPropagation();
+    setPal(false);
+    if ((e.button !== 0 && e.button !== 1) || !box) return;
+    setPicked(null);
+    ix.current = { k: "move", a: toImg(e), o: box };
+    setCur({ x: e.clientX, y: e.clientY });
+    grab(e);
+  }
+
   function startSize(e: PE<HTMLDivElement>, h: Handle) {
     e.stopPropagation();
+    setPal(false);
     if (e.button !== 0 || !box) return;
     ix.current = { k: "size", h, o: box };
     setCur({ x: e.clientX, y: e.clientY });
@@ -951,7 +1008,9 @@ export function Overlay() {
   const edW = ed && "text" in ed ? Math.max(112, textW(ed.text || " ", M.font) + 2 * M.padX + 10) : 0;
   const readout = cur && box ? `${Math.round(box.w)} × ${Math.round(box.h)} px` : "";
   const rw = readout.length * 7 + 20;
-  const cursor = layer === "selecting" ? "crosshair" : tool === "move" ? "move" : tool === "text" ? "text" : "crosshair";
+  const cursor = layer === "selecting" ? "crosshair" : tool === "move" || space || ix.current?.k === "move" ? "move" : tool === "text" ? "text" : "crosshair";
+  // The colour pop-over opens away from the box, or toward it when there is no room above the hint pill.
+  const popUp = sb ? (bar.y < sb.y ? bar.y > 64 : bar.y + tb.h + 56 > vp.h - 62) : false;
   const dim = `M0 0H${vp.w}V${vp.h}H0Z${sb ? `M${sb.x} ${sb.y}h${sb.w}v${sb.h}h${-sb.w}Z` : ""}`;
   const canEdit = tool === "pin" || tool === "text";
   const pickedShape = vis.find((x) => x.id === picked);
@@ -967,8 +1026,10 @@ export function Overlay() {
       onPointerUp={up}
       onPointerCancel={cancel}
       onContextMenu={(e) => e.preventDefault()}
+      // The middle button moves the box; keep the browser's autoscroll out of it.
+      onMouseDown={(e) => e.button === 1 && e.preventDefault()}
     >
-      {src && natural.w ? (
+      {gone ? null : src && natural.w ? (
         <>
           <img className="ov-frame" src={src} alt="" draggable={false} style={{ left: ox, top: oy, width: dw, height: dh }} />
           <svg className="ov-dim" width={vp.w} height={vp.h}>
@@ -1054,6 +1115,16 @@ export function Overlay() {
               )}
             </svg>
           ) : null}
+          {sb && layer !== "selecting" && layer !== "drawing"
+            ? SIDES.map((d) => (
+                <div
+                  key={d}
+                  className={`ov-edge ov-edge-${d}`}
+                  style={d === "n" || d === "s" ? { left: sb.x, top: d === "n" ? sb.y : sb.y + sb.h, width: sb.w } : { left: d === "w" ? sb.x : sb.x + sb.w, top: sb.y, height: sb.h }}
+                  onPointerDown={startMove}
+                />
+              ))
+            : null}
           {sb && layer !== "selecting"
             ? HANDLES.map((h) => (
                 <div key={h} className={`ov-h ov-h-${h}`} style={{ left: sb.x + sb.w * HX[h], top: sb.y + sb.h * HY[h] }} onPointerDown={(e) => startSize(e, h)} />
@@ -1121,28 +1192,55 @@ export function Overlay() {
           {readout}
         </div>
       ) : null}
-      {sb && layer !== "selecting" ? (
+      {sb && layer !== "selecting" && !gone ? (
         <div
           ref={barRef}
           className="ov-hud ov-bar"
           style={{ left: bar.x, top: bar.y }}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (!(e.target as HTMLElement).closest(".ov-pal")) setPal(false);
+          }}
           onMouseDown={(e) => e.preventDefault()}
         >
-          {TOOLS.map((t, i) => (
-            <span key={t.id} style={{ display: "contents" }}>
-              {i === 1 ? <span className="ov-sep" /> : null}
-              <button type="button" className="ov-btn" aria-pressed={tool === t.id} aria-label={t.label} title={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
-                <t.Icon size={18} strokeWidth={1.75} />
-              </button>
-            </span>
-          ))}
-          <span className="ov-sep" />
-          {COLORS.map((c) => (
-            <button key={c} type="button" className="ov-sw" aria-pressed={color === c} aria-label={`Colour ${c}`} title={c} onClick={() => setColor(c)}>
-              <i style={{ ["--c" as string]: c }} />
+          {TOOLS.map((t) => (
+            <button key={t.id} type="button" className="ov-btn" aria-pressed={tool === t.id} aria-label={t.label} title={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
+              <t.Icon size={18} strokeWidth={1.75} />
             </button>
           ))}
+          <span className="ov-pal">
+            <button
+              type="button"
+              className="ov-btn ov-cur"
+              aria-label={`Colour: ${COLOR_NAMES[COLORS.indexOf(color)]}`}
+              aria-haspopup="true"
+              aria-expanded={pal}
+              title="Colour (1 to 5)"
+              onClick={() => setPal((o) => !o)}
+            >
+              <i style={{ ["--c" as string]: color }} />
+            </button>
+            {pal ? (
+              <span className={popUp ? "ov-hud ov-pop ov-pop-up" : "ov-hud ov-pop"} role="group" aria-label="Colours">
+                {COLORS.map((c, i) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className="ov-sw"
+                    aria-pressed={color === c}
+                    aria-label={COLOR_NAMES[i]}
+                    title={`${COLOR_NAMES[i]} (${i + 1})`}
+                    onClick={() => {
+                      setColor(c);
+                      setPal(false);
+                    }}
+                  >
+                    <i style={{ ["--c" as string]: c }} />
+                  </button>
+                ))}
+              </span>
+            ) : null}
+          </span>
           <span className="ov-sep" />
           <button type="button" className="ov-btn" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" disabled={!hs.past.length} onClick={() => dispatch({ t: "undo" })}>
             <Undo2 size={18} strokeWidth={1.75} />
@@ -1155,9 +1253,12 @@ export function Overlay() {
             <Check size={16} strokeWidth={2.25} />
             {edit ? "Save" : "Capture"}
           </button>
+          <button type="button" className="ov-btn ov-x" aria-label="Cancel" title="Cancel (Esc)" onClick={leave}>
+            <X size={18} strokeWidth={1.75} />
+          </button>
         </div>
       ) : null}
-      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit)}</div> : null}
+      {src && !gone ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />
