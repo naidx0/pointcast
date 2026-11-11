@@ -2,7 +2,9 @@
 // the offline filter, where the words go, and the consent sheet's words, so node --test reads it without a window
 // (src/lib/assist.test.mjs). The engine's command names live only in the adapter in api.ts.
 
-export type RouteKind = "plan" | "key" | "local";
+/** How a route is paid for: the ChatGPT plan through Codex, another subscription through its vendor's own agent, a
+ * pasted key, or nothing (a model on this computer). */
+export type RouteKind = "plan" | "agent" | "key" | "local";
 export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported";
 /** `default`: the model the route itself starts with. */
 export type AssistModel = { id: string; name: string; images: boolean; default?: boolean };
@@ -19,6 +21,10 @@ export type Route = {
   goes_to: string;
   /** Nothing leaves this computer. */
   offline: boolean;
+  /** It can be chosen now (Claude through Claude Code waits for the owner's OK). */
+  available: boolean;
+  /** The address the person agreed to, for the route that takes one (`custom`); empty otherwise. */
+  base: string;
   /** The person allowed this AI and destination once. */
   consented: boolean;
   models: AssistModel[];
@@ -51,6 +57,7 @@ export type Help = { text: string; command: string | null };
 
 export const GROUPS: readonly (readonly [RouteKind, string])[] = [
   ["plan", "Your plan"],
+  ["agent", "Your subscriptions"],
   ["key", "A key"],
   ["local", "This computer"],
 ];
@@ -58,7 +65,10 @@ export const GROUPS: readonly (readonly [RouteKind, string])[] = [
 /** OpenAI's own install line for its Codex CLI (the same line updates it). */
 export const CODEX_INSTALL = "npm i -g @openai/codex";
 
-const KINDS: RouteKind[] = ["plan", "key", "local"];
+/** The route whose address the person types: any service that answers like OpenAI's chat API. */
+export const CUSTOM = "custom";
+
+const KINDS: RouteKind[] = ["plan", "agent", "key", "local"];
 const STATES: RouteState[] = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported"];
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
@@ -75,6 +85,8 @@ export function normalizeAssist(x: unknown): Assist {
       line: str(p.line).trim(),
       goes_to: str(p.goes_to),
       offline: p.offline === true || p.kind === "local",
+      available: p.available !== false,
+      base: str(p.base).trim(),
       consented: p.consented === true,
       models: normalizeModels(p.models),
       plan: str(p.plan) || str((p as { planType?: unknown }).planType) || null,
@@ -95,11 +107,11 @@ export function visibleRoutes(a: Assist): Route[] {
   return a.offline_only ? a.providers.filter((p) => p.offline) : a.providers;
 }
 
-/** The route answering Ask now, or null: nothing chosen, or a route that leaves the computer while only this computer
- * is allowed. */
+/** The route answering Ask now, or null: nothing chosen, a route that cannot be chosen yet, or one that leaves the
+ * computer while only this computer is allowed. */
 export function chosenRoute(a: Assist): Route | null {
   const p = a.providers.find((r) => r.id === a.chosen) ?? null;
-  return p && (!a.offline_only || p.offline) ? p : null;
+  return p && p.available && (!a.offline_only || p.offline) ? p : null;
 }
 
 /** Ask can answer: an AI is chosen and allowed. Home shows the Ask key only then. */
@@ -129,11 +141,29 @@ function planLine(p: Route): string {
   return p.id === "codex" ? `${named}, through Codex` : named;
 }
 
-/** A route's one line in plain words, and the one action that fits its state. */
+/** A route's one line in plain words, and the one action that fits its state. A route that cannot be chosen yet says
+ * why and offers nothing; an agent's line is the engine's own, which already ends in its one next step. */
 export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">): RouteView {
-  const chosen = a.chosen === p.id && (!a.offline_only || p.offline);
+  const chosen = a.chosen === p.id && p.available && (!a.offline_only || p.offline);
   const base = { id: p.id, name: shortName(p), chosen, forget: chosen || p.consented || (p.kind === "key" && p.state !== "no_key"), help: null };
   const use = (line: string): RouteView => ({ ...base, line, action: chosen ? null : "use", label: chosen ? null : "Use" });
+  if (!p.available) return { ...base, line: p.line || "Not available yet", action: null, label: null };
+  if (p.kind === "agent") {
+    const v = stateView(p, base, use);
+    const line = p.line || v.line;
+    return p.state === "ready" || p.state === "unsupported" ? { ...v, line } : { ...base, line, action: "check", label: "Check again" };
+  }
+  if (p.id === CUSTOM && p.state !== "unsupported") {
+    if (!p.base) return { ...base, line: "No address yet", action: "add_key", label: "Set up" };
+    const host = hostOf(p.base);
+    if (p.state === "ready") return use(`Key saved for ${host}`);
+    if (p.offline) return use(`At ${host}, no key needed`);
+    return { ...base, line: `No key yet for ${host}`, action: "add_key", label: "Add key" };
+  }
+  return stateView(p, base, use);
+}
+
+function stateView(p: Route, base: Omit<RouteView, "line" | "action" | "label">, use: (line: string) => RouteView): RouteView {
   switch (p.state) {
     case "ready":
       return use(p.kind === "plan" ? planLine(p) : p.kind === "key" ? "Key saved" : "Running, free");
@@ -178,6 +208,7 @@ export function goesLine(p: Pick<Route, "id" | "kind" | "goes_to" | "offline">, 
   const what = images ? "Your words and pictures go" : "Your words go";
   const to = destination(p.goes_to) || "the AI";
   if (p.id === "codex") return `${what} to ${to}, through Codex on this computer`;
+  if (p.kind === "agent") return `${what} to ${to}`;
   return p.kind === "plan" ? `${what} to ${to}, on your plan` : `${what} to ${to}, with your key`;
 }
 
@@ -186,6 +217,7 @@ export function nowView(a: Assist): { title: string; line: string } {
   const p = chosenRoute(a);
   if (!p) {
     const off = a.providers.find((r) => r.id === a.chosen);
+    if (off && !off.available) return { title: "Nothing chosen", line: off.line || `${shortName(off)} is not available yet` };
     if (off) return { title: "Nothing chosen", line: `${off.name} sends words off this computer, so it is off for now` };
     return { title: "Nothing chosen", line: "Choose an AI below. Until then nothing leaves this computer." };
   }
@@ -217,6 +249,74 @@ export const modelLabel = (m: AssistModel) => (m.images ? m.name : `${m.name} (w
 /** Whether a route's choice needs the consent sheet first. */
 export const needsConsent = (p: Pick<Route, "consented">) => !p.consented;
 
+// —— The other service (`custom`): the address the person types, checked here as the engine checks it
+// (catalog::base_of), so a wrong one is said before anything is sent. ——
+
+/** The engine's own words for a refused address. */
+export const BASE_ERRORS = {
+  parse: "That is not a web address.",
+  extra: "Type only the address of the service, with no name, password or query in it.",
+  scheme: "The address must start with https:// (http:// only for this computer).",
+} as const;
+
+/** This computer, as the engine reads a host (openai::loopback): localhost, 127.x.x.x or ::1. */
+function loopback(u: URL): boolean {
+  let h = u.hostname;
+  while (h.startsWith("[")) h = h.slice(1);
+  while (h.endsWith("]") || h.endsWith(".")) h = h.slice(0, -1);
+  if (h.toLowerCase() === "localhost" || h === "::1") return true;
+  const parts = h.split(".");
+  return parts.length === 4 && parts.every((n) => n !== "" && String(Number(n)) === n && Number(n) < 256) && parts[0] === "127";
+}
+
+const parsed = (text: string): URL | null => {
+  try {
+    return new URL(text.trim());
+  } catch {
+    return null;
+  }
+};
+
+/** The address typed for the other service: https, or http only to this computer, and nothing but the address (no
+ * name, password, query or fragment, which could carry a key into the settings). Trailing slashes go, as the engine
+ * drops them. */
+export function baseOf(text: string): { base: string } | { why: string } {
+  const u = parsed(text);
+  if (!u) return { why: BASE_ERRORS.parse };
+  // A query or fragment, even an empty one, keeps its ? or # in the address; neither can appear anywhere else in it.
+  if (u.username || u.password || u.href.includes("?") || u.href.includes("#")) return { why: BASE_ERRORS.extra };
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && loopback(u)))) return { why: BASE_ERRORS.scheme };
+  let base = u.href;
+  while (base.endsWith("/")) base = base.slice(0, -1);
+  return { base };
+}
+
+/** Nothing sent to this address leaves this computer. */
+export const isHere = (base: string) => {
+  const u = parsed(base);
+  return !!u && loopback(u);
+};
+
+/** The host the words go to, as the engine names it. */
+export const hostOf = (base: string) => parsed(base)?.hostname ?? "";
+
+/** The other service's form, checked before anything is sent: an address the engine takes, a model's name, and a key
+ * unless one is saved or the address is this computer. */
+export function customCheck(
+  p: Pick<Route, "state">,
+  f: { address: string; model: string; key: boolean },
+): { base: string; model: string } | { why: string } {
+  const b = baseOf(f.address);
+  if ("why" in b) return b;
+  const model = f.model.trim();
+  if (!model) return { why: "Type the name of a model too." };
+  if (!f.key && p.state !== "ready" && !isHere(b.base)) return { why: "Paste the service's key too." };
+  return { base: b.base, model };
+}
+
+/** An address the person has not agreed to is a new destination: the consent sheet opens again. */
+export const needsConsentAt = (p: Pick<Route, "consented" | "base">, base: string) => !p.consented || p.base !== base;
+
 // —— Browser preview fixtures (settings.html?preview=1&pane=ai&assist=…): data only; api.ts plays them. ——
 
 export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key", "local", "offline"] as const;
@@ -237,6 +337,8 @@ const MODELS: Record<string, AssistModel[]> = {
     { id: "deepseek/deepseek-chat", name: "DeepSeek Chat", images: false },
   ],
   gemini: [{ id: "gemini-flash", name: "Gemini Flash", images: true }],
+  anthropic: [{ id: "claude-sonnet", name: "Claude Sonnet", images: true }],
+  xai: [{ id: "grok-4", name: "Grok 4", images: true }],
   ollama: [
     { id: "gemma3:12b", name: "gemma3:12b", images: true },
     { id: "qwen2.5:7b", name: "qwen2.5:7b", images: false },
@@ -244,32 +346,50 @@ const MODELS: Record<string, AssistModel[]> = {
   lmstudio: [],
 };
 
-/** The routes on a fresh computer: Codex not installed, no keys, Ollama installed but stopped, no LM Studio. */
+/** The engine's line for Claude through Claude Code until the owner's OK (catalog::CLAUDE_CODE_NOT_OK). */
+export const CLAUDE_CODE_NOT_OK = "Needs your OK first: Anthropic's terms for using Claude Code inside another app";
+
+/** The routes on a fresh computer, in the engine's order: Codex not installed; the Gemini CLI installed (the engine
+ * cannot tell whether it is signed in), Copilot and OpenCode not installed, Claude Code waiting for the owner's OK; no
+ * keys and no address; Ollama installed but stopped, no LM Studio. */
 export function previewAssist(kind: string): Assist {
-  const r = (id: string, name: string, k: RouteKind, state: RouteState, goes_to: string): Route => ({
+  const r = (id: string, name: string, k: RouteKind, state: RouteState, goes_to: string, line = ""): Route => ({
     id,
     name,
     kind: k,
     state,
-    line: "",
+    line,
     goes_to,
     offline: k === "local",
+    available: true,
+    base: "",
     consented: false,
     models: state === "ready" ? MODELS[id] ?? [] : [],
     plan: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
   });
+  const missing = (cli: string) => `${cli} is not installed on this computer. Install the ${cli} first.`;
   const a: Assist = {
     chosen: null,
     model: null,
     offline_only: false,
     providers: [
       r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
-      r("openai", "OpenAI API", "key", "no_key", "OpenAI"),
-      r("openrouter", "OpenRouter", "key", "no_key", "OpenRouter"),
-      r("gemini", "Gemini API", "key", "no_key", "Google"),
-      r("ollama", "Ollama on this computer", "local", "not_running", ""),
-      r("lmstudio", "LM Studio on this computer", "local", "not_installed", ""),
+      r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first."),
+      r("copilot", "GitHub Copilot", "agent", "not_installed", "GitHub, through your Copilot plan", missing("GitHub Copilot CLI")),
+      r("opencode", "OpenCode", "agent", "not_installed", "the AI you set up in OpenCode", missing("OpenCode")),
+      { ...r("claude-code", "Claude", "agent", "unsupported", "Anthropic, through your Claude plan", CLAUDE_CODE_NOT_OK), available: false },
+      r("openai", "OpenAI API", "key", "no_key", "api.openai.com"),
+      r("anthropic", "Claude API", "key", "no_key", "api.anthropic.com"),
+      r("xai", "Grok (xAI API)", "key", "no_key", "api.x.ai"),
+      r("gemini", "Gemini API", "key", "no_key", "generativelanguage.googleapis.com"),
+      r("groq", "Groq", "key", "no_key", "api.groq.com"),
+      r("mistral", "Mistral", "key", "no_key", "api.mistral.ai"),
+      r("deepseek", "DeepSeek", "key", "no_key", "api.deepseek.com"),
+      r("openrouter", "OpenRouter", "key", "no_key", "openrouter.ai"),
+      r(CUSTOM, "Other OpenAI-compatible", "key", "no_key", "the address you type", "Type the address of the service first."),
+      r("ollama", "Ollama on this computer", "local", "not_running", "this computer"),
+      r("lmstudio", "LM Studio on this computer", "local", "not_installed", "this computer"),
     ],
   };
   const set = (id: string, p: Partial<Route>) => {
@@ -300,7 +420,10 @@ export function previewAssist(kind: string): Assist {
 /** The preview's answer to a command, as the engine would change the list. */
 export function previewApply(
   a: Assist,
-  c: { cmd: "choose"; id: string; model: string | null; consent: boolean } | { cmd: "forget" | "key_set" | "key_delete" | "signed_in"; id: string } | { cmd: "offline"; on: boolean },
+  c:
+    | { cmd: "choose"; id: string; model: string | null; consent: boolean; base?: string }
+    | { cmd: "forget" | "key_set" | "key_delete" | "signed_in"; id: string }
+    | { cmd: "offline"; on: boolean },
 ): Assist | string {
   const find = (id: string) => a.providers.find((p) => p.id === id);
   const map = (id: string, f: (p: Route) => Route) => ({ ...a, providers: a.providers.map((p) => (p.id === id ? f(p) : p)) });
@@ -309,13 +432,28 @@ export function previewApply(
       return { ...a, offline_only: c.on };
     case "choose": {
       const p = find(c.id);
-      if (!p || p.state !== "ready") return "That AI is not ready";
-      if (!p.consented && !c.consent) return `Allow ${p.name} in Settings first`;
-      if (a.offline_only && !p.offline) return "Only this computer is allowed";
-      return { ...map(c.id, (x) => ({ ...x, consented: true })), chosen: c.id, model: c.model ?? defaultModel(p) };
+      if (!p) return "Pointcast does not offer that AI.";
+      if (!p.available) return p.line;
+      // The other service: a typed address is checked, and one not agreed to is a new destination.
+      let at = p.base;
+      if (p.id === CUSTOM && c.base !== undefined) {
+        const b = baseOf(c.base);
+        if ("why" in b) return b.why;
+        at = b.base;
+      }
+      if (p.id === CUSTOM && !at) return "Type the address of the service first.";
+      const here = p.id === CUSTOM ? isHere(at) : p.offline;
+      if (p.state !== "ready" && !(p.id === CUSTOM && here)) return "That AI is not ready";
+      if (a.offline_only && !here) return "Only this computer is allowed";
+      const model = c.model ?? defaultModel(p);
+      if ((p.kind === "key" || p.kind === "local") && !model) return `Choose a model for ${p.name} first.`;
+      if (needsConsentAt(p, at) && !c.consent) return `Allow ${p.name} in Settings first`;
+      const agreed = p.id === CUSTOM ? { base: at, goes_to: hostOf(at), offline: here } : {};
+      return { ...map(c.id, (x) => ({ ...x, ...agreed, consented: true })), chosen: c.id, model };
     }
     case "forget": {
-      const next = map(c.id, (p) => ({ ...p, consented: false, ...(p.kind === "key" ? { state: "no_key" as const, models: [] } : {}) }));
+      const gone = (p: Route) => (p.id === CUSTOM ? { base: "", goes_to: "the address you type", offline: false } : {});
+      const next = map(c.id, (p) => ({ ...p, ...gone(p), consented: false, ...(p.kind === "key" ? { state: "no_key" as const, models: [] } : {}) }));
       return a.chosen === c.id ? { ...next, chosen: null, model: null } : next;
     }
     case "key_set":

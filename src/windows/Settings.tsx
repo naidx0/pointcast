@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -60,14 +60,20 @@ import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
 import { recentRows, type RecentRow } from "@/lib/home";
 import {
+  CUSTOM,
   askReady,
   chosenRoute,
   consentText,
+  customCheck,
   defaultModel,
   groups,
+  hostOf,
+  isHere,
   modelLabel,
   needsConsent,
+  needsConsentAt,
   nowView,
+  shortName,
   type Assist,
   type AssistModel,
   type Route,
@@ -693,7 +699,8 @@ function Ai() {
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [more, setMore] = useState<{ id: string; what: "key" | "help" } | null>(null);
-  const [consent, setConsent] = useState<Route | null>(null);
+  // The route the sheet asks about; for the other service, also the address and model typed (never the key).
+  const [consent, setConsent] = useState<{ route: Route; model?: string; base?: string } | null>(null);
   const [found, setFound] = useState<{ id: string; list: AssistModel[] } | null>(null);
   const [finding, setFinding] = useState(false);
   const load = () =>
@@ -706,9 +713,10 @@ function Ai() {
     return () => window.removeEventListener("focus", load);
   }, []);
   const chosen = a ? chosenRoute(a) : null;
-  // The chosen route's full model list can take a few seconds: the quick list stands in until it comes.
+  // The chosen route's full model list can take a few seconds: the quick list stands in until it comes. An agent picks
+  // its own model, so there is nothing to ask.
   useEffect(() => {
-    if (!chosen) return;
+    if (!chosen || chosen.kind === "agent") return;
     let live = true;
     setFinding(true);
     assistModels(chosen.id)
@@ -735,9 +743,22 @@ function Ai() {
       await load();
     }
   };
-  const choose = (p: Route, consent: boolean) => run(p.id, () => assistChoose(p.id, defaultModel(p), consent));
+  // A key's or a server's models are not in the quick list: they are asked for before the choice, which needs one.
+  const choose = (p: Route, consent: boolean, model?: string, base?: string) =>
+    run(p.id, async () => {
+      let m = model ?? defaultModel(p);
+      if (!m && (p.kind === "key" || p.kind === "local")) m = defaultModel({ models: await assistModels(p.id) });
+      return assistChoose(p.id, m, consent, base);
+    });
+  // The other service: the key goes straight to the engine; an address not agreed to opens the sheet, naming its host.
+  const setUp = async (p: Route, f: { base: string; model: string; key: string }) => {
+    if (f.key && !(await run(p.id, () => assistKeySet(p.id, f.key)))) return;
+    setMore(null);
+    if (needsConsentAt(p, f.base)) return setConsent({ route: { ...p, goes_to: hostOf(f.base), offline: isHere(f.base) }, model: f.model, base: f.base });
+    return choose(p, false, f.model, f.base);
+  };
   const act = (v: RouteView, p: Route) => {
-    if (v.action === "use") return needsConsent(p) ? setConsent(p) : choose(p, false);
+    if (v.action === "use") return needsConsent(p) ? setConsent({ route: p }) : choose(p, false);
     if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id));
     if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
     if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
@@ -753,7 +774,7 @@ function Ai() {
     <>
       <div className="group">
         <Row label={now.title} sub={now.line}>
-          {chosen ? (
+          {chosen && chosen.kind !== "agent" ? (
             <select
               className="field ai-model"
               aria-label="Model"
@@ -787,6 +808,28 @@ function Ai() {
             {g.routes.map((v) => {
               const p = a.providers.find((x) => x.id === v.id)!;
               const open = more?.id === v.id ? more.what : null;
+              const close = () => setMore(null);
+              const form =
+                p.id === CUSTOM ? (
+                  <CustomForm
+                    route={p}
+                    model={a.chosen === p.id ? (a.model ?? "") : ""}
+                    busy={busy === p.id}
+                    save={(f) => setUp(p, f)}
+                    fail={(why) => setErrs((e) => ({ ...e, [p.id]: why }))}
+                    cancel={() => {
+                      close();
+                      setErrs((e) => ({ ...e, [p.id]: "" }));
+                    }}
+                  />
+                ) : (
+                  <KeyForm
+                    name={v.name}
+                    busy={busy === p.id}
+                    save={(key) => run(p.id, () => assistKeySet(p.id, key)).then((ok) => ok && setMore(null))}
+                    cancel={close}
+                  />
+                );
               return (
                 <RouteRow
                   key={v.id}
@@ -794,11 +837,10 @@ function Ai() {
                   busy={busy === v.id}
                   err={errs[v.id] ?? ""}
                   more={open}
+                  form={form}
                   act={() => act(v, p)}
-                  close={() => setMore(null)}
                   check={() => run(p.id, () => Promise.resolve())}
                   forget={() => run(p.id, () => assistForget(p.id))}
-                  saveKey={(key) => run(p.id, () => assistKeySet(p.id, key)).then((ok) => ok && setMore(null))}
                 />
               );
             })}
@@ -807,10 +849,10 @@ function Ai() {
       ))}
       {consent ? (
         <ConsentSheet
-          route={consent}
+          route={consent.route}
           allow={() => {
             setConsent(null);
-            choose(consent, true);
+            choose(consent.route, true, consent.model, consent.base);
           }}
           cancel={() => setConsent(null)}
         />
@@ -821,18 +863,17 @@ function Ai() {
 
 const BUSY: Partial<Record<NonNullable<RouteView["action"]>, string>> = { sign_in: "Signing in…", check: "Checking…" };
 
-/** One way to an AI: its name, its state in plain words, and the one action that fits; a key or the install help opens
- * under it. */
+/** One way to an AI: its name, its state in plain words, and the one action that fits; its key form (`form`) or the
+ * install help opens under it. */
 function RouteRow(props: {
   v: RouteView;
   busy: boolean;
   err: string;
   more: "key" | "help" | null;
+  form: ReactNode;
   act: () => void;
-  close: () => void;
   check: () => void;
   forget: () => void;
-  saveKey: (key: string) => void;
 }) {
   const { v, busy, err, more } = props;
   const [sure, setSure] = useState(false);
@@ -888,7 +929,7 @@ function RouteRow(props: {
           {(busy && BUSY[v.action]) || v.label}
         </button>
       ) : null}
-      {more === "key" ? <KeyForm name={v.name} busy={busy} save={props.saveKey} cancel={props.close} /> : null}
+      {more === "key" ? props.form : null}
       {more === "help" && v.help ? (
         <div className="ai-more">
           <p className="ai-help">{v.help.text}</p>
@@ -961,6 +1002,76 @@ function KeyForm({ name, busy, save, cancel }: { name: string; busy: boolean; sa
       <button type="submit" className="btn primary" disabled={!filled || busy}>
         {busy ? "Saving…" : "Save"}
       </button>
+    </form>
+  );
+}
+
+/** The other service: its address and a model's name beside the key. The address and model are not secret and stay as
+ * typed; the key is read once on Save, the field emptied at once, and handed on, never kept. Esc is Cancel. */
+function CustomForm(props: {
+  route: Route;
+  model: string;
+  busy: boolean;
+  save: (f: { base: string; model: string; key: string }) => void;
+  fail: (why: string) => void;
+  cancel: () => void;
+}) {
+  const { route, busy, cancel } = props;
+  const first = useRef<HTMLInputElement>(null);
+  const field = useRef<HTMLInputElement>(null);
+  const [address, setAddress] = useState(route.base);
+  const [model, setModel] = useState(props.model);
+  useEffect(() => first.current?.focus(), []);
+  const esc = (e: ReactKeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+    }
+  };
+  return (
+    <form
+      className="ai-more ai-custom"
+      noValidate
+      onKeyDown={esc}
+      onSubmit={(e) => {
+        e.preventDefault();
+        const el = field.current;
+        const c = customCheck(route, { address, model, key: !!el?.value.trim() });
+        if ("why" in c) return props.fail(c.why);
+        const key = el?.value.trim() ?? "";
+        if (el) el.value = "";
+        props.save({ ...c, key });
+      }}
+    >
+      <input
+        ref={first}
+        className="field"
+        aria-label="Address"
+        placeholder="https://…/v1"
+        inputMode="url"
+        autoComplete="off"
+        spellCheck={false}
+        value={address}
+        onChange={(e) => setAddress(e.currentTarget.value)}
+      />
+      <input
+        className="field"
+        aria-label="Model"
+        placeholder="Model"
+        autoComplete="off"
+        spellCheck={false}
+        value={model}
+        onChange={(e) => setModel(e.currentTarget.value)}
+      />
+      <input ref={field} type="password" className="field" aria-label={`${shortName(route)} key`} placeholder="Paste your key" autoComplete="off" spellCheck={false} />
+      <div className="ai-custom-actions">
+        <button type="button" className="btn plain" onClick={cancel}>
+          Cancel
+        </button>
+        <button type="submit" className="btn primary" disabled={busy || !address.trim()}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
     </form>
   );
 }

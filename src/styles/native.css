@@ -1250,6 +1250,26 @@ html.win .home-foot .btn {
 .ai-key .field {
   flex: 1;
 }
+/* The other service: its address and model on one line, the key and the buttons under them, in two aligned columns. */
+.ai-custom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(168px, auto);
+  gap: 8px;
+}
+.ai-custom .field {
+  min-width: 0;
+}
+.ai-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* Sixteen routes stay calm: on Windows too they are compact rows, not full-height cards. */
+html.win .ai-route {
+  min-height: 52px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
 .ai-help {
   margin: 0;
   font-size: var(--fs-small);

@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { LEVEL_FIELDS, PREVIEW_ANSWER, levelOf, previewChunks, previewLevel, previewPicture, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
-import { normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
+import { CUSTOM, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const preview = !inTauri && typeof location !== "undefined" && location.search.includes("preview=1");
@@ -668,7 +668,7 @@ export const ASSIST = {
   providers: "assist_providers",
   /** command { id } → AssistModel[] (may take a few seconds) */
   models: "assist_models",
-  /** command { id, model, consent }: ok, or an error string */
+  /** command { id, model, consent, base? }: ok, or an error string; `base` is the typed address, only for `custom` */
   choose: "assist_choose",
   /** command { id }: the route's key and consent are cleared */
   forget: "assist_forget",
@@ -695,8 +695,11 @@ export const assistProviders = (): Promise<Assist> =>
   (inTauri ? invoke<unknown>(ASSIST.providers) : Promise.resolve(pvAssist())).then(normalizeAssist);
 export const assistModels = (id: string): Promise<AssistModel[]> =>
   inTauri ? invoke<unknown>(ASSIST.models, { id }).then(normalizeModels) : pvLater(1200, () => previewModels(id));
-export const assistChoose = (id: string, model: string | null, consent: boolean) =>
-  inTauri ? invoke<void>(ASSIST.choose, { id, model, consent }) : pvDo({ cmd: "choose", id, model, consent });
+/** `base` reaches the engine only for the other service (`custom`); every other route has its own address. */
+export const assistChoose = (id: string, model: string | null, consent: boolean, base?: string) => {
+  const at = id === CUSTOM && base ? { base } : {};
+  return inTauri ? invoke<void>(ASSIST.choose, { id, model, consent, ...at }) : pvDo({ cmd: "choose", id, model, consent, ...at });
+};
 export const assistForget = (id: string) => (inTauri ? invoke<void>(ASSIST.forget, { id }) : pvDo({ cmd: "forget", id }));
 /** The key is handed straight to the engine and never kept, logged or echoed here. */
 export const assistKeySet = (id: string, key: string) =>
