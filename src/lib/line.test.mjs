@@ -8,6 +8,9 @@ import {
   VOICE_DX,
   loopsPath,
   marginPath,
+  meterLevel,
+  meterStart,
+  meterStep,
   noise,
   pathPoints,
   restPath,
@@ -143,4 +146,36 @@ test("the resting stroke is short and level", () => {
   assert.equal(pts.length, 2);
   assert.equal(pts[0].y, pts[1].y);
   assert.ok(pts[1].x - pts[0].x <= 16.1);
+});
+
+// The adaptive meter: 50 ms frames, the room at 0.2 (about -42 dBFS), a soft voice 5 to 7 dB over it.
+const run = (m, levels) => {
+  const out = [];
+  for (const r of levels) {
+    m = meterStep(m, r, 50);
+    out.push(meterLevel(m, r));
+  }
+  return { m, out };
+};
+const soft = (n) => Array.from({ length: n }, (_, i) => (i % 6 < 4 ? 0.3 + (i % 3) * 0.02 : 0.21));
+const room = (n) => Array.from({ length: n }, (_, i) => 0.2 + ((i * 7) % 5) * 0.004);
+
+test("a soft voice on a weak microphone swings the line more than half its height", () => {
+  const { out } = run(meterStart(), soft(60));
+  assert.ok(Math.max(...out) > 0.75, `peak lift ${Math.max(...out)}`);
+  const spoken = out.filter((v, i) => i % 6 < 4);
+  assert.ok(spoken.reduce((a, v) => a + v, 0) / spoken.length > 0.5, "most syllables lift it past half");
+});
+
+test("silence after speech is a flat line", () => {
+  const { m } = run(meterStart(), soft(60));
+  const { out } = run(m, room(40));
+  assert.deepEqual(out.slice(4), out.slice(4).map(() => 0));
+});
+
+test("a loud burst does not squash the soft words after it", () => {
+  const { m } = run(meterStart(), [...soft(12), 0.9, 0.9, 0.9, 0.9]);
+  const { out } = run(m, soft(80));
+  const late = out.slice(-20).filter((v, i) => i % 6 < 4);
+  assert.ok(Math.max(...late) > 0.55, `late lift ${Math.max(...late)}`);
 });

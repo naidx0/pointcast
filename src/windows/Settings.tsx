@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeybo
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Check, House, Image, Info, Keyboard, MessageCircleQuestion, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, Settings2, Share } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
@@ -530,19 +530,23 @@ const RANGES = [
   ["all", "All time"],
 ] as const;
 
-/** The first pane: what was dictated (four numbers for the week or for all time, then when in the week), the last few
- * recordings, and the two shortcuts that start everything. Read once, as the pane opens. */
+/** The first pane, the hub: the two features side by side, each with its keys and where it is set up (dictation with
+ * mark-up; Ask with the AI that answers), then what was dictated (four numbers for the week or for all time, then when
+ * in the week) and the last few recordings. Read once, as the pane opens. */
 function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   const [counts, setCounts] = useState<Counts | null>(null);
   const [recent, setRecent] = useState<RecentRow[]>([]);
   const [range, setRange] = useState<Range>("week");
   const [sure, setSure] = useState(false);
-  // Ask joins the ways in once an AI is chosen; null until the engine says.
-  const [ask, setAsk] = useState<boolean | null>(null);
+  // The AI that answers Ask, by its short name; "" when none is chosen, null until the engine says.
+  const [ai, setAi] = useState<string | null>(null);
   useEffect(() => {
     assistProviders()
-      .then((a) => setAsk(askReady(a)))
-      .catch(() => setAsk(false));
+      .then((a) => {
+        const r = askReady(a) ? chosenRoute(a) : null;
+        setAi(r ? shortName(r) : "");
+      })
+      .catch(() => setAi(""));
     statsGet()
       .catch(() => null)
       .then((u) => setCounts(readUsage(u, Date.now())));
@@ -559,6 +563,52 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   };
   return (
     <div className="home">
+      <div className="home-hub">
+        <section className="feature" aria-labelledby="hub-dictate">
+          <h2 id="hub-dictate">Dictate and mark up</h2>
+          <p>Talk and mark up the screen. The prompt is pasted where you type.</p>
+          <div className="feature-keys">
+            <span>Dictate</span>
+            <Keycaps label={cfg.hotkeys.session.label} />
+            <span>Mark up</span>
+            <Keycaps label={cfg.hotkeys.region.label} />
+          </div>
+          <div className="feature-foot">
+            <button type="button" className="link" onClick={() => go("speech")}>
+              Speech
+              <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+            <button type="button" className="link" onClick={() => go("capture")}>
+              Capture
+              <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+        <section className="feature" aria-labelledby="hub-ask">
+          <h2 id="hub-ask">Ask about your screen</h2>
+          <p>Ask out loud about what you see. The answer opens beside your work.</p>
+          <div className="feature-keys">
+            {cfg.hotkeys.ask ? (
+              <>
+                <span>Ask</span>
+                <Keycaps label={cfg.hotkeys.ask.label} />
+              </>
+            ) : (
+              <button type="button" className="link" onClick={() => go("shortcuts")}>
+                Set a shortcut
+              </button>
+            )}
+          </div>
+          <div className="feature-foot">
+            {ai == null ? null : (
+              <button type="button" className={`link${ai ? "" : " strong"}`} onClick={() => go("ai")} aria-label={ai ? `AI: ${ai}. Change it` : undefined}>
+                {ai || "Choose an AI"}
+                <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
       {v.empty ? (
         <p className="home-quiet">{v.quiet}</p>
       ) : (
@@ -638,35 +688,6 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
           </ul>
         </section>
       ) : null}
-      <section>
-        <div className="home-sec">
-          <h2 className="home-title">Shortcuts</h2>
-          <button type="button" className="link" onClick={() => go("shortcuts")}>
-            Change
-          </button>
-        </div>
-        <div className="home-keys">
-          <span>
-            Dictate <Keycaps label={cfg.hotkeys.session.label} />
-          </span>
-          <span>
-            Mark up <Keycaps label={cfg.hotkeys.region.label} />
-          </span>
-          {ask && cfg.hotkeys.ask ? (
-            <span>
-              Ask <Keycaps label={cfg.hotkeys.ask.label} />
-            </span>
-          ) : null}
-        </div>
-        {ask === false && cfg.hotkeys.ask ? (
-          <p className="home-ask">
-            Ask about your screen:{" "}
-            <button type="button" className="link" onClick={() => go("ai")}>
-              choose an AI
-            </button>
-          </p>
-        ) : null}
-      </section>
       <div className="home-foot">
         <span>{v.since}</span>
         <button
@@ -703,10 +724,15 @@ function Ai() {
   const [consent, setConsent] = useState<{ route: Route; model?: string; base?: string } | null>(null);
   const [found, setFound] = useState<{ id: string; list: AssistModel[] } | null>(null);
   const [finding, setFinding] = useState(false);
+  // The routes did not come: one quiet line with Try again, never an empty pane.
+  const [failed, setFailed] = useState(false);
   const load = () =>
     assistProviders()
-      .then(setA)
-      .catch(() => undefined);
+      .then((x) => {
+        setA(x);
+        setFailed(false);
+      })
+      .catch(() => setFailed(true));
   useEffect(() => {
     load();
     window.addEventListener("focus", load);
@@ -727,7 +753,15 @@ function Ai() {
       live = false;
     };
   }, [chosen?.id]);
-  if (!a) return null;
+  if (!a)
+    return failed ? (
+      <p className="ai-fail" role="status">
+        <span>The list of AIs didn’t load.</span>
+        <button type="button" className="btn" onClick={load}>
+          Try again
+        </button>
+      </p>
+    ) : null;
 
   const run = async (id: string, job: () => Promise<unknown>) => {
     setErrs((e) => ({ ...e, [id]: "" }));
@@ -804,7 +838,7 @@ function Ai() {
       {groups(a).map((g) => (
         <Fragment key={g.kind}>
           <h2 className="group-title">{g.title}</h2>
-          <div className="group">
+          <div className="group routes">
             {g.routes.map((v) => {
               const p = a.providers.find((x) => x.id === v.id)!;
               const open = more?.id === v.id ? more.what : null;

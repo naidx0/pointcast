@@ -1,0 +1,82 @@
+/* The line (src/components/Line.tsx): one 1.5 px stroke with round ends, the same in the Ask panel and the dictation
+   capsule. Where it sits sets its ink: --line-ink, --line-warn and --line-faint (the panel's label colours by default,
+   the capsule's own on its dark material). Ask's accent is set in live.css only: the accent means the AI. */
+:root {
+  --line-ink: var(--label);
+  --line-warn: var(--orange);
+  --line-faint: var(--label-3);
+}
+.ln {
+  display: block;
+  overflow: visible;
+  transition: color 180ms var(--ease);
+}
+.ln path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ln.ink {
+  color: var(--line-ink);
+}
+.ln.warn {
+  color: var(--line-warn);
+}
+.ln.quiet {
+  color: var(--line-faint);
+}
+.ln .tip.red {
+  fill: var(--red);
+}
+.ln .tip.ink {
+  fill: currentColor;
+}
+.line-voice .ln {
+  overflow: hidden;
+}
+/* Thinking: light travels through the loops, slow and calm. */
+.ln.loops .ghost {
+  opacity: 0.26;
+}
+.ln.loops .head,
+.ln.loops .tail {
+  animation: line-head 2.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.ln.loops .head {
+  stroke-dasharray: 7 200;
+  stroke-dashoffset: 7;
+}
+.ln.loops .tail {
+  stroke-dasharray: 22 200;
+  stroke-dashoffset: 22;
+  opacity: 0.4;
+  animation-name: line-tail;
+}
+@keyframes line-head {
+  to {
+    stroke-dashoffset: -115;
+  }
+}
+@keyframes line-tail {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+/* Reduced motion: no travelling light; the loops dim and return in steps. */
+@media (prefers-reduced-motion: reduce) {
+  .ln.loops .head,
+  .ln.loops .tail {
+    display: none;
+  }
+  .ln.loops .ghost {
+    opacity: 1;
+    animation: line-step 1.6s steps(1, end) infinite !important;
+  }
+}
+@keyframes line-step {
+  50% {
+    opacity: 0.45;
+  }
+}

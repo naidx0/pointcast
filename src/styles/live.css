@@ -11,6 +11,9 @@
   --live-accent-text: var(--accent);
   --live-warn: var(--orange);
   --live-bg: var(--content);
+  --line-ink: var(--live-ink);
+  --line-warn: var(--live-warn);
+  --line-faint: var(--live-faint);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -99,9 +102,6 @@ html.win .live-row {
   /* The past fades out to the left: the ink is freshest at the pen. */
   -webkit-mask-image: linear-gradient(to right, transparent 0, #000 28px);
   mask-image: linear-gradient(to right, transparent 0, #000 28px);
-}
-.live-voice .ln {
-  overflow: hidden;
 }
 .live-row .live-line {
   margin: 0;
@@ -281,64 +281,12 @@ html.win .live-big {
   color: var(--live-accent-text);
 }
 
-/* —— The line —— */
+/* —— The line (shared rules in line.css): the panel's ink, and the accent, which means the AI —— */
 .live-line {
   height: 24px;
 }
-.ln {
-  display: block;
-  overflow: visible;
-  transition: color 180ms var(--ease);
-}
-.ln path {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.ln.ink {
-  color: var(--live-ink);
-}
 .ln.accent {
   color: var(--live-accent);
-}
-.ln.warn {
-  color: var(--live-warn);
-}
-.ln.quiet {
-  color: var(--live-faint);
-}
-.ln .tip {
-  fill: var(--red);
-}
-/* Thinking: light travels through the loops, slow and calm. */
-.ln.loops .ghost {
-  opacity: 0.26;
-}
-.ln.loops .head,
-.ln.loops .tail {
-  animation: live-head 2.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
-}
-.ln.loops .head {
-  stroke-dasharray: 7 200;
-  stroke-dashoffset: 7;
-}
-.ln.loops .tail {
-  stroke-dasharray: 22 200;
-  stroke-dashoffset: 22;
-  opacity: 0.4;
-  animation-name: live-tail;
-}
-@keyframes live-head {
-  to {
-    stroke-dashoffset: -115;
-  }
-}
-@keyframes live-tail {
-  to {
-    stroke-dashoffset: -100;
-  }
 }
 
 .live-note {
@@ -581,21 +529,8 @@ html.live-hidden .live * {
   .live .live-thumb-btn img.new {
     animation-duration: 1ms;
   }
-  .live .ln.loops .head,
-  .live .ln.loops .tail {
-    display: none;
-  }
-  .live .ln.loops .ghost {
-    opacity: 1;
-    animation: live-step 1.6s steps(1, end) infinite !important;
-  }
   .live .live-answer .caret {
     animation: none !important;
-  }
-}
-@keyframes live-step {
-  50% {
-    opacity: 0.45;
   }
 }
 

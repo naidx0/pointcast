@@ -21,8 +21,10 @@ import {
   type Config,
   type UiState,
 } from "@/lib/api";
-import { READY_WAIT_MS, discardClick, finishingLine, micCaption, noticeView, readyNote } from "@/lib/capsule";
+import { READY_WAIT_MS, capsuleLine, discardClick, finishingLine, micCaption, noticeView, readyNote, timeStays } from "@/lib/capsule";
+import { Line, type LevelSource } from "@/components/Line";
 import { chordText } from "@/lib/keys";
+import { LEVEL_FIELDS, levelOf, previewLevel } from "@/lib/live";
 import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
 
@@ -40,7 +42,16 @@ const idle: UiState = {
   notice: null,
 };
 
-const BARS = 9;
+/** The capsule's line hears the session's state stream as Ask's line does: `loudness` first (0 while the microphone is
+ * not live), so one voice moves both lines alike. */
+const sinks = new Set<(raw: number) => void>();
+const hudLevels: LevelSource = (set) => {
+  sinks.add(set);
+  return () => void sinks.delete(set);
+};
+/** The line's height in the 48 px capsule, and its width per stroke: narrower than Ask's, for a shorter line. */
+const LINE_H = 28;
+const LINE_DX = 11;
 
 /** The state the window was built for, set by the app before the page loads, so a freshly built capsule's first frame
  * is the true one ("Getting ready…" for a recording just started) and never a recording at 0:00. */
@@ -53,8 +64,6 @@ function built(): UiState {
 export function Indicator() {
   const [s, setS] = useState<UiState>(inTauri ? built : idle);
   const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
-  const [lv, setLv] = useState<number[]>(Array(BARS).fill(0));
-  const last = useRef(0);
 
   useEffect(() => {
     if (inTauri) {
@@ -95,17 +104,16 @@ export function Indicator() {
             ? null
             : { done_ms: Number(pct) * 600, total_ms: 60_000, percent: Number(pct), stalled },
       });
-      const id = setInterval(() => setLv((x) => [...x.slice(1), Math.random() * 0.9]), 110);
+      // A made-up voice for the line, at the engine's rate.
+      let i = 0;
+      const id = setInterval(() => sinks.forEach((f) => f(previewLevel(i++))), 33);
       return () => clearInterval(id);
     }
     return subscribe(
       onState((st) => {
         setS(st);
-        const now = performance.now();
-        if (now - last.current > 80) {
-          last.current = now;
-          setLv((x) => [...x.slice(1), st.mic ? Math.min(1, st.level) : 0]);
-        }
+        const raw = levelOf(st, LEVEL_FIELDS);
+        sinks.forEach((f) => f(raw));
       }),
     );
   }, []);
@@ -120,12 +128,13 @@ export function Indicator() {
   if (s.phase === "transcribing") return <Finishing s={s} />;
   if (s.phase === "ready" && s.notice) return <Done s={s} />;
 
-  return <Recording s={s} keys={keys} lv={lv} />;
+  return <Recording s={s} keys={keys} />;
 }
 
-/** The recording row. A quiet microphone keeps the timer and the bars (flat bars are the evidence) and says so under
- * them; Discard asks once before it throws the recording away. */
-function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null; lv: number[] }) {
+/** The recording row: the red dot, the line the voice draws (the time over its faded end on hover, and from a minute
+ * on), the picture tools, Discard and Finish. A quiet microphone keeps the time and the line (a flat line is the
+ * evidence) and says so under them; Discard asks once before it throws the recording away. */
+function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) {
   // How long this recording has waited for its microphone: a normal start is never said, a slow one is.
   const [waited, setWaited] = useState(0);
   const waiting = (s.phase === "loading" || s.phase === "recording") && !s.mic;
@@ -167,25 +176,30 @@ function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null
     <div className="hud-wrap" data-tauri-drag-region>
       <div className={`hud ${mic ? "warned" : ""}`} data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
         <span className={`rec ${live ? "" : "ready"}`} data-tauri-drag-region />
-        {ready || !live ? null : (
-          <span className="time" data-tauri-drag-region>
-            {stamp(s.duration_ms)}
-          </span>
-        )}
         {problem ? (
-          <span className="note" title={problem} data-tauri-drag-region>
-            {problem}
-          </span>
+          <>
+            {live ? (
+              <span className="time" data-tauri-drag-region>
+                {stamp(s.duration_ms)}
+              </span>
+            ) : null}
+            <span className="note" title={problem} data-tauri-drag-region>
+              {problem}
+            </span>
+          </>
         ) : ready ? (
           <span className={`note getting ${ready.lines[1] ? "two" : ""}`} role="status" aria-label={ready.full} title={ready.full} data-tauri-drag-region>
             <b data-tauri-drag-region>{ready.lines[0]}</b>
             {ready.lines[1] ? <span data-tauri-drag-region>{ready.lines[1]}</span> : null}
           </span>
         ) : (
-          <span className="wave" aria-hidden="true" data-tauri-drag-region>
-            {lv.map((v, i) => (
-              <i key={i} style={{ height: `${Math.max(3, v * 22)}px`, opacity: 0.45 + v * 0.55 }} />
-            ))}
+          <span className={`scribe${live && timeStays(s.duration_ms, !!mic) ? " timed" : ""}`} data-tauri-drag-region>
+            <Line mode={capsuleLine(s)} height={LINE_H} dx={LINE_DX} tip="ink" levels={hudLevels} />
+            {live ? (
+              <span className="time" data-tauri-drag-region>
+                {stamp(s.duration_ms)}
+              </span>
+            ) : null}
           </span>
         )}
         {mic && quiet ? (
@@ -260,8 +274,9 @@ function Recording({ s, keys, lv }: { s: UiState; keys: Config["hotkeys"] | null
   );
 }
 
-/** After stop, while the last words are written down: how far that is on a determinate bar, and Paste what's done to stop
- * waiting, offered from the start and in the accent once nothing has moved for 20 s. */
+/** After stop, while the last words are written down: the line loops (in the warning colour once nothing has moved for
+ * 20 s), the words say how far it is, and Paste what's done stops waiting, offered from the start and in the accent
+ * once it stalls. */
 function Finishing({ s }: { s: UiState }) {
   const p = s.progress ?? null;
   const [cutting, setCutting] = useState(false);
@@ -275,22 +290,20 @@ function Finishing({ s }: { s: UiState }) {
   return (
     <div className="hud-wrap" data-tauri-drag-region>
       <div className="hud finishing" data-tauri-drag-region>
-        <div className="fin-main" data-tauri-drag-region>
-          <span className="fin-text" role="status" data-tauri-drag-region>
-            {text}
-          </span>
-          <div
-            className={`progress on-hud ${pct == null ? "indet" : ""}`}
-            role="progressbar"
-            aria-label="Transcribing"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={pct ?? undefined}
-            data-tauri-drag-region
-          >
-            <i style={pct == null ? undefined : { width: `${pct}%` }} />
-          </div>
-        </div>
+        <span
+          className="fin-line"
+          role="progressbar"
+          aria-label="Transcribing"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct ?? undefined}
+          data-tauri-drag-region
+        >
+          <Line mode={capsuleLine(s)} height={LINE_H - 4} tone={stalled ? "warn" : "ink"} loops={3} pitch={13} lead={4} />
+        </span>
+        <span className="fin-text" role="status" data-tauri-drag-region>
+          {text}
+        </span>
         <button
           type="button"
           className={`fin-cancel ${stalled ? "accent" : ""}`}
