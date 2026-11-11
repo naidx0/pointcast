@@ -393,10 +393,10 @@ mod tests {
     #[test]
     fn the_ask_key_is_the_default_until_one_is_saved_and_a_garbled_one_falls_back() {
         assert_eq!(Settings::default().ask_chord(), chord::default_ask());
-        let mine = Settings { ask_hotkey: Some("Ctrl+Alt+A".into()), ..Settings::default() };
-        assert_eq!(mine.ask_chord().label(), "Ctrl+Alt+A");
+        let mine = Settings { ask_hotkey: Some("Ctrl+Shift+F7".into()), ..Settings::default() };
+        assert_eq!(mine.ask_chord().label(), "Ctrl+Shift+F7");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&mine).unwrap()).unwrap();
-        assert_eq!(back.ask_hotkey.as_deref(), Some("Ctrl+Alt+A"));
+        assert_eq!(back.ask_hotkey.as_deref(), Some("Ctrl+Shift+F7"));
         let garbled = Settings { ask_hotkey: Some("Ctrl+Shift+Nope".into()), ..Settings::default() };
         assert_eq!(garbled.ask_chord(), chord::default_ask());
         assert!(!serde_json::to_string(&Settings::default()).unwrap().contains("ask_hotkey"), "unset, it is not written");

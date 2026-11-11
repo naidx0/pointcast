@@ -2567,7 +2567,7 @@ mod tests {
     fn the_ask_key_is_refused_when_it_is_another_shortcut_and_rebinds_like_the_others() {
         let cur = Settings::default();
         let p = |v: Value| v.as_object().unwrap().clone();
-        assert_eq!(merge(&cur, p(json!({ "ask_hotkey": "Ctrl+Alt+A" }))).unwrap().ask_chord().label(), "Ctrl+Alt+A");
+        assert_eq!(merge(&cur, p(json!({ "ask_hotkey": "Ctrl+Shift+F7" }))).unwrap().ask_chord().label(), "Ctrl+Shift+F7");
         // Refused the way the others are: a chord saved for another shortcut cannot also be the Ask key.
         let err = merge(&cur, p(json!({ "session_hotkey": "Ctrl+Alt+F9", "ask_hotkey": "Ctrl+Alt+F9" }))).unwrap_err();
         assert!(err.contains("already Start / stop"), "{err}");
@@ -2575,6 +2575,6 @@ mod tests {
         let err = merge(&taken, p(json!({ "ask_hotkey": "Ctrl+Shift+F8" }))).unwrap_err();
         assert!(err.contains("already Capture around pointer"), "{err}");
         assert!(merge(&cur, p(json!({ "ask_hotkey": "Shift" }))).is_err(), "a chord needs a key");
-        assert!(keys_changed(&cur, &Settings { ask_hotkey: Some("Ctrl+Alt+A".into()), ..Settings::default() }));
+        assert!(keys_changed(&cur, &Settings { ask_hotkey: Some("Ctrl+Shift+F7".into()), ..Settings::default() }));
     }
 }

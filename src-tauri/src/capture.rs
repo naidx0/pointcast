@@ -911,7 +911,8 @@ mod tests {
 
     fn frame(width: u32, height: u32, at: (i32, i32), seen: &[Listed], hidden: &[String]) -> Frame {
         let map = screen((0, 0), 1.0, width, height);
-        let (rects, windows) = sort_out(seen, hidden, 42, None);
+        // This process is 42, and its answer panel is the window the OS names 77.
+        let (rects, windows) = sort_out(seen, hidden, 42, Some(77));
         // Every pixel names its place, so a cut is known by its corner.
         let mut buf: Vec<u8> = (0..width * height).flat_map(|i| [(i % width) as u8, (i / width) as u8, 7, 255]).collect();
         paint_out(&mut buf, &map, &rects);
@@ -922,7 +923,7 @@ mod tests {
     fn a_questions_picture_is_the_window_under_the_pointer_else_the_screen_with_what_a_caption_may_say() {
         let s = |s: &str| Some(s.to_string());
         let seen = [
-            Listed::seen(s("Pointcast"), s("Pointcast"), r(150, 0, 50, 100), Some(false), Some(42)),
+            Listed { id: Some(77), ..Listed::seen(s("Pointcast"), s("Pointcast"), r(150, 0, 50, 100), Some(false), Some(42)) },
             Listed::seen(s("Preview"), s(" Lecture 4.pdf "), r(20, 10, 120, 60), Some(false), Some(7)),
             Listed::seen(s("1Password"), s("Vault"), r(0, 80, 40, 20), Some(false), Some(8)),
         ];
