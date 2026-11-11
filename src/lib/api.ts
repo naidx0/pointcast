@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -260,6 +261,12 @@ export type Agents = {
 };
 /** Copies the MCP setup for one coding agent, with this install's key, straight to the clipboard. */
 export const mcpCopySetup = (agent: AgentId) => invoke<void>("mcp_copy_setup", { agent });
+/** What was dictated, as running counts, for the Usage pane. Outside Tauri: ten weeks of a stand-in, or with
+ * `?usage=empty` an install that has recorded nothing. */
+export const statsGet = () => (inTauri ? invoke<Usage>("stats_get") : Promise.resolve(previewStats()));
+/** Start counting again from now. History is left as it is. */
+export const statsReset = () => (inTauri ? invoke<Usage>("stats_reset") : Promise.resolve(emptyUsage(Date.now())));
+const previewStats = () => (location.search.includes("usage=empty") ? emptyUsage(Date.now()) : previewUsage(new Date()));
 /** Outside Tauri: a stand-in, `?agents=none|connected|notfound|error` picks which. */
 export const agentsStatus = () => (inTauri ? invoke<Agents>("agents_status") : Promise.resolve(previewAgents()));
 /** Writes Pointcast into the agent's user settings (turning sharing on first), then checks it answers. */

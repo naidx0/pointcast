@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Check, Info, Keyboard, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, ChartNoAxesColumn, Check, Info, Keyboard, Settings2, Share } from "lucide-react";
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
@@ -22,6 +22,8 @@ import {
   onUpdateChecked,
   onUpdateFailed,
   relaunch,
+  statsGet,
+  statsReset,
   subscribe,
   updateCheck,
   updateInstall,
@@ -36,6 +38,7 @@ import { useConfig } from "@/lib/useConfig";
 import { computerView, micStatus } from "@/lib/hardware";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
+import { SAVED_NOTE, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
 
 const PANES = [
   { id: "general", name: "General", icon: Settings2, tile: "tile-gray" },
@@ -43,6 +46,7 @@ const PANES = [
   { id: "speech", name: "Speech", icon: AudioLines, tile: "tile-orange" },
   { id: "capture", name: "Capture", icon: Camera, tile: "tile-purple" },
   { id: "output", name: "Output", icon: Share, tile: "tile-green" },
+  { id: "usage", name: "Usage", icon: ChartNoAxesColumn, tile: "tile-teal" },
   { id: "about", name: "About", icon: Info, tile: "tile-blue" },
 ] as const;
 type Pane = (typeof PANES)[number]["id"];
@@ -116,6 +120,8 @@ export function Settings() {
             <Capture cfg={cfg} patch={patch} />
           ) : pane === "output" ? (
             <Output cfg={cfg} patch={patch} refresh={refresh} />
+          ) : pane === "usage" ? (
+            <Usage />
           ) : (
             <About cfg={cfg} />
           )}
@@ -383,6 +389,105 @@ function History() {
         </Row>
       </div>
     </>
+  );
+}
+
+const RANGES = [
+  ["week", "This week"],
+  ["all", "All time"],
+] as const;
+
+/** What was dictated: four numbers for the week or for all time, then when in the week, the streak, and since when.
+ * Read once, as the pane opens. */
+function Usage() {
+  const [counts, setCounts] = useState<Counts | null>(null);
+  const [range, setRange] = useState<Range>("week");
+  const [sure, setSure] = useState(false);
+  useEffect(() => {
+    statsGet()
+      .then(setCounts)
+      .catch(() => undefined);
+  }, []);
+  if (!counts) return null;
+  const v = usageView(counts, new Date(), range);
+  const days = weekdayNames("short");
+  const foot = (
+    <div className="usage-foot">
+      <span>{v.since}</span>
+      <button
+        type="button"
+        className={`btn plain ${sure ? "danger" : ""}`}
+        disabled={v.empty}
+        onBlur={() => setSure(false)}
+        onClick={async () => {
+          if (!sure) return setSure(true);
+          setSure(false);
+          await statsReset()
+            .then(setCounts)
+            .catch(() => undefined);
+        }}
+      >
+        {sure ? "Click again to reset" : "Reset…"}
+      </button>
+    </div>
+  );
+  if (v.empty)
+    return (
+      <div className="usage">
+        <p className="usage-quiet">{v.quiet}</p>
+        {foot}
+      </div>
+    );
+  return (
+    <div className="usage">
+      <div className="usage-head">
+        <Seg value={range} options={RANGES} set={setRange} label="Range" />
+        {v.streak ? <span className="usage-streak">{v.streak}</span> : null}
+      </div>
+      {v.quiet ? (
+        <p className="usage-quiet">{v.quiet}</p>
+      ) : (
+        <div className="usage-figures">
+          {v.figures.map((f) => (
+            <div key={f.label} title={f.title}>
+              <div className="n">
+                {f.parts.map((p) => (
+                  <span key={p.u ?? ""}>
+                    {p.n}
+                    {p.u ? <small>{p.u}</small> : null}
+                  </span>
+                ))}
+              </div>
+              <div className="l">{f.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="usage-note">
+        {v.rate}
+        {v.rate && v.figures.some((f) => f.label === "Saved") ? " " : null}
+        {v.figures.some((f) => f.label === "Saved") ? SAVED_NOTE : null}
+      </p>
+      <h2 className="usage-title">When you dictate</h2>
+      <div className="usage-grid" role="img" aria-label="Recordings by weekday and hour">
+        {v.cells.map((row, d) => (
+          <div key={d} className="usage-row">
+            <span className="d">{days[d]}</span>
+            {row.map((c, h) => (
+              <i key={h} data-l={c.level} title={c.title} />
+            ))}
+          </div>
+        ))}
+        <div className="usage-row hours" aria-hidden="true">
+          <span className="d" />
+          {["00", "06", "12", "18"].map((h) => (
+            <span key={h}>{h}</span>
+          ))}
+        </div>
+      </div>
+      {v.longest ? <p className="usage-note">{v.longest}</p> : null}
+      {foot}
+    </div>
   );
 }
 
