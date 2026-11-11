@@ -96,6 +96,26 @@ fn due(now: std::time::Instant, q: &Quiet) -> Due {
     Due { reap, free, next: next.map_or(Next::Never, Next::At) }
 }
 
+/// The AI's helper, last used at `used` (`Live::idle_since`): whether it is due to be let go `now`, and else when it
+/// will be.
+fn assist_due(now: std::time::Instant, used: Option<std::time::Instant>) -> (bool, Option<std::time::Instant>) {
+    match used {
+        Some(u) if assist::idle_due(now, u) => (true, None),
+        Some(u) => (false, Some(u + assist::IDLE)),
+        None => (false, None),
+    }
+}
+
+/// `next`, or `at` when that comes sooner. A pulse stays a pulse.
+fn sooner(next: Next, at: Option<std::time::Instant>) -> Next {
+    match (next, at) {
+        (Next::Tick(d), _) => Next::Tick(d),
+        (n, None) => n,
+        (Next::Never, Some(t)) => Next::At(t),
+        (Next::At(a), Some(t)) => Next::At(a.min(t)),
+    }
+}
+
 /// Wakes the idle scheduler: a session phase changed, the engine was used, a window hid, a setting changed.
 struct Waker {
     seen: std::sync::Mutex<u64>,
@@ -314,6 +334,12 @@ async fn live_stop(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String
 async fn live_close(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
     live.close();
     Ok(())
+}
+
+/// Ask the question that failed again, as it was kept.
+#[tauri::command]
+async fn live_retry(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    live.retry()
 }
 
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
@@ -1974,6 +2000,7 @@ pub fn run() {
             live_drop_picture,
             live_stop,
             live_close,
+            live_retry,
             platform_info,
         ])
         .setup(move |app| {
@@ -2076,12 +2103,24 @@ pub fn run() {
                     if d.free {
                         svc2.unload_engine();
                     }
-                    WAKE.wait(gen, d.next);
+                    // The AI's helper goes five minutes after its last use.
+                    let live = handle.try_state::<Arc<live::Live>>().map(|l| l.inner().clone());
+                    let (go, at) = assist_due(std::time::Instant::now(), live.as_ref().and_then(|l| l.idle_since()));
+                    if go {
+                        if let Some(l) = &live {
+                            l.let_go();
+                        }
+                    }
+                    WAKE.wait(gen, sooner(d.next, at));
                 }
             });
             Ok(())
         })
         .on_window_event(|window, event| {
+            // The answer panel sets its own height as the answer grows: it stays docked at the top right.
+            if matches!(event, tauri::WindowEvent::Resized(_)) && window.label() == platform::PANEL {
+                platform::redock_panel(window);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Closing a window frees it; Pointcast itself stays in the tray (see ExitRequested).
                 let _ = api;
@@ -2247,6 +2286,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_ais_helper_is_let_go_five_minutes_after_its_last_use_and_the_scheduler_wakes_for_it() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert_eq!(assist_due(at(10), None), (false, None), "nothing held, nothing to wake for");
+        assert_eq!(assist_due(at(10), Some(at(5))), (false, Some(at(305))));
+        assert_eq!(assist_due(at(304), Some(at(5))), (false, Some(at(305))));
+        assert_eq!(assist_due(at(305), Some(at(5))), (true, None));
+        assert_eq!(assist_due(at(9_000), Some(at(5))), (true, None), "a late look still lets it go");
+        // The scheduler sleeps until the sooner of its own deadline and the helper's, and a pulse stays a pulse.
+        assert_eq!(sooner(Next::Never, Some(at(305))), Next::At(at(305)));
+        assert_eq!(sooner(Next::At(at(70)), Some(at(305))), Next::At(at(70)));
+        assert_eq!(sooner(Next::At(at(400)), Some(at(305))), Next::At(at(305)));
+        assert_eq!(sooner(Next::At(at(400)), None), Next::At(at(400)));
+        assert_eq!(sooner(Next::Tick(Duration::from_millis(100)), Some(at(1))), Next::Tick(Duration::from_millis(100)));
+        // Together with the rest of the loop: never a deadline already past.
+        for now in (0..400).step_by(13) {
+            if let (false, Some(t)) = assist_due(at(now), Some(at(5))) {
+                assert!(t > at(now), "{now}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_session_state_goes_to_every_window_so_the_answer_panel_hears_it() {
+        // `session://state` is sent with `emit`, which reaches every window, the panel included; one sent to named
+        // windows would have to name it.
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("lib.rs")).unwrap();
+        let name = ["session:", "//state"].concat();
+        let sends: Vec<&str> = src.lines().filter(|l| l.contains(&format!("\"{name}\"")) && !l.contains("let name")).collect();
+        assert!(sends.len() >= 2, "the scan found the senders: {sends:?}");
+        for l in &sends {
+            assert!(l.contains(".emit(") && !l.contains("emit_to") && !l.contains("emit_filter"), "{l}");
+        }
+        // And the panel's capability lets its page listen: `core:default` holds the event permissions.
+        let cap: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities").join("live.json")).unwrap()).unwrap();
+        assert!(cap["permissions"].as_array().unwrap().iter().any(|p| p == "core:default" || p == "core:event:default" || p == "core:event:allow-listen"));
     }
 
     #[test]

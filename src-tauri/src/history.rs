@@ -67,6 +67,10 @@ pub struct Meta {
     /// The loudest sample of the whole recording in dBFS (`audio::SILENT_DB` for nothing but zeros).
     #[serde(default)]
     pub mic_peak_db: i32,
+    /// How many words were said, counted as Usage counts them (`stats::counts`). An entry from before this was kept
+    /// is counted when the list is read.
+    #[serde(default)]
+    pub words: Option<u64>,
 }
 
 /// What the microphone did for a recording, for `Store::note_mic`.
@@ -207,7 +211,8 @@ impl Store {
         items.extend(said);
         let mut files = vec![(dir.join("items.json"), serde_json::to_vec(&items).map_err(|e| e.to_string())?)];
         if let Some(mut meta) = std::fs::read(dir.join("meta.json")).ok().and_then(|b| serde_json::from_slice::<Meta>(&b).ok()) {
-            meta.preview = meta_for(&items, meta.created_ms, meta.duration_ms, false).preview;
+            let fresh = meta_for(&items, meta.created_ms, meta.duration_ms, false);
+            (meta.preview, meta.words) = (fresh.preview, fresh.words);
             meta.partial = false;
             no_words(&mut meta);
             files.push((dir.join("meta.json"), serde_json::to_vec(&meta).map_err(|e| e.to_string())?));
@@ -251,8 +256,13 @@ impl Store {
             .flatten()
             .flatten()
             .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().ends_with(".tmp"))
-            .filter_map(|e| std::fs::read(e.path().join("meta.json")).ok())
-            .filter_map(|b| serde_json::from_slice(&b).ok())
+            .filter_map(|e| {
+                let mut m: Meta = serde_json::from_slice(&std::fs::read(e.path().join("meta.json")).ok()?).ok()?;
+                if m.words.is_none() {
+                    m.words = read_items(&e.path()).ok().map(|i| crate::stats::counts(&i).words);
+                }
+                Some(m)
+            })
             .collect();
         v.sort_by(|a: &Meta, b: &Meta| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
         v
@@ -518,6 +528,7 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         mic: String::new(),
         mic_open_ms: 0,
         mic_peak_db: 0,
+        words: Some(crate::stats::counts(items).words),
     }
 }
 
@@ -885,6 +896,23 @@ mod tests {
     }
 
     #[test]
+    fn each_entry_in_the_list_counts_its_words_and_one_from_before_the_count_is_counted_when_read() {
+        let s = store("words");
+        let said = |t: u64, text: &str| Item::Speech { t_ms: t, end_ms: t + 500, text: text.into() };
+        let mut v = vec![said(0, " one two  three "), said(600, crate::voice::stt::UNCLEAR)];
+        v.extend(items().into_iter().filter(|i| matches!(i, Item::Image { .. })));
+        let m = s.save(&v, 1_793_000_000_000, 10).unwrap();
+        // Only speech counts: not the placeholder for words not made out, nor a picture's marker or labels.
+        assert_eq!((m.words, s.list()[0].words), (Some(3), Some(3)));
+        let path = s.history().join(&m.id).join("meta.json");
+        let mut old: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("words");
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(s.list()[0].words, Some(3), "counted from its words when the list is read");
+        assert_eq!(serde_json::to_value(&s.list()[0]).unwrap()["words"], 3);
+    }
+
+    #[test]
     fn history_lists_newest_first_and_keeps_the_newest_hundred() {
         let s = store("prune");
         for i in 0..(KEEP as u64 + 3) {
@@ -1027,7 +1055,9 @@ mod tests {
         assert_eq!(s.picture(&m.id, 2).unwrap().png, png(90), "each picture keeps its file");
         let after = s.list()[0].clone();
         assert_eq!(after.preview, "the button is a few pixels off move it to the left and make it blue");
-        assert_eq!(Meta { preview: m.preview.clone(), ..after }, m, "the rest of the entry is as it was");
+        // The count of words follows the new words, as the preview does.
+        assert_eq!((m.words, after.words), (Some(crate::stats::counts(&v).words), Some(16)));
+        assert_eq!(Meta { preview: m.preview.clone(), words: m.words, ..after }, m, "the rest of the entry is as it was");
         let plain = r#"the button is a few pixels off [image 1: button "Place order"; 1=this one] [image 2] move it to the left [image 3] and make it blue"#;
         assert_eq!(s.export(&m.id).unwrap().plain, plain);
         let left: Vec<String> = std::fs::read_dir(s.history().join(&m.id)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
