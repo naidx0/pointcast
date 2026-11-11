@@ -166,11 +166,17 @@ export function installHelp(p: Pick<Route, "id" | "name">, update = false): Help
   return { text: `Install ${p.name}, then check again.`, command: null };
 }
 
+/** Where the words go, said with one "through": the engine's "OpenAI, through your ChatGPT plan" reads "OpenAI on
+ * your ChatGPT plan", so Codex can be the one way through. */
+export function destination(goesTo: string): string {
+  return goesTo.trim().replace(/,?\s+through (your .+ plan)$/i, " on $1");
+}
+
 /** Where the words go, for the line under the chosen AI. A model that cannot see pictures takes words only. */
 export function goesLine(p: Pick<Route, "id" | "kind" | "goes_to" | "offline">, images = true): string {
   if (p.offline) return "Stays on this computer";
   const what = images ? "Your words and pictures go" : "Your words go";
-  const to = p.goes_to || "the AI";
+  const to = destination(p.goes_to) || "the AI";
   if (p.id === "codex") return `${what} to ${to}, through Codex on this computer`;
   return p.kind === "plan" ? `${what} to ${to}, on your plan` : `${what} to ${to}, with your key`;
 }
@@ -258,7 +264,7 @@ export function previewAssist(kind: string): Assist {
     model: null,
     offline_only: false,
     providers: [
-      r("codex", "ChatGPT", "plan", "not_installed", "OpenAI"),
+      r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
       r("openai", "OpenAI API", "key", "no_key", "OpenAI"),
       r("openrouter", "OpenRouter", "key", "no_key", "OpenRouter"),
       r("gemini", "Gemini API", "key", "no_key", "Google"),

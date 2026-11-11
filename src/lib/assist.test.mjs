@@ -135,7 +135,11 @@ test("only on this computer hides every route that leaves it, and the remote cho
 
 test("the top says which AI answers and where the words go", () => {
   assert.deepEqual(nowView(previewAssist("fresh")), { title: "Nothing chosen", line: "Choose an AI below. Until then nothing leaves this computer." });
-  assert.deepEqual(nowView(previewAssist("codex-ready")), { title: "ChatGPT", line: "Your words and pictures go to OpenAI, through Codex on this computer" });
+  assert.deepEqual(nowView(previewAssist("codex-ready")), { title: "ChatGPT", line: "Your words and pictures go to OpenAI on your ChatGPT plan, through Codex on this computer" });
+  // The engine names the plan as a way through too: the line says "through" once.
+  const viaPlan = { id: "codex", kind: "plan", goes_to: "OpenAI, through your ChatGPT plan", offline: false };
+  assert.equal(goesLine(viaPlan), "Your words and pictures go to OpenAI on your ChatGPT plan, through Codex on this computer");
+  assert.equal(goesLine(viaPlan).split("through").length - 1, 1);
   assert.equal(nowView(previewAssist("key")).line, "Your words and pictures go to OpenAI, with your key");
   assert.equal(nowView(previewAssist("local")).line, "Stays on this computer");
   const words = { ...previewAssist("local"), offline_only: false };
