@@ -55,9 +55,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 core-foundation = "0.10"
-# The Mac's own store for secrets, for a key the person pastes: the keyring project's login-keychain store.
-keyring-core = "=1.0.1"
-apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+# The Mac's own store for secrets, for a key the person pastes (already in the tree through reqwest's root store).
+security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 # Credential Manager, for a key the person pastes: the keyring project's Windows store.

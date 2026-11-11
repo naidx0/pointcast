@@ -92,17 +92,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb5dfbc6d8d2675589ccbe4d0fd61df2419075625f8c1a62325e718e2b0049f9"
 
 [[package]]
-name = "apple-native-keyring-store"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
-dependencies = [
- "keyring-core",
- "log",
- "security-framework",
-]
-
-[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3771,7 +3760,6 @@ dependencies = [
 name = "pointcast"
 version = "0.4.8"
 dependencies = [
- "apple-native-keyring-store",
  "arboard",
  "auto-launch",
  "base64 0.22.1",
@@ -3790,6 +3778,7 @@ dependencies = [
  "nnnoiseless",
  "objc2 0.6.5",
  "reqwest 0.12.28",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",
