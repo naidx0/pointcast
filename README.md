@@ -235,6 +235,9 @@ pictures are kept:
 - **macOS, after an update.** Pointcast keeps Screen Recording and Accessibility from one version to the next.
   The one exception is the update to the first version signed with Pointcast's certificate (0.4.8), from an older
   one: macOS asks one last time. Turn them back on in **System Settings → Privacy & Security**, then reopen Pointcast.
+- **macOS, updating from 0.4.7 or older: "The update did not finish".** The new version is installed, but the old
+  Pointcast was never closed. Quit it from the menu bar and open Pointcast again. From 0.4.8 on, an update closes
+  and reopens Pointcast by itself.
 - **Checking for updates fails.** "Could not check: GitHub did not answer" means just that, not that you are up to
   date. Try again in a minute.
 - **Run the setup again.** Menu bar or tray icon → **Setup Assistant…**

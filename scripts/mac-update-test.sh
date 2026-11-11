@@ -160,6 +160,18 @@ if codesign --verify -R="$req" "$work/adhoc-n1/Pointcast.app" 2>"$logs/b-adhoc.t
 fi
 cat "$logs/b-adhoc.txt"
 pass "codesign --verify -R: 0 for N+1, not 0 for the ad hoc copy"
+# The release's own check, both ways: it stops a release that set a certificate up and came out ad hoc, and it
+# lets a build without the secrets (a fork, CI) through as ad hoc.
+if POINTCAST_SIGNED="$identity" bash "$here/mac-signing.sh" check "$work/adhoc-n1/Pointcast.app" >"$logs/b-check-adhoc.txt" 2>&1; then
+  die "mac-signing.sh check let an ad hoc build pass as signed with the certificate"
+fi
+cat "$logs/b-check-adhoc.txt"
+grep -q "not signed with it" "$logs/b-check-adhoc.txt" || die "the check stopped, but not for the signature"
+env -u POINTCAST_SIGNED -u MAC_SIGN_P12 -u MAC_SIGN_PASSWORD bash "$here/mac-signing.sh" setup | tee "$logs/b-setup-none.txt"
+grep -q "signed ad hoc" "$logs/b-setup-none.txt" || die "setup without the secrets did not say the build is ad hoc"
+env -u POINTCAST_SIGNED bash "$here/mac-signing.sh" check "$work/adhoc-n1/Pointcast.app" | tee "$logs/b-check-none.txt"
+grep -q "signed ad hoc" "$logs/b-check-none.txt" || die "the check without a certificate did not say the build is ad hoc"
+pass "mac-signing.sh check: stops an ad hoc build when a certificate was set up; passes it as ad hoc when none was"
 
 echo "== c1: install.sh, certificate-signed N to N+1"
 fresh
@@ -277,6 +289,17 @@ else
     fi
     grep -q "can't reach GitHub" "$logs/e-none.log" || die "no list, no API, and not the words for it: $(cat "$logs/e-none.log")"
     pass "installed $tag from the list with the API unreachable; a wrong SHA-256 is refused; no list falls back to the API"
+    # As the README's one line runs it today, against the real GitHub: whatever the published release carries
+    # (a list or, before 0.4.8, none) and whatever the API allows this runner, the published version gets installed.
+    fresh
+    if ! PATH="$work/bin:$PATH" bash "$root/install.sh" >"$logs/e-real.log" 2>&1; then
+      cat "$logs/e-real.log"
+      die "the one-line install stopped against the real GitHub"
+    fi
+    cat "$logs/e-real.log"
+    [ "v$(version_of "$dest/Pointcast.app")" = "$tag" ] || die "the real one-line install left $(version_of "$dest/Pointcast.app"), not $tag"
+    one_running >/dev/null || die "the published version did not start after the real one-line install"
+    pass "the one-line install, with nothing overridden, installed $tag"
   else
     echo "SKIP  the published release $tag has no Pointcast-macOS.dmg"
   fi

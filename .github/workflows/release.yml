@@ -82,10 +82,10 @@ jobs:
 
   # latest.json: the installers this release has, each with its SHA-256, taken from the files as they were
   # uploaded. Pointcast and install.sh read it to find a newer version without GitHub's API, which allows a whole
-  # network only 60 requests an hour. It runs after a failed build too, and lists the installers that are there.
+  # network only 60 requests an hour. It runs only when every build asked for succeeded, so a build that failed its
+  # signature check never ends up listed; a system with no installer on the release is left out of the list.
   manifest:
     needs: build
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
