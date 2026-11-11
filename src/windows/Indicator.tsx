@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PressButton } from "@/components/PressButton";
 import { Check, Monitor, SquareDashedMousePointer, TriangleAlert, X, ZoomIn } from "lucide-react";
 import {
   captureFull,
@@ -208,33 +209,30 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
           </span>
         ) : null}
         <span className="sep" />
-        <button
-          type="button"
+        <PressButton
           className="hb"
           title={tip("Mark up a region", keys?.region.label)}
           aria-label="Mark up a region"
-          onClick={() => regionBegin().catch(() => undefined)}
+          act={() => regionBegin().catch(() => undefined)}
         >
           <SquareDashedMousePointer size={18} strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
+        </PressButton>
+        <PressButton
           className="hb"
           title={tip("Capture the screen", keys?.full.label)}
           aria-label="Capture the screen"
-          onClick={() => captureFull().catch(() => undefined)}
+          act={() => captureFull().catch(() => undefined)}
         >
           <Monitor size={18} strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
+        </PressButton>
+        <PressButton
           className="hb"
           title={tip("Capture around the pointer", keys?.zoom.label)}
           aria-label="Capture around the pointer"
-          onClick={() => captureZoom().catch(() => undefined)}
+          act={() => captureZoom().catch(() => undefined)}
         >
           <ZoomIn size={18} strokeWidth={1.75} />
-        </button>
+        </PressButton>
         {/* While recording the slot is always there, so the first picture does not move the buttons. Getting ready has
             no room for it at 392 px: the count shows once recording runs. */}
         {!ready ? (
@@ -250,25 +248,23 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
         ) : null}
         <span className="sep" />
         <span className="discard-slot">
-          <button
-            type="button"
+          <PressButton
             className={`hb discard ${armed != null ? "armed" : ""}`}
             title={armed != null ? "Click again to discard (Esc keeps it)" : "Discard"}
             aria-label={armed != null ? "Click again to discard this recording" : "Discard this recording"}
-            onClick={discard}
+            act={discard}
           >
             {armed != null ? "Discard?" : <X size={17} strokeWidth={2} />}
-          </button>
+          </PressButton>
         </span>
-        <button
-          type="button"
+        <PressButton
           className="stop"
           title={tip("Finish", keys?.session.label)}
           aria-label="Finish recording"
-          onClick={() => sessionToggle().catch(() => undefined)}
+          act={() => sessionToggle().catch(() => undefined)}
         >
           <i />
-        </button>
+        </PressButton>
       </div>
     </div>
   );
@@ -304,15 +300,14 @@ function Finishing({ s }: { s: UiState }) {
         <span className="fin-text" role="status" data-tauri-drag-region>
           {text}
         </span>
-        <button
-          type="button"
+        <PressButton
           className={`fin-cancel ${stalled ? "accent" : ""}`}
           disabled={cutting}
           title="Stop waiting: paste what is written so far and keep the audio in History"
-          onClick={cancel}
+          act={cancel}
         >
           Paste what's done
-        </button>
+        </PressButton>
       </div>
     </div>
   );
@@ -355,11 +350,10 @@ function Done({ s }: { s: UiState }) {
     <div className="hud-wrap" data-tauri-drag-region>
       <div role="status" aria-live="polite">
         {v.action ? (
-          <button
-            type="button"
+          <PressButton
             className={`hud done ${second ? "two" : ""}`}
             title={second ? undefined : "Open in History"}
-            onClick={act}
+            act={act}
             onPointerEnter={() => hold("pointer", true)}
             onPointerLeave={() => hold("pointer", false)}
             onFocus={() => hold("focus", true)}
@@ -367,7 +361,7 @@ function Done({ s }: { s: UiState }) {
           >
             {mark}
             {text}
-          </button>
+          </PressButton>
         ) : (
           <div className="hud done" data-tauri-drag-region>
             {mark}

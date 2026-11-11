@@ -18,20 +18,12 @@ import { ENDED_MS, initialLive, isPinned, liveReduce, liveView, sentLine, type L
 import { marginPath, restPath } from "@/lib/line";
 import { Line, type LevelSource } from "@/components/Line";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
-import { pressOnce } from "@/lib/press";
+import { PressButton } from "@/components/PressButton";
 
 const noop = () => undefined;
 /** The panel's line hears the engine's `loudness` stream (the preview's made-up voice in a browser). */
 const liveLevels: LevelSource = (set) => subscribe(onLiveLevel(set));
 
-/** A button that acts on the press itself: the panel is shown without focus, and on Windows the first click on an
- * inactive window only focuses it (see press.ts). Enter and Space act as on any button. */
-function PressButton({ act, ...rest }: { act: () => void } & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "onPointerDown" | "type">) {
-  const latest = useRef(act);
-  latest.current = act;
-  const p = useMemo(() => pressOnce(() => latest.current()), []);
-  return <button type="button" {...rest} onPointerDown={(e) => p.onPointerDown(e)} onClick={(e) => p.onClick(e)} />;
-}
 const h = createElement as unknown as H<ReactNode>;
 const ROW = 24;
 /** The listening line's height: room for a tall stroke above the baseline and a little below. */
