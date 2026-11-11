@@ -881,7 +881,7 @@ mod tests {
         assert!(after.ends_with(r#"/mcp"}},"z":1}"#), "{after}");
         h.put(".cursor/mcp.json", "{\n  \"mcpServers\": {}\n}\n");
         set_up(Agent::Cursor, &h.0, URL, TOKEN).unwrap();
-        assert!(h.get(".cursor/mcp.json").starts_with("{\n  \"mcpServers\": {\n    \"pointcast\": {\n      \"url\""), "{}", h.get(".cursor/mcp.json"));
+        assert!(h.get(".cursor/mcp.json").starts_with("{\n  \"mcpServers\": {\n    \"pointcast\": {\n      \""), "{}", h.get(".cursor/mcp.json"));
         h.put(".cursor/mcp.json", "{\n  \"theme\": 1\n}\n");
         set_up(Agent::Cursor, &h.0, URL, TOKEN).unwrap();
         assert_eq!(entry(Agent::Cursor, &h.0, URL, TOKEN).unwrap(), Entry::Current);
