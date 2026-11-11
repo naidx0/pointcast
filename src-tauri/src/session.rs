@@ -1408,7 +1408,7 @@ fn export_dir(s: &Settings, stamp: &str) -> std::path::PathBuf {
     let base = match &s.export_dir {
         Some(d) => std::path::PathBuf::from(d),
         None => dirs::document_dir()
-            .or_else(dirs::home_dir)
+            .or_else(crate::settings::home_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("Pointcast"),
     };

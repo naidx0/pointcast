@@ -279,6 +279,22 @@ impl Settings {
 /// The app identifier: the folder name Tauri's uninstaller clears when asked to delete app data.
 pub const IDENTIFIER: &str = "dev.pointcast.app";
 
+/// The home folder Pointcast uses: `POINTCAST_HOME` when set and not empty, else the system's. On Windows the system's
+/// comes from the profile known folder and ignores USERPROFILE and HOME, so this is the only way to point it elsewhere.
+pub fn home_dir() -> Option<PathBuf> {
+    home_override(std::env::var_os("POINTCAST_HOME")).or_else(dirs::home_dir)
+}
+
+/// `POINTCAST_HOME` is set (not empty), so the home folder is not the real one.
+pub fn home_is_custom() -> bool {
+    home_override(std::env::var_os("POINTCAST_HOME")).is_some()
+}
+
+/// The override from a `POINTCAST_HOME` value: none when it is missing or empty.
+pub fn home_override(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("POINTCAST_DATA_DIR") {
         return d.into();
@@ -327,6 +343,14 @@ pub fn settings_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_override_is_honoured_and_an_empty_value_is_ignored() {
+        let scratch = std::env::temp_dir().join("pc-scratch-home");
+        assert_eq!(home_override(Some(scratch.clone().into_os_string())), Some(scratch));
+        assert_eq!(home_override(Some(std::ffi::OsString::new())), None);
+        assert_eq!(home_override(None), None);
+    }
 
     #[test]
     fn settings_round_trip_and_refused_chords_fall_back() {

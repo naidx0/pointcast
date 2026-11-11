@@ -53,6 +53,14 @@ test("the caption words steps as one ordered entry apart from the pins, as the p
   assert.deepEqual(captionMarks([{ n: 0, text: "1 area hidden" }]), ["1 area hidden"]);
 });
 
+test("a hidden note is a note with kind note or stored without a kind, never pin 0", () => {
+  const stored = [{ n: 1, text: "Save" }, { n: 0, text: "1 area hidden" }];
+  const fresh = [{ n: 1, text: "Save" }, { n: 0, text: "2 areas hidden", kind: "note" }];
+  assert.deepEqual(captionMarks(stored), ["pins: 1=Save", "1 area hidden"]);
+  assert.deepEqual(captionMarks(fresh), ["pins: 1=Save", "2 areas hidden"]);
+  for (const l of [stored, fresh]) assert.ok(!captionMarks(l).join(" ").includes("0="));
+});
+
 const box = { x: 100, y: 100, w: 400, h: 300 };
 const marks = [
   step(1, 150, 150),

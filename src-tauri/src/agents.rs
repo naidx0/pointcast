@@ -267,19 +267,25 @@ pub fn entry(agent: Agent, home: &Path, url: &str, token: &str) -> Result<Entry,
 pub struct View {
     pub id: &'static str,
     pub name: &'static str,
-    pub path: &'static str,
+    /// The file as the row names it: `~/.claude.json` for the real home folder, the full path for a custom one.
+    pub path: String,
+    /// The full path of the file "Set up" changes, always.
+    pub file: String,
     pub found: bool,
     pub entry: Entry,
     pub error: Option<String>,
 }
 
-pub fn view(agent: Agent, home: &Path, url: &str, token: &str) -> View {
+/// `custom`: the home folder came from `POINTCAST_HOME`, so the short `~/` name would point at the wrong file.
+pub fn view(agent: Agent, home: &Path, custom: bool, url: &str, token: &str) -> View {
     let found = agent.installed(home);
     let (entry, error) = match entry(agent, home, url, token) {
         Ok(e) => (e, None),
         Err(e) => (Entry::Missing, Some(e)),
     };
-    View { id: agent.id(), name: agent.name(), path: agent.shown(), found, entry, error }
+    let file = agent.config(home).to_string_lossy().into_owned();
+    let path = if custom { file.clone() } else { agent.shown().to_string() };
+    View { id: agent.id(), name: agent.name(), path, file, found, entry, error }
 }
 
 // Claude Code's pictures folder: `permissions.additionalDirectories` in `~/.claude/settings.json`.
@@ -782,12 +788,29 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_status_carries_the_full_resolved_file_path() {
+        let h = Home::new("view-path").with(".claude").with(".cursor").with(".codex");
+        for a in ALL {
+            let full = a.config(&h.0).to_string_lossy().into_owned();
+            assert!(full.starts_with(&*h.0.to_string_lossy()), "{full} is under the given home");
+            let real = view(a, &h.0, false, URL, TOKEN);
+            assert_eq!(real.file, full);
+            assert_eq!(real.path, a.shown(), "the real home keeps the short name as the label");
+            let custom = view(a, &h.0, true, URL, TOKEN);
+            assert_eq!(custom.file, full);
+            assert_eq!(custom.path, full, "a custom home shows the full path");
+            let json = serde_json::to_value(&custom).unwrap();
+            assert_eq!(json["file"], serde_json::Value::String(full));
+        }
+    }
+
+    #[test]
     fn an_agent_that_is_not_installed_is_not_set_up_and_its_folder_is_not_made() {
         let h = Home::new("absent");
         for a in ALL {
             assert!(!a.installed(&h.0));
             assert_eq!(set_up(a, &h.0, URL, TOKEN).unwrap_err(), format!("{} was not found on this computer.", a.name()));
-            assert!(!view(a, &h.0, URL, TOKEN).found);
+            assert!(!view(a, &h.0, false, URL, TOKEN).found);
         }
         assert_eq!(fs::read_dir(&h.0).unwrap().count(), 0, "nothing was made");
         assert!(allow_folder(&h.0, "/home/x/Pointcast", true).is_err());

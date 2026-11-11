@@ -50,7 +50,8 @@ export type Progress = {
 };
 
 /** A numbered pin, step or note on a picture; pins and steps share one number sequence. 0 is a note on the whole picture. */
-export type Label = { n: number; text: string; kind?: "step" };
+/** `kind` absent: a pin. "note": a note on the whole picture (numbered 0), such as "1 area hidden". */
+export type Label = { n: number; text: string; kind?: "step" | "note" };
 
 export type SessionExport = {
   plain: string;
@@ -237,8 +238,10 @@ export type AgentId = "claude" | "cursor" | "codex";
 export type AgentView = {
   id: AgentId;
   name: string;
-  /** The user-scope file Pointcast writes, as people know it ("~/.claude.json"). */
+  /** The user-scope file Pointcast writes, as people know it ("~/.claude.json"); the full path when POINTCAST_HOME is set. */
   path: string;
+  /** The full path of that file, always: the row's tooltip. */
+  file: string;
   /** The agent has run on this computer (its folder is there). */
   found: boolean;
   /** "current": this address and key; "other": a pointcast entry with an old address or key. */
@@ -268,7 +271,15 @@ export const agentFolder = (on: boolean) => invoke<Agents>("agent_folder", { on 
 
 export function previewAgents(): Agents {
   const state = typeof location !== "undefined" ? new URLSearchParams(location.search).get("agents") ?? "none" : "none";
-  const row = (id: AgentId, name: string, path: string): AgentView => ({ id, name, path, found: true, entry: "missing", error: null });
+  const row = (id: AgentId, name: string, path: string): AgentView => ({
+    id,
+    name,
+    path,
+    file: path.replace("~", "C:/Users/you"),
+    found: true,
+    entry: "missing",
+    error: null,
+  });
   const agents = [
     row("claude", "Claude Code", "~/.claude.json"),
     row("cursor", "Cursor", "~/.cursor/mcp.json"),

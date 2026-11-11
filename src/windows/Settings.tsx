@@ -871,12 +871,16 @@ function AgentsPart({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refres
           ) : set ? (
             "Set up. Turn on sharing above so it can read your prompts."
           ) : a.entry === "other" ? (
-            `${a.path} has an older Pointcast entry.`
+            <>
+              <span title={a.file}>{a.path}</span> has an older Pointcast entry.
+            </>
           ) : (
-            `Adds Pointcast to ${a.path}, nothing else.`
+            <>
+              Adds Pointcast to <span title={a.file}>{a.path}</span>, nothing else.
+            </>
           );
           return (
-            <Row key={a.id} label={a.name} sub={sub}>
+            <Row key={a.id} label={<span title={a.file}>{a.name}</span>} sub={sub}>
               {connected ? (
                 <span className="badge ok">
                   <Check size={12} strokeWidth={3} aria-hidden />
