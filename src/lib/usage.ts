@@ -29,6 +29,8 @@ export const KEEP_DAYS = 400;
 
 export const NOTHING_YET ="Nothing dictated yet. Your numbers show up here after your first recording.";
 export const NOTHING_THIS_WEEK = "Nothing dictated in the last 7 days.";
+/** Recordings in the range, none with words (silence, a mic that heard nothing): said as such, never as "nothing". */
+export const NO_WORDS = "Recordings, but no words caught yet.";
 
 /** One large number: "3 h 20 min" is two parts, each a number and its small unit. */
 export type Figure = { label: string; parts: { n: string; u?: string }[]; title?: string };
@@ -183,7 +185,7 @@ export function usageView(u: Usage, today: Date, range: Range, locale?: string):
   return {
     empty,
     figures,
-    quiet: figures.length ? null : empty ? NOTHING_YET : NOTHING_THIS_WEEK,
+    quiet: figures.length ? null : empty ? NOTHING_YET : s.recordings > 0 ? NO_WORDS : NOTHING_THIS_WEEK,
     rate,
     cells,
     streak: now > 1 ? `${grouped(now)} days in a row` : null,

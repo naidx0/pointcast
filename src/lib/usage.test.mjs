@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   KEEP_DAYS,
+  NO_WORDS,
   NOTHING_THIS_WEEK,
   NOTHING_YET,
   SAVED_NOTE,
@@ -286,4 +287,11 @@ test("the preview's totals are the sum of its days, and it has a streak and a we
   const v = usageView(u, TODAY, "week", "en-GB");
   assert.equal(v.figures.length, 4);
   assert.match(v.streak, /^\d+ days in a row$/);
+});
+
+test("a week of recordings that caught no words says so, never that nothing was dictated", () => {
+  const silent = usage({ "2026-11-11": day(1, 0, 0, 3_000) });
+  assert.equal(usageView(silent, TODAY, "week").quiet, NO_WORDS);
+  assert.equal(usageView(usage({}), TODAY, "week").quiet, NOTHING_YET);
+  assert.equal(usageView(usage({ "2026-10-01": one }), TODAY, "week").quiet, NOTHING_THIS_WEEK);
 });
