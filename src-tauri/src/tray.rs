@@ -4,7 +4,7 @@ use crate::session::{App, Phase, UiState};
 use std::sync::{Arc, Mutex};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 pub struct Tray {
@@ -15,7 +15,14 @@ pub struct Tray {
     paste: MenuItem<Wry>,
     update: MenuItem<Wry>,
     shown: Mutex<Option<bool>>,
+    menu: Menu<Wry>,
+    /// Today's words, a line under History that is in the menu only while there are some.
+    today: MenuItem<Wry>,
+    today_shown: Mutex<Option<String>>,
 }
+
+/// Where today's line goes in the menu: after History.
+const TODAY_AT: usize = 8;
 
 fn glyph(recording: bool) -> Option<Image<'static>> {
     let bytes: &'static [u8] = match (cfg!(target_os = "macos"), recording) {
@@ -48,6 +55,7 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
     let setup = item(app, "setup", "Setup Assistant…", None)?;
     let update = item(app, "update", CHECK, None)?;
     let quit = item(app, "quit", "Quit Pointcast", Some("CmdOrCtrl+Q".into()))?;
+    let today = MenuItem::with_id(app, "today", "", false, None::<&str>)?;
     let sep = || PredefinedMenuItem::separator(app);
     let menu = Menu::with_items(
         app,
@@ -60,6 +68,12 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
         .tooltip("Pointcast")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        // Yesterday's count is not today's: the line is looked at again as the pointer reaches the icon.
+        .on_tray_icon_event(|t, ev| {
+            if matches!(ev, TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. }) {
+                self::today(t.app_handle());
+            }
+        })
         .on_menu_event(|app, ev| {
             let Some(svc) = app.try_state::<Arc<App>>() else {
                 return;
@@ -116,6 +130,9 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
         paste,
         update,
         shown: Mutex::new(None),
+        menu,
+        today,
+        today_shown: Mutex::new(None),
     });
     refresh(app, &svc.ui(), svc.last_export().is_some());
     Ok(())
@@ -128,6 +145,7 @@ pub fn refresh(app: &AppHandle, st: &UiState, has_last: bool) {
     };
     let rec = matches!(st.phase, Phase::Recording | Phase::Loading);
     let _ = tray.paste.set_enabled(has_last);
+    today(app);
     #[cfg(target_os = "macos")]
     {
         let _ = t.set_title(rec.then(|| crate::clock(st.duration_ms)));
@@ -155,6 +173,46 @@ fn flip(shown: &Mutex<Option<bool>>, rec: bool) -> bool {
     }
     *s = Some(rec);
     true
+}
+
+/// Today's line in the menu: "Today: 1,240 words"; none before the first word of the day.
+fn today_text(words: u64) -> Option<String> {
+    let digits = words.to_string();
+    let mut n = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            n.push(',');
+        }
+        n.push(c);
+    }
+    (words > 0).then(|| format!("Today: {n} {}", if words == 1 { "word" } else { "words" }))
+}
+
+/// Put today's words in the menu, or take the line out when there are none. The count is in memory: nothing is read
+/// here after the first time. Decided under the lock and changed outside it, as `refresh` does.
+pub fn today(app: &AppHandle) {
+    let (Some(tray), Some(svc)) = (app.try_state::<Tray>(), app.try_state::<Arc<App>>()) else {
+        return;
+    };
+    let text = today_text(svc.stats.today_words());
+    let was = {
+        let mut shown = tray.today_shown.lock().unwrap();
+        if *shown == text {
+            return;
+        }
+        std::mem::replace(&mut *shown, text.clone())
+    };
+    match text {
+        Some(t) => {
+            let _ = tray.today.set_text(t);
+            if was.is_none() {
+                let _ = tray.menu.insert(&tray.today, TODAY_AT);
+            }
+        }
+        None => {
+            let _ = tray.menu.remove(&tray.today);
+        }
+    }
 }
 
 const CHECK: &str = "Check for Updates…";
@@ -195,5 +253,14 @@ mod tests {
         assert!(!flip(&shown, true));
         assert!(flip(&shown, false));
         assert!(shown.try_lock().is_ok(), "nothing holds the lock while the tray is updated");
+    }
+
+    #[test]
+    fn todays_line_groups_thousands_and_is_not_there_at_zero() {
+        assert_eq!(today_text(0), None);
+        assert_eq!(today_text(1).as_deref(), Some("Today: 1 word"));
+        assert_eq!(today_text(999).as_deref(), Some("Today: 999 words"));
+        assert_eq!(today_text(1_240).as_deref(), Some("Today: 1,240 words"));
+        assert_eq!(today_text(1_234_567).as_deref(), Some("Today: 1,234,567 words"));
     }
 }

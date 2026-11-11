@@ -17,6 +17,7 @@ mod privacy;
 mod prompt;
 mod session;
 mod settings;
+mod stats;
 mod tools;
 mod tray;
 mod update;
@@ -1052,6 +1053,20 @@ fn history_clear(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), 
     r
 }
 
+/// What the Usage pane shows: the running counts of what was dictated, read when it opens.
+#[tauri::command]
+fn stats_get(svc: tauri::State<'_, Arc<App>>) -> stats::Data {
+    svc.stats.get()
+}
+
+/// Reset in the Usage pane: counting starts again from now. History is left as it is.
+#[tauri::command]
+fn stats_reset(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> stats::Data {
+    let d = svc.stats.reset();
+    tray::today(&app);
+    d
+}
+
 /// A deleted prompt leaves Paste Last Prompt and what coding agents read too.
 fn forgot(app: &AppHandle, svc: &App, gone: Option<&str>) {
     if svc.forget(gone) {
@@ -1811,6 +1826,8 @@ pub fn run() {
             history_paste,
             history_delete,
             history_clear,
+            stats_get,
+            stats_reset,
             speech_cancel,
             gpu_upgrade_cancel,
             gpu_retry,
@@ -1849,6 +1866,7 @@ pub fn run() {
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
             if let Some(m) = svc.history.recover() {
+                svc.stats.count(&m);
                 let _ = svc.set_last(&m.id);
                 show_window(&handle, "result");
             } else if let Some(m) = svc.history.list().first() {

@@ -160,6 +160,8 @@ pub struct App {
     /// Audio transcribed and the time that took, in ms, per model over this run.
     paces: Mutex<std::collections::HashMap<String, (u64, u64)>>,
     pub history: crate::history::Store,
+    /// Running counts of what was dictated, beside History.
+    pub stats: crate::stats::Stats,
     /// Where the pointer went during this recording (positions only).
     trail: Mutex<crate::pointer::Trail>,
     /// When the model heard each token, by the start of its piece, for the pieces it gave times for.
@@ -243,6 +245,7 @@ impl App {
             last_export: Mutex::default(),
             last_dir: Mutex::default(),
             history: crate::history::Store::new(&crate::settings::data_dir()),
+            stats: crate::stats::Stats::new(&crate::settings::data_dir()),
             trail: Mutex::default(),
             tokens: Mutex::default(),
             frames: Mutex::default(),
@@ -653,6 +656,7 @@ impl App {
                 if let Some(r) = &mic_run {
                     let _ = self.history.note_mic(&m.id, r);
                 }
+                self.stats.count(&m);
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
                 created_ms = m.created_ms;
@@ -1155,7 +1159,8 @@ impl App {
                 return Err(AGAIN_CANCELLED.into());
             }
             self.history.replace_speech(id, &said)?;
-            let _ = self.history.note_run(id, &self.run(spent, x.len() as u64 * 1000 / audio::RATE as u64));
+            self.stats.again(id);
+            let _ = self.history.note_run(id,&self.run(spent, x.len() as u64 * 1000 / audio::RATE as u64));
             let s = self.settings.lock().unwrap().clone();
             let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
             if self.last_id.lock().unwrap().as_deref() == Some(id) {
@@ -1709,7 +1714,8 @@ mod tests {
         // The text as said: tidying has its own tests (prompt.rs) and one here.
         let mut a = App::new(Settings { tidy: false, ..Settings::default() }, d.join("settings.json"));
         // History and the recovery checkpoint live in the test's own folder, never the real app's.
-        Arc::get_mut(&mut a).expect("not shared yet").history = crate::history::Store::new(&d);
+        let own = Arc::get_mut(&mut a).expect("not shared yet");
+        (own.history, own.stats) = (crate::history::Store::new(&d), crate::stats::Stats::new(&d));
         // A practice run checkpoints nothing and delivers nowhere: a stop never pastes into the desktop.
         a.practice.store(true, Ordering::SeqCst);
         a
