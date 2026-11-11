@@ -1,0 +1,559 @@
+/* The Ask panel (live.html). Native tokens from native.css for each skin; the line is the only drawn element.
+   Colour roles: red is the live microphone; accent is going to or coming from the AI; ink is work on this computer;
+   warn is a wait that ran long or a failure. One animation per state; a change of state is a 180 ms fade. */
+
+.live {
+  --pad: 14px;
+  --live-ink: var(--label);
+  --live-quiet: var(--label-2);
+  --live-faint: var(--label-3);
+  --live-accent: var(--accent);
+  --live-accent-text: var(--accent);
+  --live-warn: var(--orange);
+  --live-bg: var(--content);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--live-bg);
+  color: var(--live-ink);
+  font: 400 var(--fs-body) / 20px var(--font);
+  overflow: hidden;
+}
+html.win .live {
+  --pad: 16px;
+}
+/* The 12 px provider name meets AA on the light macOS panel only in the pressed blue. */
+html:not(.win):not([data-theme="dark"]) .live {
+  --live-accent-text: var(--accent-press);
+}
+html.win[data-theme="dark"] .live {
+  --live-accent: var(--link);
+  --live-accent-text: var(--link);
+}
+html.vibrant .live {
+  --live-bg: transparent;
+}
+.live.closed {
+  background: transparent;
+}
+
+.live button {
+  cursor: default;
+}
+.live button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* —— Header: the question's first words, and the AI's name —— */
+.live-head {
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 var(--pad);
+  border-bottom: 0.5px solid var(--sep);
+}
+html.win .live-head {
+  border-bottom-width: 1px;
+}
+.live-title {
+  flex: 1;
+  min-width: 0;
+  margin-right: 24px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.live-provider {
+  flex: none;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+  transition:
+    color 180ms var(--ease),
+    transform 180ms var(--ease);
+}
+.live-provider.on {
+  color: var(--live-accent-text);
+}
+.live-hb {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  opacity: 0;
+  transition: opacity 180ms var(--ease);
+}
+.live:hover .live-hb,
+.live-hb:focus-visible {
+  opacity: 1;
+}
+.live:hover .live-provider,
+.live:has(.live-hb:focus-visible) .live-provider {
+  transform: translateX(-24px);
+}
+.live-hb:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+
+/* —— Body —— */
+.live-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* The panel keeps its own place while text streams in: follow the newest line, or stay where the reader is. */
+  overflow-anchor: none;
+}
+.live-inner {
+  padding: 12px var(--pad) 16px;
+}
+.live-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.live-q.big {
+  flex-direction: column;
+}
+.live-words {
+  flex: 1;
+  min-width: 0;
+  margin: -2px 0 0;
+  color: var(--live-ink);
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: color 180ms var(--ease);
+}
+.live-words.quiet {
+  color: var(--live-quiet);
+}
+.live-q.big .live-words {
+  margin: 0;
+}
+
+.live-thumb {
+  position: relative;
+  flex: none;
+  width: 96px;
+  height: 54px;
+}
+.live-thumb.big {
+  width: 100%;
+  height: auto;
+}
+.live-thumb-btn {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0.5px solid var(--sep);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--fill);
+}
+html.win .live-thumb-btn {
+  border-width: 1px;
+  border-radius: 4px;
+}
+.live-thumb-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.live-drop {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+.live-thumb:hover .live-drop,
+.live-thumb:focus-within .live-drop {
+  opacity: 1;
+}
+
+/* —— The line —— */
+.live-line {
+  height: 24px;
+  margin-top: 12px;
+}
+.ln {
+  display: block;
+  overflow: visible;
+  transition: color 180ms var(--ease);
+}
+.ln path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ln.ink {
+  color: var(--live-ink);
+}
+.ln.accent {
+  color: var(--live-accent);
+}
+.ln.warn {
+  color: var(--live-warn);
+}
+.ln.quiet {
+  color: var(--live-faint);
+}
+.ln .tip {
+  fill: var(--red);
+}
+/* Thinking: light travels through the loops, slow and calm. */
+.ln.loops .ghost {
+  opacity: 0.26;
+}
+.ln.loops .head,
+.ln.loops .tail {
+  animation: live-head 2.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.ln.loops .head {
+  stroke-dasharray: 7 200;
+  stroke-dashoffset: 7;
+}
+.ln.loops .tail {
+  stroke-dasharray: 22 200;
+  stroke-dashoffset: 22;
+  opacity: 0.4;
+  animation-name: live-tail;
+}
+@keyframes live-head {
+  to {
+    stroke-dashoffset: -115;
+  }
+}
+@keyframes live-tail {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+.live-note {
+  margin: 8px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-err {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.live-err .ln {
+  flex: none;
+}
+.live-err-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* —— The answer —— */
+.live-answer {
+  position: relative;
+  min-height: 20px;
+  margin-top: 16px;
+  padding-left: 20px;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+.live-answer > .ln {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.live-answer .caret {
+  fill: currentColor;
+  animation: live-blink 1s ease-in-out infinite;
+  transition: opacity 200ms var(--ease);
+}
+/* Shown: the line withdraws up the margin to a short quiet stroke beside the first line. */
+.live-answer.shown .margin {
+  transition: stroke-dashoffset 420ms var(--ease);
+}
+.live-answer.shown .caret {
+  opacity: 0;
+  animation: none;
+}
+@keyframes live-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+.md-end {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  vertical-align: baseline;
+}
+
+.md p,
+.md blockquote,
+.md ul,
+.md ol,
+.md-code,
+.md-math-block {
+  margin: 0 0 8px;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md strong {
+  font-weight: 600;
+}
+.md-h {
+  font-weight: 600;
+}
+.md ul,
+.md ol {
+  padding-left: 18px;
+}
+.md li + li {
+  margin-top: 2px;
+}
+.md li::marker {
+  color: var(--live-quiet);
+}
+.md blockquote {
+  padding-left: 12px;
+  border-left: 2px solid var(--sep);
+  color: var(--live-quiet);
+}
+.md hr {
+  height: 0;
+  margin: 12px 0;
+  border: 0;
+  border-top: 0.5px solid var(--sep);
+}
+.md code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--fill-2);
+  font: 0.9em / 1 var(--mono);
+}
+.md-code {
+  position: relative;
+}
+.md-code pre {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--fill);
+  font: 12px / 18px var(--mono);
+  white-space: pre;
+  overflow-x: auto;
+}
+html.win .md-code pre {
+  border-radius: 4px;
+}
+.md-code pre code {
+  padding: 0;
+  background: none;
+  font: inherit;
+}
+.md-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-control);
+  background: var(--live-bg);
+  color: var(--live-quiet);
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+html.vibrant .md-copy {
+  background: var(--fill-2);
+}
+.md-code:hover .md-copy,
+.md-copy:focus-visible {
+  opacity: 1;
+}
+.md-copy:hover {
+  color: var(--live-ink);
+}
+.md-math {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+.md-math-block {
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--live-ink);
+}
+.md-url {
+  color: var(--live-quiet);
+  overflow-wrap: anywhere;
+}
+
+/* —— Foot row: only when the answer is complete —— */
+.live-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 8px 0 var(--pad);
+  border-top: 0.5px solid var(--sep);
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+html.win .live-foot {
+  border-top-width: 1px;
+}
+.live-sent {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font-size: var(--fs-caption);
+  opacity: 0;
+  transition: opacity 180ms var(--ease);
+}
+.live:hover .live-copy,
+.live-copy:focus-visible {
+  opacity: 1;
+}
+.live-copy:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+
+.live-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A change of state fades in; nothing else moves. */
+.live-in {
+  animation: live-in 180ms var(--ease) both;
+}
+@keyframes live-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Nothing animates while the window is hidden. */
+html.live-hidden .live * {
+  animation-play-state: paused !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live .ln.loops .head,
+  .live .ln.loops .tail {
+    display: none;
+  }
+  .live .ln.loops .ghost {
+    opacity: 1;
+    animation: live-step 1.6s steps(1, end) infinite !important;
+  }
+  .live .live-answer .caret {
+    animation: none !important;
+  }
+}
+@keyframes live-step {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* —— Browser preview only: a desktop behind the panel and the window's own edge, which the OS draws in the app —— */
+html.live-preview body {
+  background: #c4c7cc;
+}
+html.live-preview[data-theme="dark"] body {
+  background: #18191b;
+}
+html.live-preview #root {
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+  height: auto;
+  min-height: 100%;
+  padding: 12px;
+}
+html.live-preview .live {
+  width: 380px;
+  height: auto;
+  max-height: 60vh;
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.22),
+    0 16px 40px rgba(0, 0, 0, 0.22);
+}
+html.live-preview[data-theme="dark"] .live {
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.16),
+    0 16px 40px rgba(0, 0, 0, 0.5);
+}
+html.live-preview.win .live {
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.1),
+    0 8px 32px rgba(0, 0, 0, 0.24);
+}
+html.live-preview.win[data-theme="dark"] .live {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 8px 32px rgba(0, 0, 0, 0.5);
+}
+html.live-preview .live.closed {
+  box-shadow: none;
+}

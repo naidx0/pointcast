@@ -27,6 +27,7 @@ export default defineConfig({
         overlay: resolve(__dirname, "overlay.html"),
         result: resolve(__dirname, "result.html"),
         onboarding: resolve(__dirname, "onboarding.html"),
+        live: resolve(__dirname, "live.html"),
       },
     },
   },
