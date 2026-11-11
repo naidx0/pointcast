@@ -829,6 +829,9 @@ struct RegionCommit {
     /// The outlined control, in the cropped picture's pixels, when the person kept it.
     #[serde(default)]
     element: Option<element::ElementMark>,
+    /// How many areas the person blacked out; the prompt carries it as a note on the picture.
+    #[serde(default)]
+    hidden: u32,
 }
 
 #[tauri::command]
@@ -841,13 +844,15 @@ fn region_commit(
     let png = base64::engine::general_purpose::STANDARD
         .decode(body.png_b64.trim())
         .map_err(|e| e.to_string())?;
+    let mut labels = body.labels;
+    prompt::note_hidden(&mut labels, body.hidden);
     // A picture from History goes back into its entry, which becomes the last prompt and is copied again.
-    let (cap, edited) = match EDIT.commit(&svc.history, &png, body.labels.clone()) {
+    let (cap, edited) = match EDIT.commit(&svc.history, &png, labels.clone()) {
         Some(r) => {
             let (id, cap) = r?;
             (cap, Some(id))
         }
-        None => (svc.commit_region(png, body.labels, body.element)?, None),
+        None => (svc.commit_region(png, labels, body.element)?, None),
     };
     close_overlay(&app);
     let last = match edited {

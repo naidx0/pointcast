@@ -634,7 +634,7 @@ export function PromptDoc({
         )}
         <figcaption>
           [image {n}]
-          {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
+          {img?.labels.length ? ` · ${img.labels.map((l) => (l.n ? `${l.n} ${l.text}` : l.text)).join(" · ")}` : ""}
         </figcaption>
       </figure>
     );

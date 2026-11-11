@@ -202,8 +202,9 @@ export const captureZoom = () => invoke<void>("capture_zoom");
 export const regionBegin = () => invoke<{ png_b64: string; width: number; height: number }>("region_begin");
 /** The control under the pointer, its rect in picture pixels. */
 export type ElementMark = { role: string; name: string; rect: { x: number; y: number; w: number; h: number } };
-export const regionCommit = (pngB64: string, labels: Label[], element: ElementMark | null = null) =>
-  invoke<void>("region_commit", { body: { png_b64: pngB64, labels, element } });
+/** `hidden`: how many areas the person blacked out; the prompt says so ("1 area hidden"). */
+export const regionCommit = (pngB64: string, labels: Label[], element: ElementMark | null = null, hidden = 0) =>
+  invoke<void>("region_commit", { body: { png_b64: pngB64, labels, element, hidden } });
 export const regionCancel = () => invoke<void>("region_cancel");
 export const regionFrame = () =>
   invoke<{

@@ -57,6 +57,15 @@
   cursor: grabbing;
 }
 
+/* A hidden area is grabbed anywhere on it; a rectangle's edge only when the tool would not draw there. */
+.ov-root .ov-fill {
+  pointer-events: all;
+}
+
+.ov-root .ov-off {
+  pointer-events: none;
+}
+
 /* An outline is picked to delete it, not moved. */
 .ov-root .ov-pick,
 .ov-root .ov-pick:active {
@@ -100,6 +109,20 @@
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* The handles of a picked rectangle or hidden area: smaller, square, so they read apart from the box's own. */
+.ov-root .ov-h-sm {
+  z-index: 25;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+}
+
+.ov-root .ov-h-sm::after {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
 }
 
 .ov-root .ov-h-nw,
@@ -234,6 +257,61 @@
 
 .ov-root .ov-sw[aria-pressed="true"] i {
   box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px #fff;
+}
+
+/* The current colour; the five swatches open from it. */
+.ov-root .ov-pal {
+  position: relative;
+  display: flex;
+  flex: none;
+}
+
+.ov-root .ov-cur i {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 0 2px #1c1c1e, 0 0 0 3.5px rgba(255, 255, 255, 0.9);
+}
+
+.ov-root .ov-pop {
+  position: absolute;
+  z-index: 31;
+  top: calc(100% + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 12px;
+}
+
+.ov-root .ov-pop-up {
+  top: auto;
+  bottom: calc(100% + 12px);
+}
+
+/* The box's border: drag it to move the box, whatever the tool. Its handles sit above it and resize. */
+.ov-root .ov-edge {
+  position: absolute;
+  z-index: 18;
+  cursor: move;
+}
+
+.ov-root .ov-edge-n,
+.ov-root .ov-edge-s {
+  height: 10px;
+  margin-top: -5px;
+}
+
+.ov-root .ov-edge-e,
+.ov-root .ov-edge-w {
+  width: 10px;
+  margin-left: -5px;
+}
+
+.ov-root .ov-x {
+  margin-left: 2px;
 }
 
 .ov-root .ov-go {
