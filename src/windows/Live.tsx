@@ -1,4 +1,4 @@
-import { createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { Check, Copy, Square, X } from "lucide-react";
 import {
   inTauri,
@@ -15,21 +15,20 @@ import {
   subscribe,
 } from "@/lib/api";
 import { ENDED_MS, initialLive, isPinned, liveReduce, liveView, sentLine, type LiveDelta, type LivePicture, type LiveView } from "@/lib/live";
-import {
-  FLOOR_START,
-  VOICE_DX,
-  VOICE_STEP_MS,
-  loopsPath,
-  marginPath,
-  restPath,
-  smoothLevel,
-  trackFloor,
-  voiceLevel,
-  voicePath,
-} from "@/lib/line";
+import { VOICE_DX, VOICE_STEP_MS, loopsPath, marginPath, meterLevel, meterStart, meterStep, restPath, smoothLevel, voicePath } from "@/lib/line";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
+import { pressOnce } from "@/lib/press";
 
 const noop = () => undefined;
+
+/** A button that acts on the press itself: the panel is shown without focus, and on Windows the first click on an
+ * inactive window only focuses it (see press.ts). Enter and Space act as on any button. */
+function PressButton({ act, ...rest }: { act: () => void } & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "onPointerDown" | "type">) {
+  const latest = useRef(act);
+  latest.current = act;
+  const p = useMemo(() => pressOnce(() => latest.current()), []);
+  return <button type="button" {...rest} onPointerDown={(e) => p.onPointerDown(e)} onClick={(e) => p.onClick(e)} />;
+}
 const h = createElement as unknown as H<ReactNode>;
 const ROW = 24;
 /** The listening line's height: room for a tall stroke above the baseline and a little below. */
@@ -223,15 +222,14 @@ export function Live() {
 /** Stop while anything is under way, Close otherwise: always visible, never only on hover. Esc does the same. */
 function StopButton({ stop }: { stop: boolean }) {
   return (
-    <button
-      type="button"
+    <PressButton
       className={`live-hb${stop ? " stop" : ""}`}
       title={stop ? "Stop (Esc)" : "Close (Esc)"}
       aria-label={stop ? "Stop" : "Close"}
-      onClick={() => (stop ? liveStop() : liveClose()).catch(noop)}
+      act={() => void (stop ? liveStop() : liveClose()).catch(noop)}
     >
-      {stop ? <Square size={8} fill="currentColor" strokeWidth={0} /> : <X size={15} strokeWidth={1.75} />}
-    </button>
+      {stop ? <Square size={8} fill="currentColor" strokeWidth={0} /> : <X size={16} strokeWidth={1.5} />}
+    </PressButton>
   );
 }
 
@@ -290,14 +288,14 @@ function Picture({
           />
         </button>
         {canDrop ? (
-          <button type="button" className="live-drop" title="Don't send the picture (Delete)" aria-label="Don't send the picture" onClick={() => liveDropPicture().catch(noop)}>
-            <X size={11} strokeWidth={2.25} />
-          </button>
+          <PressButton className="live-drop" title="Don't send the picture (Delete)" aria-label="Don't send the picture" act={() => void liveDropPicture().catch(noop)}>
+            <X size={11} strokeWidth={2} />
+          </PressButton>
         ) : null}
       </div>
-      {label ? (
+      {label.trim() ? (
         <figcaption className="live-label" title={label}>
-          {label}
+          {label.trim()}
         </figcaption>
       ) : null}
     </figure>
@@ -322,7 +320,7 @@ function VoiceLine() {
   const dot = useRef<SVGCircleElement>(null);
   const [w, setW] = useState(0);
   // What the pen has written survives a change of width (the picture taken out, a longer app name).
-  const pen = useRef({ raw: 0, floor: FLOOR_START, env: 0, acc: 0, first: 0, hist: [] as number[] });
+  const pen = useRef({ raw: 0, meter: meterStart(), env: 0, acc: 0, first: 0, hist: [] as number[] });
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -353,8 +351,8 @@ function VoiceLine() {
       const dt = Math.min(100, Math.max(0, t - last));
       last = t;
       if (document.hidden) return;
-      s.floor = trackFloor(s.floor, s.raw, dt);
-      s.env = smoothLevel(s.env, voiceLevel(s.raw, s.floor), dt);
+      s.meter = meterStep(s.meter, s.raw, dt);
+      s.env = smoothLevel(s.env, meterLevel(s.meter, s.raw), dt);
       s.acc += dt;
       while (s.acc >= VOICE_STEP_MS) {
         s.acc -= VOICE_STEP_MS;
@@ -411,9 +409,9 @@ function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {
       </svg>
       <span className="live-err-text">{err.text}</span>
       {err.action ? (
-        <button type="button" className="btn" onClick={act}>
+        <PressButton className="btn" act={act}>
           {err.label}
-        </button>
+        </PressButton>
       ) : null}
     </div>
   );
@@ -509,9 +507,9 @@ function Code({ b, tail }: { b: CodeBlock; tail: ReactNode }) {
           {tail}
         </code>
       </pre>
-      <button type="button" className="md-copy" title="Copy code" aria-label={done ? "Copied" : "Copy code"} onClick={() => copy(b.v)}>
-        {done ? <Check size={13} strokeWidth={2} /> : <Copy size={13} strokeWidth={1.75} />}
-      </button>
+      <PressButton className="md-copy" title="Copy code" aria-label={done ? "Copied" : "Copy code"} act={() => copy(b.v)}>
+        {done ? <Check size={14} strokeWidth={1.75} /> : <Copy size={14} strokeWidth={1.5} />}
+      </PressButton>
     </div>
   );
 }
@@ -522,10 +520,10 @@ function Foot({ text, v }: { text: string; v: LiveView }) {
   return (
     <footer className="live-foot live-in">
       <span className="live-sent">{sentLine(v)}</span>
-      <button type="button" className="live-copy" onClick={() => copy(text)} aria-label={done ? "Copied" : "Copy the answer"}>
-        {done ? <Check size={13} strokeWidth={2} /> : <Copy size={13} strokeWidth={1.75} />}
+      <PressButton className="live-copy" act={() => copy(text)} aria-label={done ? "Copied" : "Copy the answer"}>
+        {done ? <Check size={14} strokeWidth={1.75} /> : <Copy size={14} strokeWidth={1.5} />}
         <span>{done ? "Copied" : "Copy"}</span>
-      </button>
+      </PressButton>
     </footer>
   );
 }
