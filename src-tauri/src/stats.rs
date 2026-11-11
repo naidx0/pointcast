@@ -44,8 +44,9 @@ pub struct Slot {
     pub w: u64,
 }
 
-/// Consecutive local days with at least one recording. `current` is the run that ends on `last_day`: whoever shows it
-/// checks that day is today or yesterday.
+/// Consecutive local days with at least one recording, as counted when each recording came in. `current` is the run
+/// that ends on `last_day`. The Usage pane reads the streak from `days` as seen from today (src/lib/usage.ts) and uses
+/// these only for what `days` no longer holds: a run older than the days kept, and the longest run ever.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Streak {
     pub current: u64,

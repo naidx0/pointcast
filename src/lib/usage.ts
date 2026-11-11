@@ -5,7 +5,8 @@
 export type UsageDay = { r: number; w: number; speech_ms: number; wall_ms: number; p: number };
 
 /** The counts as the app keeps them. Days are local ("2026-11-11"); `grid` is recordings by weekday (Monday first),
- * then by hour. `streak.current` is the run that ends on `last_day`, which may be days ago. */
+ * then by hour. `streak` is the run the app counted as recordings came in, ending on `last_day`; the pane reads the
+ * streak from `days` (streakNow) and the kept one only for what `days` no longer holds. */
 export type Usage = {
   v: number;
   since_ms: number;
@@ -23,7 +24,10 @@ export type Range = "week" | "all";
 export const TYPING_WPM = 40;
 export const SAVED_NOTE = `Time saved is against typing at ${TYPING_WPM} wpm.`;
 
-export const NOTHING_YET = "Nothing dictated yet. Your numbers show up here after your first recording.";
+/** Days the counts keep one by one, as stats.rs keeps them; older ones are only in the totals. */
+export const KEEP_DAYS = 400;
+
+export const NOTHING_YET ="Nothing dictated yet. Your numbers show up here after your first recording.";
 export const NOTHING_THIS_WEEK = "Nothing dictated in the last 7 days.";
 
 /** One large number: "3 h 20 min" is two parts, each a number and its small unit. */
@@ -90,9 +94,40 @@ export function perDay(u: Usage, today: Date, n: number): number {
   return over(u, today, n).recordings / Math.min(n, Math.max(1, counted));
 }
 
-/** The streak as it stands today: the kept run still counts if its last day is today or yesterday, else it is over. */
+/** A day the counts hold with a recording on it. */
+const on = (u: Usage, k: string) => (u.days[k]?.r ?? 0) > 0;
+
+/** The local day `n` days after a day the counts name ("2026-11-11"), before it with `n` below zero. */
+function after(k: string, n: number): string {
+  const [y, m, d] = k.split("-").map(Number);
+  return dayKey(new Date(y, m - 1, d + n));
+}
+
+/** The streak as it stands today, read from the days: the run that ends today, or yesterday (today is not over yet).
+ * A day after today (a recording made while the clock was set ahead) is no part of it. The kept `streak` is read only
+ * where the days run out: a run older than the days kept goes on as far back as the app counted it. */
 export function streakNow(u: Usage, today: Date): number {
-  return lastDays(today, 2).includes(u.streak.last_day) ? u.streak.current : 0;
+  const end = lastDays(today, 2).find((k) => on(u, k));
+  if (!end) return 0;
+  let n = 0;
+  let k = end;
+  for (; on(u, k); k = after(k, -1)) n++;
+  const kept = Object.keys(u.days).sort();
+  const cut = kept.length >= KEEP_DAYS && after(k, 1) === kept[0];
+  return cut && u.streak.last_day === end ? Math.max(n, u.streak.current) : n;
+}
+
+/** The longest run of days in a row: the longest among the days kept, and never less than the longest the app kept
+ * (a run older than the days it keeps) or the streak now. */
+export function longestRun(u: Usage, today: Date): number {
+  let [best, run, prev] = [0, 0, ""];
+  for (const k of Object.keys(u.days).sort()) {
+    if (!on(u, k)) continue;
+    run = prev && after(prev, 1) === k ? run + 1 : 1;
+    best = Math.max(best, run);
+    prev = k;
+  }
+  return Math.max(best, u.streak.longest, streakNow(u, today));
 }
 
 /** Shades for the grid: 0 for none, else 1 to 4 by share of the busiest hour. */
@@ -143,6 +178,7 @@ export function usageView(u: Usage, today: Date, range: Range, locale?: string):
   const cells = u.grid.map((row, d) => row.map((v, h) => ({ level: level[d][h], title: `${names[d]} ${pad(h)}:00, ${v ? plural(v, "recording") : "no recordings"}` })));
 
   const now = streakNow(u, today);
+  const longest = longestRun(u, today);
   const empty = u.total.recordings === 0;
   return {
     empty,
@@ -151,7 +187,7 @@ export function usageView(u: Usage, today: Date, range: Range, locale?: string):
     rate,
     cells,
     streak: now > 1 ? `${grouped(now)} days in a row` : null,
-    longest: u.streak.longest > 1 && u.streak.longest > now ? `Longest: ${grouped(u.streak.longest)} days` : null,
+    longest: longest > 1 && longest > now ? `Longest: ${grouped(longest)} days` : null,
     since: `Since ${new Date(u.since_ms).toLocaleDateString(locale, { day: "numeric", month: "long", year: "numeric" })}`,
   };
 }
