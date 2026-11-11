@@ -16,7 +16,7 @@ import {
 } from "@/lib/api";
 import { initialLive, isPinned, liveReduce, liveView, sentLine, type LiveDelta, type LivePicture, type LiveView } from "@/lib/live";
 import { VOICE_SLOTS, loopsPath, marginPath, restPath, voicePath } from "@/lib/line";
-import { parseMarkdown, renderMarkdown, type CodeBlock, type H } from "@/lib/markdown";
+import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
 
 const noop = () => undefined;
 const h = createElement as unknown as H<ReactNode>;
@@ -297,7 +297,8 @@ function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {
 /** Answering: the markdown, with the line down its margin turning under the line being written; its end is the caret.
  * Shown: the caret fades and the line rests as a short quiet stroke. */
 function Answer({ text, v }: { text: string; v: LiveView }) {
-  const blocks = useMemo(() => parseMarkdown(text), [text]);
+  const streaming = v.phase === "answering";
+  const blocks = useMemo(() => parseMarkdown(streaming ? settleTail(text) : text), [text, streaming]);
   const box = useRef<HTMLDivElement>(null);
   const end = useRef<HTMLSpanElement>(null);
   const margin = useRef<SVGPathElement>(null);

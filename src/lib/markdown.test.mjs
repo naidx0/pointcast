@@ -1,7 +1,7 @@
 // Run: node --test src/lib/markdown.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ELEMENTS, parseMarkdown, renderMarkdown } from "./markdown.ts";
+import { ELEMENTS, parseMarkdown, renderMarkdown, settleTail } from "./markdown.ts";
 import { PREVIEW_ANSWER } from "./live.ts";
 
 const NL = String.fromCharCode(10);
@@ -113,6 +113,18 @@ test("every prefix of a streamed answer renders, only with the allowed elements"
     html(src.slice(0, n), { tail: { html: "" } });
     for (const t of used) assert.ok(ELEMENTS.includes(t), `${t} at ${n}`);
   }
+});
+
+test("while streaming, a line cut mid-syntax shows words, not markup; code is left as it came", () => {
+  assert.equal(settleTail("More in [Bayes"), "More in Bayes");
+  assert.equal(settleTail("More in [Bayes](https://en.wiki"), "More in Bayes");
+  assert.equal(settleTail("See [a](b) done"), "See [a](b) done");
+  assert.equal(html(settleTail("a **bol")), "<p>a <strong>bol</strong></p>");
+  assert.equal(html(settleTail("call `fo")), "<p>call <code>fo</code></p>");
+  assert.equal(settleTail("2 * 3"), "2 * 3");
+  const code = lines("```", "x = [1, 2", "**y");
+  assert.equal(settleTail(code), code);
+  assert.equal(settleTail(lines("**done**", "next [x")), lines("**done**", "next x"));
 });
 
 test("parsing is deterministic", () => {

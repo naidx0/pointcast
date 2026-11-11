@@ -238,6 +238,35 @@ export function parseMarkdown(src: string): Block[] {
   return out;
 }
 
+const count = (s: string, part: string) => s.split(part).length - 1;
+
+/** While an answer streams, its last line is often cut mid-syntax: settle it so the reader sees words, not markup. An
+ * unfinished link shows its text so far, and an open ** or ` closes at the end. Code (inside an open fence) is left
+ * exactly as it came. Only for the text still being written; a finished answer is parsed as it is. */
+export function settleTail(src: string): string {
+  const lines = src.split(NL);
+  let fence: Fence | null = null;
+  for (const l of lines.slice(0, -1)) {
+    if (fence) {
+      if (closesFence(l, fence)) fence = null;
+    } else fence = fenceOf(l);
+  }
+  let line = lines[lines.length - 1];
+  if (fence || fenceOf(line) || startsMath(line)) return src;
+  const mid = line.lastIndexOf("](");
+  if (mid >= 0 && line.indexOf(")", mid) < 0) {
+    const lb = line.lastIndexOf("[", mid);
+    line = lb >= 0 ? line.slice(0, lb) + line.slice(lb + 1, mid) : line.slice(0, mid);
+  } else {
+    const lb = line.lastIndexOf("[");
+    if (lb >= 0 && line.indexOf("]", lb) < 0) line = line.slice(0, lb) + line.slice(lb + 1);
+  }
+  if (count(line, "`") % 2 === 1) line += "`";
+  if (count(line.split("`").filter((_, i) => i % 2 === 0).join(""), "**") % 2 === 1) line = line.trimEnd() + "**";
+  lines[lines.length - 1] = line;
+  return lines.join(NL);
+}
+
 // —— Inlines ——
 
 /** The end of a run of `ch` starting at i. */
