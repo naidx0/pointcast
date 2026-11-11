@@ -509,6 +509,10 @@ impl App {
         if self.history.recover().is_none() {
             self.history.clear_checkpoint();
         }
+        // A question's checkpoint says what it is: a crash while it is said never comes back as a dictation.
+        if purpose == Purpose::Ask {
+            let _ = self.history.mark_question();
+        }
         self.trail.lock().unwrap().clear();
         self.tokens.lock().unwrap().clear();
         // Nothing of the last recording's audio is written for this one; its worker says what it keeps.
@@ -3055,6 +3059,45 @@ mod tests {
         assert!(a.take_said().is_none());
         assert_eq!((a.history.list().len(), a.stats.get().total.recordings), (1, 1));
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_crash_while_a_question_is_said_leaves_nothing_for_history_or_the_counts_and_a_dictation_is_recovered_as_ever() {
+        let mut a = app("ask-crash");
+        let dir = std::env::temp_dir().join(format!("pc-session-ask-crash-{}", std::process::id()));
+        {
+            let m = Arc::get_mut(&mut a).expect("not shared yet");
+            m.open_mic = slow_mic;
+            m.settings.get_mut().unwrap().device = None;
+        }
+        // What the next launch does with whatever the recovery area holds.
+        let launch = || {
+            let back = crate::history::Store::new(&dir).recover();
+            if let Some(m) = &back {
+                a.stats.count(m);
+            }
+            back
+        };
+        let said = |text: &str| {
+            a.history.append_audio(&bursts(8.5, &SPANS)).unwrap();
+            a.push(Item::Speech { t_ms: 300, end_ms: 2_700, text: text.into() }).unwrap();
+            assert!(dir.join("recovery").join("items.json").exists() && a.history.kept_audio(), "{text}: checkpointed");
+        };
+        assert!(a.start_for(Purpose::Ask).unwrap());
+        said("what is this");
+        // The process dies here.
+        assert!(launch().is_none(), "a question is not recovered");
+        assert!(a.history.list().is_empty() && !a.history.kept_audio(), "nothing of it is in History or left behind");
+        assert_eq!(a.stats.get().total, crate::stats::Total::default());
+        a.stop(true).unwrap();
+        // A dictation cut off the same way comes back, marked recovered, and is counted.
+        a.start().unwrap();
+        said("move the button left");
+        let back = launch().expect("a dictation is recovered");
+        assert!(back.recovered && back.has_audio);
+        assert_eq!(a.history.list().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [back.id.as_str()]);
+        assert_eq!(a.stats.get().total.recordings, 1);
+        a.stop(true).unwrap();
     }
 
     #[test]
