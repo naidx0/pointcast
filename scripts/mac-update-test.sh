@@ -19,8 +19,9 @@
 # by hand (docs/SIGNING.md).
 set -euo pipefail
 
-app=${1:?usage: mac-update-test.sh <Pointcast.app> <the library's test binary>}
-parent=${2:?usage: mac-update-test.sh <Pointcast.app> <the library's test binary>}
+# No apostrophe inside ${...}: the bash of macOS reads one there as the start of a quoted string.
+app=${1:?usage: mac-update-test.sh <Pointcast.app> <test binary of the library>}
+parent=${2:?usage: mac-update-test.sh <Pointcast.app> <test binary of the library>}
 identity=${APPLE_SIGNING_IDENTITY:?run mac-signing.sh setup with a certificate first}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
