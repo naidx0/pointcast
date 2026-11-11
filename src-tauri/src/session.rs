@@ -2668,9 +2668,9 @@ mod tests {
         [live, again]
     }
 
-    /// A sentence (0.5 to 3 s) and a short sound (4 to 4.8 s), after 0.3 s from before the microphone opened.
+    /// A sentence (1 to 3.5 s) and a short sound (4.5 to 5.3 s), after 0.3 s from before the microphone opened.
     fn sentence_and_short() -> Vec<f32> {
-        bursts(10.0, &[(0.5, 3.0), (4.0, 4.8)])
+        bursts(10.0, &[(1.0, 3.5), (4.5, 5.3)])
     }
 
     /// A field of a request sent to the helper.
@@ -2704,7 +2704,7 @@ mod tests {
     #[test]
     fn transcribing_again_hears_each_short_piece_joined_once_and_settles_the_language_once_per_run() {
         // A sentence of over five seconds, then two short replies.
-        let x = bursts(14.0, &[(0.5, 6.0), (7.0, 7.8), (9.0, 9.8)]);
+        let x = bursts(14.0, &[(1.5, 7.0), (8.0, 8.8), (9.8, 10.6)]);
         let verbose = r#"{"language":"spanish","text":" Abre la configuracion."}"#;
         let run = [verbose, "Vale.", "Abre la configuracion. Vale.", "Vale.", "Vale. Vale."];
         let answers = [run, run].concat();
