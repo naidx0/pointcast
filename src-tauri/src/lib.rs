@@ -693,7 +693,6 @@ fn settings_view(svc: &App) -> Value {
         "full_hotkey": s.full_chord().label(),
         "region_hotkey": s.region_chord().label(),
         "zoom_hotkey": s.zoom_chord().label(),
-        "ask_hotkey": s.ask_chord().label(),
         "hotkeys": {
             "session": chord(s.session_chord(), chord::default_session()),
             "full": chord(s.full_chord(), chord::default_full()),
@@ -738,6 +737,7 @@ fn settings_view(svc: &App) -> Value {
     });
     // Set apart: one more key in the literal above passes json!'s recursion limit.
     v["update_checked"] = update::checked();
+    v["ask_hotkey"] = json!(s.ask_chord().label());
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
     v["voice_boost"] = json!(s.voice_boost);
