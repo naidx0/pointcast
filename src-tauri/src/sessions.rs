@@ -77,6 +77,9 @@ pub struct Sent {
     pub pictures: Vec<SentPicture>,
     /// The earlier turns that went along, by id, oldest first.
     pub earlier: Vec<String>,
+    /// Files the AI's own app sent along with the question (Codex: the person's own instructions file).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

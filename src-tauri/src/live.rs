@@ -24,8 +24,9 @@ const FRAME: Duration = Duration::from_millis(34);
 /// The long side of the picture the panel shows beside the question.
 const THUMB: u32 = 480;
 
-pub const NO_PROVIDER: &str = "Choose an AI in Settings first";
+pub const NO_PROVIDER: &str = assist::catalog::NONE_CHOSEN;
 pub const NO_ANSWER: &str = "No answer after 20 seconds. Ask again.";
+pub const NOTHING_TO_RETRY: &str = "There is no question to ask again.";
 
 const SYSTEM: &str = "You are the study assistant in Pointcast. The person asks a question out loud about what is on \
 their screen, and a picture of it may be attached. Answer plainly and briefly, in markdown. You cannot run tools, \
@@ -67,7 +68,7 @@ pub fn next(from: State, step: Step) -> Option<State> {
     match (from, step) {
         (Closed | Shown | Error, Step::Press) => Some(Listening),
         (Listening, Step::Release) => Some(Finishing),
-        (Finishing, Step::Send) => Some(Sending),
+        (Finishing | Error, Step::Send) => Some(Sending),
         (Sending, Step::First) => Some(Answering),
         (Listening | Finishing | Sending | Answering, Step::Settle) => Some(Shown),
         (Closed | Shown | Error | Finishing | Sending | Answering, Step::Fail) => Some(Error),
@@ -158,12 +159,21 @@ pub struct Deps {
     pub voice: Arc<dyn Voice>,
     /// One frame of the screen as it is now.
     pub grab: Box<dyn Fn() -> Result<Frame, String> + Send + Sync>,
-    /// The AI the person chose, when one is configured.
-    pub provider: Box<dyn Fn() -> Option<Arc<dyn Provider>> + Send + Sync>,
+    /// The AI the person chose, as the settings say at this Ask; else the line the panel shows instead.
+    pub provider: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>,
     pub out: Box<dyn Fn(Out) + Send + Sync>,
     /// Unix ms.
     pub now: Box<dyn Fn() -> u64 + Send + Sync>,
     pub tidy: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+/// A question that is kept and on its way, or that failed and can be asked again: what is sent, and its answer so far.
+#[derive(Clone)]
+struct Kept {
+    session: String,
+    turn: String,
+    parts: Vec<Part>,
+    answer: Answer,
 }
 
 #[derive(Default)]
@@ -181,6 +191,10 @@ struct Inner {
     session: Option<String>,
     press_ms: u64,
     release_ms: u64,
+    /// The question that failed, until it is answered, another is asked or the panel closes.
+    kept: Option<Kept>,
+    /// When the AI's helper was last used: from here the idle scheduler counts the time before it is let go.
+    used: Option<Instant>,
 }
 
 pub struct Live {
@@ -208,10 +222,7 @@ pub fn line(f: &Failure) -> String {
 /// What the person calls the AI behind provider `id`: the panel never shows an id, so one with no name here shows
 /// nothing.
 pub fn name_of(id: &str) -> &'static str {
-    match id {
-        assist::codex::ID => "ChatGPT",
-        _ => "",
-    }
+    assist::catalog::name_of(id)
 }
 
 /// One line about the picture, sent with the question: its size, the window it shows, the control pointed at when the
@@ -292,10 +303,13 @@ impl Live {
         if next(g.snap.state, Step::Press).is_none() || self.deps.voice.busy() {
             return false;
         }
-        let Some(provider) = (self.deps.provider)() else {
-            // Nothing is grabbed, kept or sent without an AI to ask.
-            self.refuse(g, NO_PROVIDER.into());
-            return false;
+        let provider = match (self.deps.provider)() {
+            Ok(p) => p,
+            Err(why) => {
+                // Nothing is grabbed, kept or sent without an AI the person chose and allowed.
+                self.refuse(g, why);
+                return false;
+            }
         };
         // The screen as it is now, before the panel is on it.
         let frame = (self.deps.grab)().ok();
@@ -312,6 +326,8 @@ impl Live {
         let run = g.run;
         g.press_ms = (self.deps.now)();
         g.halt = false;
+        g.kept = None;
+        g.used = Some(Instant::now());
         g.snap.provider = name_of(provider.id()).into();
         g.provider = Some(provider);
         g.snap.error = None;
@@ -433,6 +449,7 @@ impl Live {
         g.picture = None;
         g.provider = None;
         g.session = None;
+        g.kept = None;
         g.halt = false;
         g.snap = Snapshot::default();
         self.tell(&g);
@@ -460,13 +477,13 @@ impl Live {
         self.tell(&g);
     }
 
-    /// What a session already said, as turns, and the ids of those turns, oldest first.
-    fn earlier(&self, session: &str) -> (Vec<Turn>, Vec<String>) {
+    /// What a session already said, as turns, and the ids of those turns, oldest first; never the turn `except`.
+    fn earlier(&self, session: &str, except: Option<&str>) -> (Vec<Turn>, Vec<String>) {
         let Ok((_, kept)) = self.sessions.read(session) else {
             return Default::default();
         };
         let (mut turns, mut ids) = (vec![], vec![]);
-        for k in kept {
+        for k in kept.into_iter().filter(|k| Some(k.meta.id.as_str()) != except) {
             let Some(a) = k.answer else { continue };
             let mut parts = vec![Part::Text(a.sent.text.clone())];
             for p in &a.sent.pictures {
@@ -527,14 +544,14 @@ impl Live {
         };
         // A conversation opened on a session that already has turns starts from them.
         let (before, ids) = match (&session, fresh) {
-            (Some(id), true) => self.earlier(id),
+            (Some(id), true) => self.earlier(id, None),
             _ => Default::default(),
         };
         let wires: Vec<Wire> = asked.iter().map(|a| Wire { bytes: &a.wire, w: a.wire_w, h: a.wire_h, mime: a.mime }).collect();
         let first = Answer {
             provider: provider.id().into(),
             times: Times { press_ms, release_ms, words_ms, ..Times::default() },
-            sent: Sent { text: sent_text.clone(), pictures: vec![], earlier: ids },
+            sent: Sent { text: sent_text.clone(), pictures: vec![], earlier: ids, adds: vec![] },
             ..Answer::default()
         };
         let q = Question { items: &said.items, created_ms: said.created_ms, duration_ms: said.duration_ms, audio: said.audio.clone(), pictures: &wires };
@@ -542,27 +559,73 @@ impl Live {
             Ok(s) => s,
             Err(e) => return self.fail(run, format!("The question could not be kept: {e}")),
         };
-        let (sid, tid, mut answer) = (saved.session.id.clone(), saved.turn.clone(), saved.answer.clone());
-        let keep = |a: &Answer| {
-            let _ = self.sessions.write_answer(&sid, &tid, a, now());
-        };
-        let (turn_no, chat) = {
-            let mut g = self.inner.lock().unwrap();
-            if g.run != run {
-                // The panel closed while the question was kept: it stays on disk, unanswered.
-                answer.stopped = true;
-                return keep(&answer);
-            }
-            g.session = Some(sid.clone());
-            g.snap.session = SessionRef { id: sid.clone(), title: saved.session.title.clone() };
-            g.snap.turn += 1;
-            self.tell(&g);
-            (g.snap.turn, g.chat.take())
-        };
         let mut parts = vec![Part::Text(sent_text)];
         if let (Some(a), Some(path)) = (&asked, saved.pictures.first()) {
             parts.push(Part::Picture { path: path.clone(), w: a.wire_w, h: a.wire_h, mime: a.mime });
         }
+        let kept = Kept { session: saved.session.id.clone(), turn: saved.turn.clone(), parts, answer: saved.answer.clone() };
+        let (turn_no, chat) = {
+            let mut g = self.inner.lock().unwrap();
+            if g.run != run {
+                // The panel closed while the question was kept: it stays on disk, unanswered.
+                let mut answer = kept.answer;
+                answer.stopped = true;
+                let _ = self.sessions.write_answer(&kept.session, &kept.turn, &answer, now());
+                return;
+            }
+            g.session = Some(kept.session.clone());
+            g.snap.session = SessionRef { id: kept.session.clone(), title: saved.session.title.clone() };
+            g.snap.turn += 1;
+            g.kept = Some(kept.clone());
+            self.tell(&g);
+            (g.snap.turn, g.chat.take())
+        };
+        self.send(run, &provider, kept, turn_no, chat, before);
+    }
+
+    /// Ask the question that failed again, as it was kept: the same words and the same picture bytes, in the same
+    /// session, as the panel's next turn. Nothing happens when no question failed.
+    pub fn retry(self: &Arc<Self>) -> Result<(), String> {
+        let mut g = self.inner.lock().unwrap();
+        let Some(mut kept) = g.kept.clone().filter(|_| g.snap.state == State::Error) else {
+            return Err(NOTHING_TO_RETRY.into());
+        };
+        let provider = (self.deps.provider)()?;
+        g.run += 1;
+        let run = g.run;
+        g.halt = false;
+        g.used = Some(Instant::now());
+        g.snap.error = None;
+        g.snap.thinking = false;
+        g.snap.provider = name_of(provider.id()).into();
+        g.provider = Some(provider.clone());
+        g.snap.turn += 1;
+        let turn_no = g.snap.turn;
+        self.step(&mut g, Step::Send);
+        self.tell(&g);
+        let chat = g.chat.take();
+        drop(g);
+        // The conversation that failed was closed: the new one starts from what the session kept before this question.
+        let (before, ids) = if chat.is_none() { self.earlier(&kept.session, Some(&kept.turn)) } else { Default::default() };
+        let was = kept.answer;
+        kept.answer = Answer {
+            provider: provider.id().into(),
+            times: Times { sent_ms: 0, first_ms: 0, done_ms: 0, ..was.times },
+            sent: Sent { earlier: ids, ..was.sent },
+            ..Answer::default()
+        };
+        let me = self.clone();
+        std::thread::spawn(move || me.send(run, &provider, kept, turn_no, chat, before));
+        Ok(())
+    }
+
+    /// Ask the kept question and follow its answer to the end, keeping it as it comes.
+    fn send(&self, run: u64, provider: &Arc<dyn Provider>, kept: Kept, turn_no: u64, chat: Option<Box<dyn Chat>>, before: Vec<Turn>) {
+        let now = || (self.deps.now)();
+        let Kept { session: sid, turn: tid, parts, mut answer } = kept;
+        let keep = |a: &Answer| {
+            let _ = self.sessions.write_answer(&sid, &tid, a, now());
+        };
         // Opening can take a while (a helper starts): never under the lock.
         let opened = match chat {
             Some(c) => Ok(c),
@@ -577,6 +640,8 @@ impl Live {
                 return self.fail(run, line(&f));
             }
         };
+        // What the AI's own app adds to the question goes along too, and is kept as sent.
+        answer.sent.adds = chat.adds();
         let stopper = chat.stopper();
         let (tx, rx) = mpsc::channel::<Event>();
         answer.times.sent_ms = now();
@@ -675,6 +740,7 @@ impl Live {
         }
         g.halt = false;
         g.snap.thinking = false;
+        g.used = Some(Instant::now());
         match &answer.error {
             Some(why) => {
                 // A conversation that failed is not asked again: the next question opens one from what is kept.
@@ -686,10 +752,36 @@ impl Live {
                 self.step(&mut g, Step::Fail);
             }
             None => {
+                g.kept = None;
                 self.step(&mut g, Step::Settle);
             }
         }
         self.tell(&g);
+        drop(g);
+        // The idle scheduler counts five minutes from here.
+        crate::wake();
+    }
+
+    /// When the AI's helper was last used, while the panel may still hold one.
+    pub fn idle_since(&self) -> Option<Instant> {
+        self.inner.lock().unwrap().used
+    }
+
+    /// Let the AI's helper go after it sat idle: the conversation is closed, and the next question opens one from
+    /// what the session kept. An answer under way is left alone.
+    pub fn let_go(&self) {
+        let mut g = self.inner.lock().unwrap();
+        if matches!(g.snap.state, State::Sending | State::Answering) {
+            g.used = Some(Instant::now());
+            return;
+        }
+        g.used = None;
+        g.stopper = None;
+        let chat = g.chat.take();
+        drop(g);
+        if let Some(mut c) = chat {
+            c.close();
+        }
     }
 }
 
@@ -796,6 +888,10 @@ mod tests {
     }
 
     fn rig(name: &str, provider: Option<Arc<dyn Provider>>, wait: Duration) -> Rig {
+        rig_with(name, Box::new(move || provider.clone().ok_or_else(|| NO_PROVIDER.to_owned())), wait)
+    }
+
+    fn rig_with(name: &str, provider: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>, wait: Duration) -> Rig {
         let dir = std::env::temp_dir().join(format!("pc-live-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -814,7 +910,7 @@ mod tests {
                 });
                 Ok(cut)
             }),
-            provider: Box::new(move || provider.clone()),
+            provider,
             out: Box::new(move |out| o.lock().unwrap().push(out)),
             // Every reading is a millisecond after the last, so the order of the stages is the order of their times.
             now: Box::new(move || clock.fetch_add(1, Ordering::SeqCst)),
@@ -1026,6 +1122,141 @@ mod tests {
         let Part::Text(context) = &opened[1].1[0].parts[0] else { panic!("no context: {opened:?}") };
         assert!(context.contains("what is this") && context.contains("par"), "{context}");
         assert_eq!(r.kept()[0].1[1].answer.clone().unwrap().sent.earlier, [turn.meta.id.clone()]);
+        r.end();
+    }
+
+    /// Fails the answer of its first conversation as `first` does, then answers as `then` does.
+    struct FailsOnce {
+        first: Scripted,
+        then: Scripted,
+        opened: AtomicUsize,
+    }
+
+    impl Provider for FailsOnce {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn caps(&self, m: Option<&str>) -> Caps {
+            self.then.caps(m)
+        }
+        fn health(&self) -> Health {
+            self.then.health()
+        }
+        fn warm(&self) {}
+        fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
+            let p = if self.opened.fetch_add(1, Ordering::SeqCst) == 0 { &self.first } else { &self.then };
+            p.open(system, earlier)
+        }
+    }
+
+    #[test]
+    fn a_question_that_failed_is_asked_again_with_the_same_words_and_picture_as_the_next_turn() {
+        let (first, then) = (Scripted::new(&[]).failing(Failure::Offline), Scripted::new(&[(1, "Four.")]));
+        let r = rig("retry", Some(Arc::new(FailsOnce { first: first.clone(), then: then.clone(), opened: AtomicUsize::new(0) })), FIRST_WAIT);
+        assert_eq!(r.live.retry(), Err(NOTHING_TO_RETRY.to_owned()), "nothing failed yet");
+        r.ask("what is two plus two", State::Error);
+        assert_eq!(r.live.snapshot().error, Some(line(&Failure::Offline)));
+        let failed = r.kept()[0].1[0].answer.clone().unwrap();
+        assert_eq!(failed.error, Some(line(&Failure::Offline)));
+        assert_eq!(r.live.retry(), Ok(()));
+        r.until(State::Shown);
+        let snap = r.live.snapshot();
+        assert_eq!((snap.turn, snap.error.clone(), snap.words.as_str()), (2, None, "what is two plus two"));
+        assert_eq!(r.deltas(), [(2, "Four.".to_owned())], "the answer comes under the new turn number");
+        // Still one question on disk, now answered, and what was sent is what was sent the first time.
+        let kept = r.kept();
+        assert_eq!((kept.len(), kept[0].1.len()), (1, 1));
+        let a = kept[0].1[0].answer.clone().unwrap();
+        assert_eq!((a.text.as_str(), a.error.clone(), &a.sent), ("Four.", None, &failed.sent));
+        assert!(a.times.sent_ms > failed.times.sent_ms && a.times.press_ms == failed.times.press_ms, "{:?}", a.times);
+        // The provider got the same words and the same picture bytes both times.
+        let (one, two) = (first.asked.lock().unwrap().clone(), then.asked.lock().unwrap().clone());
+        assert_eq!((one.len(), two.len()), (1, 1));
+        assert_eq!(one[0], two[0]);
+        let Part::Picture { path, .. } = &two[0].parts[1] else { panic!("no picture: {two:?}") };
+        assert_eq!(std::fs::read(path).unwrap(), shot().wire);
+        assert_eq!(r.live.retry(), Err(NOTHING_TO_RETRY.to_owned()), "answered: nothing is left to ask again");
+        r.end();
+        // With no AI chosen nothing was kept, so there is nothing to ask again either.
+        let none = rig("retry-none", None, FIRST_WAIT);
+        assert!(!none.live.press());
+        assert_eq!(none.live.retry(), Err(NOTHING_TO_RETRY.to_owned()));
+        assert_eq!((none.grabs.load(Ordering::SeqCst), none.kept().len()), (0, 0));
+        none.end();
+    }
+
+    #[test]
+    fn a_question_that_waited_too_long_is_asked_again_on_the_same_kept_turn() {
+        let silent = Canned { events: vec![], hold: true, held: Arc::default() };
+        let r = rig("retry-silent", Some(Arc::new(silent)), Duration::from_millis(80));
+        r.ask("anyone there", State::Error);
+        assert_eq!(r.live.snapshot().error.as_deref(), Some(NO_ANSWER));
+        assert_eq!(r.live.retry(), Ok(()));
+        r.until(State::Error);
+        r.wait("the second wait to end", || r.live.snapshot().turn == 2 && r.live.snapshot().error.as_deref() == Some(NO_ANSWER));
+        assert_eq!((r.kept().len(), r.kept()[0].1.len()), (1, 1));
+        r.end();
+    }
+
+    #[test]
+    fn a_conversation_left_idle_is_closed_and_the_next_question_opens_one_from_what_is_kept() {
+        let (script, provider) = scripted(&[(1, "Yes.")]);
+        let r = rig("idle", provider, FIRST_WAIT);
+        assert!(r.live.idle_since().is_none(), "nothing used yet");
+        r.ask("is this a cell", State::Shown);
+        let used = r.live.idle_since().expect("the helper was used");
+        assert!(r.live.inner.lock().unwrap().chat.is_some());
+        r.live.let_go();
+        assert!(r.live.idle_since().is_none() && r.live.inner.lock().unwrap().chat.is_none());
+        r.ask("and this", State::Shown);
+        let opened = script.opened.lock().unwrap().clone();
+        assert_eq!(opened.len(), 2, "a new conversation");
+        assert!(!opened[1].1.is_empty(), "it starts from what was kept");
+        assert!(r.live.idle_since().unwrap() > used);
+        r.end();
+    }
+
+    #[test]
+    fn an_ask_through_the_settings_makes_nothing_without_a_chosen_and_allowed_ai_and_takes_a_new_choice_at_once() {
+        use crate::assist::catalog::{self, Held};
+        use crate::settings::Settings;
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let made: Arc<Mutex<Vec<Scripted>>> = Arc::default();
+        let m = made.clone();
+        let held = Arc::new(Held::with(Box::new(move |p| {
+            let s = Scripted { id: p.id, ..Scripted::new(&[(1, "Fine.")]) };
+            m.lock().unwrap().push(s.clone());
+            Ok(Arc::new(s) as Arc<dyn Provider>)
+        })));
+        let (s2, h2) = (settings.clone(), held.clone());
+        let r = rig_with("chosen", Box::new(move || h2.provider(&s2.lock().unwrap())), FIRST_WAIT);
+        let refused = |why: &str| {
+            assert!(!r.live.press());
+            let snap = r.live.snapshot();
+            assert_eq!((snap.state, snap.error.as_deref()), (State::Error, Some(why)));
+            assert_eq!((made.lock().unwrap().len(), r.grabs.load(Ordering::SeqCst), r.kept().len()), (0, 0, 0), "nothing made, grabbed or kept");
+        };
+        refused(NO_PROVIDER);
+        settings.lock().unwrap().assist_provider = Some("ollama".into());
+        settings.lock().unwrap().assist_model = Some("llava".into());
+        refused("Allow Ollama on this computer in Settings first");
+        catalog::choose(&mut settings.lock().unwrap(), "openai", Some("m".into()), true, 1).unwrap();
+        settings.lock().unwrap().assist_offline_only = true;
+        refused(catalog::OFFLINE_ONLY);
+        // Allowed: asked through what was chosen, no restart between.
+        catalog::choose(&mut settings.lock().unwrap(), "ollama", Some("llava".into()), true, 2).unwrap();
+        r.ask("what is this", State::Shown);
+        assert_eq!(r.live.snapshot().provider, "Ollama on this computer");
+        let first = made.lock().unwrap().clone();
+        assert_eq!((first.len(), first[0].asked.lock().unwrap().len()), (1, 1));
+        catalog::choose(&mut settings.lock().unwrap(), "lmstudio", Some("q".into()), true, 3).unwrap();
+        r.live.close();
+        r.ask("and now", State::Shown);
+        assert_eq!(r.live.snapshot().provider, "LM Studio on this computer");
+        assert_eq!(made.lock().unwrap().len(), 2);
+        // No key reaches the panel: it never holds one, so a planted one cannot show in what it is told.
+        let told = format!("{:?}", r.outs.lock().unwrap());
+        assert!(!told.contains("test-key-not-real") && told.contains("LM Studio"));
         r.end();
     }
 

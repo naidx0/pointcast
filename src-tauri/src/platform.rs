@@ -244,7 +244,50 @@ pub fn panel_spot(area: (i32, i32, u32, u32), scale: f64, width: f64, margin: f6
     (x + w - wide - margin, y + margin, wide, (h - 2.0 * margin).max(0.0))
 }
 
+/// The panel at `high` logical pixels tall, docked as `panel_spot` says: its top and right edges stay where they are and
+/// it grows downward, never past the bottom margin of `area`.
+pub fn panel_fit(area: (i32, i32, u32, u32), scale: f64, width: f64, margin: f64, high: f64) -> (f64, f64, f64, f64) {
+    let (x, y, wide, most) = panel_spot(area, scale, width, margin);
+    (x, y, wide, high.max(0.0).min(most))
+}
+
+/// Put the panel at `spot` (logical pixels of a screen at `scale`), moving or sizing only what is off by a pixel or more,
+/// so a resize this causes finds nothing more to do.
+fn place_panel(w: &tauri::Window, spot: (f64, f64, f64, f64), scale: f64) {
+    let (x, y, wide, high) = spot;
+    let off = |a: f64, b: f64| (a - b).abs() >= 1.0;
+    if let Ok(size) = w.inner_size() {
+        if off(size.width as f64 / scale, wide) || off(size.height as f64 / scale, high) {
+            // As for the HUD: AppKit places windows in points, Windows in physical pixels of one desktop.
+            if cfg!(target_os = "macos") {
+                let _ = w.set_size(tauri::LogicalSize::new(wide, high));
+            } else {
+                let _ = w.set_size(tauri::PhysicalSize::new((wide * scale).round() as u32, (high * scale).round() as u32));
+            }
+        }
+    }
+    if let Ok(at) = w.outer_position() {
+        if off(at.x as f64 / scale, x) || off(at.y as f64 / scale, y) {
+            if cfg!(target_os = "macos") {
+                let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+            } else {
+                let _ = w.set_position(tauri::PhysicalPosition::new((x * scale).round() as i32, (y * scale).round() as i32));
+            }
+        }
+    }
+}
+
+/// The panel's page set a new height: keep it docked at the top right of its screen. AppKit keeps a window's bottom
+/// edge where it was when it is resized, so on a Mac the panel would otherwise grow upward.
+pub fn redock_panel(w: &tauri::Window) {
+    let Ok(Some(m)) = w.current_monitor() else { return };
+    let (wa, s) = (m.work_area(), m.scale_factor());
+    let high = w.inner_size().map(|z| z.height as f64 / s).unwrap_or(0.0);
+    place_panel(w, panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN, high), s);
+}
+
 /// Show the answer panel at the right edge of the pointer's screen, without taking focus from the app being asked about.
+/// It keeps the height its page last asked for, within that screen.
 pub fn show_panel(app: &AppHandle) {
     let Some(w) = ensure(app, PANEL) else {
         return;
@@ -252,15 +295,9 @@ pub fn show_panel(app: &AppHandle) {
     if let Some(m) = pointer_monitor(app) {
         let wa = m.work_area();
         let s = m.scale_factor();
-        let (x, y, wide, high) = panel_spot((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN);
-        // As for the HUD: AppKit places windows in points, Windows in physical pixels of one desktop.
-        if cfg!(target_os = "macos") {
-            let _ = w.set_size(tauri::LogicalSize::new(wide, high));
-            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
-        } else {
-            let _ = w.set_size(tauri::PhysicalSize::new((wide * s).round() as u32, (high * s).round() as u32));
-            let _ = w.set_position(tauri::PhysicalPosition::new((x * s).round() as i32, (y * s).round() as i32));
-        }
+        let high = w.inner_size().map(|z| z.height as f64 / w.scale_factor().unwrap_or(s)).unwrap_or(0.0);
+        let spot = panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN, high);
+        place_panel(&w.as_ref().window(), spot, s);
     }
     if !cfg!(target_os = "macos") {
         let _ = w.set_always_on_top(true);
@@ -632,6 +669,13 @@ mod tests {
             assert!(!asks, "{} lets the panel hide itself", file.path().display());
         }
         assert!(reach > 0, "the panel has a capability, so the check above read something");
+        // The panel's own file: the check finds the permission where it is planted, and the panel may size itself.
+        let own: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("live.json")).unwrap()).unwrap();
+        let grants = |cap: &serde_json::Value, p: &str| cap["permissions"].as_array().unwrap().iter().any(|q| q.to_string().contains(p));
+        let mut planted = own.clone();
+        planted["permissions"].as_array_mut().unwrap().push("core:window:allow-set-content-protected".into());
+        assert!(grants(&planted, "set-content-protected") && !grants(&own, "set-content-protected"));
+        assert!(grants(&own, "core:window:allow-set-size") && own["windows"] == serde_json::json!([PANEL]));
         // And the window is declared: built on demand, never at launch.
         let conf: serde_json::Value =
             serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json")).unwrap()).unwrap();
@@ -657,6 +701,27 @@ mod tests {
         at((0, 50, 3024, 1888), 2.0, (1120.0, 37.0, 380.0, 920.0));
         // A screen narrower than the panel: it shrinks to fit inside the margins and never leaves the screen.
         at((0, 0, 300, 200), 1.0, (12.0, 12.0, 276.0, 176.0));
+    }
+
+    #[test]
+    fn a_panel_that_sets_its_height_keeps_its_top_and_right_edges_and_grows_downward_within_the_screen() {
+        let near = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| [a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3].iter().all(|d| d.abs() < 1e-6);
+        // A small 1280x720 screen under a 40 px bar; the page caps itself at 60 % of the screen, 432 px.
+        let area = (0, 40, 1280, 680);
+        let screen = 720.0;
+        for high in [120.0, 300.0, 0.6 * screen] {
+            let got = panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, high);
+            assert!(near(got, (888.0, 52.0, 380.0, high)), "{high}: {got:?}");
+            assert!((got.0 + got.2 - (1280.0 - PANEL_MARGIN)).abs() < 1e-6, "the right edge stays");
+        }
+        // Taller than the screen allows: it stops at the bottom margin.
+        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 900.0), (888.0, 52.0, 380.0, 656.0)));
+        // A Retina screen in points, at 60 % of its 944-point height.
+        let got = panel_fit((0, 50, 3024, 1888), 2.0, PANEL_WIDTH, PANEL_MARGIN, 0.6 * 944.0);
+        assert!(near(got, (1120.0, 37.0, 380.0, 566.4)), "{got:?}");
+        // A screen narrower and shorter than the panel: inside the margins either way.
+        assert!(near(panel_fit((0, 0, 300, 200), 1.0, PANEL_WIDTH, PANEL_MARGIN, 0.6 * 200.0), (12.0, 12.0, 276.0, 120.0)));
+        assert!(near(panel_fit((0, 0, 300, 200), 1.0, PANEL_WIDTH, PANEL_MARGIN, -5.0), (12.0, 12.0, 276.0, 0.0)));
     }
 
     #[test]

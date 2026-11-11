@@ -23,6 +23,10 @@ pub const ID: &str = "codex";
 /// call without a test failing.
 pub const SENDS: &[&str] = &["initialize", "initialized", "account/read", "model/list", "thread/start", "turn/start", "turn/interrupt", "account/rateLimits/read"];
 
+/// Every method a sign-in sends, on a line of its own that never asks anything: the greeting, and the start of Codex's
+/// own ChatGPT sign-in, whose page the browser shows.
+pub const SIGN_IN: &[&str] = &["initialize", "initialized", "account/login/start"];
+
 /// The features of Codex that act on the computer or reach beyond the conversation, by their names in
 /// `codex features list` (0.164.0).
 pub const FEATURES_OFF: &[&str] = &[
@@ -226,6 +230,10 @@ struct Shared {
     tail: Option<Arc<Tail>>,
     /// Notifications that were not for us to act on.
     ignored: AtomicU64,
+    /// What this line may send: `SENDS` for a conversation, `SIGN_IN` for a sign-in.
+    sends: &'static [&'static str],
+    /// A sign-in waiting to hear that it ended.
+    login: Mutex<Option<Sender<Value>>>,
 }
 
 impl Shared {
@@ -237,8 +245,17 @@ impl Shared {
         }
     }
 
+    /// Whether this line may send `method`.
+    fn allows(&self, method: &str) -> std::io::Result<()> {
+        if self.sends.contains(&method) {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("Pointcast does not send {method}")))
+        }
+    }
+
     fn call(&self, method: &str, params: Value, within: Duration) -> Result<Value, Failure> {
-        Self::allowed(method).map_err(|e| Failure::Broken(e.to_string()))?;
+        self.allows(method).map_err(|e| Failure::Broken(e.to_string()))?;
         self.rpc.call(method, params, within).map_err(|e| {
             Failure::Broken(match e {
                 CallError::Rpc(e) => format!("Codex refused {method}: {}", e.message),
@@ -249,7 +266,7 @@ impl Shared {
     }
 
     fn post_as(&self, id: u64, method: &str, params: Value) -> std::io::Result<()> {
-        Self::allowed(method)?;
+        self.allows(method)?;
         self.rpc.post_as(id, method, params)
     }
 
@@ -280,6 +297,8 @@ impl Shared {
 
     /// The helper is gone: whatever was being answered, or waited to be, fails with what the helper said last.
     fn gone(&self) {
+        // A sign-in waiting to hear how it ended hears that it did not.
+        self.login.lock().unwrap().take();
         let (a, q) = {
             let mut s = self.inner.lock().unwrap();
             s.dead = true;
@@ -348,6 +367,12 @@ impl Shared {
             "account/rateLimits/updated", "item/agentMessage/delta", "item/completed", "item/started", "item/reasoning/summaryTextDelta",
             "item/reasoning/textDelta", "thread/tokenUsage/updated", "error", "turn/completed",
         ];
+        if method == "account/login/completed" {
+            if let Some(tx) = self.login.lock().unwrap().as_ref() {
+                let _ = tx.send(p.clone());
+                return;
+            }
+        }
         if !HEARD.contains(&method) {
             self.ignored.fetch_add(1, Ordering::SeqCst);
             return;
@@ -531,6 +556,9 @@ pub struct CodexChat {
     pictures: bool,
     /// What a resumed conversation starts from, sent with its first question.
     context: Vec<Part>,
+    /// The files Codex itself adds to every conversation, as its `thread/start` named them (the person's own Codex
+    /// instructions file). Pointcast cannot leave them out, so it says that they go along.
+    pub adds: Vec<String>,
 }
 
 /// What a conversation is started with.
@@ -548,7 +576,7 @@ impl CodexChat {
     pub fn connect<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W, proc: Option<Proc>) -> Result<CodexChat, Failure> {
         let (rpc, incoming) = Client::over(reader, writer);
         let tail = proc.as_ref().map(Proc::tail);
-        let shared = Arc::new(Shared { rpc, inner: Mutex::default(), proc: Mutex::new(proc), tail, ignored: AtomicU64::new(0) });
+        let shared = Arc::new(Shared { rpc, inner: Mutex::default(), proc: Mutex::new(proc), tail, ignored: AtomicU64::new(0), sends: SENDS, login: Mutex::default() });
         let pump = shared.clone();
         std::thread::spawn(move || pump.run(incoming));
         let greet = || -> Result<(Account, Vec<Value>), Failure> {
@@ -561,7 +589,7 @@ impl CodexChat {
             Ok((account, models))
         };
         match greet() {
-            Ok((account, models)) => Ok(CodexChat { shared, account, models, model: None, effort: None, pictures: true, context: Vec::new() }),
+            Ok((account, models)) => Ok(CodexChat { shared, account, models, model: None, effort: None, pictures: true, context: Vec::new(), adds: Vec::new() }),
             Err(f) => {
                 shared.shut(Duration::ZERO);
                 Err(f)
@@ -571,12 +599,18 @@ impl CodexChat {
 
     /// Start this conversation's own thread, fenced in to question and answer.
     pub fn begin(&mut self, setup: &Setup) -> Result<(), Failure> {
-        let model = chosen(&self.models, setup.model);
-        self.pictures = model.is_none_or(takes_pictures);
-        self.effort = setup.effort.filter(|e| model.is_some_and(|m| offers_effort(m, e))).map(str::to_owned);
-        self.model = model.and_then(|m| m["id"].as_str()).map(str::to_owned);
+        // A model is always named: without one Codex takes the one in the person's own config, which their plan may
+        // not offer. The one asked for when Codex lists it, else the one it marks as its default.
+        let Some(model) = chosen(&self.models, setup.model) else {
+            return Err(Failure::Broken("Codex did not list its models, so Pointcast did not ask.".into()));
+        };
+        let id = model["id"].as_str().or(model["model"].as_str()).unwrap_or_default().to_owned();
+        self.pictures = takes_pictures(model);
+        self.effort = setup.effort.filter(|e| offers_effort(model, e)).map(str::to_owned);
         self.context = replay(setup.earlier, if self.pictures { KEEP_PICTURES } else { 0 });
-        let started = self.shared.call("thread/start", thread_start(setup.cwd, setup.system, setup.model), ANSWER_WITHIN)?;
+        let started = self.shared.call("thread/start", thread_start(setup.cwd, setup.system, Some(&id)), ANSWER_WITHIN)?;
+        self.model = Some(id);
+        self.adds = started["instructionSources"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect();
         // The person agreed to a question going to OpenAI. A config that points Codex elsewhere must not make that false.
         if let Some(other) = started["modelProvider"].as_str().filter(|p| *p != OPENAI) {
             self.shared.shut(Duration::ZERO);
@@ -657,6 +691,54 @@ impl Chat for CodexChat {
     fn close(&mut self) {
         self.shared.shut(child::CLOSE_GRACE);
     }
+
+    fn adds(&self) -> Vec<String> {
+        self.adds.clone()
+    }
+}
+
+/// Sign in to ChatGPT through Codex's own flow over these streams: Codex makes the sign-in page, `open` shows it in the
+/// browser, and Codex says when the person is done there. Pointcast never sees what the sign-in keeps, and this line
+/// can send nothing but what `SIGN_IN` lists.
+pub fn sign_in_over<R: Read + Send + 'static, W: Write + Send + 'static>(
+    reader: R,
+    writer: W,
+    proc: Option<Proc>,
+    open: &dyn Fn(&str) -> Result<(), String>,
+    within: Duration,
+) -> Result<(), String> {
+    let (rpc, incoming) = Client::over(reader, writer);
+    let tail = proc.as_ref().map(Proc::tail);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let login = Mutex::new(Some(tx));
+    let shared = Arc::new(Shared { rpc, inner: Mutex::default(), proc: Mutex::new(proc), tail, ignored: AtomicU64::new(0), sends: SIGN_IN, login });
+    let pump = shared.clone();
+    std::thread::spawn(move || pump.run(incoming));
+    let words = |f: Failure| if let Failure::Broken(why) = f { why } else { "Codex could not start the sign-in.".into() };
+    let run = || -> Result<(), String> {
+        shared.call("initialize", json!({ "clientInfo": { "name": "pointcast", "title": "Pointcast", "version": env!("CARGO_PKG_VERSION") } }), START_WITHIN).map_err(words)?;
+        shared.allows("initialized").and_then(|_| shared.rpc.notify("initialized")).map_err(|_| stopped(&shared.last_words()))?;
+        let started = shared.call("account/login/start", json!({ "type": "chatgpt" }), ANSWER_WITHIN).map_err(words)?;
+        let url = started["authUrl"].as_str().filter(|u| u.starts_with("https://")).ok_or("Codex gave no sign-in page to open.")?;
+        let id = started["loginId"].as_str().map(str::to_owned);
+        open(url)?;
+        let deadline = Instant::now() + within;
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(done) if id.is_some() && done["loginId"].as_str() != id.as_deref() => {}
+                Ok(done) if done["success"].as_bool() == Some(true) => return Ok(()),
+                Ok(done) => {
+                    let why = done["error"].as_str().filter(|e| !e.is_empty()).unwrap_or("it was not completed");
+                    return Err(format!("The sign-in did not finish: {why}."));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err("The sign-in was not finished in time. Try again.".into()),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(stopped(&shared.last_words())),
+            }
+        }
+    };
+    let said = run();
+    shared.shut(child::CLOSE_GRACE);
+    said
 }
 
 impl Drop for CodexChat {
@@ -684,11 +766,13 @@ pub struct Codex {
     launch: Option<Launch>,
     warmed: Mutex<Option<CodexChat>>,
     models: Mutex<Vec<Value>>,
+    /// The files Codex added to the last conversation it started (`CodexChat::adds`).
+    adds: Mutex<Vec<String>>,
 }
 
 impl Codex {
     pub fn new(home: PathBuf) -> Codex {
-        Codex { home, model: None, effort: Some("low".into()), launch: None, warmed: Mutex::default(), models: Mutex::default() }
+        Codex { home, model: None, effort: Some("low".into()), launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default() }
     }
 
     /// Run `launch` in place of the `codex` found on this computer.
@@ -696,8 +780,8 @@ impl Codex {
         Codex { launch: Some(launch), ..Codex::new(home) }
     }
 
-    /// Start the helper and greet it.
-    fn connect(&self) -> Result<CodexChat, Failure> {
+    /// Start the helper in Pointcast's empty folder.
+    fn spawn(&self) -> Result<(Proc, std::process::ChildStdin, std::process::ChildStdout), Failure> {
         let launch = match &self.launch {
             Some(l) => l.clone(),
             None => match detect::codex() {
@@ -710,10 +794,35 @@ impl Codex {
         let cwd = empty_folder(&self.home)?;
         let pidfile = self.home.join("codex.pid");
         child::reap_stale(&pidfile);
-        let (proc, stdin, stdout) = Proc::start(&launch, &cwd, Some(&pidfile)).map_err(|e| Failure::Broken(format!("Codex did not start: {e}")))?;
+        Proc::start(&launch, &cwd, Some(&pidfile)).map_err(|e| Failure::Broken(format!("Codex did not start: {e}")))
+    }
+
+    /// Start the helper and greet it.
+    fn connect(&self) -> Result<CodexChat, Failure> {
+        let (proc, stdin, stdout) = self.spawn()?;
         let chat = CodexChat::connect(stdout, stdin, Some(proc))?;
         *self.models.lock().unwrap() = chat.models.clone();
         Ok(chat)
+    }
+
+    /// Sign in to ChatGPT through Codex's own flow (`sign_in_over`), on a helper of its own that ends with it.
+    pub fn sign_in(&self, open: &dyn Fn(&str) -> Result<(), String>, within: Duration) -> Result<(), String> {
+        let (proc, stdin, stdout) = self.spawn().map_err(|f| if let Failure::Broken(why) = f { why } else { "Codex is not installed.".into() })?;
+        sign_in_over(stdout, stdin, Some(proc), open, within)
+    }
+
+    /// Start the helper if it does not run, and say which models it lists. Nothing is spent.
+    pub fn list(&self) -> Result<Vec<super::catalog::Model>, Failure> {
+        self.warm_now()?;
+        Ok(super::Provider::models(self))
+    }
+
+    fn warm_now(&self) -> Result<(), Failure> {
+        let mut w = self.warmed.lock().unwrap();
+        if !w.as_ref().is_some_and(CodexChat::usable) {
+            *w = Some(self.connect()?);
+        }
+        Ok(())
     }
 
     /// A conversation on a helper of its own: the warmed one if it still runs, else a new one.
@@ -725,7 +834,13 @@ impl Codex {
         };
         let cwd = empty_folder(&self.home)?;
         chat.begin(&Setup { cwd: &cwd, system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref() })?;
+        *self.adds.lock().unwrap() = chat.adds.clone();
         Ok(chat)
+    }
+
+    /// The files Codex added to the last conversation it started, once one has started.
+    pub fn adds(&self) -> Vec<String> {
+        self.adds.lock().unwrap().clone()
     }
 
     /// The helper `warm` started and no conversation has taken yet.
@@ -757,14 +872,32 @@ impl Provider for Codex {
     /// Start the helper and greet it (who is signed in, which models), so the first question does not wait for
     /// that. No thread is started and nothing is spent.
     fn warm(&self) {
-        let mut w = self.warmed.lock().unwrap();
-        if !w.as_ref().is_some_and(CodexChat::usable) {
-            *w = self.connect().ok();
-        }
+        let _ = self.warm_now();
     }
 
     fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
         self.start(system, earlier).map(|c| Box::new(c) as Box<dyn Chat>)
+    }
+
+    fn cool(&self) {
+        Codex::cool(self);
+    }
+
+    fn adds(&self) -> Vec<String> {
+        Codex::adds(self)
+    }
+
+    /// The models of the last greeting, none before one.
+    fn models(&self) -> Vec<super::catalog::Model> {
+        let models = self.models.lock().unwrap();
+        models
+            .iter()
+            .filter_map(|m| {
+                let id = m["id"].as_str().or(m["model"].as_str())?.to_owned();
+                let name = m["displayName"].as_str().filter(|n| !n.is_empty()).map_or_else(|| id.clone(), str::to_owned);
+                Some(super::catalog::Model { id, name, images: takes_pictures(m) })
+            })
+            .collect()
     }
 }
 
@@ -1151,6 +1284,71 @@ pub mod tests {
         for m in ["account/login/start", "account/logout", "account/chatgptAuthTokens/refresh", "thread/resume", "config/value/write"] {
             assert!(Shared::allowed(m).is_err(), "{m} is not sent");
         }
+    }
+
+    #[test]
+    fn the_thread_always_names_a_model_codex_lists_and_never_falls_to_the_one_in_the_persons_config() {
+        // Nothing asked for: the listed default, not the config's.
+        let (chat, seen) = wire("normal");
+        assert_eq!(sent(&seen, "thread/start")[0]["model"], "fake-model");
+        assert_eq!(chat.model.as_deref(), Some("fake-model"));
+        // A model this plan does not list: the listed default again.
+        let (chat, seen) = link("normal");
+        let mut chat = chat.ok().unwrap();
+        chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: Some(fake::CONFIG_MODEL), effort: None }).unwrap();
+        assert_eq!(sent(&seen, "thread/start")[0]["model"], "fake-model");
+        // No list to choose from: a plain error, and no thread is started for Codex to pick a model for.
+        let (chat, seen) = wire_with("no-models", &[]);
+        assert_eq!(chat.err(), Some(Failure::Broken("Codex did not list its models, so Pointcast did not ask.".into())));
+        assert!(sent(&seen, "thread/start").is_empty());
+    }
+
+    #[test]
+    fn the_files_codex_adds_to_a_conversation_are_said() {
+        let (chat, _) = wire("normal");
+        assert_eq!((chat.adds.clone(), Chat::adds(&chat)), (vec![fake::INSTRUCTIONS.to_owned()], vec![fake::INSTRUCTIONS.to_owned()]));
+    }
+
+    /// A sign-in served by the stand-in inside this process: what it said, what was sent, and which pages were opened.
+    fn signing_in(mode: &'static str, within: Duration) -> (Result<(), String>, Seen, Vec<String>) {
+        let (their_in, our_out) = std::io::pipe().unwrap();
+        let (our_in, their_out) = std::io::pipe().unwrap();
+        let seen = Seen::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            fake::serve(mode, std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone()));
+        });
+        let opened = Mutex::new(Vec::new());
+        let said = sign_in_over(
+            our_in,
+            our_out,
+            None,
+            &|page: &str| {
+                opened.lock().unwrap().push(page.to_owned());
+                Ok(())
+            },
+            within,
+        );
+        (said, seen, opened.into_inner().unwrap())
+    }
+
+    #[test]
+    fn a_sign_in_is_codexs_own_flow_its_page_opened_and_it_ends_when_codex_says() {
+        let (said, seen, opened) = signing_in("login", Duration::from_secs(20));
+        assert_eq!(said, Ok(()));
+        assert_eq!(opened, [fake::SIGN_IN_PAGE]);
+        assert_eq!(methods(&seen), ["initialize", "initialized", "account/login/start"]);
+        assert_eq!(sent(&seen, "account/login/start"), [json!({ "type": "chatgpt" })]);
+        assert!(!seen.lock().unwrap().iter().any(asks_for_a_token));
+        // The sign-in line sends nothing of a conversation, and a conversation never starts a sign-in.
+        for m in ["account/read", "model/list", "thread/start", "turn/start", "account/logout"] {
+            assert!(!SIGN_IN.contains(&m), "{m}");
+        }
+        assert!(Shared::allowed("account/login/start").is_err());
+        let (said, _, _) = signing_in("login-fail", Duration::from_secs(20));
+        assert_eq!(said, Err("The sign-in did not finish: denied.".into()));
+        let (said, _, opened) = signing_in("login-never", Duration::from_millis(300));
+        assert_eq!((said, opened.len()), (Err("The sign-in was not finished in time. Try again.".into()), 1));
     }
 
     #[test]

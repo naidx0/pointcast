@@ -96,7 +96,7 @@ pub fn detect_local() -> Vec<Found> {
     detect_at(LOCAL)
 }
 
-fn detect_at(places: &[(&'static str, &str)]) -> Vec<Found> {
+pub(crate) fn detect_at(places: &[(&'static str, &str)]) -> Vec<Found> {
     let probes: Vec<_> = places
         .iter()
         .map(|(name, base)| {
@@ -176,6 +176,12 @@ impl OpenAi {
         Some(n)
     }
 
+    /// Ask the service for its list of models now: one request for the list, never a question.
+    pub fn listed(&self) -> Result<Vec<super::catalog::Model>, String> {
+        self.list(WARM_WITHIN).ok_or_else(|| "The service did not list its models. Check the key, or that it runs.".to_owned())?;
+        Ok(Provider::models(self))
+    }
+
     /// Ollama says what a model takes when asked about it; its list does not. One short request on this computer.
     fn show(&self, model: &str) {
         if self.cfg.needs_key || !self.offline || self.known.lock().unwrap().get(model).copied().flatten().is_some() {
@@ -225,6 +231,13 @@ impl Provider for OpenAi {
         if !self.offline {
             let _ = self.list(WARM_WITHIN);
         }
+    }
+
+    /// What the service's list said; a model whose pictures it did not mention is taken to read them, as `caps` does.
+    fn models(&self) -> Vec<super::catalog::Model> {
+        let mut v: Vec<_> = self.known.lock().unwrap().iter().map(|(id, p)| super::catalog::Model { id: id.clone(), name: id.clone(), images: p.unwrap_or(true) }).collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 
     fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
