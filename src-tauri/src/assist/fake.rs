@@ -23,6 +23,12 @@ pub const LAST_WORDS: &str = "fake_codex: out of cheese";
 /// Stands where an account's address would be, so a test can look for it in what the adapter keeps.
 pub const PLANTED: &str = "planted-address";
 pub const NEVER_SHOWN: &str = "NOT SHOWN";
+/// The model the person's own Codex config names, which their plan does not offer: a thread started without a model
+/// runs on it.
+pub const CONFIG_MODEL: &str = "config-only-model";
+/// The file Codex itself adds to every conversation.
+pub const INSTRUCTIONS: &str = "/home/someone/.codex/AGENTS.md";
+pub const SIGN_IN_PAGE: &str = "https://auth.example.test/start";
 
 static THREADS: AtomicU64 = AtomicU64::new(0);
 
@@ -123,12 +129,14 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                     }
                     _ => {}
                 }
-                reply(json!({ "data": [model], "nextCursor": null }));
+                let data = if mode == "no-models" { json!([]) } else { json!([model]) };
+                reply(json!({ "data": data, "nextCursor": null }));
             }
             "account/rateLimits/read" => reply(json!({ "rateLimits": limits(if mode == "limit" { 100 } else { 12 }) })),
             "thread/start" => {
                 let provider = if mode == "foreign" { "elsewhere" } else { "openai" };
-                reply(json!({ "thread": { "id": thread }, "model": "fake-model", "modelProvider": provider }));
+                let model = m["params"]["model"].as_str().unwrap_or(CONFIG_MODEL).to_owned();
+                reply(json!({ "thread": { "id": thread }, "model": model, "modelProvider": provider, "instructionSources": [INSTRUCTIONS] }));
                 note(&say, "thread/started", json!({ "thread": { "id": thread } }));
             }
             "turn/start" => {
@@ -189,6 +197,16 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                         answer(&say, mode, &thread, &turn);
                     }
                     _ => answer(&say, mode, &thread, &turn),
+                }
+            }
+            "account/login/start" if mode.starts_with("login") => {
+                reply(json!({ "type": "chatgpt", "loginId": "login-1", "authUrl": SIGN_IN_PAGE }));
+                // Another sign-in's end is not this one's.
+                note(&say, "account/login/completed", json!({ "loginId": "login-0", "success": true, "error": null }));
+                match mode {
+                    "login" => note(&say, "account/login/completed", json!({ "loginId": "login-1", "success": true, "error": null })),
+                    "login-fail" => note(&say, "account/login/completed", json!({ "loginId": "login-1", "success": false, "error": "denied" })),
+                    _ => {}
                 }
             }
             "turn/interrupt" => {

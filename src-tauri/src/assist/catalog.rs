@@ -1,0 +1,560 @@
+//! The AIs a person can choose in Settings, and what Pointcast keeps of that choice: which one, which model, whether
+//! only this computer may be asked, and each destination the person agreed to. `providers` reads only what is known
+//! without spending anything; a pasted key goes straight to `vault` and is never in a setting, an event or an error.
+
+use super::codex::{self, Codex};
+use super::vault::{self, Secret};
+use super::{openai, Failure, Health, Provider, State};
+use crate::settings::{Consent, Settings};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+pub const NONE_CHOSEN: &str = "Choose an AI in Settings first";
+pub const OFFLINE_ONLY: &str = "Only on this computer is on, so nothing is sent to another one.";
+pub const UNKNOWN: &str = "Pointcast does not offer that AI.";
+const KEYS_NOT_HERE: &str = "Keys are not supported on Linux yet. A model on this computer needs no key.";
+
+/// How a route is paid for: the person's plan, a pasted key, or nothing (a model on this computer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Way {
+    Plan,
+    Key,
+    Local,
+}
+
+pub struct Route {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub way: Way,
+    pub base: &'static str,
+    pub goes_to: &'static str,
+}
+
+/// Every route Pointcast offers, in the order Settings lists them.
+pub const ROUTES: &[Route] = &[
+    Route { id: codex::ID, name: "ChatGPT", way: Way::Plan, base: "", goes_to: super::detect::GOES_TO },
+    Route { id: "openai", name: "OpenAI API", way: Way::Key, base: "https://api.openai.com/v1", goes_to: "api.openai.com" },
+    Route { id: "openrouter", name: "OpenRouter", way: Way::Key, base: "https://openrouter.ai/api/v1", goes_to: "openrouter.ai" },
+    Route { id: "gemini", name: "Gemini API", way: Way::Key, base: "https://generativelanguage.googleapis.com/v1beta/openai", goes_to: "generativelanguage.googleapis.com" },
+    Route { id: "ollama", name: "Ollama on this computer", way: Way::Local, base: openai::LOCAL[0].1, goes_to: "this computer" },
+    Route { id: "lmstudio", name: "LM Studio on this computer", way: Way::Local, base: openai::LOCAL[1].1, goes_to: "this computer" },
+];
+
+pub fn route(id: &str) -> Option<&'static Route> {
+    ROUTES.iter().find(|r| r.id == id)
+}
+
+/// What the person calls the AI behind `id`; nothing for an id that is not offered.
+pub fn name_of(id: &str) -> &'static str {
+    route(id).map_or("", |r| r.name)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Ready,
+    SignedOut,
+    NotInstalled,
+    TooOld,
+    NoKey,
+    NotRunning,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub images: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Row {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub kind: Way,
+    pub state: Status,
+    pub line: String,
+    pub goes_to: &'static str,
+    pub offline: bool,
+    pub consented: bool,
+    pub models: Vec<Model>,
+    /// Files the AI's own app sends along with every question (Codex: the person's own instructions file).
+    pub adds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct List {
+    pub chosen: Option<String>,
+    pub model: Option<String>,
+    pub offline_only: bool,
+    pub providers: Vec<Row>,
+}
+
+/// What is known of each route without spending anything.
+#[derive(Debug, Clone, Default)]
+pub struct Look {
+    /// Codex as `detect::health` found it, and whether `codex login status` says it is signed in.
+    pub codex: Option<(Health, Option<bool>)>,
+    /// The models and added files of a Codex already running, none otherwise.
+    pub codex_models: Vec<Model>,
+    pub adds: Vec<String>,
+    /// The routes with a key saved.
+    pub keys: Vec<&'static str>,
+    pub keys_here: bool,
+    pub local: Vec<openai::Found>,
+}
+
+/// Gather a `Look`: the model servers at `places` asked for their lists (two seconds), Codex's version and sign-in
+/// asked of `codex`, and the store asked which keys it holds; all at once.
+pub fn gather(places: &[(&'static str, &str)], codex: impl FnOnce() -> (Health, Option<bool>) + Send, has_key: impl Fn(&str) -> bool, held: Option<Arc<dyn Provider>>) -> Look {
+    let (local, codex) = std::thread::scope(|s| {
+        let local = s.spawn(|| openai::detect_at(places));
+        let codex = codex();
+        (local.join().unwrap_or_default(), codex)
+    });
+    let running = held.filter(|p| p.id() == codex::ID);
+    Look {
+        codex: Some(codex),
+        codex_models: running.as_ref().map(|p| p.models()).unwrap_or_default(),
+        adds: running.as_ref().map(|p| p.adds()).unwrap_or_default(),
+        keys: ROUTES.iter().filter(|r| r.way == Way::Key && has_key(r.id)).map(|r| r.id).collect(),
+        keys_here: cfg!(any(windows, target_os = "macos")),
+        local,
+    }
+}
+
+/// The `Look` of this computer.
+pub fn look(held: &Held) -> Look {
+    let codex = || {
+        let found = super::detect::codex();
+        let signed = found.as_ref().ok().and_then(|f| super::detect::signed_in(&f.exe));
+        (super::detect::health_of(&found), signed)
+    };
+    gather(openai::LOCAL, codex, vault::has, held.held())
+}
+
+pub fn consented(s: &Settings, r: &Route) -> bool {
+    s.assist_consent.iter().any(|c| c.provider == r.id && c.goes_to == r.goes_to)
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', std::path::MAIN_SEPARATOR]).next().unwrap_or(path)
+}
+
+/// Every route as Settings shows it.
+pub fn providers(s: &Settings, look: &Look) -> List {
+    let rows = ROUTES
+        .iter()
+        .map(|r| {
+            let (mut models, mut adds) = (Vec::new(), Vec::new());
+            let (state, line) = match r.way {
+                Way::Plan => match &look.codex {
+                    Some((h, signed)) => match (h.state, signed) {
+                        (State::NotInstalled, _) => (Status::NotInstalled, h.line.clone()),
+                        (State::TooOld, _) => (Status::TooOld, h.line.clone()),
+                        (State::Unknown, _) => (Status::Unsupported, h.line.clone()),
+                        (State::Ready, Some(false)) => (Status::SignedOut, "Codex is installed. Sign in with your ChatGPT account.".to_owned()),
+                        (State::Ready, signed) => {
+                            (models, adds) = (look.codex_models.clone(), look.adds.clone());
+                            let mut line = if *signed == Some(true) { "Signed in to ChatGPT through Codex.".to_owned() } else { h.line.clone() };
+                            if !adds.is_empty() {
+                                let names: Vec<&str> = adds.iter().map(|a| file_name(a)).collect();
+                                line.push_str(&format!(" Codex also sends your own Codex instructions ({}) with every question.", names.join(", ")));
+                            }
+                            (Status::Ready, line)
+                        }
+                    },
+                    None => (Status::NotInstalled, "Codex is not installed on this computer.".to_owned()),
+                },
+                Way::Key if !look.keys_here => (Status::Unsupported, KEYS_NOT_HERE.to_owned()),
+                Way::Key if look.keys.contains(&r.id) => (Status::Ready, "Key saved.".to_owned()),
+                Way::Key => (Status::NoKey, "No key yet.".to_owned()),
+                Way::Local => match look.local.iter().find(|f| f.base_url == r.base) {
+                    Some(f) => {
+                        models = f.models.iter().map(|m| Model { id: m.clone(), name: m.clone(), images: true }).collect();
+                        let line = if models.len() == 1 { "Running, 1 model.".to_owned() } else { format!("Running, {} models.", models.len()) };
+                        (Status::Ready, line)
+                    }
+                    None => (Status::NotRunning, "Not running.".to_owned()),
+                },
+            };
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to: r.goes_to, offline: r.way == Way::Local, consented: consented(s, r), models, adds }
+        })
+        .collect();
+    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), offline_only: s.assist_offline_only, providers: rows }
+}
+
+/// Choose the AI `id` and its `model`. Refused unless the person agrees now (`consent`) or agreed before to this
+/// route and destination; the agreement is kept. A route off this computer is refused while "Only on this computer" is on.
+pub fn choose(s: &mut Settings, id: &str, model: Option<String>, consent: bool, now_ms: u64) -> Result<(), String> {
+    let r = route(id).ok_or(UNKNOWN)?;
+    if s.assist_offline_only && r.way != Way::Local {
+        return Err(OFFLINE_ONLY.into());
+    }
+    let model = model.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty());
+    if r.way != Way::Plan && model.is_none() {
+        return Err(format!("Choose a model for {} first.", r.name));
+    }
+    if !consented(s, r) {
+        if !consent {
+            return Err(format!("Agree to send your questions to {} first.", r.goes_to));
+        }
+        s.assist_consent.retain(|c| c.provider != r.id);
+        s.assist_consent.push(Consent { provider: r.id.into(), goes_to: r.goes_to.into(), at_ms: now_ms });
+    }
+    s.assist_provider = Some(r.id.into());
+    s.assist_model = model;
+    Ok(())
+}
+
+/// Forget `id`: its agreement, the choice if it was chosen, and its saved key. The settings change even when the store
+/// could not forget the key; the error says so.
+pub fn forget(s: &mut Settings, keys: &Keys, id: &str) -> Result<(), String> {
+    let r = route(id).ok_or(UNKNOWN)?;
+    s.assist_consent.retain(|c| c.provider != r.id);
+    if s.assist_provider.as_deref() == Some(r.id) {
+        (s.assist_provider, s.assist_model) = (None, None);
+    }
+    if r.way == Way::Key {
+        keys.delete(r.id)?;
+    }
+    Ok(())
+}
+
+/// The pasted keys, in the system's store, under items whose names start with `ns` (none for the person's own; a
+/// test's own name in a test, so a test never touches a real key).
+pub struct Keys {
+    ns: String,
+}
+
+impl Keys {
+    pub fn store() -> Keys {
+        Keys { ns: String::new() }
+    }
+
+    #[cfg(test)]
+    pub fn named(ns: &str) -> Keys {
+        Keys { ns: ns.to_owned() }
+    }
+
+    fn item(&self, id: &str) -> String {
+        format!("{}{id}", self.ns)
+    }
+
+    fn keyed(id: &str) -> Result<&'static Route, String> {
+        let r = route(id).ok_or(UNKNOWN)?;
+        if r.way == Way::Key {
+            Ok(r)
+        } else {
+            Err(format!("{} takes no key.", r.name))
+        }
+    }
+
+    pub fn has(&self, id: &str) -> bool {
+        vault::has(&self.item(id))
+    }
+
+    pub fn set(&self, id: &str, key: String) -> Result<(), String> {
+        let r = Self::keyed(id)?;
+        vault::set(&self.item(r.id), Secret::new(key))
+    }
+
+    pub fn delete(&self, id: &str) -> Result<(), String> {
+        let r = Self::keyed(id)?;
+        vault::delete(&self.item(r.id))
+    }
+}
+
+/// What an Ask is sent through, as the settings say now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picked {
+    pub id: &'static str,
+    pub model: Option<String>,
+    pub offline_only: bool,
+}
+
+/// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
+/// this computer may be asked.
+pub fn picked(s: &Settings) -> Result<Picked, String> {
+    let Some(r) = s.assist_provider.as_deref().and_then(route) else {
+        return Err(NONE_CHOSEN.into());
+    };
+    if !consented(s, r) {
+        return Err(format!("Allow {} in Settings first", r.name));
+    }
+    if s.assist_offline_only && r.way != Way::Local {
+        return Err(OFFLINE_ONLY.into());
+    }
+    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only })
+}
+
+/// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
+pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
+    let r = route(p.id).ok_or(UNKNOWN)?;
+    let model = p.model.as_deref().unwrap_or_default();
+    match r.way {
+        Way::Plan => {
+            let mut c = Codex::new(home.join("codex"));
+            c.model = p.model.clone();
+            Ok(Arc::new(c))
+        }
+        _ if model.is_empty() => Err(format!("Choose a model for {} in Settings first.", r.name)),
+        Way::Key => Ok(Arc::new(openai::remote(r.id, r.base, model).provider(p.offline_only)?)),
+        Way::Local => Ok(Arc::new(openai::local(r.id, r.base, model).provider(p.offline_only)?)),
+    }
+}
+
+pub type Build = Box<dyn Fn(&Picked) -> Result<Arc<dyn Provider>, String> + Send + Sync>;
+
+/// The provider of the chosen AI, made once per choice: a warmed helper and a model list outlive one question, and a
+/// changed choice takes effect at the next Ask.
+pub struct Held {
+    built: Mutex<Option<(Picked, Arc<dyn Provider>)>>,
+    build: Build,
+}
+
+impl Held {
+    pub fn new(home: PathBuf) -> Held {
+        Held::with(Box::new(move |p| build(p, &home)))
+    }
+
+    pub fn with(build: Build) -> Held {
+        Held { built: Mutex::default(), build }
+    }
+
+    /// The provider for what the settings say now; nothing is made when the answer is no.
+    pub fn provider(&self, s: &Settings) -> Result<Arc<dyn Provider>, String> {
+        let p = picked(s)?;
+        let mut b = self.built.lock().unwrap();
+        if let Some((was, made)) = b.as_ref() {
+            if *was == p {
+                return Ok(made.clone());
+            }
+        }
+        let made = (self.build)(&p)?;
+        *b = Some((p, made.clone()));
+        Ok(made)
+    }
+
+    pub fn held(&self) -> Option<Arc<dyn Provider>> {
+        self.built.lock().unwrap().as_ref().map(|(_, p)| p.clone())
+    }
+
+    /// Let go of a helper warmed for a question that never came.
+    pub fn cool(&self) {
+        if let Some(p) = self.held() {
+            p.cool();
+        }
+    }
+}
+
+/// The models `id` offers, asked of it now: Codex is started and greeted (its `model/list`), a service is asked for its
+/// list. Never a question.
+pub fn models_of(id: &str, s: &Settings, held: &Held, home: &Path) -> Result<Vec<Model>, String> {
+    let r = route(id).ok_or(UNKNOWN)?;
+    match r.way {
+        Way::Plan => {
+            let said = |f: Failure| match f {
+                Failure::NotInstalled => "Codex is not installed on this computer.".to_owned(),
+                Failure::SignedOut => "Sign in to ChatGPT through Codex first.".to_owned(),
+                Failure::Broken(why) => why,
+                _ => "Codex did not list its models.".to_owned(),
+            };
+            match held.held().filter(|p| p.id() == codex::ID) {
+                Some(p) => {
+                    p.warm();
+                    Some(p.models()).filter(|m| !m.is_empty()).ok_or_else(|| "Codex did not list its models.".to_owned())
+                }
+                None => Codex::new(home.join("codex")).list().map_err(said),
+            }
+        }
+        Way::Key => openai::remote(r.id, r.base, "").provider(s.assist_offline_only)?.listed(),
+        Way::Local => openai::local(r.id, r.base, "").provider(s.assist_offline_only)?.listed(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assist::http::tests::{stub, Reply};
+    use crate::assist::Scripted;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FAKE: &str = "test-key-not-real-planted";
+
+    fn ready_codex() -> (Health, Option<bool>) {
+        (Health { state: State::Ready, line: "Codex 0.164.0 is installed.".into(), goes_to: super::super::detect::GOES_TO }, Some(true))
+    }
+
+    #[test]
+    fn every_route_says_where_a_question_goes_and_a_service_is_named_by_its_own_host() {
+        let ids: Vec<&str> = ROUTES.iter().map(|r| r.id).collect();
+        assert_eq!(ids, ["codex", "openai", "openrouter", "gemini", "ollama", "lmstudio"]);
+        for r in ROUTES {
+            assert!(!r.name.is_empty() && name_of(r.id) == r.name);
+            match r.way {
+                Way::Plan => assert!(r.base.is_empty()),
+                Way::Key => assert_eq!(reqwest::Url::parse(r.base).unwrap().host_str(), Some(r.goes_to), "{}", r.id),
+                Way::Local => assert_eq!((reqwest::Url::parse(r.base).unwrap().host_str(), r.goes_to), (Some("127.0.0.1"), "this computer")),
+            }
+        }
+        assert_eq!((name_of("codex"), name_of("claude"), route("claude").is_none()), ("ChatGPT", "", true));
+    }
+
+    #[test]
+    fn choosing_needs_the_persons_yes_once_per_route_and_destination() {
+        let mut s = Settings::default();
+        assert_eq!(picked(&s), Err(NONE_CHOSEN.into()));
+        assert_eq!(choose(&mut s, "openai", Some("gpt-x".into()), false, 1), Err("Agree to send your questions to api.openai.com first.".into()));
+        assert_eq!((s.assist_provider.clone(), s.assist_consent.len()), (None, 0), "nothing kept on a no");
+        assert_eq!(choose(&mut s, "openai", None, true, 1), Err("Choose a model for OpenAI API first.".into()));
+        assert_eq!(choose(&mut s, "openai", Some(" gpt-x ".into()), true, 7), Ok(()));
+        assert_eq!(s.assist_consent, [Consent { provider: "openai".into(), goes_to: "api.openai.com".into(), at_ms: 7 }]);
+        assert_eq!((s.assist_provider.as_deref(), s.assist_model.as_deref()), (Some("openai"), Some("gpt-x")));
+        // Remembered: the next choice of it needs no new yes, and Codex takes its own default model.
+        assert_eq!(choose(&mut s, "openai", Some("gpt-y".into()), false, 9), Ok(()));
+        assert_eq!(s.assist_consent.len(), 1);
+        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false }));
+        assert_eq!(choose(&mut s, "codex", None, true, 10), Ok(()));
+        assert_eq!(s.assist_model, None);
+        assert_eq!(choose(&mut s, "nope", None, true, 1), Err(UNKNOWN.into()));
+        // A destination agreed to before is not this one: it asks again, and an Ask is refused meanwhile.
+        let mut moved = Settings { assist_provider: Some("gemini".into()), assist_model: Some("m".into()), ..Settings::default() };
+        moved.assist_consent.push(Consent { provider: "gemini".into(), goes_to: "old.example.test".into(), at_ms: 1 });
+        assert_eq!(picked(&moved), Err("Allow Gemini API in Settings first".into()));
+        assert!(choose(&mut moved, "gemini", Some("m".into()), false, 2).is_err());
+        assert_eq!(choose(&mut moved, "gemini", Some("m".into()), true, 2), Ok(()));
+        assert_eq!(moved.assist_consent, [Consent { provider: "gemini".into(), goes_to: "generativelanguage.googleapis.com".into(), at_ms: 2 }]);
+    }
+
+    #[test]
+    fn only_on_this_computer_refuses_a_remote_choice_and_a_remote_ask_and_builds_nothing() {
+        let mut s = Settings::default();
+        choose(&mut s, "openrouter", Some("m".into()), true, 1).unwrap();
+        s.assist_offline_only = true;
+        assert_eq!(choose(&mut s, "codex", None, true, 1), Err(OFFLINE_ONLY.into()));
+        assert_eq!(choose(&mut s, "openai", Some("m".into()), true, 1), Err(OFFLINE_ONLY.into()));
+        assert_eq!(picked(&s), Err(OFFLINE_ONLY.into()));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let n = builds.clone();
+        let held = Held::with(Box::new(move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Scripted::new(&[])) as Arc<dyn Provider>)
+        }));
+        assert_eq!(held.provider(&s).err(), Some(OFFLINE_ONLY.into()));
+        // A model on this computer is still allowed, and even a remote route built by hand makes no client.
+        assert_eq!(choose(&mut s, "ollama", Some("llava".into()), true, 2), Ok(()));
+        assert!(held.provider(&s).is_ok());
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true };
+        assert_eq!(build(&remote, Path::new("unused")).err(), Some(OFFLINE_ONLY.into()));
+    }
+
+    #[test]
+    fn the_provider_is_made_once_per_choice_and_none_without_one() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let n = builds.clone();
+        let held = Held::with(Box::new(move |p| {
+            n.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(Scripted { id: p.id, ..Scripted::new(&[]) }) as Arc<dyn Provider>)
+        }));
+        let mut s = Settings::default();
+        assert_eq!(held.provider(&s).err(), Some(NONE_CHOSEN.into()));
+        s.assist_provider = Some("lmstudio".into());
+        s.assist_model = Some("m".into());
+        assert_eq!(held.provider(&s).err(), Some("Allow LM Studio on this computer in Settings first".into()));
+        assert_eq!(builds.load(Ordering::SeqCst), 0, "no yes, nothing made");
+        choose(&mut s, "lmstudio", Some("m".into()), true, 1).unwrap();
+        let a = held.provider(&s).unwrap();
+        let b = held.provider(&s).unwrap();
+        assert!(Arc::ptr_eq(&a, &b) && a.id() == "lmstudio");
+        s.assist_model = Some("other".into());
+        assert!(!Arc::ptr_eq(&a, &held.provider(&s).unwrap()), "a new model is a new provider");
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_list_spends_nothing_a_local_server_is_asked_only_for_its_models_and_codex_s_added_file_is_said() {
+        let server = stub(|_| Reply::Whole(200, "", r#"{"data":[{"id":"llava"},{"id":"qwen"}]}"#.into()));
+        let place: &'static str = Box::leak(server.base.clone().into_boxed_str());
+        let mut held_codex = Scripted::new(&[]);
+        held_codex.id = codex::ID;
+        let look = gather(&[("Ollama", place)], ready_codex, |id| id == "openrouter", Some(Arc::new(held_codex)));
+        assert_eq!(server.paths(), ["/v1/models"], "one list, never a question");
+        let mut look = Look { local: look.local.iter().map(|f| openai::Found { base_url: openai::LOCAL[0].1.into(), ..f.clone() }).collect(), ..look };
+        look.adds = vec!["/home/someone/.codex/AGENTS.md".into()];
+        let mut s = Settings::default();
+        choose(&mut s, "codex", None, true, 1).unwrap();
+        let list = providers(&s, &look);
+        assert_eq!((list.chosen.as_deref(), list.offline_only), (Some("codex"), false));
+        let row = |id: &str| list.providers.iter().find(|r| r.id == id).unwrap().clone();
+        let codex = row("codex");
+        assert_eq!((codex.state, codex.consented, codex.kind, codex.adds.len()), (Status::Ready, true, Way::Plan, 1));
+        assert!(codex.line.contains("Signed in") && codex.line.contains("(AGENTS.md)"), "{}", codex.line);
+        let ollama = row("ollama");
+        assert_eq!((ollama.state, ollama.offline, ollama.models.len(), ollama.line.as_str()), (Status::Ready, true, 2, "Running, 2 models."));
+        assert_eq!(row("lmstudio").state, Status::NotRunning);
+        let keyed = if cfg!(any(windows, target_os = "macos")) { (Status::Ready, Status::NoKey) } else { (Status::Unsupported, Status::Unsupported) };
+        assert_eq!((row("openrouter").state, row("openai").state), keyed);
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!((json["providers"][0]["kind"].as_str(), json["providers"][1]["state"].as_str()), (Some("plan"), Some(if keyed.1 == Status::NoKey { "no_key" } else { "unsupported" })));
+        // Codex signed out, missing, too old: one plain state each.
+        let codex_as = |h: State, signed: Option<bool>| {
+            let look = Look { codex: Some((Health { state: h, line: "said".into(), goes_to: "" }, signed)), ..Look::default() };
+            providers(&Settings::default(), &look).providers[0].state
+        };
+        assert_eq!(
+            [codex_as(State::Ready, Some(false)), codex_as(State::NotInstalled, None), codex_as(State::TooOld, None), codex_as(State::Unknown, None)],
+            [Status::SignedOut, Status::NotInstalled, Status::TooOld, Status::Unsupported]
+        );
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn forgetting_a_route_removes_its_key_its_yes_and_the_choice_and_a_key_is_never_in_a_setting_list_or_error() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let keys = Keys::named(&format!("pointcast-test-{}-{nanos}/", std::process::id()));
+        struct Gone<'a>(&'a Keys);
+        impl Drop for Gone<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete("openai");
+            }
+        }
+        let _gone = Gone(&keys);
+        assert_eq!(keys.set("ollama", FAKE.into()), Err("Ollama on this computer takes no key.".into()));
+        assert_eq!(keys.set("openai", FAKE.into()), Ok(()));
+        assert!(keys.has("openai"));
+        let mut s = Settings::default();
+        choose(&mut s, "openai", Some("m".into()), true, 1).unwrap();
+        let mut errors = vec![choose(&mut s, "nope", Some(FAKE.into()), true, 1).unwrap_err(), keys.set("nope", FAKE.into()).unwrap_err()];
+        let look = gather(&[], ready_codex, |id| keys.has(id), None);
+        let list = serde_json::to_string(&providers(&s, &look)).unwrap();
+        let file = std::env::temp_dir().join(format!("pc-catalog-{}-{nanos}.json", std::process::id()));
+        s.save(&file).unwrap();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(forget(&mut s, &keys, "openai"), Ok(()));
+        assert!(!keys.has("openai") && s.assist_provider.is_none() && s.assist_model.is_none() && s.assist_consent.is_empty());
+        errors.push(picked(&s).unwrap_err());
+        let back: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back["assist_provider"], "openai", "the scan read the saved settings");
+        for text in [saved.as_str(), list.as_str()].into_iter().chain(errors.iter().map(String::as_str)) {
+            assert!(!text.contains(FAKE), "{text}");
+        }
+        assert!(list.contains("Key saved."), "the list read the planted key's item: {list}");
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn on_linux_a_key_is_refused_and_forgetting_still_clears_the_choice() {
+        let keys = Keys::named("pointcast-test-linux/");
+        assert!(keys.set("openai", FAKE.into()).unwrap_err().contains("not supported on Linux yet"));
+        let mut s = Settings::default();
+        choose(&mut s, "openai", Some("m".into()), true, 1).unwrap();
+        assert_eq!(forget(&mut s, &keys, "openai"), Ok(()));
+        assert!(s.assist_provider.is_none() && s.assist_consent.is_empty());
+    }
+}

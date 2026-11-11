@@ -282,8 +282,8 @@ fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
 
 /// The Ask loop as the app runs it: the recording path for its words, one frame of the screen for its picture, and
 /// the panel for what it says.
-fn live_for(app: &AppHandle, svc: &Arc<App>) -> Arc<live::Live> {
-    let (handle, shots, tidy) = (app.clone(), svc.clone(), svc.clone());
+fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<live::Live> {
+    let (handle, shots, tidy, chooser) = (app.clone(), svc.clone(), svc.clone(), svc.clone());
     live::Live::new(
         live::Deps {
             voice: Arc::new(live::AppVoice(svc.clone())),
@@ -294,8 +294,11 @@ fn live_for(app: &AppHandle, svc: &Arc<App>) -> Arc<live::Live> {
                 let cut: live::Frame = Box::new(move || frame.finish(&s, target, capture::ASK_EDGE));
                 Ok(cut)
             }),
-            // No AI is configured until the person chooses one in Settings (slice 3).
-            provider: Box::new(|| None),
+            // The AI the settings name at this Ask: a choice made in Settings needs no restart.
+            provider: Box::new(move || {
+                let s = chooser.settings.lock().unwrap().clone();
+                held.provider(&s)
+            }),
             out: Box::new(move |o| match o {
                 live::Out::State(s) => {
                     let _ = handle.emit("live://state", &s);
@@ -334,6 +337,83 @@ async fn live_stop(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String
 async fn live_close(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
     live.close();
     Ok(())
+}
+
+/// Where the assistant keeps its own files: Codex's empty folder and its pid file.
+fn assist_home() -> std::path::PathBuf {
+    settings::data_dir().join("assistant")
+}
+
+/// Every AI Pointcast offers and where each stands. Spends nothing: Codex is asked its version and whether it is
+/// signed in, the store which keys it holds, and the usual ports on this computer for their model lists (2 s).
+#[tauri::command]
+async fn assist_providers(svc: tauri::State<'_, Arc<App>>, held: tauri::State<'_, Arc<assist::catalog::Held>>) -> Result<assist::catalog::List, String> {
+    let s = svc.settings.lock().unwrap().clone();
+    let held = held.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || assist::catalog::providers(&s, &assist::catalog::look(&held))).await.map_err(|e| e.to_string())
+}
+
+/// The models `id` offers, asked of it now (Codex is started for its list). Never a question.
+#[tauri::command]
+async fn assist_models(svc: tauri::State<'_, Arc<App>>, held: tauri::State<'_, Arc<assist::catalog::Held>>, id: String) -> Result<Vec<assist::catalog::Model>, String> {
+    let s = svc.settings.lock().unwrap().clone();
+    let held = held.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || assist::catalog::models_of(&id, &s, &held, &assist_home())).await.map_err(|e| e.to_string())?
+}
+
+/// A change to what the assistant keeps in the settings, saved.
+fn assist_change(svc: &App, change: impl FnOnce(&mut Settings) -> Result<(), String>) -> Result<(), String> {
+    let mut s = svc.settings.lock().unwrap().clone();
+    let said = change(&mut s);
+    svc.save_settings(s)?;
+    said
+}
+
+#[tauri::command]
+fn assist_choose(svc: tauri::State<'_, Arc<App>>, id: String, model: Option<String>, consent: bool) -> Result<(), String> {
+    let mut s = svc.settings.lock().unwrap().clone();
+    assist::catalog::choose(&mut s, &id, model, consent, now_ms())?;
+    svc.save_settings(s)
+}
+
+#[tauri::command]
+fn assist_forget(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
+    assist_change(&svc, |s| assist::catalog::forget(s, &assist::catalog::Keys::store(), &id))
+}
+
+/// The key goes to the system's store and nowhere else.
+#[tauri::command]
+fn assist_key_set(id: String, key: String) -> Result<(), String> {
+    assist::catalog::Keys::store().set(&id, key)
+}
+
+#[tauri::command]
+fn assist_key_delete(id: String) -> Result<(), String> {
+    assist::catalog::Keys::store().delete(&id)
+}
+
+/// Sign in to ChatGPT through Codex's own flow: its page opens in the browser, and this ends when Codex says the
+/// person is done, or after 5 minutes.
+#[tauri::command]
+async fn assist_sign_in(app: AppHandle, id: String) -> Result<(), String> {
+    if id != assist::codex::ID {
+        return Err(format!("{} has no sign-in here.", assist::catalog::route(&id).map_or("That AI", |r| r.name)));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_opener::OpenerExt;
+        let open = |page: &str| app.opener().open_url(page, None::<&str>).map_err(|e| format!("The sign-in page did not open: {e}"));
+        assist::codex::Codex::new(assist_home().join("codex")).sign_in(&open, std::time::Duration::from_secs(300))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn assist_offline_only(svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
+    assist_change(&svc, |s| {
+        s.assist_offline_only = on;
+        Ok(())
+    })
 }
 
 /// Ask the question that failed again, as it was kept.
@@ -874,6 +954,10 @@ fn settings_patch(
 fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settings, String> {
     let mut v = serde_json::to_value(cur).map_err(|e| e.to_string())?;
     let obj = v.as_object_mut().ok_or("settings are not an object")?;
+    // The AI and the person's agreement change only through the assist_ commands, which ask before they keep a yes.
+    if patch.keys().any(|k| k.starts_with("assist_")) {
+        return Err("The AI is chosen in Settings, not by a patch.".into());
+    }
     for (k, val) in patch {
         if val.is_null() {
             obj.remove(&k);
@@ -2001,6 +2085,14 @@ pub fn run() {
             live_stop,
             live_close,
             live_retry,
+            assist_providers,
+            assist_models,
+            assist_choose,
+            assist_forget,
+            assist_key_set,
+            assist_key_delete,
+            assist_sign_in,
+            assist_offline_only,
             platform_info,
         ])
         .setup(move |app| {
@@ -2009,7 +2101,9 @@ pub fn run() {
             let handle = app.handle().clone();
             clipboard::bind(&handle);
             tray::setup(&handle, &svc)?;
-            app.manage(live_for(&handle, &svc));
+            let held = Arc::new(assist::catalog::Held::new(assist_home()));
+            app.manage(held.clone());
+            app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
             if let Some(m) = svc.history.recover() {
@@ -2109,6 +2203,10 @@ pub fn run() {
                     if go {
                         if let Some(l) = &live {
                             l.let_go();
+                        }
+                        // And a helper warmed for a question that never came.
+                        if let Some(h) = handle.try_state::<Arc<assist::catalog::Held>>() {
+                            h.cool();
                         }
                     }
                     WAKE.wait(gen, sooner(d.next, at));
@@ -2310,6 +2408,19 @@ mod tests {
                 assert!(t > at(now), "{now}");
             }
         }
+    }
+
+    #[test]
+    fn a_settings_patch_cannot_choose_the_ai_or_record_a_yes() {
+        let cur = Settings::default();
+        for k in ["assist_provider", "assist_consent", "assist_offline_only", "assist_model"] {
+            let mut patch = serde_json::Map::new();
+            patch.insert(k.into(), json!(if k == "assist_consent" { json!([{ "provider": "openai", "goes_to": "api.openai.com", "at_ms": 1 }]) } else { json!("openai") }));
+            assert!(merge(&cur, patch).is_err(), "{k}");
+        }
+        let mut sounds = serde_json::Map::new();
+        sounds.insert("sounds".into(), json!(false));
+        assert!(!merge(&cur, sounds).unwrap().sounds, "another setting still changes");
     }
 
     #[test]

@@ -8,6 +8,7 @@
 // Nothing calls this module yet: slice 3 wires it to commands and Settings, and removes this line.
 #![allow(dead_code)]
 
+pub mod catalog;
 pub mod child;
 pub mod codex;
 pub mod detect;
@@ -165,6 +166,16 @@ pub trait Provider: Send + Sync {
     fn once(&self, system: &str, turns: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
         self.open(system, turns)
     }
+    /// Let go of a helper `warm` started that no conversation took.
+    fn cool(&self) {}
+    /// The models known without asking anyone; none when nothing is known yet.
+    fn models(&self) -> Vec<catalog::Model> {
+        Vec::new()
+    }
+    /// The files the AI's own app adds to every question, once known (Codex: the person's own instructions file).
+    fn adds(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub trait Chat: Send {
@@ -178,6 +189,10 @@ pub trait Chat: Send {
         (self.stopper())()
     }
     fn close(&mut self);
+    /// The files the AI's own app added to this conversation.
+    fn adds(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Earlier turns as the context a new conversation starts from: one transcript in words, then the pictures of

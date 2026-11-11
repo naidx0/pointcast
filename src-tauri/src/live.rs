@@ -24,7 +24,7 @@ const FRAME: Duration = Duration::from_millis(34);
 /// The long side of the picture the panel shows beside the question.
 const THUMB: u32 = 480;
 
-pub const NO_PROVIDER: &str = "Choose an AI in Settings first";
+pub const NO_PROVIDER: &str = assist::catalog::NONE_CHOSEN;
 pub const NO_ANSWER: &str = "No answer after 20 seconds. Ask again.";
 pub const NOTHING_TO_RETRY: &str = "There is no question to ask again.";
 
@@ -159,8 +159,8 @@ pub struct Deps {
     pub voice: Arc<dyn Voice>,
     /// One frame of the screen as it is now.
     pub grab: Box<dyn Fn() -> Result<Frame, String> + Send + Sync>,
-    /// The AI the person chose, when one is configured.
-    pub provider: Box<dyn Fn() -> Option<Arc<dyn Provider>> + Send + Sync>,
+    /// The AI the person chose, as the settings say at this Ask; else the line the panel shows instead.
+    pub provider: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>,
     pub out: Box<dyn Fn(Out) + Send + Sync>,
     /// Unix ms.
     pub now: Box<dyn Fn() -> u64 + Send + Sync>,
@@ -222,10 +222,7 @@ pub fn line(f: &Failure) -> String {
 /// What the person calls the AI behind provider `id`: the panel never shows an id, so one with no name here shows
 /// nothing.
 pub fn name_of(id: &str) -> &'static str {
-    match id {
-        assist::codex::ID => "ChatGPT",
-        _ => "",
-    }
+    assist::catalog::name_of(id)
 }
 
 /// One line about the picture, sent with the question: its size, the window it shows, the control pointed at when the
@@ -306,10 +303,13 @@ impl Live {
         if next(g.snap.state, Step::Press).is_none() || self.deps.voice.busy() {
             return false;
         }
-        let Some(provider) = (self.deps.provider)() else {
-            // Nothing is grabbed, kept or sent without an AI to ask.
-            self.refuse(g, NO_PROVIDER.into());
-            return false;
+        let provider = match (self.deps.provider)() {
+            Ok(p) => p,
+            Err(why) => {
+                // Nothing is grabbed, kept or sent without an AI the person chose and allowed.
+                self.refuse(g, why);
+                return false;
+            }
         };
         // The screen as it is now, before the panel is on it.
         let frame = (self.deps.grab)().ok();
@@ -551,7 +551,7 @@ impl Live {
         let first = Answer {
             provider: provider.id().into(),
             times: Times { press_ms, release_ms, words_ms, ..Times::default() },
-            sent: Sent { text: sent_text.clone(), pictures: vec![], earlier: ids },
+            sent: Sent { text: sent_text.clone(), pictures: vec![], earlier: ids, adds: vec![] },
             ..Answer::default()
         };
         let q = Question { items: &said.items, created_ms: said.created_ms, duration_ms: said.duration_ms, audio: said.audio.clone(), pictures: &wires };
@@ -590,9 +590,7 @@ impl Live {
         let Some(mut kept) = g.kept.clone().filter(|_| g.snap.state == State::Error) else {
             return Err(NOTHING_TO_RETRY.into());
         };
-        let Some(provider) = (self.deps.provider)() else {
-            return Err(NO_PROVIDER.into());
-        };
+        let provider = (self.deps.provider)()?;
         g.run += 1;
         let run = g.run;
         g.halt = false;
@@ -642,6 +640,8 @@ impl Live {
                 return self.fail(run, line(&f));
             }
         };
+        // What the AI's own app adds to the question goes along too, and is kept as sent.
+        answer.sent.adds = chat.adds();
         let stopper = chat.stopper();
         let (tx, rx) = mpsc::channel::<Event>();
         answer.times.sent_ms = now();
@@ -888,6 +888,10 @@ mod tests {
     }
 
     fn rig(name: &str, provider: Option<Arc<dyn Provider>>, wait: Duration) -> Rig {
+        rig_with(name, Box::new(move || provider.clone().ok_or_else(|| NO_PROVIDER.to_owned())), wait)
+    }
+
+    fn rig_with(name: &str, provider: Box<dyn Fn() -> Result<Arc<dyn Provider>, String> + Send + Sync>, wait: Duration) -> Rig {
         let dir = std::env::temp_dir().join(format!("pc-live-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -906,7 +910,7 @@ mod tests {
                 });
                 Ok(cut)
             }),
-            provider: Box::new(move || provider.clone()),
+            provider,
             out: Box::new(move |out| o.lock().unwrap().push(out)),
             // Every reading is a millisecond after the last, so the order of the stages is the order of their times.
             now: Box::new(move || clock.fetch_add(1, Ordering::SeqCst)),
@@ -1209,6 +1213,50 @@ mod tests {
         assert_eq!(opened.len(), 2, "a new conversation");
         assert!(!opened[1].1.is_empty(), "it starts from what was kept");
         assert!(r.live.idle_since().unwrap() > used);
+        r.end();
+    }
+
+    #[test]
+    fn an_ask_through_the_settings_makes_nothing_without_a_chosen_and_allowed_ai_and_takes_a_new_choice_at_once() {
+        use crate::assist::catalog::{self, Held};
+        use crate::settings::Settings;
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let made: Arc<Mutex<Vec<Scripted>>> = Arc::default();
+        let m = made.clone();
+        let held = Arc::new(Held::with(Box::new(move |p| {
+            let s = Scripted { id: p.id, ..Scripted::new(&[(1, "Fine.")]) };
+            m.lock().unwrap().push(s.clone());
+            Ok(Arc::new(s) as Arc<dyn Provider>)
+        })));
+        let (s2, h2) = (settings.clone(), held.clone());
+        let r = rig_with("chosen", Box::new(move || h2.provider(&s2.lock().unwrap())), FIRST_WAIT);
+        let refused = |why: &str| {
+            assert!(!r.live.press());
+            let snap = r.live.snapshot();
+            assert_eq!((snap.state, snap.error.as_deref()), (State::Error, Some(why)));
+            assert_eq!((made.lock().unwrap().len(), r.grabs.load(Ordering::SeqCst), r.kept().len()), (0, 0, 0), "nothing made, grabbed or kept");
+        };
+        refused(NO_PROVIDER);
+        settings.lock().unwrap().assist_provider = Some("ollama".into());
+        settings.lock().unwrap().assist_model = Some("llava".into());
+        refused("Allow Ollama on this computer in Settings first");
+        catalog::choose(&mut settings.lock().unwrap(), "openai", Some("m".into()), true, 1).unwrap();
+        settings.lock().unwrap().assist_offline_only = true;
+        refused(catalog::OFFLINE_ONLY);
+        // Allowed: asked through what was chosen, no restart between.
+        catalog::choose(&mut settings.lock().unwrap(), "ollama", Some("llava".into()), true, 2).unwrap();
+        r.ask("what is this", State::Shown);
+        assert_eq!(r.live.snapshot().provider, "Ollama on this computer");
+        let first = made.lock().unwrap().clone();
+        assert_eq!((first.len(), first[0].asked.lock().unwrap().len()), (1, 1));
+        catalog::choose(&mut settings.lock().unwrap(), "lmstudio", Some("q".into()), true, 3).unwrap();
+        r.live.close();
+        r.ask("and now", State::Shown);
+        assert_eq!(r.live.snapshot().provider, "LM Studio on this computer");
+        assert_eq!(made.lock().unwrap().len(), 2);
+        // No key reaches the panel: it never holds one, so a planted one cannot show in what it is told.
+        let told = format!("{:?}", r.outs.lock().unwrap());
+        assert!(!told.contains("test-key-not-real") && told.contains("LM Studio"));
         r.end();
     }
 

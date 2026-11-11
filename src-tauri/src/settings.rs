@@ -183,6 +183,26 @@ pub struct Settings {
     /// What the picture of a question shows: the window under the pointer or the whole screen.
     #[serde(default)]
     pub ask_target: AskTarget,
+    /// The AI a question goes to (`assist::catalog::ROUTES`); none until the person chooses one. Never a key: keys
+    /// live in the system's store.
+    #[serde(default)]
+    pub assist_provider: Option<String>,
+    #[serde(default)]
+    pub assist_model: Option<String>,
+    /// "Only on this computer": no question goes to another one.
+    #[serde(default)]
+    pub assist_offline_only: bool,
+    /// Each AI and destination the person agreed to send questions to.
+    #[serde(default)]
+    pub assist_consent: Vec<Consent>,
+}
+
+/// The person agreed that questions asked through `provider` go to `goes_to`, at `at_ms`. A new destination asks again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Consent {
+    pub provider: String,
+    pub goes_to: String,
+    pub at_ms: u64,
 }
 
 fn default_model() -> String {
@@ -241,6 +261,10 @@ impl Default for Settings {
             free_default: 1,
             handoff_dir: None,
             ask_target: AskTarget::default(),
+            assist_provider: None,
+            assist_model: None,
+            assist_offline_only: false,
+            assist_consent: Vec::new(),
         }
     }
 }

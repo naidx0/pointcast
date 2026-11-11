@@ -168,8 +168,19 @@ pub fn locate() -> Option<PathBuf> {
 
 /// What `exe --version` prints.
 pub fn version_of(exe: &Path) -> Result<String, String> {
+    said_by(exe, &["--version"]).map(|(_, said)| said)
+}
+
+/// Whether Codex says it is signed in: `codex login status` reads its own sign-in, and Pointcast reads only whether it
+/// succeeded. None when it did not say.
+pub fn signed_in(exe: &Path) -> Option<bool> {
+    said_by(exe, &["login", "status"]).ok().map(|(ok, _)| ok)
+}
+
+/// Whether `exe args` succeeded, and what it printed, within 10 seconds.
+fn said_by(exe: &Path, args: &[&str]) -> Result<(bool, String), String> {
     let mut cmd = Command::new(exe);
-    cmd.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -178,19 +189,23 @@ pub fn version_of(exe: &Path) -> Result<String, String> {
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let t = Instant::now();
-    while matches!(child.try_wait(), Ok(None)) {
-        if t.elapsed() > Duration::from_secs(10) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("it did not answer".into());
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if t.elapsed() > Duration::from_secs(10) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("it did not answer".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => return Err(e.to_string()),
         }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    };
     let mut said = String::new();
     if let Some(mut out) = child.stdout.take() {
         let _ = out.read_to_string(&mut said);
     }
-    Ok(said)
+    Ok((ok, said))
 }
 
 pub fn codex() -> Result<Found, Missing> {
