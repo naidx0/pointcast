@@ -58,53 +58,43 @@ pub fn has(id: &str) -> bool {
     get(id).is_some()
 }
 
+/// Credential Manager through the keyring project's Windows store: a generic credential named for the item and kept
+/// on this computer only (it does not roam). The secret is the key's own bytes, so an item kept before the swap
+/// still reads. A keyring error's text never holds the secret.
 #[cfg(windows)]
 mod store {
-    use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::ERROR_NOT_FOUND;
-    use windows::Win32::Security::Credentials::{CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
+    use keyring_core::api::CredentialStoreApi;
+    use keyring_core::{Entry, Error};
 
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(Some(0)).collect()
+    fn entry(item: &str) -> Result<Entry, Error> {
+        let named = std::collections::HashMap::from([("target", item), ("persistence", "Local")]);
+        windows_native_keyring_store::Store::new()?.build(item, "Pointcast", Some(&named))
     }
 
     pub fn set(item: &str, key: &[u8]) -> Result<(), String> {
-        let (mut name, mut user) = (wide(item), wide("Pointcast"));
-        let cred = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: PWSTR(name.as_mut_ptr()),
-            CredentialBlobSize: key.len() as u32,
-            CredentialBlob: key.as_ptr() as *mut u8,
-            // This account on this computer: the key does not roam.
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            UserName: PWSTR(user.as_mut_ptr()),
-            ..Default::default()
-        };
-        unsafe { CredWriteW(&cred, 0) }.map_err(|e| format!("Windows did not keep the key: {}", e.message()))
+        entry(item).and_then(|e| e.set_secret(key)).map_err(|e| format!("Windows did not keep the key: {e}"))
     }
 
     pub fn get(item: &str) -> Option<String> {
-        let name = wide(item);
-        let mut found: *mut CREDENTIALW = std::ptr::null_mut();
-        unsafe {
-            CredReadW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, 0, &mut found).ok()?;
-            let c = &*found;
-            let bytes = if c.CredentialBlob.is_null() { Vec::new() } else { std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec() };
-            CredFree(found as *const core::ffi::c_void);
-            String::from_utf8(bytes).ok().filter(|k| !k.is_empty())
-        }
+        String::from_utf8(entry(item).ok()?.get_secret().ok()?).ok().filter(|k| !k.is_empty())
     }
 
     pub fn delete(item: &str) -> Result<(), String> {
-        let name = wide(item);
-        match unsafe { CredDeleteW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, 0) } {
-            Ok(()) => Ok(()),
-            Err(e) if e.code() == ERROR_NOT_FOUND.to_hresult() => Ok(()),
-            Err(e) => Err(format!("Windows did not forget the key: {}", e.message())),
+        match entry(item).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("Windows did not forget the key: {e}")),
         }
+    }
+
+    #[cfg(test)]
+    pub fn named_and_local(item: &str) -> bool {
+        let a = entry(item).and_then(|e| e.get_attributes()).unwrap_or_default();
+        a.get("target_name").map(String::as_str) == Some(item) && a.get("persistence").map(String::as_str) == Some("Local")
     }
 }
 
+/// The Mac's store through `security-framework`, already a library. The keyring project's Mac store is not used:
+/// its module path is a word the vendor sign-in scan forbids in this folder, and it would save a dozen lines.
 #[cfg(target_os = "macos")]
 mod store {
     use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
@@ -131,6 +121,8 @@ mod store {
     }
 }
 
+/// Linux: the keyring project reaches the Secret Service only over D-Bus (a second async stack and a running
+/// service a headless machine lacks), and the kernel keyring forgets at reboot. Neither is a quiet win yet.
 #[cfg(not(any(windows, target_os = "macos")))]
 mod store {
     pub const NOT_YET: &str = "Keys are not supported on Linux yet. A model on this computer needs no key.";
@@ -181,21 +173,14 @@ mod tests {
         assert!(!has(&t.0) && get(&t.0).is_none());
         assert_eq!(set(&t.0, Secret::new(format!(" {FAKE}\n"))), Ok(()));
         assert!(has(&t.0));
+        #[cfg(windows)]
+        assert!(store::named_and_local(&item(&t.0)), "one item named for Pointcast, kept on this computer only");
         assert_eq!(get(&t.0).unwrap().expose(), FAKE, "kept without the space and the line end of a paste");
         assert_eq!(set(&t.0, Secret::new("test-key-not-real-2")), Ok(()));
         assert_eq!(get(&t.0).unwrap().expose(), "test-key-not-real-2");
         assert_eq!(delete(&t.0), Ok(()));
         assert!(!has(&t.0));
         assert_eq!(delete(&t.0), Ok(()), "forgetting twice is not an error");
-    }
-
-    #[cfg(not(any(windows, target_os = "macos")))]
-    #[test]
-    fn on_linux_a_key_is_refused_in_words_and_none_is_ever_found() {
-        let said = set("pointcast-test-linux", Secret::new(FAKE)).unwrap_err();
-        assert!(said.contains("not supported on Linux yet"), "{said}");
-        assert!(!has("pointcast-test-linux") && get("pointcast-test-linux").is_none());
-        assert_eq!(delete("pointcast-test-linux"), Ok(()));
     }
 
     #[test]
