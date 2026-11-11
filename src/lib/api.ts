@@ -32,6 +32,10 @@ export type UiState = {
   preparing_gpu?: boolean;
   /** Where the engine transcribes: "your graphics card" or "your processor"; null before a model is loaded. */
   engine_label?: string | null;
+  /** After a stop: the History entry the prompt was saved as; null when nothing was saved. */
+  entry?: string | null;
+  /** Auto-paste was chosen but macOS would not take it (no Accessibility), so the prompt was copied instead. */
+  paste_blocked?: boolean;
 };
 
 export type Progress = {
@@ -45,7 +49,9 @@ export type Progress = {
   left_ms?: number | null;
 };
 
-export type Label = { n: number; text: string };
+/** A numbered pin, step or note on a picture; pins and steps share one number sequence. 0 is a note on the whole picture. */
+/** `kind` absent: a pin. "note": a note on the whole picture (numbered 0), such as "1 area hidden". */
+export type Label = { n: number; text: string; kind?: "step" | "note" };
 
 export type SessionExport = {
   plain: string;
@@ -138,11 +144,13 @@ export type Config = {
   keep_audio?: boolean;
   /** Put the file path of each picture in the text, for terminal agents. Treated as on when absent. */
   picture_paths?: boolean;
+  /** Paragraphs at the pauses, no ums and no repeated words when the prompt is composed. Treated as on when absent. */
+  tidy?: boolean;
   /** Clean up room noise and even out the volume before transcribing. Treated as on when absent. */
   voice_boost?: boolean;
   /** Get the faster GPU version of Whisper Turbo by itself. Treated as on when absent. */
   auto_gpu?: boolean;
-  /** Minutes with no recording before the speech model is freed from memory; 0 keeps it loaded. Treated as 10 when absent. */
+  /** Minutes after the speech model's last use before it is freed from memory; 0 keeps it loaded. Treated as 1 when absent. */
   free_memory_minutes?: number;
   gpu_upgrade?: GpuUpgrade;
   start_at_login: boolean;
@@ -169,6 +177,14 @@ export type Config = {
   /** The model a recording would load now (the picked one, or the installed one it falls back to). */
   speech_in_use?: string | null;
   devices: string[];
+  /** The system's default microphone, by name. */
+  default_device?: string | null;
+  /** The microphone of the newest recordings, newest first. */
+  mic_recent?: MicRecent[];
+  /** This computer, as measured at launch. */
+  machine?: Machine;
+  /** Cancel was pressed on the graphics-card download: not tried again until asked. */
+  gpu_declined?: boolean;
   permissions: Permissions;
   recommended: string;
 };
@@ -187,13 +203,18 @@ export const sessionState = () => invoke<UiState>("session_state");
 export const sessionCancel = () => invoke<void>("session_cancel");
 /** Stop waiting for the last words: save what is transcribed now and keep the audio for Transcribe again. */
 export const sessionFinishNow = () => invoke<void>("session_finish_now");
+/** The capsule's end notice has the pointer or focus, or lost it: it stays while held and a moment after. */
+export const hudHold = (over: boolean) => invoke<void>("hud_hold", { over });
+/** Open History, on entry `id` when given. */
+export const historyOpen = (id: string | null) => invoke<void>("history_open", { id });
 export const captureFull = () => invoke<void>("capture_full");
 export const captureZoom = () => invoke<void>("capture_zoom");
 export const regionBegin = () => invoke<{ png_b64: string; width: number; height: number }>("region_begin");
 /** The control under the pointer, its rect in picture pixels. */
 export type ElementMark = { role: string; name: string; rect: { x: number; y: number; w: number; h: number } };
-export const regionCommit = (pngB64: string, labels: Label[], element: ElementMark | null = null) =>
-  invoke<void>("region_commit", { body: { png_b64: pngB64, labels, element } });
+/** `hidden`: how many areas the person blacked out; the prompt says so ("1 area hidden"). */
+export const regionCommit = (pngB64: string, labels: Label[], element: ElementMark | null = null, hidden = 0) =>
+  invoke<void>("region_commit", { body: { png_b64: pngB64, labels, element, hidden } });
 export const regionCancel = () => invoke<void>("region_cancel");
 export const regionFrame = () =>
   invoke<{
@@ -212,8 +233,77 @@ export const lastPrompt = () => invoke<SessionExport | null>("last_prompt");
 export const lastFolder = () => invoke<string | null>("last_folder");
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 export const copyAgain = () => invoke<void>("copy_again");
+export type AgentId = "claude" | "cursor" | "codex";
+/** One coding agent as Settings shows it. Never carries the key. */
+export type AgentView = {
+  id: AgentId;
+  name: string;
+  /** The user-scope file Pointcast writes, as people know it ("~/.claude.json"); the full path when POINTCAST_HOME is set. */
+  path: string;
+  /** The full path of that file, always: the row's tooltip. */
+  file: string;
+  /** The agent has run on this computer (its folder is there). */
+  found: boolean;
+  /** "current": this address and key; "other": a pointcast entry with an old address or key. */
+  entry: "missing" | "current" | "other";
+  /** The file could not be read, in plain words. */
+  error: string | null;
+};
+export type Agents = {
+  agents: AgentView[];
+  /** The agent server answered an MCP client just now. */
+  server_ok: boolean;
+  server_error: string | null;
+  /** Where each recording's pictures go, and whether Claude Code may open it without asking. */
+  folder: string;
+  folder_allowed: boolean;
+};
 /** Copies the MCP setup for one coding agent, with this install's key, straight to the clipboard. */
-export const mcpCopySetup = (agent: "claude" | "cursor") => invoke<void>("mcp_copy_setup", { agent });
+export const mcpCopySetup = (agent: AgentId) => invoke<void>("mcp_copy_setup", { agent });
+/** Outside Tauri: a stand-in, `?agents=none|connected|notfound|error` picks which. */
+export const agentsStatus = () => (inTauri ? invoke<Agents>("agents_status") : Promise.resolve(previewAgents()));
+/** Writes Pointcast into the agent's user settings (turning sharing on first), then checks it answers. */
+export const agentConnect = (agent: AgentId, folder: boolean) => invoke<Agents>("agent_connect", { agent, folder });
+/** Takes only Pointcast's entry out of the agent's settings. */
+export const agentRemove = (agent: AgentId) => invoke<Agents>("agent_remove", { agent });
+/** Lets Claude Code open the pictures folder without asking, or stops it. */
+export const agentFolder = (on: boolean) => invoke<Agents>("agent_folder", { on });
+
+export function previewAgents(): Agents {
+  const state = typeof location !== "undefined" ? new URLSearchParams(location.search).get("agents") ?? "none" : "none";
+  const row = (id: AgentId, name: string, path: string): AgentView => ({
+    id,
+    name,
+    path,
+    file: path.replace("~", "C:/Users/you"),
+    found: true,
+    entry: "missing",
+    error: null,
+  });
+  const agents = [
+    row("claude", "Claude Code", "~/.claude.json"),
+    row("cursor", "Cursor", "~/.cursor/mcp.json"),
+    row("codex", "Codex", "~/.codex/config.toml"),
+  ];
+  if (state === "connected") agents.forEach((a) => (a.entry = "current"));
+  if (state === "notfound") {
+    agents[0].entry = "current";
+    agents[1].found = false;
+    agents[2].found = false;
+  }
+  if (state === "error") {
+    agents[0].entry = "other";
+    agents[1].error = "~/.cursor/mcp.json is not plain JSON (it may have comments), so Pointcast left it unchanged.";
+    agents[2].entry = "current";
+  }
+  return {
+    agents,
+    server_ok: state !== "error",
+    server_error: state === "error" ? "127.0.0.1:47821 is already in use" : null,
+    folder: "~/Pointcast",
+    folder_allowed: state === "connected" || state === "notfound",
+  };
+}
 export const pasteAgain = () => invoke<void>("paste_again");
 export type SpeechProgress = { phase: "download" | "unpack" | "check"; part?: string; received?: number; total?: number };
 export const speechSetup = (id: string) => invoke<void>("speech_setup", { id });
@@ -232,7 +322,12 @@ export const sendToTool = (id: string) => invoke<void>("send_to_tool", { id });
 export const hotkeysSuspend = (on: boolean) => invoke<Config>("hotkeys_suspend", { on });
 export const hotkeyTest = (on: boolean) => invoke<void>("hotkey_test", { on });
 export const practice = (on: boolean) => invoke<void>("practice", { on });
-export const micMonitor = (on: boolean) => invoke<void>("mic_monitor", { on });
+/** Open or close the microphone check. With `leaseMs` it closes by itself unless asked again within that time. */
+export const micMonitor = (on: boolean, leaseMs?: number) => invoke<void>("mic_monitor", { on, leaseMs });
+/** Listen briefly to the other microphones: the ones that picked up sound, loudest first (dBFS). */
+export const micScan = () => invoke<{ name: string; peak_db: number }[]>("mic_scan");
+/** Forget that the graphics card could not run the engine, or that its download was stopped, so it is tried again. */
+export const gpuRetry = () => invoke<void>("gpu_retry");
 export const onboardingFinish = () => invoke<void>("onboarding_finish");
 /** Open at login for this user; `machine` is an older entry for every user that only an administrator can remove. */
 export type Login = { enabled: boolean; machine: boolean };
@@ -242,6 +337,20 @@ export const updateCheck = () => invoke<string | null>("update_check");
 export const updateInstall = () => invoke<void>("update_install");
 export const windowOpen = (label: string) => invoke<void>("window_open", { label });
 export const platformInfo = () => invoke<{ os: string; materials: boolean }>("platform_info");
+
+export type MicRecent = { mic: string; open_ms: number; peak_db: number };
+export type Machine = {
+  cpu?: string;
+  cores: number;
+  ram_gb: number;
+  /** The graphics card and its own memory in GB. */
+  gpu?: [string, number] | null;
+  gpu_integrated: boolean;
+  mac: boolean;
+  apple_silicon: boolean;
+  /** A graphics-card version of the speech engine is published for this computer. */
+  helper: boolean;
+};
 
 export type HistoryMeta = {
   id: string;
@@ -261,6 +370,12 @@ export type HistoryMeta = {
   /** The engine's time on it and the length of its audio, in ms. */
   transcribe_ms?: number;
   audio_ms?: number;
+  /** The microphone it was recorded on; empty for an entry from before this was kept. */
+  mic?: string;
+  /** From the press to the microphone's first sample, in ms. */
+  mic_open_ms?: number;
+  /** The loudest sample of the recording, in dBFS (-100 for nothing but zeros). */
+  mic_peak_db?: number;
 };
 
 /** A graphics card's short name: "NVIDIA GeForce RTX 2060 SUPER via Vulkan" is "RTX 2060 SUPER". */
@@ -314,12 +429,16 @@ export const onPracticeResult = on<SessionExport>("practice://result");
 export const onOverlayFinish = on<null>("overlay://finish");
 export const onOverlayFrame = on<{ png_b64: string; width: number; height: number }>("overlay://frame");
 export const onHistoryChanged = on<{ id: string }>("history://changed");
+/** Open History on this entry (the capsule's notice was clicked). */
+export const onHistorySelect = on<{ id: string }>("history://select");
 export const onTranscribeProgress = on<{ id: string; done_ms: number; total_ms: number }>("transcribe://progress");
 export const onSpeechProgress = on<SpeechProgress>("speech://progress");
 export const onSpeechDone = on<{ id: string; ok: boolean; error?: string | null }>("speech://done");
 export const onGpuUpgrade = on<GpuUpgrade>("gpu://upgrade");
 export const onHotkey = on<{ action: Action; pressed: boolean }>("hotkey://fired");
 export const onMicLevel = on<number>("mic://level");
+/** The loudest sample of the microphone check's last 50 ms, in dBFS. */
+export const onMicPeak = on<number>("mic://peak");
 export const onUpdateChecked = on<string | null>("update://checked");
 export const onUpdateFailed = on<string>("update://failed");
 export const onSettingsPane = on<string>("settings://pane");

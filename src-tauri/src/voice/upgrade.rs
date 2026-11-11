@@ -222,8 +222,40 @@ pub fn welcome(data: &Path) {
     }
 }
 
+/// Whether `skip` holds until something the person does (`kick_upgrade`: a model picked, onboarding finished, the
+/// setting changed): asking again by itself would get the same answer. Busy, a recent failure, a metered connection and
+/// low disk pass by themselves, so those are asked again.
+pub fn settled(skip: &Skip) -> bool {
+    match skip {
+        Skip::Off | Skip::NotTurbo | Skip::Installed | Skip::NoHelper | Skip::Unusable | Skip::Declined => true,
+        Skip::Busy | Skip::Wait | Skip::Metered | Skip::LowDisk { .. } => false,
+    }
+}
+
+/// Whether a run's `out` is final in the same sense: set up, found unusable or cancelled. A pause (a recording), a
+/// failure (offline, say) or another run under way goes on later.
+pub fn finished(out: &Outcome) -> bool {
+    match out {
+        Outcome::Gpu(_) | Outcome::Unusable(_) | Outcome::Cancelled => true,
+        Outcome::Paused | Outcome::Failed(_) | Outcome::Running => false,
+    }
+}
+
+/// Whether the network's cost decides `f`: only when nothing before it in `decide` says no.
+fn asks_network(f: &Facts) -> bool {
+    matches!(decide(f), Decision::Start | Decision::Skip(Skip::LowDisk { .. }))
+}
+
 /// The facts for `decide` on this computer now.
 pub fn facts(root: &Path, data: &Path, cat: &Catalog, model: &str, auto_gpu: bool, busy: bool) -> Facts {
+    facts_with(root, data, cat, model, auto_gpu, busy, &metered)
+}
+
+/// The cheap facts first; the network is asked last, and only when its answer decides.
+fn facts_with(root: &Path, data: &Path, cat: &Catalog, model: &str, auto_gpu: bool, busy: bool, metered: &dyn Fn() -> bool) -> Facts {
+    if !auto_gpu {
+        return Facts { busy, ..Default::default() };
+    }
     let installed = super::engine::installed(root, cat);
     let turbo = super::machine::route(model, super::machine::recommended(), &installed) == Some(MODEL);
     let helper = cat.helper_for_host().filter(|h| !h.pending);
@@ -231,7 +263,7 @@ pub fn facts(root: &Path, data: &Path, cat: &Catalog, model: &str, auto_gpu: boo
     let missing = helper.filter(|h| !models::runtime_installed(root, h)).map_or(0, |h| h.bytes)
         + gpu.filter(|g| !models::model_installed(root, g)).map_or(0, |g| g.bytes);
     let state = load_state(data);
-    Facts {
+    let mut f = Facts {
         auto_gpu,
         turbo,
         helper: helper.map(stamp),
@@ -239,11 +271,15 @@ pub fn facts(root: &Path, data: &Path, cat: &Catalog, model: &str, auto_gpu: boo
         unusable: state.gpu_unusable.map(|u| u.helper),
         declined: state.declined,
         busy,
-        metered: metered(),
+        metered: false,
         missing,
         free: models::free_bytes(root),
         wait: FAILED_AT.lock().unwrap().is_some_and(|t| t.elapsed() < AGAIN_AFTER),
+    };
+    if asks_network(&f) {
+        f.metered = metered();
     }
+    f
 }
 
 /// What `run` needs from the app: whether it is busy now, the check (start the helper, warm it up, say what it runs
@@ -438,6 +474,65 @@ mod tests {
         assert_eq!(decide(&Facts { unusable: Some("h1 old".into()), ..ready() }), Decision::Start);
         assert!(note(&Skip::LowDisk { need: 2_590_000_000, free: 1_000_000_000 }).unwrap().note.unwrap().contains("2.6 GB"));
         assert!(note(&Skip::Busy).is_none() && note(&Skip::Metered).is_some());
+    }
+
+    #[test]
+    fn the_background_loop_ends_on_a_final_answer_and_asks_again_after_a_passing_one() {
+        // Every reason it does not start, from `decide` itself.
+        let cases = [
+            (Facts { auto_gpu: false, ..ready() }, true),
+            (Facts { turbo: false, ..ready() }, true),
+            (Facts { installed: true, ..ready() }, true),
+            (Facts { helper: None, ..ready() }, true),
+            (Facts { unusable: Some("h1 abc".into()), ..ready() }, true),
+            (Facts { declined: true, ..ready() }, true),
+            (Facts { busy: true, ..ready() }, false),
+            (Facts { wait: true, ..ready() }, false),
+            (Facts { metered: true, ..ready() }, false),
+            (Facts { free: Some(1), ..ready() }, false),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (f, settles) in cases {
+            let Decision::Skip(skip) = decide(&f) else { panic!("started: {f:?}") };
+            assert_eq!(settled(&skip), settles, "{skip:?}");
+            seen.insert(std::mem::discriminant(&skip));
+        }
+        assert_eq!(seen.len(), 10, "every Skip once");
+        // Every outcome of a run.
+        assert!(finished(&Outcome::Gpu(Some("RTX".into()))) && finished(&Outcome::Gpu(None)), "set up and checked");
+        assert!(finished(&Outcome::Unusable(NO_GPU.into())), "found unusable with this helper");
+        assert!(finished(&Outcome::Cancelled), "declined on the card");
+        assert!(!finished(&Outcome::Paused), "a recording paused it: it goes on");
+        assert!(!finished(&Outcome::Failed("offline".into())), "tried again after a while");
+        assert!(!finished(&Outcome::Running), "the other run decides");
+    }
+
+    #[test]
+    fn the_metered_check_runs_last_and_only_when_it_decides() {
+        // Only when everything before it says yes.
+        assert!(asks_network(&ready()));
+        assert!(asks_network(&Facts { free: Some(1), ..ready() }), "it comes before low disk");
+        for f in [
+            Facts { auto_gpu: false, ..ready() },
+            Facts { turbo: false, ..ready() },
+            Facts { installed: true, ..ready() },
+            Facts { helper: None, ..ready() },
+            Facts { declined: true, ..ready() },
+            Facts { busy: true, ..ready() },
+            Facts { wait: true, ..ready() },
+        ] {
+            assert!(!asks_network(&f), "{f:?}");
+        }
+        // Off: nothing on disk is read and the network is not asked.
+        let (root, data) = scratch("facts");
+        let never = || -> bool { panic!("the network was asked") };
+        let cat = models::catalog();
+        let f = facts_with(&root, &data, &cat, MODEL, false, true, &never);
+        assert_eq!(decide(&f), Decision::Skip(Skip::Off));
+        assert!(f.busy);
+        // On, but nothing installed: Whisper Turbo is not what recordings use, so the network is not asked either.
+        let f = facts_with(&root, &data, &cat, MODEL, true, false, &never);
+        assert!(!asks_network(&f), "{f:?}");
     }
 
     #[test]

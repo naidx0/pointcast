@@ -1,10 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { AudioLines, Check, ClipboardPaste, Keyboard, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
-import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AudioLines, Check, ClipboardPaste, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
+import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
-import { ModelPicker, speechReady, useSpeechJob } from "@/components/Models";
+import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
+import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
 import {
-  hotkeyTest,
   inTauri,
   loginSet,
   onboardingFinish,
@@ -25,25 +25,25 @@ import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
 import { PromptDoc } from "./Result";
 
-const STEPS = ["welcome", "access", "speech", "keys", "practice", "done"] as const;
-type Step = (typeof STEPS)[number];
-
 export function Onboarding() {
   const { cfg, setCfg, patch, refresh, error } = useConfig();
-  // The download keeps going in the background, so the next steps need not wait for it.
+  // The recommended model downloads in the background from Get Started on; no step waits for it.
   const speech = useSpeechJob(refresh);
+  const askDownload = useRef(downloadOnce()).current;
   const [step, setStep] = useState<Step>(() => {
     const q = new URLSearchParams(location.search).get("step");
     return (STEPS as readonly string[]).includes(q ?? "") ? (q as Step) : "welcome";
   });
+  // "Change model…" shows the model cards in place of the step, until Done.
+  const [models, setModels] = useState(() => preview && new URLSearchParams(location.search).get("models") === "1");
+  const [practiced, setPracticed] = useState(false);
   const i = STEPS.indexOf(step);
   const go = (d: number) => setStep(STEPS[Math.min(STEPS.length - 1, Math.max(0, i + d))]);
 
-  // Each step turns on only the machinery it needs.
+  // The practice run is armed only on Try it.
   useEffect(() => {
     if (!inTauri) return;
-    hotkeyTest(step === "keys").catch(() => undefined);
-    practice(step === "practice").catch(() => undefined);
+    practice(step === "try").catch(() => undefined);
   }, [step]);
 
   // Reopened for an existing user (a macOS update dropped a permission): go straight to access.
@@ -51,29 +51,48 @@ export function Onboarding() {
     if (cfg?.onboarded) setStep((s) => (s === "welcome" ? "access" : s));
   }, [cfg?.onboarded]);
 
+  // Browser preview: `?speech=ready` shows the recommended model already in place.
+  const seeded = !!cfg;
+  useEffect(() => {
+    if (!preview || !cfg || new URLSearchParams(location.search).get("speech") !== "ready") return;
+    patch({
+      speech: {
+        runtime: { id: "runtime", installed: true, lib: "" },
+        models: cfg.speech.models?.map((m) => (m.id === cfg.recommended ? { ...m, installed: true } : m)),
+      },
+      speech_check: { ok: true, error: null },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seeded]);
+
   if (!cfg) return <div className="onb" />;
 
-  const next: Record<Step, { label: string; enabled?: boolean; skip?: string }> = {
-    welcome: { label: "Get Started" },
-    access: { label: "Continue" },
-    speech: { label: "Continue", enabled: speechReady(cfg), skip: "Skip for Now" },
-    keys: { label: "Continue" },
-    practice: { label: "Continue", skip: "Skip" },
-    done: { label: "Start Using Pointcast" },
-  };
-  const n = next[step];
+  const n = nextButton(step, practiced);
+  const line = speechLine({ ready: speechInstalled(cfg), busy: !!speech.job, error: speech.error?.text ?? null });
+  const getSpeech = () => speech.start(cfg.recommended, cfg, patch);
 
   return (
     <div className="onb">
       <div className="onb-body drag">
-        {step === "welcome" && <Welcome />}
-        {step === "access" && <AccessStep cfg={cfg} />}
-        {step === "speech" && <SpeechStep cfg={cfg} patch={patch} refresh={refresh} />}
-        {step === "keys" && <KeysStep cfg={cfg} patch={patch} setCfg={setCfg} />}
-        {step === "practice" && (
-          <PracticeStep cfg={cfg} downloading={!!speech.job} onBack={() => setStep("speech")} />
+        {models ? (
+          <ModelsStep cfg={cfg} patch={patch} refresh={refresh} speech={speech} />
+        ) : (
+          <>
+            {step === "welcome" && <Welcome />}
+            {step === "access" && <AccessStep cfg={cfg} />}
+            {step === "try" && (
+              <TryStep
+                cfg={cfg}
+                patch={patch}
+                setCfg={setCfg}
+                speech={line}
+                onModels={() => setModels(true)}
+                onResult={() => setPracticed(true)}
+              />
+            )}
+            {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
+          </>
         )}
-        {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
         {error ? (
           <div className="t-small" role="alert" style={{ color: "var(--red-ink)", marginTop: 12, maxWidth: 440 }}>
             {error.replace(/^Error:\s*/, "")}
@@ -86,28 +105,110 @@ export function Onboarding() {
             <i key={s} className={s === step ? "on" : ""} />
           ))}
         </div>
-        {i > 0 && step !== "done" ? (
-          <button type="button" className="btn plain" onClick={() => go(-1)}>
-            Back
-          </button>
+        {step !== "welcome" ? (
+          <SpeechStatus
+            cfg={cfg}
+            line={line}
+            speech={speech}
+            onRetry={getSpeech}
+            onModels={models ? undefined : () => setModels(true)}
+          />
         ) : null}
-        {n.skip && n.enabled === false ? (
-          <button type="button" className="btn" onClick={() => go(1)}>
-            {n.skip}
+        {models ? (
+          <button type="button" className="btn primary lg" onClick={() => setModels(false)}>
+            Done
           </button>
-        ) : null}
-        <button
-          type="button"
-          className="btn primary lg"
-          disabled={n.enabled === false}
-          onClick={async () => {
-            if (step !== "done") return go(1);
-            if (inTauri) await onboardingFinish().catch(() => undefined);
-          }}
-        >
-          {n.label}
-        </button>
+        ) : (
+          <>
+            {i > 0 && step !== "done" ? (
+              <button type="button" className="btn plain" onClick={() => go(-1)}>
+                Back
+              </button>
+            ) : null}
+            {n.skip && n.enabled === false ? (
+              <button type="button" className="btn" onClick={() => go(1)}>
+                {n.skip}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn primary lg"
+              disabled={n.enabled === false}
+              onClick={async () => {
+                if (step === "welcome")
+                  askDownload({ installed: speechInstalled(cfg), busy: !!speech.job }, () => void getSpeech());
+                if (step !== "done") return go(1);
+                if (inTauri) await onboardingFinish().catch(() => undefined);
+              }}
+            >
+              {n.label}
+            </button>
+          </>
+        )}
       </footer>
+    </div>
+  );
+}
+
+/** The footer's one quiet line about the speech model, on every step after the welcome. */
+function SpeechStatus({
+  cfg,
+  line,
+  speech,
+  onRetry,
+  onModels,
+}: {
+  cfg: Config;
+  line: SpeechLine;
+  speech: SpeechJob;
+  onRetry: () => void;
+  onModels?: () => void;
+}) {
+  const job = speech.job;
+  const size = modelSize(cfg, job?.id ?? cfg.recommended);
+  const pct = job?.phase === "download" ? percent(job.received, job.total) : null;
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  return (
+    <div className="onb-speech t-small" role="status" title={line === "failed" ? speech.error?.text : undefined}>
+      {line === "downloading" ? (
+        <>
+          <span className="spinner" aria-hidden />
+          <span>
+            Getting speech ready
+            {job?.phase !== "download" ? (
+              " · Checking it works"
+            ) : pct != null ? (
+              <span aria-hidden>{` · ${pct}%${size ? ` of ${size}` : ""}`}</span>
+            ) : size ? (
+              ` · ${size}`
+            ) : null}
+          </span>
+        </>
+      ) : line === "ready" ? (
+        <>
+          <span className="onb-speech-ok" aria-hidden>
+            <Check size={10} strokeWidth={3.4} />
+          </span>
+          <span>Speech is ready</span>
+        </>
+      ) : line === "failed" ? (
+        <span className="onb-speech-warn">
+          {offline ? "No internet, so speech didn’t download." : "Speech didn’t download."}{" "}
+          <button type="button" className="link" onClick={onRetry}>
+            Retry
+          </button>
+        </span>
+      ) : (
+        <span>No speech model yet</span>
+      )}
+      {onModels ? (
+        <>
+          <span aria-hidden>·</span>
+          <button type="button" className="link" onClick={onModels}>
+            Change model…
+          </button>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -176,105 +277,27 @@ function AccessStep({ cfg }: { cfg: Config }) {
   );
 }
 
-function SpeechStep({
+function ModelsStep({
   cfg,
   patch,
   refresh,
+  speech,
 }: {
   cfg: Config;
   patch: (p: Record<string, unknown>) => Promise<string | null>;
   refresh: () => void;
+  speech: SpeechJob;
 }) {
   return (
     <div className="onb-step">
       <Glyph tile="tile-orange">
         <AudioLines size={28} strokeWidth={1.8} />
       </Glyph>
-      <h1 className="t-title">Choose a speech model</h1>
+      <h1 className="t-title">Speech model</h1>
       <p className="t-body">
-        Speech turns into text right on this computer: no account, no upload. Pick a model; you can switch later.
+        Speech turns into text right on this computer: no account, no upload. The recommended one suits this computer.
       </p>
-      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} />
-    </div>
-  );
-}
-
-function KeysStep({
-  cfg,
-  patch,
-  setCfg,
-}: {
-  cfg: Config;
-  patch: (p: Record<string, unknown>) => Promise<string | null>;
-  setCfg: (c: Config) => void;
-}) {
-  const [fired, setFired] = useState<Partial<Record<Action, boolean>>>({});
-  const [down, setDown] = useState<Action | null>(null);
-  useEffect(
-    () =>
-      subscribe(
-        onHotkey((h) => {
-          if (h.pressed) {
-            setFired((f) => ({ ...f, [h.action]: true }));
-            setDown(h.action);
-          } else setDown(null);
-        }),
-      ),
-    [],
-  );
-  const all = ACTIONS.every((a) => fired[a.id]);
-  return (
-    <div className="onb-step">
-      <Glyph tile="tile-indigo">
-        <Keyboard size={28} strokeWidth={1.8} />
-      </Glyph>
-      <h1 className="t-title">Try your shortcuts</h1>
-      <p className="t-body">
-        Press each one now. They work in every app. To change one, click it and press the new keys.
-      </p>
-      <div className="cards">
-        {ACTIONS.map((a) => (
-          <div
-            key={a.id}
-            className="card"
-            style={down === a.id ? { boxShadow: "0 0 0 2px var(--accent)", borderColor: "transparent" } : undefined}
-          >
-            <span className={`check ${fired[a.id] ? "on" : ""}`} aria-label={fired[a.id] ? "Works" : "Not pressed yet"}>
-              <Check size={13} strokeWidth={3} />
-            </span>
-            <div className="grow">
-              <div className="ttl">{a.name}</div>
-              <div className="sub">{a.sub}</div>
-            </div>
-            <ShortcutField action={a.id} cfg={cfg} patch={patch} setCfg={setCfg} />
-          </div>
-        ))}
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16, alignSelf: "stretch" }}>
-        <div style={{ flex: 1, textAlign: "left" }}>
-          <div style={{ fontWeight: 600 }}>Start or stop by</div>
-          <div className="t-caption">
-            {cfg.talk_mode === "hold"
-              ? "Hold to talk, release to finish. A quick tap keeps recording."
-              : "Press once to start, again to finish."}
-          </div>
-        </div>
-        <div className="seg" role="group" aria-label="Start or stop by">
-          {(
-            [
-              ["tap", "Pressing"],
-              ["hold", "Holding"],
-            ] as const
-          ).map(([id, name]) => (
-            <button key={id} type="button" aria-pressed={cfg.talk_mode === id} onClick={() => patch({ talk_mode: id })}>
-              {name}
-            </button>
-          ))}
-        </div>
-      </div>
-      <p className="t-small" style={{ marginTop: 14, minHeight: 16 }}>
-        {all ? "All four work." : inTauri ? "Nothing records while you test." : "Preview: shortcuts are not live in a browser."}
-      </p>
+      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} speech={speech} />
     </div>
   );
 }
@@ -282,27 +305,47 @@ function KeysStep({
 /** What was said, without the [image n] markers captures add to the running text. */
 const words = (t: string) => t.replace(/\[image[^\]]*\]/g, " ").replace(/\s+/g, " ").trim();
 
-function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: boolean; onBack: () => void }) {
+/** One practice run with the shortcuts on cards: each card ticks off when its shortcut is used in the run, and its
+ * Change opens the shortcut recorder. */
+function TryStep({
+  cfg,
+  patch,
+  setCfg,
+  speech,
+  onModels,
+  onResult,
+}: {
+  cfg: Config;
+  patch: (p: Record<string, unknown>) => Promise<string | null>;
+  setCfg: (c: Config) => void;
+  speech: SpeechLine;
+  onModels: () => void;
+  onResult: () => void;
+}) {
   const [st, setSt] = useState<UiState | null>(null);
   const [result, setResult] = useState<SessionExport | null>(null);
+  const [fired, setFired] = useState<Partial<Record<Action, boolean>>>({});
+  const [down, setDown] = useState<Action | null>(null);
   // `quiet`: what the microphone gave during this run, the worse of what was reported.
-  const [seen, setSeen] = useState<{ started: boolean; spoke: boolean; marked: boolean; quiet: UiState["quiet_mic"] }>({
+  const [seen, setSeen] = useState<{ started: boolean; spoke: boolean; quiet: UiState["quiet_mic"] }>({
     started: false,
     spoke: false,
-    marked: false,
     quiet: null,
   });
   useEffect(() => {
-    // ?quiet=silent|quiet and ?result=empty show those states in a browser.
+    // ?quiet=silent|quiet, ?result=empty and ?tried=session,region show those states in a browser.
     if (preview) {
       const q = new URLSearchParams(location.search);
       const quiet = q.get("quiet") === "silent" || q.get("quiet") === "quiet" ? (q.get("quiet") as "silent" | "quiet") : null;
+      const tried = (q.get("tried") ?? "").split(",").filter((a): a is Action => ACTIONS.some((x) => x.id === a));
+      if (tried.length) setFired(Object.fromEntries(tried.map((a) => [a, true])));
       if (q.get("result") === "empty") {
-        setSeen({ started: true, spoke: false, marked: false, quiet });
+        setSeen({ started: true, spoke: false, quiet });
         setResult({ plain: "", markdown: "", html: "", images: [] });
+        onResult();
       } else if (quiet) {
         setSt({ ...PREVIEW_STATE, quiet_mic: quiet });
-        setSeen({ started: true, spoke: false, marked: false, quiet });
+        setSeen({ started: true, spoke: false, quiet });
       }
     }
     return subscribe(
@@ -311,12 +354,21 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
         setSeen((x) => ({
           started: x.started || s.phase === "recording",
           spoke: x.spoke || !!words(s.partial || s.text),
-          marked: x.marked || s.image_count > 0,
           quiet: x.quiet === "silent" ? "silent" : (s.quiet_mic ?? x.quiet),
         }));
       }),
-      onPracticeResult((r) => setResult(r)),
+      onPracticeResult((r) => {
+        setResult(r);
+        onResult();
+      }),
+      onHotkey((h) => {
+        if (h.pressed) {
+          setFired((f) => ({ ...f, [h.action]: true }));
+          setDown(h.action);
+        } else setDown(null);
+      }),
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const session = chordText(cfg.hotkeys.session.label);
   const region = chordText(cfg.hotkeys.region.label);
@@ -330,7 +382,7 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
   // A practice run is one recording; another needs asking for again.
   const again = () => {
     setResult(null);
-    setSeen({ started: false, spoke: false, marked: false, quiet: null });
+    setSeen({ started: false, spoke: false, quiet: null });
     if (inTauri) practice(true).catch(() => undefined);
   };
   const tryAgain = (
@@ -338,37 +390,47 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
       Try again
     </button>
   );
-  const steps = [
-    { done: seen.started, text: <>Press <Keycaps label={cfg.hotkeys.session.label} /> to start</> },
-    { done: seen.spoke, text: <>Say what you see, like “this button should be blue”</> },
-    {
-      done: seen.marked,
-      text: (
-        <>
-          Press <Keycaps label={cfg.hotkeys.region.label} />, drag a box, then press {platform() === "mac" ? "Return" : "Enter"}
-        </>
-      ),
-    },
-    { done: !!result, text: <>Press <Keycaps label={cfg.hotkeys.session.label} /> again to finish</> },
-  ];
+  const enter = platform() === "mac" ? "Return" : "Enter";
+  const subs: Record<Action, string> = {
+    session: "Press to start, talk, then press again to finish.",
+    region: `Freeze the screen, drag a box, then press ${enter}.`,
+    full: ACTIONS.find((a) => a.id === "full")!.sub,
+    zoom: ACTIONS.find((a) => a.id === "zoom")!.sub,
+  };
+  const used = (a: Action) => !!fired[a] || (a === "session" && seen.started);
+  const caption = rec
+    ? words(st?.partial || st?.text || "")
+      ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
+      : st?.quiet_mic
+        ? micNotice(st.quiet_mic).full
+        : "Listening…"
+    : dropped
+      ? <>That run was discarded. {tryAgain}</>
+      : seen.started
+        ? "Finishing…"
+        : inTauri
+          ? `Try it now: ${session} to start, ${region} to mark.`
+          : "Preview: shortcuts are not live in a browser.";
+  const warn = rec && !!st?.quiet_mic && !words(st.partial || st.text);
   return (
     <div className="onb-step">
       <Glyph tile="tile-green">
         <Play size={26} strokeWidth={2} />
       </Glyph>
-      <h1 className="t-title">Do one practice run</h1>
+      <h1 className="t-title">Try it</h1>
       <p className="t-body">
-        A real run, start to finish. Nothing is pasted anywhere; the prompt shows up here.
+        Start, say what you see, like “this button should be blue”, and mark something. Nothing is pasted anywhere; the
+        prompt shows up here.
       </p>
-      {downloading ? (
-        <p className="t-caption" style={{ marginTop: -12, marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
-          <span className="spinner" /> The speech model is still downloading. Wait for it, or try captures now.
+      {speech === "downloading" ? (
+        <p className="t-caption onb-note">
+          Speech is still downloading, so your words may not be written down yet. Captures work now.
         </p>
-      ) : !speechReady(cfg) ? (
-        <p className="t-caption" style={{ marginTop: -12, marginBottom: 16 }}>
-          No speech model yet, so your words won’t be written down.{" "}
-          <button type="button" className="link" onClick={onBack}>
-            Download one
+      ) : speech !== "ready" ? (
+        <p className="t-caption onb-note">
+          {speech === "failed" ? "Speech didn’t download" : "No speech model yet"}, so your words won’t be written down.{" "}
+          <button type="button" className="link" onClick={onModels}>
+            Choose one
           </button>
         </p>
       ) : null}
@@ -395,37 +457,24 @@ function PracticeStep({ cfg, downloading, onBack }: { cfg: Config; downloading: 
         </>
       ) : (
         <div className="cards">
-          {steps.map((s, k) => (
-            <div key={k} className="card" style={{ minHeight: 48 }}>
-              <span className={`check ${s.done ? "on" : ""}`}>
+          {ACTIONS.map((a) => (
+            <div key={a.id} className={`card try ${down === a.id ? "down" : ""}`}>
+              <span className={`check ${used(a.id) ? "on" : ""}`} aria-label={used(a.id) ? "Used" : "Not used yet"}>
                 <Check size={13} strokeWidth={3} />
               </span>
-              <div className="grow" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                {s.text}
+              <div className="grow">
+                <div className="ttl">{a.name}</div>
+                <div className="sub">{subs[a.id]}</div>
               </div>
+              <ShortcutField action={a.id} cfg={cfg} patch={patch} setCfg={setCfg} />
             </div>
           ))}
           <p
             className="t-caption"
-            role={rec && st?.quiet_mic && !words(st.partial || st.text) ? "alert" : undefined}
-            style={{
-              minHeight: 18,
-              textAlign: "center",
-              marginTop: 4,
-              color: rec && st?.quiet_mic && !words(st.partial || st.text) ? "var(--orange-ink)" : undefined,
-            }}
+            role={warn ? "alert" : undefined}
+            style={{ minHeight: 18, textAlign: "center", marginTop: 4, color: warn ? "var(--orange-ink)" : undefined }}
           >
-            {rec
-              ? words(st?.partial || st?.text || "")
-                ? `“${words(st?.partial || st?.text || "").slice(-90)}”`
-                : st?.quiet_mic
-                  ? micNotice(st.quiet_mic).full
-                  : "Listening…"
-              : dropped
-                ? <>That run was discarded. {tryAgain}</>
-                : seen.started
-                  ? "Finishing…"
-                  : `Try it now: ${session} to start, ${region} to mark.`}
+            {caption}
           </p>
         </div>
       )}

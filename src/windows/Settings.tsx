@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Info, Keyboard, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, Info, Keyboard, Settings2, Share } from "lucide-react";
 import { ACTIONS, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
-import { ModelPicker } from "@/components/Models";
+import { ModelPicker, useSpeechJob } from "@/components/Models";
 import {
   HOTKEY_FIELD,
+  agentConnect,
+  agentFolder,
+  agentRemove,
+  agentsStatus,
+  gpuRetry,
   historyClear,
   historyList,
   inTauri,
@@ -16,14 +21,20 @@ import {
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
+  relaunch,
   subscribe,
   updateCheck,
   updateInstall,
   windowOpen,
+  type AgentId,
+  type Agents,
+  type AgentView,
   type Config,
   type Login,
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
+import { computerView, micStatus } from "@/lib/hardware";
+import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 
 const PANES = [
@@ -104,7 +115,7 @@ export function Settings() {
           ) : pane === "capture" ? (
             <Capture cfg={cfg} patch={patch} />
           ) : pane === "output" ? (
-            <Output cfg={cfg} patch={patch} />
+            <Output cfg={cfg} patch={patch} refresh={refresh} />
           ) : (
             <About cfg={cfg} />
           )}
@@ -421,27 +432,80 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
   );
 }
 
-function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+  const cfg = previewHardware(real);
+  const speech = useSpeechJob(refresh);
+  const device = cfg.device ?? cfg.default_device ?? "";
+  const check = useMicCheck(true, cfg.device ?? null);
+  const status = micStatus({ device, live: check.live, recent: cfg.mic_recent ?? [], others: check.others, mac: platform() === "mac" });
+  const model = (cfg.speech.models ?? []).find((m) => m.id === (cfg.speech_in_use ?? cfg.model)) ?? null;
+  const pc = cfg.machine ? computerView({ machine: cfg.machine, model, upgrade: cfg.gpu_upgrade ?? null, declined: !!cfg.gpu_declined }) : null;
+  const fix = async () => {
+    if (pc?.action === "retry" && inTauri) await gpuRetry().catch(() => undefined);
+    speech.start("whisper-turbo", cfg, patch);
+  };
   return (
     <>
+      <h2 className="group-title">Microphone</h2>
+      <div className="group">
+        <div className="row mic-row">
+          <div className="grow">
+            <select
+              className="field mic-pick"
+              aria-label="Microphone"
+              value={cfg.device ?? ""}
+              onChange={(e) => patch({ device: e.target.value || null })}
+            >
+              <option value="">{cfg.default_device ? `System default (${cfg.default_device})` : "System default"}</option>
+              {cfg.devices.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+            <div className={`sub mic-status ${status?.tone ?? ""}`} role="status">
+              {status ? status.text : "Used only while you record."}
+              {status?.offer ? (
+                <>
+                  <span className="mic-offer">
+                    {status.offer} is picking up sound.{" "}
+                    <button type="button" className="link" onClick={() => patch({ device: status.offer })}>
+                      Use it
+                    </button>
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <LevelMeter level={check.level} />
+        </div>
+      </div>
+      {pc ? (
+        <>
+          <h2 className="group-title">This computer</h2>
+          <div className="group">
+            <div className="row">
+              <div className="grow pc-lines">
+                <div className="lbl">{pc.card}</div>
+                {pc.engine ? <div className="sub">{pc.engine}</div> : null}
+                {pc.why ? (
+                  <div className="sub pc-why">
+                    {pc.why}{" "}
+                    {pc.action ? (
+                      <button type="button" className="link" disabled={!!speech.job} onClick={fix}>
+                        {pc.action === "retry" ? "Try again" : "Set it up"}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </>
+      ) : null}
       <h2 className="group-title">Model</h2>
-      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} removable />
+      <ModelPicker cfg={cfg} patch={patch} refresh={refresh} removable speech={speech} computer={!!pc} />
       <div className="group" style={{ marginTop: 12 }}>
-        <Row label="Microphone" sub="Used only while you record.">
-          <select
-            className="field"
-            style={{ maxWidth: 240 }}
-            value={cfg.device ?? ""}
-            onChange={(e) => patch({ device: e.target.value || null })}
-          >
-            <option value="">System default</option>
-            {cfg.devices.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-        </Row>
         <Row
           label="Pick up quieter and farther speech"
           sub="Cleans up room noise and evens out your volume before transcribing. Turn it off if it ever makes your voice sound wrong."
@@ -464,17 +528,17 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
         </Row>
         <Row
           label="Free the speech model from memory when idle"
-          sub="The model takes several hundred MB while loaded. After this long without a recording it is let go, and the next recording loads it again."
+          sub="After a recording, the speech engine keeps about 0.9 GB of graphics memory and 1.5 GB of RAM so the next one starts at once. Loading it again takes about 3 seconds, while you talk."
         >
           <select
             className="field"
             style={{ maxWidth: 160 }}
-            value={cfg.free_memory_minutes ?? 10}
+            value={cfg.free_memory_minutes ?? 1}
             onChange={(e) => patch({ free_memory_minutes: Number(e.target.value) })}
           >
-            {[2, 5, 10, 30].map((m) => (
+            {[1, 5, 10, 30].map((m) => (
               <option key={m} value={m}>
-                After {m} minutes
+                {m === 1 ? "After 1 minute" : `After ${m} minutes`}
               </option>
             ))}
             <option value={0}>Never</option>
@@ -493,6 +557,15 @@ function Speech({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: (
       </div>
       <p className="group-note">Models are saved in Pointcast’s data folder.</p>
     </>
+  );
+}
+
+/** The live input level as one bar of fixed size: it moves without moving anything around it. */
+function LevelMeter({ level }: { level: number }) {
+  return (
+    <div className="level" aria-label="Microphone level" role="meter" aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.round(level * 100) / 100}>
+      <i style={{ transform: `scaleX(${Math.max(0.02, Math.min(1, level * 1.4))})` }} />
+    </div>
   );
 }
 
@@ -613,21 +686,9 @@ function Capture({ cfg, patch }: { cfg: Config; patch: Patch }) {
   );
 }
 
-function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
+function Output({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
   const mac = platform() === "mac";
   const needsAx = mac && cfg.permissions.accessibility !== "granted";
-  const [copied, setCopied] = useState<"" | "claude" | "cursor">("");
-  const [copyErr, setCopyErr] = useState("");
-  const copy = (agent: "claude" | "cursor") => {
-    setCopyErr("");
-    if (!inTauri) return;
-    mcpCopySetup(agent)
-      .then(() => {
-        setCopied(agent);
-        setTimeout(() => setCopied(""), 1600);
-      })
-      .catch((e) => setCopyErr(String(e)));
-  };
   return (
     <>
       <div className="group">
@@ -659,6 +720,9 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
             <Toggle label="Also copy to the clipboard" on={cfg.also_clipboard} set={(v) => patch({ also_clipboard: v })} />
           </Row>
         ) : null}
+        <Row label="Tidy the text" sub="Paragraphs at your pauses, no ums and no repeated words. Nothing is summarized or reworded.">
+          <Toggle label="Tidy the text" on={cfg.tidy !== false} set={(v) => patch({ tidy: v })} />
+        </Row>
         <Row label="Save folder" sub={cfg.export_dir || "Documents › Pointcast, one folder per recording"}>
           {cfg.export_dir ? (
             <button type="button" className="btn plain" onClick={() => patch({ export_dir: null })}>
@@ -688,6 +752,80 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
           />
         </Row>
       </div>
+      <AgentsPart cfg={cfg} patch={patch} refresh={refresh} />
+    </>
+  );
+}
+
+/** Settings › Output › Agents: each coding agent set up in one click, in its own user settings. */
+function AgentsPart({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: () => void }) {
+  const [st, setSt] = useState<Agents | null>(null);
+  const [busy, setBusy] = useState<AgentId | "">("");
+  const [errs, setErrs] = useState<Partial<Record<AgentId, string>>>({});
+  const [copied, setCopied] = useState<AgentId | "">("");
+  // Claude Code's pictures folder, chosen before its first Set up.
+  const [folder, setFolder] = useState(true);
+  const load = () => {
+    agentsStatus()
+      .then(setSt)
+      .catch(() => undefined);
+  };
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [cfg.mcp_enabled, cfg.mcp_bind]);
+
+  const run = (id: AgentId, job: () => Promise<Agents>, preview: (s: Agents) => Agents) => {
+    setErrs((e) => ({ ...e, [id]: "" }));
+    if (!inTauri) {
+      setSt((s) => (s ? preview(s) : s));
+      return;
+    }
+    setBusy(id);
+    job()
+      .then(setSt)
+      .catch((e) => {
+        setErrs((x) => ({ ...x, [id]: String(e) }));
+        load();
+      })
+      .finally(() => {
+        setBusy("");
+        refresh();
+      });
+  };
+  const mark = (s: Agents, id: AgentId, entry: AgentView["entry"]): Agents => ({
+    ...s,
+    server_ok: true,
+    server_error: null,
+    agents: s.agents.map((a) => (a.id === id ? { ...a, entry, error: null } : a)),
+  });
+  const connect = (id: AgentId) =>
+    run(
+      id,
+      () => agentConnect(id, folder),
+      (s) => ({ ...mark(s, id, "current"), folder_allowed: s.folder_allowed || (id === "claude" && folder) }),
+    );
+  const remove = (id: AgentId) => run(id, () => agentRemove(id), (s) => mark(s, id, "missing"));
+  const copy = (id: AgentId) => {
+    setErrs((e) => ({ ...e, [id]: "" }));
+    if (!inTauri) return;
+    mcpCopySetup(id)
+      .then(() => {
+        setCopied(id);
+        setTimeout(() => setCopied(""), 1600);
+      })
+      .catch((e) => setErrs((x) => ({ ...x, [id]: String(e) })));
+  };
+  const claude = st?.agents.find((a) => a.id === "claude");
+  const claudeOn = claude?.entry === "current";
+  const setFolderAllowed = (on: boolean) => {
+    if (!claudeOn) return setFolder(on);
+    run("claude", () => agentFolder(on), (s) => ({ ...s, folder_allowed: on }));
+  };
+
+  return (
+    <>
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Agents
       </h2>
@@ -702,32 +840,95 @@ function Output({ cfg, patch }: { cfg: Config; patch: Patch }) {
               </span>
             ) : (
               <>
-                Claude Code, Cursor and Codex can read it over MCP at{" "}
-                <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this computer can connect. Applies after
-                Pointcast reopens.
+                Coding agents read it over MCP at <span className="mono">http://{cfg.mcp_bind}/mcp</span>. Only this
+                computer can connect.
               </>
             )
           }
         >
+          {cfg.mcp_enabled && cfg.mcp_error ? (
+            <button type="button" className="btn" onClick={() => inTauri && relaunch()}>
+              Reopen Pointcast
+            </button>
+          ) : null}
           <Toggle label="Share over MCP" on={cfg.mcp_enabled} set={(v) => patch({ mcp_enabled: v })} />
         </Row>
-        {cfg.mcp_enabled ? (
+        {(st?.agents ?? []).map((a) => {
+          const err = errs[a.id] || a.error;
+          const set = a.entry === "current";
+          const connected = set && cfg.mcp_enabled && st?.server_ok;
+          const down = set && cfg.mcp_enabled && !st?.server_ok;
+          const sub = err ? (
+            <span style={{ color: "var(--red-ink)" }}>{err}</span>
+          ) : !a.found && !set ? (
+            `${a.name} was not found on this computer. Copy the ${a.id === "claude" ? "command" : "entry"} to set it up by hand.`
+          ) : connected ? (
+            "New sessions can read your last prompt."
+          ) : down ? (
+            <span style={{ color: "var(--red-ink)" }}>
+              Pointcast's agent server is not answering{st?.server_error ? `: ${st.server_error}` : ""}.
+            </span>
+          ) : set ? (
+            "Set up. Turn on sharing above so it can read your prompts."
+          ) : a.entry === "other" ? (
+            <>
+              <span title={a.file}>{a.path}</span> has an older Pointcast entry.
+            </>
+          ) : (
+            <>
+              Adds Pointcast to <span title={a.file}>{a.path}</span>, nothing else.
+            </>
+          );
+          return (
+            <Row key={a.id} label={<span title={a.file}>{a.name}</span>} sub={sub}>
+              {connected ? (
+                <span className="badge ok">
+                  <Check size={12} strokeWidth={3} aria-hidden />
+                  Connected
+                </span>
+              ) : null}
+              {down ? (
+                <button type="button" className="btn primary" onClick={() => inTauri && relaunch()}>
+                  Reopen Pointcast
+                </button>
+              ) : null}
+              {a.found && !set ? (
+                <button type="button" className="btn primary" disabled={busy === a.id} onClick={() => connect(a.id)}>
+                  {busy === a.id ? "Setting up…" : a.entry === "other" ? "Set up again" : "Set up"}
+                </button>
+              ) : null}
+              {set ? (
+                <button type="button" className="btn plain" disabled={busy === a.id} onClick={() => remove(a.id)}>
+                  Remove
+                </button>
+              ) : null}
+              <button type="button" className="btn plain" onClick={() => copy(a.id)}>
+                {copied === a.id ? "Copied" : a.id === "claude" ? "Copy command" : "Copy entry"}
+              </button>
+            </Row>
+          );
+        })}
+        {claude?.found ? (
           <Row
-            label="Agent setup"
+            label="Let Claude Code open the pictures folder"
             sub={
-              copyErr ||
-              "For your user settings only: run the Claude Code command in a terminal, or paste the Cursor entry into mcpServers in ~/.cursor/mcp.json. It holds this computer's key, so never put it in a project file."
+              <>
+                Each recording's pictures are in <span className="mono">{st?.folder}</span>. Adds it to
+                additionalDirectories in ~/.claude/settings.json{claudeOn ? "" : " when you set up Claude Code"}.
+              </>
             }
           >
-            <button type="button" className="btn" onClick={() => copy("claude")}>
-              {copied === "claude" ? "Copied" : "Claude Code"}
-            </button>
-            <button type="button" className="btn" onClick={() => copy("cursor")}>
-              {copied === "cursor" ? "Copied" : "Cursor"}
-            </button>
+            <Toggle
+              label="Let Claude Code open the pictures folder"
+              on={claudeOn ? !!st?.folder_allowed : folder}
+              set={setFolderAllowed}
+            />
           </Row>
         ) : null}
       </div>
+      <p className="group-note">
+        Set up writes to each agent's own user settings, never a project folder: the entry holds this computer's key.
+      </p>
     </>
   );
 }
@@ -753,9 +954,18 @@ function About({ cfg }: { cfg: Config }) {
           Report a Problem
         </button>
       </div>
-      <p className="t-small" style={{ marginTop: 28, maxWidth: 380 }}>
-        Speech recognition by Moonshine (MIT) running on sherpa-onnx (Apache 2.0). Both are downloaded, not bundled.
-      </p>
+      <div className="t-small about-credits">
+        <div className="about-credits-head">Speech recognition</div>
+        <ul>
+          <li>Whisper by OpenAI (MIT)</li>
+          <li>whisper.cpp (MIT)</li>
+          <li>Moonshine by Useful Sensors (MIT)</li>
+          <li>Parakeet TDT by NVIDIA, used under CC-BY-4.0</li>
+          <li>sherpa-onnx (Apache-2.0)</li>
+          <li>Noise reduction by nnnoiseless, a port of RNNoise (BSD-3-Clause)</li>
+        </ul>
+        <div>Speech models are downloaded at setup, not bundled.</div>
+      </div>
     </div>
   );
 }

@@ -142,6 +142,10 @@ pub struct Settings {
     /// The plain-text prompt names each picture's file, for agents in a terminal that cannot take pasted images.
     #[serde(default = "yes")]
     pub picture_paths: bool,
+    /// Tidy the text when the prompt is composed: paragraphs at the pauses, no ums and no repeated words. Nothing is
+    /// summarized or reworded, and History keeps the words as they were said; off joins the pieces with single spaces.
+    #[serde(default = "yes")]
+    pub tidy: bool,
     /// Clean up room noise and even out the volume before the voice detector and the model hear it, live and when a
     /// recording is transcribed again; the kept audio stays as it came.
     #[serde(default = "yes")]
@@ -149,10 +153,16 @@ pub struct Settings {
     /// Get the faster GPU version of Whisper Turbo by itself, in the background, where a graphics card can run it.
     #[serde(default = "yes")]
     pub auto_gpu: bool,
-    /// Minutes with no recording before the speech model is let go and its memory (hundreds of MB) returned to the
-    /// system. The next recording loads it again. 0 keeps it loaded.
+    /// Minutes after the speech model's last use before it is let go and its memory (about 0.9 GB of graphics memory and
+    /// 1.5 GB of RAM) returned to the system. The next recording loads it again. 0 keeps it loaded.
     #[serde(default = "default_free_minutes")]
     pub free_memory_minutes: u32,
+    /// Which default `free_memory_minutes` was written under: 0 before 1 minute was (every file then held 10), 1 since.
+    #[serde(default)]
+    pub free_default: u8,
+    /// Where each recording's pictures are copied for agents, one folder per recording; none is `~/Pointcast`.
+    #[serde(default)]
+    pub handoff_dir: Option<String>,
 }
 
 fn default_model() -> String {
@@ -165,7 +175,7 @@ fn default_zoom_px() -> u32 {
     512
 }
 fn default_free_minutes() -> u32 {
-    10
+    1
 }
 fn default_mcp() -> String {
     "127.0.0.1:47821".into()
@@ -202,19 +212,30 @@ impl Default for Settings {
             granted: Granted::default(),
             keep_audio: true,
             picture_paths: true,
+            tidy: true,
             voice_boost: true,
             auto_gpu: true,
             free_memory_minutes: default_free_minutes(),
+            free_default: 1,
+            handoff_dir: None,
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        let mut s: Self = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // The old default, 10, becomes the new one once; 10 picked after that is kept.
+        if s.free_default < 1 {
+            if s.free_memory_minutes == 10 {
+                s.free_memory_minutes = default_free_minutes();
+            }
+            s.free_default = 1;
+        }
+        s
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(d) = path.parent() {
@@ -257,6 +278,22 @@ impl Settings {
 
 /// The app identifier: the folder name Tauri's uninstaller clears when asked to delete app data.
 pub const IDENTIFIER: &str = "dev.pointcast.app";
+
+/// The home folder Pointcast uses: `POINTCAST_HOME` when set and not empty, else the system's. On Windows the system's
+/// comes from the profile known folder and ignores USERPROFILE and HOME, so this is the only way to point it elsewhere.
+pub fn home_dir() -> Option<PathBuf> {
+    home_override(std::env::var_os("POINTCAST_HOME")).or_else(dirs::home_dir)
+}
+
+/// `POINTCAST_HOME` is set (not empty), so the home folder is not the real one.
+pub fn home_is_custom() -> bool {
+    home_override(std::env::var_os("POINTCAST_HOME")).is_some()
+}
+
+/// The override from a `POINTCAST_HOME` value: none when it is missing or empty.
+pub fn home_override(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
 
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("POINTCAST_DATA_DIR") {
@@ -306,6 +343,14 @@ pub fn settings_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_override_is_honoured_and_an_empty_value_is_ignored() {
+        let scratch = std::env::temp_dir().join("pc-scratch-home");
+        assert_eq!(home_override(Some(scratch.clone().into_os_string())), Some(scratch));
+        assert_eq!(home_override(Some(std::ffi::OsString::new())), None);
+        assert_eq!(home_override(None), None);
+    }
 
     #[test]
     fn settings_round_trip_and_refused_chords_fall_back() {
@@ -414,12 +459,35 @@ mod tests {
     }
 
     #[test]
-    fn the_speech_model_is_freed_after_ten_quiet_minutes_unless_told_otherwise() {
-        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
-        assert_eq!(old.free_memory_minutes, 10, "a file from before this keeps today's behaviour");
-        assert_eq!(Settings::default().free_memory_minutes, 10);
-        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":2}"#).unwrap().free_memory_minutes, 2);
-        assert_eq!(serde_json::from_str::<Settings>(r#"{"free_memory_minutes":0}"#).unwrap().free_memory_minutes, 0);
+    fn the_speech_model_is_freed_a_minute_after_its_last_use_unless_told_otherwise() {
+        let d = std::env::temp_dir().join(format!("pc-settings-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("settings.json");
+        let load = |json: &str| {
+            std::fs::write(&file, json).unwrap();
+            Settings::load(&file)
+        };
+        assert_eq!(Settings::default().free_memory_minutes, 1);
+        assert_eq!(load(r#"{"onboarded":true}"#).free_memory_minutes, 1, "a file from before the setting");
+        // Every file written before held the old default, 10: it becomes the new one, once.
+        let old = load(r#"{"onboarded":true,"free_memory_minutes":10}"#);
+        assert_eq!(old.free_memory_minutes, 1, "the old default moves to the new one");
+        old.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 1);
+        // 10 picked after that is the person's choice: it stays through a save and a load.
+        let chosen = Settings { free_memory_minutes: 10, ..Settings::load(&file) };
+        chosen.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "an explicit 10 survives");
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "and every later load");
+        let fresh = Settings { free_memory_minutes: 10, ..Settings::default() };
+        fresh.save(&file).unwrap();
+        assert_eq!(Settings::load(&file).free_memory_minutes, 10, "on a file made with the new default too");
+        // Any other stored choice is kept as it was.
+        for m in [0, 2, 5, 30] {
+            assert_eq!(load(&format!(r#"{{"free_memory_minutes":{m}}}"#)).free_memory_minutes, m);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -429,6 +497,8 @@ mod tests {
         assert!(Settings::default().keep_audio && Settings::default().picture_paths);
         let off: Settings = serde_json::from_str(r#"{"keep_audio":false,"picture_paths":false}"#).unwrap();
         assert!(!off.keep_audio && !off.picture_paths);
+        assert!(old.tidy && Settings::default().tidy, "the text is tidied unless turned off");
+        assert!(!serde_json::from_str::<Settings>(r#"{"tidy":false}"#).unwrap().tidy);
         assert!(old.auto_gpu && Settings::default().auto_gpu, "the faster engine sets itself up unless turned off");
         assert!(!serde_json::from_str::<Settings>(r#"{"auto_gpu":false}"#).unwrap().auto_gpu);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();

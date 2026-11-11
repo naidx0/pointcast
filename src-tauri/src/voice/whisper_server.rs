@@ -82,8 +82,27 @@ const NOT_SPEECH: &[&str] = &[
     "pause", "clears throat", "typing", "clicking", "keyboard clicking",
 ];
 
+/// A word that makes a short `(...)` a described sound, as `(sad music)`.
+const SOUND: &[&str] = &[
+    "music", "noise", "noises", "sniff", "sniffs", "sniffing", "sniffles", "laughter", "laughs", "laughing", "applause",
+    "sigh", "sighs", "sighing", "cough", "coughs", "coughing", "beep", "beeps", "static", "silence", "breathing",
+    "typing", "clicking", "click", "clicks",
+];
+
+/// Whether what stands between two marks is a sound the model described and not words the person said.
+fn described_sound(open: u8, inner: &str) -> bool {
+    let words: Vec<&str> = inner.split_whitespace().collect();
+    match open {
+        b'[' => true,
+        // `*sniff*`, `*sad music*`: a few words and no number, so `3 * 4 * 5` stays.
+        b'*' => !words.is_empty() && words.len() <= 4 && !inner.chars().any(|c| c.is_ascii_digit()),
+        // `(sad music)` ends on the sound; `(music settings)` does not.
+        _ => NOT_SPEECH.contains(&inner) || (words.len() <= 3 && words.last().is_some_and(|w| SOUND.contains(w))),
+    }
+}
+
 /// The words of a piece without whisper.cpp's marks for what is not speech: every `[...]`, and `(...)` or `*...*`
-/// around a sound, as `[BLANK_AUDIO]`, `[Music]`, `(silence)`.
+/// around a sound, as `[BLANK_AUDIO]`, `[Music]`, `(silence)`, `*sniff*`.
 pub fn clean(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -96,7 +115,7 @@ pub fn clean(text: &str) -> String {
         };
         let Some(j) = rest[i + 1..].find(close).map(|j| i + 1 + j) else { break };
         let inner = rest[i + 1..j].trim().trim_matches(['-', ' ', '.']).to_lowercase();
-        let drop = open == b'[' || NOT_SPEECH.contains(&inner.as_str());
+        let drop = described_sound(open, &inner);
         out.push_str(&rest[..i]);
         if !drop {
             out.push_str(&rest[i..=j]);
@@ -105,6 +124,22 @@ pub fn clean(text: &str) -> String {
     }
     out.push_str(rest);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The language a verbose answer says it was heard in (`detected_language`, else `language`), lower-cased, when it is a
+/// plain name or code the helper takes back as a request's language.
+fn detected(v: &serde_json::Value) -> Option<String> {
+    let l = ["detected_language", "language"].iter().find_map(|k| v.get(k).and_then(|l| l.as_str()).filter(|l| !l.is_empty()))?;
+    let l = l.trim().to_lowercase();
+    (l != "auto" && l.len() <= 32 && l.chars().all(|c| c.is_ascii_lowercase() || c == ' ')).then_some(l)
+}
+
+/// What the helper is started with, after its model.
+fn launch_args(port: u16, prefix: &str, inference: &str) -> Vec<String> {
+    // -nfa: with flash attention the GPU gives a different transcript for the same audio on each run.
+    ["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", prefix, "--inference-path", inference, "-t", "4", "-nfa"]
+        .map(String::from)
+        .to_vec()
 }
 
 /// 16 kHz mono samples as a 16-bit PCM WAV file in memory.
@@ -301,7 +336,7 @@ impl Server {
         let mut cmd = Command::new(&exe);
         cmd.arg("-m")
             .arg(&l.model)
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--request-path", &prefix, "--inference-path", &inference, "-t", "4"])
+            .args(launch_args(port, &prefix, &inference))
             .current_dir(&l.dir)
             .env_remove("GGML_BACKEND_PATH");
         // A development build can make the helper find no graphics card, as on a computer without one.
@@ -396,11 +431,23 @@ impl Server {
 
     /// The words of one piece: beam search of 5 at temperature 0, no prompt, in `language` ("auto" detects it).
     pub fn transcribe(&self, samples: &[f32], language: &str, timeout: Duration) -> Result<String, Fail> {
+        self.post(samples, language, "json", timeout).map(|r| r.0)
+    }
+
+    /// The words of one piece in the language the helper detects, with that language as it names it (as "english"),
+    /// when it does.
+    pub fn transcribe_detect(&self, samples: &[f32], timeout: Duration) -> Result<(String, Option<String>), Fail> {
+        let (text, v) = self.post(samples, "auto", "verbose_json", timeout)?;
+        Ok((text, detected(&v)))
+    }
+
+    /// One piece sent in `language`, answered as `format`: its cleaned words and the whole answer.
+    fn post(&self, samples: &[f32], language: &str, format: &str, timeout: Duration) -> Result<(String, serde_json::Value), Fail> {
         let gen = self.abort.load(Ordering::SeqCst);
         let mut key = [0u8; 8];
         let _ = getrandom::getrandom(&mut key);
         let boundary = format!("pointcast{}", key.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        let fields = [("response_format", "json"), ("language", language), ("beam_size", "5"), ("temperature", "0.0")];
+        let fields = [("response_format", format), ("language", language), ("beam_size", "5"), ("temperature", "0.0")];
         let body = form(&boundary, &fields, &wav(samples));
         let head = format!("POST {} HTTP/1.1\r\nContent-Type: multipart/form-data; boundary={boundary}\r\n", self.path);
         let (status, body) = request(self.port, &head, &body, Instant::now() + timeout, &self.abort, gen)?;
@@ -410,7 +457,7 @@ impl Server {
         let v: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| Fail::Broken("the GPU engine's answer was not readable".into()))?;
         let text = v.get("text").and_then(|t| t.as_str()).ok_or_else(|| Fail::Broken("the GPU engine gave no text".into()))?;
-        Ok(clean(text))
+        Ok((clean(text), v))
     }
 
     /// Stop the helper, which frees the graphics card's memory.
@@ -658,6 +705,21 @@ pub mod tests {
 
     const PATH: &str = "/i-test";
 
+    #[test]
+    fn the_language_a_verbose_answer_was_heard_in_is_read_from_it() {
+        let v = |j: &str| serde_json::from_str::<serde_json::Value>(j).unwrap();
+        assert_eq!(detected(&v(r#"{"language":"english","text":"x"}"#)).as_deref(), Some("english"));
+        assert_eq!(detected(&v(r#"{"detected_language":"French","language":"auto"}"#)).as_deref(), Some("french"));
+        for j in [r#"{"text":"x"}"#, r#"{"language":"auto"}"#, r#"{"language":""}"#, r#"{"language":"en:x"}"#] {
+            assert_eq!(detected(&v(j)), None, "{j}");
+        }
+        let f = fake(PATH, vec![Answer::Json(r#"{"language":"german","text":" Guten Tag. [BLANK_AUDIO]"}"#.into())]);
+        let said = Server::at(f.port, PATH).transcribe_detect(&[0.1; 16_000], Duration::from_secs(5));
+        assert_eq!(said, Ok(("Guten Tag.".into(), Some("german".into()))));
+        let post = f.posts.lock().unwrap()[0].clone();
+        assert!(post.contains("verbose_json") && post.contains(&format!("{0}{0}auto{0}", String::from_utf8(vec![13, 10]).unwrap())), "{post}");
+    }
+
     /// One bodyless request as `head` (its request line), for what a route answers.
     pub fn raw(port: u16, head: &str, abort: &AtomicU64) -> Result<(u16, Vec<u8>), Fail> {
         request(port, head, &[], Instant::now() + Duration::from_secs(10), abort, abort.load(Ordering::SeqCst))
@@ -698,8 +760,26 @@ pub mod tests {
         assert_eq!(clean(" Open the (settings) page [BLANK_AUDIO]"), "Open the (settings) page");
         assert_eq!(clean("Done. (laughs) Next"), "Done. Next");
         assert_eq!(clean("a [unclosed"), "a [unclosed");
+        // A sound whisper.cpp describes in its own words is not something the person said.
+        for t in ["*sniff*", "*sad music*", " *Loud noise* ", "(sad music)", "(loud noise)", "(sniffs)", "*sighs deeply*"] {
+            assert_eq!(clean(t), "", "{t:?}");
+        }
+        assert_eq!(clean("So the fix *sniff* is in the header."), "So the fix is in the header.");
+        assert_eq!(clean("Multiply 3 * 4 * 5 here"), "Multiply 3 * 4 * 5 here", "arithmetic is speech");
+        assert_eq!(clean("Open the (music settings) page"), "Open the (music settings) page", "a real aside is kept");
         let f = fake(PATH, vec![Answer::Json(r#"{"text":" [BLANK_AUDIO]\n"}"#.into())]);
         assert_eq!(Server::at(f.port, PATH).transcribe(&[0.0; 8_000], "auto", Duration::from_secs(5)), Ok(String::new()));
+    }
+
+    /// Flash attention on the GPU gives a different transcript for the same audio from one run to the next (133 of
+    /// 1,342 words between two identical runs on real dictation); without it every run is the same.
+    #[test]
+    fn the_helper_is_started_so_that_the_same_audio_gives_the_same_words() {
+        let args = launch_args(4321, "/p", "/i-x");
+        assert!(args.iter().any(|a| a == "-nfa"), "{args:?}");
+        for pair in [["--host", "127.0.0.1"], ["--port", "4321"], ["--request-path", "/p"], ["--inference-path", "/i-x"], ["-t", "4"]] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
     }
 
     #[test]

@@ -1,15 +1,17 @@
 import { useEffect, useLayoutEffect, useReducer, useRef, useState, type PointerEvent as PE } from "react";
 import {
   Check,
+  EyeOff,
   Highlighter,
+  ListOrdered,
   MapPin,
-  MousePointer2,
   MoveUpRight,
   Pencil,
   Redo2,
   Square,
   Type,
   Undo2,
+  X,
   ZoomIn,
   type LucideIcon,
 } from "lucide-react";
@@ -24,10 +26,12 @@ import {
   type ElementMark,
   type Label,
 } from "@/lib/api";
+import { REDACT_EDGE_CSS, REDACT_FILL_CSS, edgeWidth, hiddenNote, overlaps, redact } from "@/lib/redact";
+import { captionMarks, empty, hist, kept, labelsFor, numbers, view, type A, type H } from "@/lib/marks";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
-type Tool = "move" | "pin" | "arrow" | "rect" | "highlight" | "pen" | "text" | "magnify";
+type Tool = "move" | "pin" | "step" | "arrow" | "rect" | "redact" | "highlight" | "pen" | "text" | "magnify";
 type Pt = { x: number; y: number };
 type Rect = { x: number; y: number; w: number; h: number };
 type Handle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -35,7 +39,11 @@ type Handle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 // Every shape lives in frame-pixel space (the physical pixels of the frozen PNG).
 type Shape =
   | { id: number; kind: "pin" | "text"; c: string; at: Pt; text: string }
-  | { id: number; kind: "arrow" | "rect"; c: string; a: Pt; b: Pt }
+  // A numbered step: counts up by itself, asks for no words (a label can be added by double-clicking it). `to`: where a
+  // short leader from the number points, when it was dragged out.
+  | { id: number; kind: "step"; c: string; at: Pt; text: string; to?: Pt }
+  // A redaction ("redact") is a box drawn solid over everything else; the pixels under it are written over when saved.
+  | { id: number; kind: "arrow" | "rect" | "redact"; c: string; a: Pt; b: Pt }
   | { id: number; kind: "pen" | "highlight"; c: string; pts: Pt[] }
   | { id: number; kind: "magnify"; at: Pt }
   // Where the person pointed when the frame froze; placed for them, theirs to move or remove.
@@ -54,40 +62,52 @@ type Op =
 
 type Ix =
   | { k: "sel"; a: Pt; cx: number; cy: number; moved: boolean; r: Rect | null }
-  | { k: "size"; h: Handle; o: Rect }
-  | { k: "move"; a: Pt; o: Rect }
+  // The box resized or moved; `d` is where it is now, a crop on release.
+  | { k: "size"; h: Handle; o: Rect; d?: Rect }
+  | { k: "move"; a: Pt; o: Rect; d?: Rect }
   | { k: "draw"; shape: Shape }
-  | { k: "drop"; a: Pt; tool: "pin" | "text" | "magnify" }
-  | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt };
+  | { k: "drop"; a: Pt; tool: "pin" | "step" | "text" | "magnify"; to?: Pt }
+  | { k: "shift"; id: number; a: Pt; o: Pt; at: Pt; kind: Shape["kind"] }
+  // A rectangle or a hidden area: moved by its body, resized by a handle.
+  | { k: "grab"; o: Box2; a: Pt; cx: number; cy: number; moved: boolean; d?: Box2 }
+  | { k: "reshape"; o: Box2; h: Handle; d?: Box2 };
+
+type Box2 = Extract<Shape, { a: Pt }> & { kind: "rect" | "redact" };
+const isBox = (x: Shape | undefined): x is Box2 => x?.kind === "rect" || x?.kind === "redact";
 
 // `edit`: a picture from History, its labels already drawn in; new pins are numbered on from `base`.
 type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null; edit?: boolean; base?: number };
 
-type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null };
+type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null; hidden: number };
 
 const PREVIEW = typeof location !== "undefined" && location.search.includes("preview=1");
 const PREVIEW_EDIT = PREVIEW && location.search.includes("edit=1");
-// Room a picture from History leaves around it (logical px) for the toolbar below and the hint under that.
-const EDGE = { side: 40, top: 40, bottom: 128 };
 const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
+const COLOR_NAMES = ["Red", "Orange", "Yellow", "Green", "Blue"];
 const HL = "#FFCC00";
 const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 // Sizes in logical (on-screen) px. Everything drawn into the frame is multiplied by s = frame px per logical px.
-const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16, mark: 16, markW: 3, grip: 16, out: 2, outGap: 3 };
+const M = { line: 4, rect: 3, pen: 3.5, hl: 18, pin: 11, step: 12, lead: 2.5, leadHead: 11, font: 13, padX: 8, pillH: 26, gap: 6, lens: 60, ring: 3, head: 16, mark: 16, markW: 3, grip: 16, out: 2, outGap: 3 };
 const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const HX = { nw: 0, n: 0.5, ne: 1, e: 1, se: 1, s: 0.5, sw: 0, w: 0 };
 const HY = { nw: 0, n: 0, ne: 0, e: 0.5, se: 1, s: 1, sw: 1, w: 0.5 };
+// Moving the box needs no tool: its border always moves it, its handles resize it, and Space or the middle button moves
+// it from inside. V still picks a move mode for those who used it, with no button of its own.
 const TOOLS: { id: Tool; Icon: LucideIcon; label: string; key: string }[] = [
-  { id: "move", Icon: MousePointer2, label: "Move selection", key: "V" },
   { id: "pin", Icon: MapPin, label: "Pin", key: "P" },
+  { id: "step", Icon: ListOrdered, label: "Step", key: "S" },
   { id: "arrow", Icon: MoveUpRight, label: "Arrow", key: "A" },
   { id: "rect", Icon: Square, label: "Rectangle", key: "R" },
+  { id: "redact", Icon: EyeOff, label: "Redact", key: "X" },
   { id: "highlight", Icon: Highlighter, label: "Highlighter", key: "H" },
   { id: "pen", Icon: Pencil, label: "Pen", key: "D" },
   { id: "text", Icon: Type, label: "Text", key: "T" },
   { id: "magnify", Icon: ZoomIn, label: "Magnify 2x", key: "M" },
 ];
-const KEYS = Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.id])) as Record<string, Tool>;
+// Tools that draw where they are dragged; pressing with one starts a stroke, not a grab.
+const DRAWS = new Set<Tool>(["arrow", "rect", "redact", "highlight", "pen"]);
+const KEYS = { ...Object.fromEntries(TOOLS.map((t) => [t.key.toLowerCase(), t.id])), v: "move" } as Record<string, Tool>;
+const SIDES = ["n", "e", "s", "w"] as const;
 
 function esc(layer: Layer): Layer | "idle" {
   if (layer === "drawing" || layer === "pinning") return "annotating";
@@ -96,78 +116,37 @@ function esc(layer: Layer): Layer | "idle" {
 }
 
 const GESTURE: Record<Tool, string> = {
-  move: "Drag inside the box to move it",
+  move: "Drag inside the box to move it · Click a mark to pick it",
   pin: "Click to drop a numbered pin",
+  step: "Click to drop the next step · Drag for a leader",
   arrow: "Drag an arrow",
   rect: "Drag a rectangle",
+  redact: "Drag over what to hide",
   highlight: "Drag to highlight",
   pen: "Draw freehand",
   text: "Click to place a label",
   magnify: "Click to drop a 2x loupe",
 };
 
-function hint(layer: Layer, tool: Tool, picked?: Shape["kind"], edit = false): string {
-  if (edit && layer === "annotating") return "Edit picture · Return saves · Esc cancels";
+const CROP_HINT = "Drag the edges to crop · Marks stay put · C or Esc done";
+
+function hint(layer: Layer, tool: Tool, picked?: Shape["kind"], edit = false, crop = false): string {
+  if (crop && layer !== "selecting") return CROP_HINT;
   if (layer === "selecting") return "Drag to select · Click for full screen · Esc cancel";
+  if (picked === "step" && layer === "annotating") return "Drag to move · Double-click to label · Delete removes it · Enter capture";
+  if (edit && layer === "annotating") return "Edit picture · C crop · Return saves · Esc cancels";
   if (picked === "ring" && layer === "annotating") return "Drag the ring to move it · Delete removes it · Enter capture";
   if (picked === "element" && layer === "annotating") return "Delete removes the outline · Enter capture";
+  if ((picked === "redact" || picked === "rect") && layer === "annotating") return "Drag to move · Drag a handle to resize · Delete removes it · Enter capture";
   if (layer === "pinning") return "Type a label · Enter or Esc to finish";
   if (layer === "drawing") return "Release to finish · Esc discard";
-  return `${GESTURE[tool]} · Enter capture · Esc back`;
-}
-
-// Undo history: `now` is the shape list; text edits mutate it in place so one keystroke is not one undo step.
-type H = { past: Shape[][]; now: Shape[]; future: Shape[][] };
-type A =
-  | { t: "add"; s: Shape }
-  | { t: "text"; id: number; text: string }
-  | { t: "drop"; id: number }
-  | { t: "move"; id: number; at: Pt }
-  | { t: "remove"; id: number }
-  | { t: "seed"; base: Shape[]; s: Shape[] }
-  | { t: "undo" }
-  | { t: "redo" }
-  | { t: "reset"; now?: Shape[] };
-
-function hist(h: H, a: A): H {
-  switch (a.t) {
-    case "add":
-      return { past: [...h.past, h.now], now: [...h.now, a.s], future: [] };
-    case "text":
-      return { ...h, now: h.now.map((x) => (x.id === a.id && (x.kind === "pin" || x.kind === "text") ? { ...x, text: a.text } : x)) };
-    case "drop": {
-      const prev = h.past[h.past.length - 1];
-      const last = h.now[h.now.length - 1];
-      if (prev && last?.id === a.id && prev.length === h.now.length - 1) return { ...h, past: h.past.slice(0, -1), now: prev };
-      return { ...h, now: h.now.filter((x) => x.id !== a.id) };
-    }
-    case "move":
-      return { past: [...h.past, h.now], now: h.now.map((x) => (x.id === a.id && "at" in x ? { ...x, at: a.at } : x)), future: [] };
-    case "remove":
-      return { past: [...h.past, h.now], now: h.now.filter((x) => x.id !== a.id), future: [] };
-    // Each shape placed for the person counts as one step, so undo takes them away one at a time.
-    case "seed": {
-      const past = [a.base];
-      for (const x of a.s.slice(0, -1)) past.push([...past[past.length - 1], x]);
-      return { past, now: [...a.base, ...a.s], future: [] };
-    }
-    case "undo":
-      return h.past.length ? { past: h.past.slice(0, -1), now: h.past[h.past.length - 1], future: [h.now, ...h.future] } : h;
-    case "redo":
-      return h.future.length ? { past: [...h.past, h.now], now: h.future[0], future: h.future.slice(1) } : h;
-    case "reset":
-      return { past: [], now: a.now ?? [], future: [] };
-  }
+  return `${GESTURE[tool]} · C crop · Enter capture · Esc back`;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 const ink = (c: string) => (c === HL ? "#1c1c1e" : "#fff");
 const inside = (p: Pt, b: Rect) => p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h;
 const norm = (a: Pt, b: Pt): Rect => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
-
-const mid = (r: Rect): Pt => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
-// Anchored shapes only count when their anchor is inside the box, an outline when its middle is; strokes are just clipped by it.
-const seen = (sh: Shape, b: Rect) => (sh.kind === "element" ? inside(mid(sh.r), b) : !("at" in sh) || inside(sh.at, b));
 
 // The outlined control in the captured picture's pixels, clipped to it; null when none of it is in the box.
 function within(r: Rect, b: Rect): ElementMark["rect"] | null {
@@ -185,13 +164,6 @@ const ringed = (r: Rect, s: number): Rect => {
   return { x: r.x - g, y: r.y - g, w: r.w + 2 * g, h: r.h + 2 * g };
 };
 const svgRect = (r: Rect) => ({ x: r.x, y: r.y, width: r.w, height: r.h });
-
-function numbering(list: Shape[], base = 0): Map<number, number> {
-  const m = new Map<number, number>();
-  let n = base;
-  for (const sh of list) if (sh.kind === "pin") m.set(sh.id, ++n);
-  return m;
-}
 
 function resize(o: Rect, h: Handle, p: Pt, min: number): Rect {
   let x1 = o.x;
@@ -237,7 +209,7 @@ function pill(x: number, y: number, str: string, s: number, fill: string, fg: st
 function labelX(sh: Extract<Shape, { text: string }>, w: number, s: number, b: Rect) {
   const flush = Math.max(b.x, b.x + b.w - w);
   if (sh.kind === "text") return clamp(sh.at.x, b.x, flush);
-  const off = (M.pin + M.gap) * s;
+  const off = ((sh.kind === "step" ? M.step : M.pin) + M.gap) * s;
   const right = sh.at.x + off;
   const left = sh.at.x - off - w;
   if (right + w <= b.x + b.w) return right;
@@ -260,22 +232,39 @@ function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
     }
     case "text":
       return sh.text && !bare ? pill(labelX(sh, pillW(sh.text, s), s, b), sh.at.y, sh.text, s, sh.c, ink(sh.c), "#fff") : [];
-    case "arrow": {
-      const { a, b } = sh;
-      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-      const ux = (b.x - a.x) / len;
-      const uy = (b.y - a.y) / len;
-      const hl = Math.min(M.head * s, len * 0.7);
-      const hw = hl * 0.5;
-      const bx = b.x - ux * hl;
-      const by = b.y - uy * hl;
-      return [
-        { k: "path", d: [["M", a.x, a.y], ["L", bx + ux * hl * 0.3, by + uy * hl * 0.3]], stroke: sh.c, w: M.line * s },
-        { k: "path", d: [["M", b.x, b.y], ["L", bx - uy * hw, by + ux * hw], ["L", bx + uy * hw, by - ux * hw], ["Z"]], fill: sh.c, stroke: sh.c, w: 2 * s },
-      ];
+    case "step": {
+      const { x, y } = sh.at;
+      const r = M.step * s;
+      const o: Op[] = [];
+      // The leader starts at the circle's edge and points where it was dragged to.
+      if (sh.to) {
+        const len = Math.hypot(sh.to.x - x, sh.to.y - y);
+        if (len > r + 4 * s) {
+          const a = { x: x + ((sh.to.x - x) / len) * r, y: y + ((sh.to.y - y) / len) * r };
+          o.push(...arrow(a, sh.to, "rgba(0,0,0,.45)", (M.lead + 2) * s, (M.leadHead + 1.5) * s, s), ...arrow(a, sh.to, sh.c, M.lead * s, M.leadHead * s, s));
+        }
+      }
+      // A dark rim outside the white ring keeps the circle apart from light and dark screens alike.
+      o.push(
+        { k: "ell", x, y, r: r + 2.25 * s, fill: "rgba(0,0,0,.55)" },
+        { k: "ell", x, y, r, fill: sh.c, stroke: "#fff", w: 2.5 * s, shadow: true },
+        { k: "txt", x, y, str: String(n), px: (n >= 10 ? 11.5 : 13.5) * s, wt: 700, fill: ink(sh.c), mid: true },
+      );
+      if (sh.text && !bare) o.push(...pill(labelX(sh, pillW(sh.text, s), s, b), y, sh.text, s, "rgba(255,255,255,.96)", "#1c1c1e", sh.c));
+      return o;
     }
+    case "arrow":
+      return arrow(sh.a, sh.b, sh.c, M.line * s, M.head * s, s);
     case "rect":
       return [{ k: "box", ...norm(sh.a, sh.b), r: 4 * s, stroke: sh.c, sw: M.rect * s }];
+    case "redact": {
+      const r = norm(sh.a, sh.b);
+      const e = edgeWidth(s);
+      return [
+        { k: "box", ...r, r: 0, fill: REDACT_FILL_CSS },
+        { k: "box", x: r.x + e / 2, y: r.y + e / 2, w: Math.max(0, r.w - e), h: Math.max(0, r.h - e), r: 0, stroke: REDACT_EDGE_CSS, sw: e },
+      ];
+    }
     case "pen":
       return [{ k: "path", d: smooth(sh.pts), stroke: sh.c, w: M.pen * s }];
     case "highlight":
@@ -306,6 +295,25 @@ function ops(sh: Shape, s: number, n: number, bare: boolean, b: Rect): Op[] {
     }
   }
 }
+
+// A line from a to b with a filled head at b: w the line's width, head the head's length, both in frame px.
+function arrow(a: Pt, b: Pt, c: string, w: number, head: number, s: number): Op[] {
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const ux = (b.x - a.x) / len;
+  const uy = (b.y - a.y) / len;
+  const hl = Math.min(head, len * 0.7);
+  const hw = hl * 0.5;
+  const bx = b.x - ux * hl;
+  const by = b.y - uy * hl;
+  return [
+    { k: "path", d: [["M", a.x, a.y], ["L", bx + ux * hl * 0.3, by + uy * hl * 0.3]], stroke: c, w },
+    { k: "path", d: [["M", b.x, b.y], ["L", bx - uy * hw, by + ux * hw], ["L", bx + uy * hw, by - ux * hw], ["Z"]], fill: c, stroke: c, w: 2 * s },
+  ];
+}
+
+// Drawing order: marks, then pins and steps with a label (so a label is never under the next step's circle), then
+// hidden areas over everything.
+const tier = (sh: Shape) => (sh.kind === "redact" ? 2 : (sh.kind === "pin" || sh.kind === "step") && sh.text ? 1 : 0);
 
 const dstr = (d: Seg[]) => d.map((g) => g[0] + (g.slice(1) as number[]).join(" ")).join("");
 
@@ -344,7 +352,7 @@ function Ops({ list, id, src, nat }: { list: Op[]; id: number; src: string; nat:
   );
 }
 
-function paint(ctx: CanvasRenderingContext2D, img: HTMLImageElement, o: Op, s: number) {
+function paint(ctx: CanvasRenderingContext2D, img: CanvasImageSource, o: Op, s: number) {
   ctx.save();
   if ("shadow" in o && o.shadow) {
     ctx.shadowColor = "rgba(0,0,0,.35)";
@@ -405,8 +413,23 @@ function paint(ctx: CanvasRenderingContext2D, img: HTMLImageElement, o: Op, s: n
   ctx.restore();
 }
 
+// Hidden areas last, written into the pixels; the loupes read a frame they are already written into, so none can
+// show what is under one.
 async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: Map<number, number>): Promise<string> {
-  const img = await loadImg(src);
+  const raw = await loadImg(src);
+  const hide = list.flatMap((x) => (x.kind === "redact" ? [norm(x.a, x.b)] : []));
+  let img: CanvasImageSource = raw;
+  if (hide.length) {
+    const f = document.createElement("canvas");
+    f.width = raw.naturalWidth;
+    f.height = raw.naturalHeight;
+    const fx = f.getContext("2d")!;
+    fx.drawImage(raw, 0, 0);
+    const d = fx.getImageData(0, 0, f.width, f.height);
+    redact(d.data, f.width, f.height, hide, s);
+    fx.putImageData(d, 0, 0);
+    img = f;
+  }
   const x0 = Math.round(b.x);
   const y0 = Math.round(b.y);
   const w = Math.max(1, Math.round(b.x + b.w) - x0);
@@ -421,7 +444,12 @@ async function rasterize(src: string, b: Rect, list: Shape[], s: number, nums: M
   ctx.beginPath();
   ctx.rect(x0, y0, w, h);
   ctx.clip();
-  for (const sh of list) for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
+  for (const sh of [...list].sort((p, q) => tier(p) - tier(q))) if (sh.kind !== "redact") for (const o of ops(sh, s, nums.get(sh.id) ?? 0, false, b)) paint(ctx, img, o, s);
+  if (hide.length) {
+    const d = ctx.getImageData(0, 0, w, h);
+    redact(d.data, w, h, hide.map((r) => ({ ...r, x: r.x - x0, y: r.y - y0 })), s);
+    ctx.putImageData(d, 0, 0);
+  }
   const url = c.toDataURL("image/png");
   return url.slice(url.indexOf(",") + 1);
 }
@@ -494,9 +522,19 @@ export function Overlay() {
   const [out, setOut] = useState<Out | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [nudge, setNudge] = useState<{ id: number; at: Pt } | null>(null);
+  // A rectangle or hidden area being moved or resized, shown in place of the stored one until release.
+  const [drag, setDrag] = useState<Box2 | null>(null);
+  const [pal, setPal] = useState(false);
+  const [space, setSpace] = useState(false);
+  const [gone, setGone] = useState(false);
+  // Cropping (key C): the box's edges resize it instead of moving it, and marks cannot be picked meanwhile.
+  const [crop, setCrop] = useState(false);
+  // The last press on a step that did not move it, to tell a double-click (edit its label) from a pick.
+  const tap = useRef<{ id: number; t: number } | null>(null);
+  const spaceRef = useRef(false);
   const [edit, setEdit] = useState(false);
   const [base, setBase] = useState(0);
-  const [hs, dispatch] = useReducer(hist, { past: [], now: [], future: [] });
+  const [hs, dispatch] = useReducer((h: H<Shape>, a: A<Shape>) => hist(h, a), empty<Shape>());
   const ix = useRef<Ix | null>(null);
   const ids = useRef(0);
   const busy = useRef<Promise<void> | null>(null);
@@ -524,10 +562,13 @@ export function Overlay() {
       setOut(null);
       setPicked(null);
       setNudge(null);
+      setDrag(null);
       editRef.current = null;
       ix.current = null;
+      setCrop(false);
       seed.current = f.edit ? [] : placed(f.element, f.pointer, colorRef.current);
       restart();
+      if (f.edit) dispatch({ t: "frame", r: { x: 0, y: 0, w: f.width, h: f.height } });
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
     let f: Promise<(() => void) | null> = Promise.resolve(null);
@@ -548,14 +589,18 @@ export function Overlay() {
         if (PREVIEW_EDIT) {
           setEdit(true);
           setBase(1);
-          setBox({ x: 0, y: 0, w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
+          const r = { x: 0, y: 0, w: img.naturalWidth || 1280, h: img.naturalHeight || 800 };
+          setBox(r);
           seed.current = [];
           restart();
+          dispatch({ t: "frame", r });
           return;
         }
-        setBox({ x: 975, y: 240, w: 380, h: 310 });
+        const r = { x: 975, y: 240, w: 380, h: 310 };
+        setBox(r);
         seed.current = placed({ role: "button", name: "Place order", rect: { x: 987, y: 435, w: 116, h: 41 } }, { x: 1060, y: 456 }, COLORS[0]);
         restart([{ id: ++ids.current, kind: "pin", c: COLORS[0], at: { x: 1128, y: 456 }, text: "28px too far left" }]);
+        dispatch({ t: "frame", r });
       };
       img.src = "/freeze.png";
     }
@@ -563,13 +608,28 @@ export function Overlay() {
     window.addEventListener("resize", onResize);
     const onKey = (e: KeyboardEvent) => keyRef.current(e);
     window.addEventListener("keydown", onKey);
+    const spaceUp = (e: KeyboardEvent | FocusEvent) => {
+      if (e.type === "blur" || (e as KeyboardEvent).key === " ") {
+        spaceRef.current = false;
+        setSpace(false);
+      }
+    };
+    window.addEventListener("keyup", spaceUp);
+    window.addEventListener("blur", spaceUp);
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", spaceUp);
+      window.removeEventListener("blur", spaceUp);
       void u.then((fn) => fn?.());
       void f.then((fn) => fn?.());
     };
   }, []);
+
+  // The box is part of the undo history once drawn: undoing a crop brings back the box and the marks it dropped.
+  useEffect(() => {
+    if (hs.cut) setBox(hs.cut);
+  }, [hs.cut]);
 
   useLayoutEffect(() => {
     const el = barRef.current;
@@ -585,22 +645,17 @@ export function Overlay() {
 
   // Frame px <-> logical px. s = natural.w / displayed image width: every size drawn into the frame is multiplied by it.
   // A picture from History sits clear of the toolbar and hint, and never larger than its own pixels.
-  const room = edit ? { w: vp.w - 2 * EDGE.side, h: vp.h - EDGE.top - EDGE.bottom } : vp;
-  const most = edit ? 1 / (window.devicePixelRatio || 1) : Infinity;
-  const fit = natural.w && room.w > 0 && room.h > 0 ? Math.min(room.w / natural.w, room.h / natural.h, most) : 1;
+  // It depends on the picture and the screen, never on the box: a crop leaves every mark where it was on screen.
+  const { fit, ox, oy, dw, dh } = view(natural, vp, edit, window.devicePixelRatio);
   const s = 1 / fit;
-  const dw = natural.w * fit;
-  const dh = natural.h * fit;
-  const ox = (vp.w - dw) / 2;
-  const oy = edit ? EDGE.top + (room.h - dh) / 2 : (vp.h - dh) / 2;
   const toImg = (e: { clientX: number; clientY: number }): Pt => ({ x: (e.clientX - ox) / fit, y: (e.clientY - oy) / fit });
   const clampP = (p: Pt): Pt => ({ x: clamp(p.x, 0, natural.w), y: clamp(p.y, 0, natural.h) });
   const toScr = (r: Rect): Rect => ({ x: ox + r.x * fit, y: oy + r.y * fit, w: r.w * fit, h: r.h * fit });
   const full: Rect = { x: 0, y: 0, w: natural.w, h: natural.h };
 
-  const shapes = nudge ? hs.now.map((x) => (x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : x)) : hs.now;
-  const vis = box ? shapes.filter((x) => seen(x, box)) : shapes;
-  const nums = numbering(vis, base);
+  const shapes = hs.now.map((x) => (nudge && x.id === nudge.id && "at" in x ? { ...x, at: nudge.at } : drag && x.id === drag.id ? drag : x));
+  const vis = box ? kept(shapes, box) : shapes;
+  const nums = numbers(vis, base);
   const sb = box ? toScr(box) : null;
   const grab = (e: PE) => {
     try {
@@ -625,10 +680,21 @@ export function Overlay() {
     setLayer((l) => (l === "pinning" ? "annotating" : l));
   }
 
+  // Leave without capturing: what Esc does from the selecting layer, and the toolbar's Cancel.
+  function leave() {
+    setPal(false);
+    if (PREVIEW) setGone(true);
+    try {
+      void regionCancel().catch(() => {});
+    } catch {
+      /* plain browser, no Tauri */
+    }
+  }
+
   function back() {
     const next = edit && layer === "annotating" ? "idle" : esc(layer);
     if (next === "idle") {
-      void regionCancel().catch(() => {});
+      leave();
       return;
     }
     if (layer === "drawing") {
@@ -660,20 +726,17 @@ export function Overlay() {
   async function send(src: string) {
     try {
       const b = layer === "selecting" || !box ? full : box;
-      const list = shapes.filter((x) => seen(x, b) && !(x.kind === "text" && !x.text.trim()));
-      const nn = numbering(list, base);
-      const png = await rasterize(src, b, list, s, nn);
-      const pins = list.filter((x) => x.kind === "pin");
-      const notes = list.filter((x) => x.kind === "text");
-      const labels: Label[] = [
-        ...pins.map((p, i) => ({ n: base + i + 1, text: ("text" in p && p.text.trim()) || `pin ${base + i + 1}` })),
-        ...notes.map((t, i) => ({ n: base + pins.length + i + 1, text: "text" in t ? t.text.trim() : "" })),
-      ];
+      // Marks wholly outside the box are left out of the picture and the caption; the box edge clips the rest.
+      const list = kept(shapes, b).filter((x) => !(x.kind === "text" && !x.text.trim()));
+      const png = await rasterize(src, b, list, s, numbers(list, base));
+      const labels: Label[] = labelsFor(list, base);
+      const hidden = list.flatMap((x) => (x.kind === "redact" ? [norm(x.a, x.b)] : [])).filter((r) => r.w > 0 && r.h > 0 && overlaps(r, b));
       const el = list.find((x) => x.kind === "element");
       const rect = el?.kind === "element" ? within(el.r, b) : null;
-      const element = el?.kind === "element" && rect ? { role: el.role, name: el.name, rect } : null;
-      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels, element });
-      else await regionCommit(png, labels, element);
+      // A control under a hidden area keeps its name to itself: its words could be what was hidden.
+      const element = el?.kind === "element" && rect && !hidden.some((r) => overlaps(r, el.r)) ? { role: el.role, name: el.name, rect } : null;
+      if (PREVIEW) setOut({ url: `data:image/png;base64,${png}`, w: Math.round(b.w), h: Math.round(b.h), labels, element, hidden: hidden.length });
+      else await regionCommit(png, labels, element, hidden.length);
     } catch (err) {
       console.error("pointcast overlay commit failed", err);
     }
@@ -687,6 +750,8 @@ export function Overlay() {
     const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
     if (e.key === "Escape") {
       if (typing) t.blur();
+      else if (pal) setPal(false);
+      else if (crop) setCrop(false);
       else back();
       return;
     }
@@ -698,6 +763,20 @@ export function Overlay() {
     if (typing) return;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
+    // Space held: drag inside the box to move it. Kept from pressing a focused toolbar button.
+    if (e.key === " ") {
+      e.preventDefault();
+      if (!spaceRef.current) {
+        spaceRef.current = true;
+        setSpace(true);
+      }
+      return;
+    }
+    const n = "12345".indexOf(e.key);
+    if (!mod && !e.altKey && n >= 0 && e.key.length === 1) {
+      setColor(COLORS[n]);
+      return;
+    }
     if (mod && (k === "z" || k === "y")) {
       e.preventDefault();
       dispatch({ t: k === "y" || e.shiftKey ? "redo" : "undo" });
@@ -705,11 +784,21 @@ export function Overlay() {
       e.preventDefault();
       dispatch({ t: "remove", id: picked });
       setPicked(null);
-    } else if (!mod && !e.altKey && KEYS[k]) setTool(KEYS[k]);
+    } else if (!mod && !e.altKey && k === "c" && layer !== "selecting") {
+      setPicked(null);
+      setCrop((c) => !c);
+    } else if (!mod && !e.altKey && KEYS[k]) pickTool(KEYS[k]);
   };
 
+  function pickTool(t: Tool) {
+    setTool(t);
+    setCrop(false);
+  }
+
   function down(e: PE<HTMLDivElement>) {
-    if (e.button !== 0 || !src || !natural.w) return;
+    setPal(false);
+    const middle = e.button === 1;
+    if ((e.button !== 0 && !middle) || !src || !natural.w) return;
     setPicked(null);
     const p = toImg(e);
     if (layer === "selecting") {
@@ -718,7 +807,7 @@ export function Overlay() {
       return;
     }
     if (!box) return;
-    if (tool === "move") {
+    if (tool === "move" || middle || spaceRef.current || crop) {
       if (inside(p, box)) {
         ix.current = { k: "move", a: p, o: box };
         setCur({ x: e.clientX, y: e.clientY });
@@ -727,14 +816,14 @@ export function Overlay() {
       return;
     }
     if (!inside(p, box)) return;
-    if (tool === "pin" || tool === "text" || tool === "magnify") {
+    if (tool === "pin" || tool === "step" || tool === "text" || tool === "magnify") {
       ix.current = { k: "drop", a: p, tool };
       grab(e);
       return;
     }
     const id = ++ids.current;
     const shape: Shape =
-      tool === "arrow" || tool === "rect" ? { id, kind: tool, c: color, a: p, b: p } : { id, kind: tool, c: tool === "highlight" ? HL : color, pts: [p] };
+      tool === "arrow" || tool === "rect" || tool === "redact" ? { id, kind: tool, c: color, a: p, b: p } : { id, kind: tool, c: tool === "highlight" ? HL : color, pts: [p] };
     ix.current = { k: "draw", shape };
     setLive(shape);
     setLayer("drawing");
@@ -744,8 +833,26 @@ export function Overlay() {
   function startShift(e: PE<SVGCircleElement>, sh: Shape & { at: Pt }) {
     e.stopPropagation();
     if (e.button !== 0) return;
-    ix.current = { k: "shift", id: sh.id, a: toImg(e), o: sh.at, at: sh.at };
+    ix.current = { k: "shift", id: sh.id, a: toImg(e), o: sh.at, at: sh.at, kind: sh.kind };
     setPicked(sh.id);
+    grab(e);
+  }
+
+  // A hidden area is grabbed whatever the tool (it sits on top of everything); a rectangle's edge only when the tool
+  // would not draw there.
+  function startGrab(e: PE<SVGRectElement>, sh: Box2) {
+    if (sh.kind === "rect" && DRAWS.has(tool)) return;
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    ix.current = { k: "grab", o: sh, a: toImg(e), cx: e.clientX, cy: e.clientY, moved: false };
+    setPicked(sh.id);
+    grab(e);
+  }
+
+  function startReshape(e: PE<HTMLDivElement>, sh: Box2, h: Handle) {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    ix.current = { k: "reshape", o: sh, h };
     grab(e);
   }
 
@@ -754,8 +861,21 @@ export function Overlay() {
     if (e.button === 0) setPicked(id);
   }
 
+  // The box's border moves it, whatever the tool; while cropping it moves that edge.
+  function startMove(e: PE<HTMLDivElement>, side: (typeof SIDES)[number]) {
+    if (crop) return startSize(e, side);
+    e.stopPropagation();
+    setPal(false);
+    if ((e.button !== 0 && e.button !== 1) || !box) return;
+    setPicked(null);
+    ix.current = { k: "move", a: toImg(e), o: box };
+    setCur({ x: e.clientX, y: e.clientY });
+    grab(e);
+  }
+
   function startSize(e: PE<HTMLDivElement>, h: Handle) {
     e.stopPropagation();
+    setPal(false);
     if (e.button !== 0 || !box) return;
     ix.current = { k: "size", h, o: box };
     setCur({ x: e.clientX, y: e.clientY });
@@ -773,21 +893,43 @@ export function Overlay() {
       setBox(m.r);
       setCur({ x: e.clientX, y: e.clientY });
     } else if (m.k === "size") {
-      setBox(resize(m.o, m.h, p, 12 * s));
+      m.d = resize(m.o, m.h, p, 12 * s);
+      setBox(m.d);
       setCur({ x: e.clientX, y: e.clientY });
     } else if (m.k === "move") {
       const q = toImg(e);
-      setBox({ ...m.o, x: clamp(m.o.x + q.x - m.a.x, 0, natural.w - m.o.w), y: clamp(m.o.y + q.y - m.a.y, 0, natural.h - m.o.h) });
+      m.d = { ...m.o, x: clamp(m.o.x + q.x - m.a.x, 0, natural.w - m.o.w), y: clamp(m.o.y + q.y - m.a.y, 0, natural.h - m.o.h) };
+      setBox(m.d);
       setCur({ x: e.clientX, y: e.clientY });
+    } else if (m.k === "drop") {
+      // Dragged out from a step: a leader from the number to where it is let go.
+      if (m.tool !== "step") return;
+      const far = Math.hypot(p.x - m.a.x, p.y - m.a.y) >= (M.step + 10) * s;
+      m.to = far ? p : undefined;
+      setLive(far ? { id: -1, kind: "step", c: color, at: m.a, text: "", to: p } : null);
     } else if (m.k === "shift") {
       const q = toImg(e);
       const b = box ?? full;
       const pad = Math.min(M.mark * s, b.w / 2, b.h / 2);
       m.at = { x: clamp(m.o.x + q.x - m.a.x, b.x + pad, b.x + b.w - pad), y: clamp(m.o.y + q.y - m.a.y, b.y + pad, b.y + b.h - pad) };
       setNudge({ id: m.id, at: m.at });
+    } else if (m.k === "grab") {
+      if (!m.moved && Math.hypot(e.clientX - m.cx, e.clientY - m.cy) < 3) return;
+      m.moved = true;
+      const q = toImg(e);
+      const r = norm(m.o.a, m.o.b);
+      const b = box ?? full;
+      const dx = clamp(q.x - m.a.x, b.x - r.x - r.w + 4 * s, b.x + b.w - r.x - 4 * s);
+      const dy = clamp(q.y - m.a.y, b.y - r.y - r.h + 4 * s, b.y + b.h - r.y - 4 * s);
+      m.d = { ...m.o, a: { x: m.o.a.x + dx, y: m.o.a.y + dy }, b: { x: m.o.b.x + dx, y: m.o.b.y + dy } };
+      setDrag(m.d);
+    } else if (m.k === "reshape") {
+      const r = resize(norm(m.o.a, m.o.b), m.h, p, 4 * s);
+      m.d = { ...m.o, a: { x: r.x, y: r.y }, b: { x: r.x + r.w, y: r.y + r.h } };
+      setDrag(m.d);
     } else if (m.k === "draw") {
       const sh = m.shape;
-      if (sh.kind === "arrow" || sh.kind === "rect") m.shape = { ...sh, b: p };
+      if (sh.kind === "arrow" || sh.kind === "rect" || sh.kind === "redact") m.shape = { ...sh, b: p };
       else if (sh.kind === "pen" || sh.kind === "highlight") {
         const l = sh.pts[sh.pts.length - 1];
         if (Math.hypot(p.x - l.x, p.y - l.y) < 1.2 * s) return;
@@ -807,25 +949,53 @@ export function Overlay() {
       /* not captured */
     }
     if (!m) return;
-    if (m.k === "shift") {
+    if ((m.k === "size" || m.k === "move") && m.d) {
+      dispatch({ t: "crop", r: m.d });
+    } else if (m.k === "grab" || m.k === "reshape") {
+      const d = m.d;
+      setDrag(null);
+      if (d && (d.a.x !== m.o.a.x || d.a.y !== m.o.a.y || d.b.x !== m.o.b.x || d.b.y !== m.o.b.y)) dispatch({ t: "put", s: d });
+    } else if (m.k === "shift") {
       setNudge(null);
-      if (Math.hypot(m.at.x - m.o.x, m.at.y - m.o.y) >= 1) dispatch({ t: "move", id: m.id, at: m.at });
+      if (Math.hypot(m.at.x - m.o.x, m.at.y - m.o.y) >= 1) {
+        dispatch({ t: "move", id: m.id, at: m.at });
+        tap.current = null;
+      } else if (m.kind === "step") {
+        // A second press on the same step within a moment: give it a label.
+        const now = performance.now();
+        if (tap.current?.id === m.id && now - tap.current.t < 450) {
+          tap.current = null;
+          setPicked(null);
+          startEdit(m.id, true);
+        } else tap.current = { id: m.id, t: now };
+      }
     } else if (m.k === "sel") {
       if (!m.moved) {
         setBox(full);
+        dispatch({ t: "frame", r: full });
         setLayer("annotating");
-      } else if (m.r && m.r.w * fit >= 8 && m.r.h * fit >= 8) setLayer("annotating");
-      else setBox(null);
+      } else if (m.r && m.r.w * fit >= 8 && m.r.h * fit >= 8) {
+        dispatch({ t: "frame", r: m.r });
+        setLayer("annotating");
+      } else setBox(null);
     } else if (m.k === "draw") {
       const sh = m.shape;
       setLive(null);
       setLayer("annotating");
-      const long = sh.kind === "arrow" || sh.kind === "rect" ? Math.hypot(sh.b.x - sh.a.x, sh.b.y - sh.a.y) >= 6 * s : true;
+      const long =
+        sh.kind === "redact"
+          ? Math.min(Math.abs(sh.b.x - sh.a.x), Math.abs(sh.b.y - sh.a.y)) >= 4 * s
+          : sh.kind === "arrow" || sh.kind === "rect"
+            ? Math.hypot(sh.b.x - sh.a.x, sh.b.y - sh.a.y) >= 6 * s
+            : true;
       if (long) dispatch({ t: "add", s: sh });
     } else if (m.k === "drop") {
       const id = ++ids.current;
       if (m.tool === "magnify") dispatch({ t: "add", s: { id, kind: "magnify", at: m.a } });
-      else {
+      else if (m.tool === "step") {
+        setLive(null);
+        dispatch({ t: "add", s: { id, kind: "step", c: color, at: m.a, text: "", ...(m.to ? { to: m.to } : {}) } });
+      } else {
         dispatch({ t: "add", s: { id, kind: m.tool, c: color, at: m.a, text: "" } });
         startEdit(id, true);
       }
@@ -834,6 +1004,8 @@ export function Overlay() {
 
   function cancel() {
     if (ix.current?.k === "shift") setNudge(null);
+    if (ix.current?.k === "drop") setLive(null);
+    setDrag(null);
     if (ix.current?.k === "draw") {
       setLive(null);
       setLayer("annotating");
@@ -859,22 +1031,28 @@ export function Overlay() {
   const edW = ed && "text" in ed ? Math.max(112, textW(ed.text || " ", M.font) + 2 * M.padX + 10) : 0;
   const readout = cur && box ? `${Math.round(box.w)} × ${Math.round(box.h)} px` : "";
   const rw = readout.length * 7 + 20;
-  const cursor = layer === "selecting" ? "crosshair" : tool === "move" ? "move" : tool === "text" ? "text" : "crosshair";
+  const cursor = layer === "selecting" ? "crosshair" : tool === "move" || space || crop || ix.current?.k === "move" ? "move" : tool === "text" ? "text" : "crosshair";
+  // The colour pop-over opens away from the box, or toward it when there is no room above the hint pill.
+  const popUp = sb ? (bar.y < sb.y ? bar.y > 64 : bar.y + tb.h + 56 > vp.h - 62) : false;
   const dim = `M0 0H${vp.w}V${vp.h}H0Z${sb ? `M${sb.x} ${sb.y}h${sb.w}v${sb.h}h${-sb.w}Z` : ""}`;
   const canEdit = tool === "pin" || tool === "text";
+  const pickedShape = vis.find((x) => x.id === picked);
+  const pickedBox = isBox(pickedShape) ? pickedShape : null;
 
   return (
     <div
       ref={rootRef}
-      className={edit ? "ov-root ov-edit" : "ov-root"}
+      className={`ov-root${edit ? " ov-edit" : ""}${crop ? " ov-crop" : ""}`}
       style={{ cursor }}
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
       onPointerCancel={cancel}
       onContextMenu={(e) => e.preventDefault()}
+      // The middle button moves the box; keep the browser's autoscroll out of it.
+      onMouseDown={(e) => e.button === 1 && e.preventDefault()}
     >
-      {src && natural.w ? (
+      {gone ? null : src && natural.w ? (
         <>
           <img className="ov-frame" src={src} alt="" draggable={false} style={{ left: ox, top: oy, width: dw, height: dh }} />
           <svg className="ov-dim" width={vp.w} height={vp.h}>
@@ -892,15 +1070,15 @@ export function Overlay() {
               ) : null}
             </defs>
             <g clipPath={box ? "url(#ov-clip)" : undefined}>
-              {[...vis, ...(live ? [live] : [])].map((sh) => (
-                <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? 0, sh.id === editing, box ?? full)} />
+              {[...vis, ...(live ? [live] : [])].sort((p, q) => tier(p) - tier(q)).map((sh) => (
+                <Ops key={sh.id} id={sh.id} src={src} nat={natural} list={ops(sh, s, nums.get(sh.id) ?? (sh === live ? base + nums.size + 1 : 0), sh.id === editing, box ?? full)} />
               ))}
             </g>
           </svg>
           {sb ? <div className="ov-sel" style={{ left: sb.x, top: sb.y, width: sb.w, height: sb.h }} /> : null}
-          {layer === "annotating" ? (
+          {layer === "annotating" && !crop ? (
             <svg className="ov-grips" style={{ left: ox, top: oy, width: dw, height: dh }} viewBox={`0 0 ${natural.w} ${natural.h}`}>
-              {vis.map((sh) =>
+              {[...vis].sort((p, q) => +(p.kind === "redact") - +(q.kind === "redact")).map((sh) =>
                 sh.kind === "element" ? (
                   <g key={sh.id}>
                     {picked === sh.id ? (
@@ -924,6 +1102,36 @@ export function Overlay() {
                       onPointerDown={(e) => pick(e, sh.id)}
                     />
                   </g>
+                ) : isBox(sh) ? (
+                  <g key={sh.id}>
+                    {picked === sh.id ? (
+                      <rect {...svgRect(norm(sh.a, sh.b))} fill="none" stroke="#fff" strokeWidth={1.5 * s} strokeDasharray={`${4 * s} ${3 * s}`} />
+                    ) : null}
+                    <rect
+                      className={sh.kind === "redact" ? "ov-grip ov-fill" : DRAWS.has(tool) ? "ov-grip ov-off" : "ov-grip"}
+                      aria-label={sh.kind === "redact" ? "Hidden area" : "Rectangle"}
+                      {...svgRect(norm(sh.a, sh.b))}
+                      fill="transparent"
+                      stroke="transparent"
+                      strokeWidth={M.grip * s}
+                      onPointerDown={(e) => startGrab(e, sh)}
+                    />
+                  </g>
+                ) : sh.kind === "step" ? (
+                  <g key={sh.id}>
+                    {picked === sh.id ? (
+                      <circle cx={sh.at.x} cy={sh.at.y} r={(M.step + 6) * s} fill="none" stroke="#fff" strokeWidth={1.5 * s} strokeDasharray={`${4 * s} ${3 * s}`} />
+                    ) : null}
+                    <circle
+                      className="ov-grip ov-fill"
+                      aria-label={`Step ${nums.get(sh.id) ?? ""}`}
+                      cx={sh.at.x}
+                      cy={sh.at.y}
+                      r={(M.step + 2) * s}
+                      fill="transparent"
+                      onPointerDown={(e) => startShift(e, sh)}
+                    />
+                  </g>
                 ) : sh.kind === "ring" ? (
                   <g key={sh.id}>
                     {picked === sh.id ? (
@@ -945,16 +1153,41 @@ export function Overlay() {
               )}
             </svg>
           ) : null}
-          {sb && layer !== "selecting"
-            ? HANDLES.map((h) => (
-                <div key={h} className={`ov-h ov-h-${h}`} style={{ left: sb.x + sb.w * HX[h], top: sb.y + sb.h * HY[h] }} onPointerDown={(e) => startSize(e, h)} />
+          {sb && layer !== "selecting" && layer !== "drawing"
+            ? SIDES.map((d) => (
+                <div
+                  key={d}
+                  className={`ov-edge ov-edge-${d}`}
+                  style={d === "n" || d === "s" ? { left: sb.x, top: d === "n" ? sb.y : sb.y + sb.h, width: sb.w } : { left: d === "w" ? sb.x : sb.x + sb.w, top: sb.y, height: sb.h }}
+                  onPointerDown={(e) => startMove(e, d)}
+                />
               ))
             : null}
-          {canEdit && layer !== "drawing"
+          {sb && layer !== "selecting"
+            ? HANDLES.map((h) => (
+                <div key={h} className={`ov-h ov-h-${h}`} title="Drag to crop" style={{ left: sb.x + sb.w * HX[h], top: sb.y + sb.h * HY[h] }} onPointerDown={(e) => startSize(e, h)} />
+              ))
+            : null}
+          {pickedBox && layer === "annotating"
+            ? HANDLES.map((h) => {
+                const r = toScr(norm(pickedBox.a, pickedBox.b));
+                return (
+                  <div
+                    key={`s-${h}`}
+                    className={`ov-h ov-h-sm ov-h-${h}`}
+                    style={{ left: r.x + r.w * HX[h], top: r.y + r.h * HY[h] }}
+                    onPointerDown={(e) => startReshape(e, pickedBox, h)}
+                  />
+                );
+              })
+            : null}
+          {layer !== "drawing" && !crop
             ? vis.map((sh) => {
-                if (sh.kind !== "pin" && sh.kind !== "text") return null;
+                if (sh.kind !== "pin" && sh.kind !== "text" && sh.kind !== "step") return null;
+                // A step's circle is its grip (drag, double-click); its label, once it has one, opens the editor.
+                if (sh.kind !== "step" && !canEdit) return null;
                 const pw = sh.text ? pillW(sh.text, s) : 0;
-                if (sh.kind === "text" && !pw) return null;
+                if (sh.kind !== "pin" && !pw) return null;
                 const lx = pw ? labelX(sh, pw, s, box ?? full) : sh.at.x;
                 const l0 = sh.kind === "pin" ? Math.min(lx, sh.at.x - M.pin * s) : lx;
                 const l1 = sh.kind === "pin" ? Math.max(pw ? lx + pw : 0, sh.at.x + M.pin * s) : lx + pw;
@@ -971,7 +1204,7 @@ export function Overlay() {
                 );
               })
             : null}
-          {ed && (ed.kind === "pin" || ed.kind === "text") ? (
+          {ed && (ed.kind === "pin" || ed.kind === "step" || ed.kind === "text") ? (
             <EditInput
               key={ed.id}
               now={editNow.current}
@@ -979,10 +1212,10 @@ export function Overlay() {
               y={oy + ed.at.y * fit - M.pillH / 2}
               w={edW}
               text={ed.text}
-              hold={ed.kind === "pin" ? "Label…" : "Type a label…"}
-              bg={ed.kind === "pin" ? "#fff" : ed.c}
-              fg={ed.kind === "pin" ? "#1c1c1e" : ink(ed.c)}
-              edge={ed.kind === "pin" ? ed.c : "#fff"}
+              hold={ed.kind === "text" ? "Type a label…" : "Label…"}
+              bg={ed.kind === "text" ? ed.c : "#fff"}
+              fg={ed.kind === "text" ? ink(ed.c) : "#1c1c1e"}
+              edge={ed.kind === "text" ? "#fff" : ed.c}
               onText={(text) => dispatch({ t: "text", id: ed.id, text })}
               onDone={(empty) => endEdit(ed.id, empty, ed.kind)}
             />
@@ -999,28 +1232,55 @@ export function Overlay() {
           {readout}
         </div>
       ) : null}
-      {sb && layer !== "selecting" ? (
+      {sb && layer !== "selecting" && !gone ? (
         <div
           ref={barRef}
           className="ov-hud ov-bar"
           style={{ left: bar.x, top: bar.y }}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (!(e.target as HTMLElement).closest(".ov-pal")) setPal(false);
+          }}
           onMouseDown={(e) => e.preventDefault()}
         >
-          {TOOLS.map((t, i) => (
-            <span key={t.id} style={{ display: "contents" }}>
-              {i === 1 ? <span className="ov-sep" /> : null}
-              <button type="button" className="ov-btn" aria-pressed={tool === t.id} aria-label={t.label} title={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
-                <t.Icon size={18} strokeWidth={1.75} />
-              </button>
-            </span>
-          ))}
-          <span className="ov-sep" />
-          {COLORS.map((c) => (
-            <button key={c} type="button" className="ov-sw" aria-pressed={color === c} aria-label={`Colour ${c}`} title={c} onClick={() => setColor(c)}>
-              <i style={{ ["--c" as string]: c }} />
+          {TOOLS.map((t) => (
+            <button key={t.id} type="button" className="ov-btn" aria-pressed={tool === t.id} aria-label={t.label} title={`${t.label} (${t.key})`} onClick={() => pickTool(t.id)}>
+              <t.Icon size={18} strokeWidth={1.75} />
             </button>
           ))}
+          <span className="ov-pal">
+            <button
+              type="button"
+              className="ov-btn ov-cur"
+              aria-label={`Colour: ${COLOR_NAMES[COLORS.indexOf(color)]}`}
+              aria-haspopup="true"
+              aria-expanded={pal}
+              title="Colour (1 to 5)"
+              onClick={() => setPal((o) => !o)}
+            >
+              <i style={{ ["--c" as string]: color }} />
+            </button>
+            {pal ? (
+              <span className={popUp ? "ov-hud ov-pop ov-pop-up" : "ov-hud ov-pop"} role="group" aria-label="Colours">
+                {COLORS.map((c, i) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className="ov-sw"
+                    aria-pressed={color === c}
+                    aria-label={COLOR_NAMES[i]}
+                    title={`${COLOR_NAMES[i]} (${i + 1})`}
+                    onClick={() => {
+                      setColor(c);
+                      setPal(false);
+                    }}
+                  >
+                    <i style={{ ["--c" as string]: c }} />
+                  </button>
+                ))}
+              </span>
+            ) : null}
+          </span>
           <span className="ov-sep" />
           <button type="button" className="ov-btn" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" disabled={!hs.past.length} onClick={() => dispatch({ t: "undo" })}>
             <Undo2 size={18} strokeWidth={1.75} />
@@ -1033,15 +1293,18 @@ export function Overlay() {
             <Check size={16} strokeWidth={2.25} />
             {edit ? "Save" : "Capture"}
           </button>
+          <button type="button" className="ov-btn ov-x" aria-label="Cancel" title="Cancel (Esc)" onClick={leave}>
+            <X size={18} strokeWidth={1.75} />
+          </button>
         </div>
       ) : null}
-      {src ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit)}</div> : null}
+      {src && !gone ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit, crop)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />
           <p>
             Preview capture {out.w} × {out.h} px ·{" "}
-            {[out.element ? `${out.element.role} “${out.element.name}”` : "", ...out.labels.map((l) => `${l.n}. ${l.text}`)].filter(Boolean).join(" · ") ||
+            {[out.element ? `${out.element.role} “${out.element.name}”` : "", ...captionMarks(out.labels), hiddenNote(out.hidden)].filter(Boolean).join(" · ") ||
               "no labels"}
           </p>
         </div>

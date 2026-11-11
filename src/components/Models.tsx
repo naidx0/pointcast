@@ -61,6 +61,17 @@ export function speechReady(cfg: Config) {
   return !!cfg.speech.models?.some((m) => m.id === id && runnable(m, !!cfg.speech.runtime?.installed));
 }
 
+/** Some model can run here, so recordings are written down (the picked one, or the one they fall back to). */
+export function speechInstalled(cfg: Config) {
+  return !!cfg.speech.models?.some((m) => runnable(m, !!cfg.speech.runtime?.installed));
+}
+
+/** A model's one size figure, as its card shows it, from the catalog. */
+export function modelSize(cfg: Config, id: string) {
+  const m = withPreview(cfg.speech.models ?? []).find((x) => x.id === id);
+  return m ? sizeText(m, runnable(m, !!cfg.speech.runtime?.installed)) : "";
+}
+
 /** What a download of `m` fetches: its GPU version where that can be set up here. */
 const download = (m: SpeechModel) => (gpuFirst(m) ? m.gpu!.bytes : m.bytes);
 
@@ -122,13 +133,23 @@ function useGpuUpgrade(cfg: Config, refresh: () => void) {
   return up;
 }
 
-/** The one setup job (engine + model) as every window sees it, including one started elsewhere. */
+export type SpeechJob = ReturnType<typeof useSpeechJob>;
+
+/** The one setup job (engine + model) as every window sees it, including one started elsewhere. In the browser
+ * preview, `?speech=downloading` (with `&pct=42`) or `?speech=failed` shows those states. */
 export function useSpeechJob(refresh: () => void) {
   const [job, setJob] = useState<(SpeechProgress & { id?: string }) | null>(null);
   const [error, setError] = useState<{ id: string; text: string } | null>(null);
 
   useEffect(() => {
     if (inTauri) speechStatus().then((p) => p && setJob(p)).catch(() => undefined);
+    else if (preview) {
+      const q = new URLSearchParams(location.search);
+      if (q.get("speech") === "downloading")
+        setJob({ phase: "download", received: Number(q.get("pct") ?? 42), total: 100 });
+      else if (q.get("speech") === "failed")
+        setError({ id: "", text: "Pointcast can't reach GitHub to download the speech files." });
+    }
     return subscribe(
       onSpeechProgress((p) => {
         setError(null);
@@ -154,7 +175,12 @@ export function useSpeechJob(refresh: () => void) {
     }
   }
 
-  return { job, error, start, cancel: () => (inTauri ? speechCancel() : setJob(null)) };
+  return {
+    job,
+    error,
+    start,
+    cancel: () => (inTauri ? speechCancel() : (setJob(null), setError({ id: job?.id ?? "", text: "Cancelled." }))),
+  };
 }
 
 /** Whether the model in use is slower than real time here, as the last recording reported it. Remembered with the model
@@ -176,14 +202,21 @@ export function ModelPicker({
   patch,
   refresh,
   removable,
+  speech,
+  computer,
 }: {
   cfg: Config;
   patch: (p: Record<string, unknown>) => Promise<string | null>;
   refresh: () => void;
   /** Offer Remove on downloaded models that are not in use (Settings, not first-run setup). */
   removable?: boolean;
+  /** A setup job the window already follows (first-run setup's background download), so both show the same one. */
+  speech?: SpeechJob;
+  /** Settings' "This computer" block says where the model runs, how fast, and offers the graphics-card version. */
+  computer?: boolean;
 }) {
-  const { job, error, start, cancel } = useSpeechJob(refresh);
+  const own = useSpeechJob(refresh);
+  const { job, error, start, cancel } = speech ?? own;
   const [removeErr, setRemoveErr] = useState<{ id: string; text: string } | null>(null);
   const chosen = chosenModel(cfg);
   // Marked is the model recordings really use; picking one that is not downloaded yet does not change that.
@@ -257,13 +290,13 @@ export function ModelPicker({
                         : "Checking it works…"
                       : job?.phase === "unpack"
                         ? "Unpacking…"
-                        : job?.total
-                          ? `${mbText(job.received ?? 0)} of ${mbText(job.total)}`
+                        : pct != null
+                          ? `${Math.floor(pct)}%`
                           : "Starting…"}
                   </span>
                 </div>
               ) : null}
-              {device && !mine && !preparing ? (
+              {device && !computer && !mine && !preparing ? (
                 <div className="t-small" style={{ marginTop: 4, color: device.warn ? "var(--orange-ink)" : undefined }}>
                   {device.text}
                 </div>
@@ -293,12 +326,12 @@ export function ModelPicker({
                   {bg.note}
                 </div>
               ) : null}
-              {m.gpu?.unusable && on && !mine ? (
+              {m.gpu?.unusable && on && !computer && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   Your graphics card can't run the faster version, so Whisper Turbo runs on your processor.
                 </div>
               ) : null}
-              {ready && offerSwitch && !mine ? (
+              {ready && offerSwitch && !computer && !mine ? (
                 <div className="t-small" style={{ marginTop: 4 }}>
                   <button
                     type="button"
@@ -466,7 +499,8 @@ function simulate(
   patch: (p: Record<string, unknown>) => Promise<string | null>,
   setJob: (p: (SpeechProgress & { id?: string }) | null) => void,
 ) {
-  const total = 120_000_000;
+  const m = withPreview(cfg.speech.models ?? []).find((x) => x.id === id);
+  const total = m ? download(m) : 120_000_000;
   let got = 0;
   const t = setInterval(() => {
     got += 9_000_000;

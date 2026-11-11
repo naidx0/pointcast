@@ -1,6 +1,6 @@
 [package]
 name = "pointcast"
-version = "0.4.7"
+version = "0.4.8"
 description = "Voice plus annotated screenshots into one prompt for any AI tool"
 authors = ["Pointcast contributors"]
 license = "MIT"
@@ -26,7 +26,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 xcap = { version = "0.9", default-features = false }
 cpal = "0.15"
 libloading = "0.8"
@@ -41,6 +41,8 @@ auto-launch = "0.6"
 tar = "0.4"
 bzip2 = "0.4"
 dirs = "5"
+# Codex's config.toml edited with its comments and layout kept (already in the tree through tauri's build tools).
+toml_edit = "0.25"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 mouse_position = "0.1.4"
 getrandom = "0.2"

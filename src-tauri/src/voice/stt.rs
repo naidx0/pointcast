@@ -248,6 +248,80 @@ pub fn hear_piece(samples: &[f32], voiced_ms: u64, hear: impl Fn(&[f32]) -> Hear
     Some(Heard { text: UNCLEAR.into(), tokens: None })
 }
 
+/// What Whisper says for a short piece of next to nothing, decoded alone: lower-cased, without punctuation.
+pub const STRAY: &[&str] = &["thank you", "thanks", "thank you very much", "thanks for watching", "you", "bye", "um", "uh", "so", "okay"];
+
+/// A piece with less audio than this (2.5 s) is short: decoded alone, it is where Whisper makes words up.
+pub const SHORT_MS: u64 = 2_500;
+
+/// A short piece is heard again with at most this much audio (5 s) before it, from the last kept piece's start.
+pub const CONTEXT_MS: u64 = 5_000;
+
+/// A piece with nothing before it that says only a `STRAY` with less voice than this (1.2 s) is dropped.
+pub const LONE_STRAY_VOICED_MS: u64 = 1_200;
+
+/// Each word of `text` as written, with its comparable form (lower case, letters, digits and apostrophes only); a
+/// word with no comparable form (a dash, an ellipsis) is left out.
+fn words(text: &str) -> Vec<(&str, String)> {
+    text.split_whitespace()
+        .map(|w| (w, w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').flat_map(char::to_lowercase).collect::<String>()))
+        .filter(|(_, n)| !n.is_empty())
+        .collect()
+}
+
+/// Whether `text` says only one of the `STRAY` phrases.
+pub fn is_stray(text: &str) -> bool {
+    let said = words(text).into_iter().map(|w| w.1).collect::<Vec<_>>().join(" ");
+    STRAY.contains(&said.as_str())
+}
+
+/// Whether a piece of `audio_ms` that came out as `text` is short.
+pub fn is_short(audio_ms: u64, text: &str) -> bool {
+    audio_ms < SHORT_MS || is_stray(text)
+}
+
+/// The words of `joined` (the audio before a piece and the piece, heard as one) that come after the words of `before`
+/// (what was heard for that audio before): after the longest run of words that ends `before` and begins `joined`.
+/// None when no such run is found.
+pub fn new_words(before: &str, joined: &str) -> Option<String> {
+    let (b, j) = (words(before), words(joined));
+    let k = (1..=b.len().min(j.len())).rev().find(|&k| b[b.len() - k..].iter().zip(&j[..k]).all(|(x, y)| x.1 == y.1))?;
+    Some(j[k..].iter().map(|w| w.0).collect::<Vec<_>>().join(" "))
+}
+
+/// What a short piece that came out as `text` says once heard with the audio before it, which came out as `joined`:
+/// the new words, nothing (None: dropped) when there are none, or `text` when the two cannot be lined up.
+pub fn settle_joined(text: &str, before: &str, joined: &str) -> Option<String> {
+    match new_words(before, joined) {
+        Some(w) if w.is_empty() => None,
+        Some(w) => Some(w),
+        None => Some(text.to_string()),
+    }
+}
+
+/// Whether a piece with nothing heard before it, that came out as `text` with `voiced_ms` of voice, is dropped.
+pub fn lone_stray(text: &str, voiced_ms: u64) -> bool {
+    is_stray(text) && voiced_ms < LONE_STRAY_VOICED_MS
+}
+
+/// What a piece heard as `h` says once a short one is heard in context. `before` is what the last kept piece said,
+/// when audio of it is held; `hear_joined` hears that audio and this piece as one and is called only for a short piece
+/// with something before it. A piece kept as `UNCLEAR` stays, so the loss shows.
+pub fn in_context(h: Heard, audio_ms: u64, voiced_ms: u64, before: Option<&str>, hear_joined: impl FnOnce() -> String) -> Option<Heard> {
+    if h.text == UNCLEAR || !is_short(audio_ms, &h.text) {
+        return Some(h);
+    }
+    match before {
+        None if lone_stray(&h.text, voiced_ms) => None,
+        None => Some(h),
+        Some(b) => {
+            let text = settle_joined(&h.text, b, &hear_joined())?;
+            let tokens = if text == h.text { h.tokens } else { None };
+            Some(Heard { text, tokens })
+        }
+    }
+}
+
 /// Families fast enough on a CPU to re-decode the open sentence for a live caption.
 pub fn live_captions(family: &str) -> bool {
     family != "whisper"
@@ -594,5 +668,71 @@ mod tests {
         let h = eng.hear(&at16);
         eprintln!("{}: {:?}; token times: {:?}", m.id, h.text, h.tokens);
         assert!(h.text.split_whitespace().count() >= 3, "{h:?}");
+    }
+
+    fn said(t: &str) -> Heard {
+        Heard { text: t.into(), tokens: None }
+    }
+
+    #[test]
+    fn a_piece_is_short_by_its_audio_or_by_saying_only_a_stray_phrase() {
+        for t in ["Thank you.", "thanks", "Thank you very much!", "Thanks for watching.", "you", "Bye.", "Um...", "Uh,", "So.", "Okay."] {
+            assert!(is_stray(t) && is_short(9_000, t), "{t}");
+        }
+        for t in ["Okay, yeah.", "I love that.", "thank you so much", "", "Make the header sticky."] {
+            assert!(!is_stray(t), "{t}");
+        }
+        assert!(is_short(SHORT_MS - 1, "Make the header sticky.") && !is_short(SHORT_MS, "Make the header sticky."));
+    }
+
+    #[test]
+    fn the_new_words_are_the_ones_after_the_last_piece_in_the_joined_text() {
+        let b = "Make the header sticky.";
+        assert_eq!(new_words(b, "Make the header sticky. Okay, yeah.").as_deref(), Some("Okay, yeah."));
+        assert_eq!(new_words(b, "make the HEADER sticky"), Some(String::new()), "case and punctuation do not count");
+        // Five seconds of context may begin part way through the last piece: its end begins the joined text.
+        assert_eq!(new_words("so we open the settings and make the header sticky", "header sticky. I love that.").as_deref(), Some("I love that."));
+        assert_eq!(new_words(b, "Something else entirely."), None);
+        assert_eq!(new_words(b, ""), None);
+        assert_eq!(new_words("", "Okay."), None);
+    }
+
+    #[test]
+    fn a_short_piece_heard_with_its_context_is_kept_as_its_new_words_dropped_without_any_or_kept_on_a_miss() {
+        let b = "Make the header sticky.";
+        assert_eq!(settle_joined("Thank you.", b, "Make the header sticky."), None, "a made-up piece goes");
+        assert_eq!(settle_joined("Okay, yeah.", b, "Make the header sticky. Okay, yeah.").as_deref(), Some("Okay, yeah."));
+        assert_eq!(settle_joined("Okay, yeah.", b, "Make the head are sticky okay yeah").as_deref(), Some("Okay, yeah."), "a miss keeps it");
+    }
+
+    #[test]
+    fn a_piece_with_nothing_before_it_is_dropped_only_as_a_brief_stray_phrase() {
+        let never = || -> String { panic!("nothing before it to hear it with") };
+        assert_eq!(in_context(said("Thank you."), 900, LONE_STRAY_VOICED_MS - 1, None, never), None);
+        assert_eq!(in_context(said("Thank you."), 900, LONE_STRAY_VOICED_MS, None, never), Some(said("Thank you.")));
+        assert_eq!(in_context(said("Okay, yeah."), 900, 700, None, never), Some(said("Okay, yeah.")));
+    }
+
+    #[test]
+    fn only_a_short_piece_with_something_before_it_is_heard_again_and_only_once() {
+        let calls = std::cell::Cell::new(0);
+        let joined = |t: &'static str| {
+            let c = &calls;
+            move || {
+                c.set(c.get() + 1);
+                t.to_string()
+            }
+        };
+        let b = Some("Make the header sticky.");
+        let long = said("Then move the footer below the fold.");
+        assert_eq!(in_context(long, 3_000, 2_800, b, joined("x")).map(|h| h.text).as_deref(), Some("Then move the footer below the fold."));
+        assert_eq!(calls.get(), 0, "a long piece is never heard again");
+        assert_eq!(in_context(said("Thank you."), 1_000, 800, b, joined("Make the header sticky.")), None);
+        assert_eq!(calls.get(), 1);
+        // A long piece that says only a stray phrase is short too.
+        assert_eq!(in_context(said("Thank you."), 4_000, 3_000, b, joined("Make the header sticky. Thank you.")), Some(said("Thank you.")));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(in_context(said(UNCLEAR), 2_000, 1_600, b, joined("x")), Some(said(UNCLEAR)), "a loss stays in view");
+        assert_eq!(calls.get(), 2);
     }
 }

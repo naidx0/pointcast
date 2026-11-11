@@ -54,6 +54,24 @@ pub struct Meta {
     /// How long its audio is, in ms.
     #[serde(default)]
     pub audio_ms: u64,
+    /// The microphone it was recorded on, by the name the system gives it; empty for an entry from before this was
+    /// kept.
+    #[serde(default)]
+    pub mic: String,
+    /// From the press to the microphone's first sample, in ms: words before that were not recorded.
+    #[serde(default)]
+    pub mic_open_ms: u64,
+    /// The loudest sample of the whole recording in dBFS (`audio::SILENT_DB` for nothing but zeros).
+    #[serde(default)]
+    pub mic_peak_db: i32,
+}
+
+/// What the microphone did for a recording, for `Store::note_mic`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MicRun {
+    pub mic: String,
+    pub open_ms: u64,
+    pub peak_db: i32,
 }
 
 /// How an entry was transcribed, for `Store::note_run`.
@@ -185,6 +203,26 @@ impl Store {
         write_atomic(&path, &serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
     }
 
+    /// Note which microphone recorded an entry, how long it took to start and how loud it got. Transcribing again
+    /// leaves this as it is: the recording did not change.
+    pub fn note_mic(&self, id: &str, run: &MicRun) -> Result<(), String> {
+        let path = self.entry_dir(id)?.join("meta.json");
+        let mut meta: Meta = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("no such prompt")?;
+        (meta.mic, meta.mic_open_ms, meta.mic_peak_db) = (run.mic.clone(), run.open_ms, run.peak_db);
+        write_atomic(&path, &serde_json::to_vec(&meta).map_err(|e| e.to_string())?)
+    }
+
+    /// The microphone of the newest recordings that name one, newest first, at most `n`: what Settings judges a
+    /// microphone by.
+    pub fn recent_mics(&self, n: usize) -> Vec<MicRun> {
+        self.list()
+            .into_iter()
+            .filter(|m| !m.mic.is_empty())
+            .take(n)
+            .map(|m| MicRun { mic: m.mic, open_ms: m.mic_open_ms, peak_db: m.mic_peak_db })
+            .collect()
+    }
+
     /// Newest first.
     pub fn list(&self) -> Vec<Meta> {
         let mut v: Vec<Meta> = std::fs::read_dir(self.history())
@@ -204,14 +242,70 @@ impl Store {
     }
 
     pub fn export(&self, id: &str) -> Result<SessionExport, String> {
-        self.export_with(id, false)
+        self.export_with(id, false, false)
     }
 
-    /// The export of an entry; with `paths`, its plain text names each picture's file.
-    pub fn export_with(&self, id: &str, paths: bool) -> Result<SessionExport, String> {
+    /// The export of an entry; with `paths`, its plain text names each picture's file; with `tidy`, it is in paragraphs.
+    /// The stored items stay as they were said: formatting happens here, each time.
+    pub fn export_with(&self, id: &str, paths: bool, tidy: bool) -> Result<SessionExport, String> {
         let items = self.items(id)?;
-        let files = if paths { self.files(id) } else { vec![] };
-        Ok(prompt::assemble_export_files(&items, &files))
+        let files = if paths { self.prompt_files(id) } else { vec![] };
+        Ok(prompt::assemble_export_files(&items, &files, tidy))
+    }
+
+    /// The export a copy, paste or send from History uses. With a handoff `root` (picture paths on), its plain text
+    /// names the entry's handoff folder (`agent_files`); without, no files, as `export_with` without paths.
+    pub fn export_for_agents(&self, id: &str, root: Option<&Path>, tidy: bool, now_ms: u64) -> Result<SessionExport, String> {
+        let items = self.items(id)?;
+        let files = match root {
+            Some(root) => self.agent_files(id, &items, root, tidy, now_ms),
+            None => vec![],
+        };
+        Ok(prompt::assemble_export_files(&items, &files, tidy))
+    }
+
+    /// The files the prompt of entry `id` (whose session is `items`) lists for agents, in prompt order: its handoff
+    /// folder under `root` while that holds the same pictures; else the folder written again (named by the entry's
+    /// time, any older folder of the entry removed first so none is left stale) and the root pruned; History's own
+    /// files when it cannot be written.
+    pub fn agent_files(&self, id: &str, items: &[Item], root: &Path, tidy: bool, now_ms: u64) -> Vec<String> {
+        if let Some(files) = prompt::handoff_files(root, id, items) {
+            return files;
+        }
+        if prompt::compose(items).1.is_empty() {
+            return vec![];
+        }
+        let created_ms = self
+            .entry_dir(id)
+            .ok()
+            .and_then(|d| std::fs::read(d.join("meta.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Meta>(&b).ok())
+            .map_or(now_ms, |m| m.created_ms);
+        prompt::remove_handoffs(root, id);
+        match prompt::write_handoff(root, id, created_ms, items, now_ms, tidy) {
+            Ok(h) => h.files,
+            Err(_) => self.prompt_files(id),
+        }
+    }
+
+    /// Where an entry's pictures are, in the order the prompt numbers them (`[image 1]` first), with forward slashes.
+    /// Pictures whose file never landed are left out, as `items` leaves them out.
+    pub fn prompt_files(&self, id: &str) -> Vec<String> {
+        let Ok(dir) = self.entry_dir(id) else { return vec![] };
+        let Ok(items) = stored(&dir) else { return vec![] };
+        let mut k = 0;
+        let mut kept = vec![];
+        for it in &items {
+            if let Item::Image { t_ms, .. } = it {
+                let p = dir.join(format!("image-{k}.png"));
+                if std::fs::metadata(&p).is_ok_and(|m| m.len() > 0) {
+                    kept.push((*t_ms, p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")));
+                }
+                k += 1;
+            }
+        }
+        kept.sort_by_key(|x| x.0);
+        kept.into_iter().map(|x| x.1).collect()
     }
 
     /// Where an entry's pictures are, in the order its session holds them, with forward slashes.
@@ -240,7 +334,10 @@ impl Store {
         let (i, k) = locate(&dir, &items, n)?;
         let Item::Image { capture: c, .. } = &mut items[i] else { unreachable!() };
         let base = c.labels.iter().map(|l| l.n).max().unwrap_or(0);
-        c.labels.extend(labels.into_iter().zip(base + 1..).map(|(l, n)| prompt::Label { n, ..l }));
+        // A note (0: areas hidden) adds to the picture's one note; pins are numbered on.
+        let hidden = prompt::hidden_count(&labels);
+        c.labels.extend(labels.into_iter().filter(|l| l.n != 0).zip(base + 1..).map(|(l, n)| prompt::Label { n, ..l }));
+        prompt::note_hidden(&mut c.labels, hidden);
         (c.width, c.height) = (width, height);
         let out = prompt::Capture { png: png.to_vec(), ..c.clone() };
         write_together(&[
@@ -385,6 +482,9 @@ fn meta_for(items: &[Item], created_ms: u64, duration_ms: u64, recovered: bool) 
         device: String::new(),
         transcribe_ms: 0,
         audio_ms: 0,
+        mic: String::new(),
+        mic_open_ms: 0,
+        mic_peak_db: 0,
     }
 }
 
@@ -559,7 +659,7 @@ mod tests {
                     png: png(200),
                     width: 1,
                     height: 1,
-                    labels: vec![Label { n: 1, text: "this one".into() }],
+                    labels: vec![Label { n: 1, text: "this one".into(), ..Default::default() }],
                     pointer: None,
                     trail: vec![],
                     element: Some(crate::element::ElementMark {
@@ -594,6 +694,139 @@ mod tests {
         assert_eq!(s.list(), vec![m.clone()]);
         s.delete(&m.id).unwrap();
         assert!(s.list().is_empty());
+    }
+
+    #[test]
+    fn history_paths_follow_the_prompts_numbers_when_a_key_frame_was_stored_first() {
+        let s = store("prompt-files");
+        // A key frame taken at 1.5 s, added after the stop, is stored before the person's picture from 1 s.
+        let mut v = items();
+        let Item::Image { capture, .. } = v[1].clone() else { panic!() };
+        let key = Capture { t_ms: 1500, png: png(90), auto: true, labels: vec![], element: None, ..capture };
+        v.insert(1, Item::Image { t_ms: 1500, capture: key });
+        let m = s.save(&v, 1_793_000_000_000, 2000).unwrap();
+        let files = s.prompt_files(&m.id);
+        assert!(files[0].ends_with("/image-1.png") && files[1].ends_with("/image-0.png"), "{files:?}");
+        assert_eq!(std::fs::read(&files[0]).unwrap(), png(200), "[image 1] is the picture taken first");
+        let plain = s.export_with(&m.id, true, false).unwrap().plain;
+        assert!(plain.contains(&format!("[image 1] `{}`  region 1x1", files[0])), "{plain}");
+        assert!(plain.ends_with(&format!("[image 2] `{}`  region 1x1", files[1])), "{plain}");
+    }
+
+    /// A History store under `<tmp>/pc-agents-<name>/data` and a handoff root beside it, `.../handoff`.
+    fn agents_lab(name: &str) -> (PathBuf, Store, PathBuf) {
+        let base = std::env::temp_dir().join(format!("pc-agents-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        (base.clone(), Store::new(&base.join("data")), base.join("handoff"))
+    }
+
+    /// `items()` with a second picture at 1.5 s.
+    fn two() -> Vec<Item> {
+        let mut v = items();
+        let Item::Image { capture, .. } = v[1].clone() else { panic!() };
+        v.insert(2, Item::Image { t_ms: 1500, capture: Capture { t_ms: 1500, png: png(90), labels: vec![], element: None, ..capture } });
+        v
+    }
+
+    /// Every file under `dir`, relative, with its bytes.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push((e.path().strip_prefix(dir).unwrap().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn folders(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(root).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    const AT: u64 = 1_793_000_000_000;
+
+    #[test]
+    fn a_copy_from_history_names_the_handoff_folder_that_still_holds_its_pictures() {
+        let (base, s, root) = agents_lab("kept");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let h = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        let data = snapshot(&base.join("data"));
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT + 1000).unwrap().plain;
+        let dir = h.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert!(plain.contains(&format!("[image 1] `{dir}/01.png`")), "{plain}");
+        assert!(plain.contains(&format!("[image 2] `{dir}/02.png`")), "{plain}");
+        assert!(!plain.contains("image-0.png"), "not History's own files: {plain}");
+        assert_eq!(folders(&root).len(), 1, "the folder is used as it is, no second one");
+        assert_eq!(snapshot(&base.join("data")), data, "History is left as it was");
+        assert_eq!(folders(&base), ["data", "handoff"], "nothing written beside the root");
+        // Picture paths off: no files named, nothing written.
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!s.export_for_agents(&m.id, None, false, AT).unwrap().plain.contains(".png"));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_copy_from_history_writes_the_handoff_folder_again_when_it_is_gone() {
+        let (base, s, root) = agents_lab("gone");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let first = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        std::fs::remove_dir_all(&first.dir).unwrap();
+        let files = s.agent_files(&m.id, &s.items(&m.id).unwrap(), &root, false, AT + 1000);
+        assert_eq!(files.len(), 2);
+        let dir = first.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert_eq!(files, [format!("{dir}/01.png"), format!("{dir}/02.png")], "named by the entry's time, as at stop");
+        assert_eq!((std::fs::read(&files[0]).unwrap(), std::fs::read(&files[1]).unwrap()), (png(200), png(90)));
+        assert!(Path::new(&format!("{dir}/manifest.json")).is_file());
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT + 2000).unwrap().plain;
+        assert!(plain.contains(&format!("`{dir}/02.png`")), "{plain}");
+        assert_eq!(folders(&root).len(), 1, "the second copy reuses the folder just written");
+        assert_eq!(folders(&base), ["data", "handoff"]);
+    }
+
+    #[test]
+    fn after_a_picture_is_edited_in_history_the_copy_points_at_fresh_files_and_the_old_folder_is_gone() {
+        let (base, s, root) = agents_lab("edited");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        let old = prompt::write_handoff(&root, &m.id, AT, &s.items(&m.id).unwrap(), AT, false).unwrap();
+        // Another entry's folder stays untouched.
+        let other = s.save(&items(), AT + 60_000, 2000).unwrap();
+        let theirs = prompt::write_handoff(&root, &other.id, AT + 60_000, &s.items(&other.id).unwrap(), AT, false).unwrap();
+        s.replace(&m.id, 2, &png(77), vec![]).unwrap();
+        let files = s.agent_files(&m.id, &s.items(&m.id).unwrap(), &root, false, AT + 1000);
+        assert_eq!((std::fs::read(&files[0]).unwrap(), std::fs::read(&files[1]).unwrap()), (png(200), png(77)), "the files match History now");
+        let ids: Vec<String> = folders(&root)
+            .iter()
+            .map(|f| serde_json::from_slice::<prompt::Manifest>(&std::fs::read(root.join(f).join("manifest.json")).unwrap()).unwrap().id)
+            .collect();
+        assert_eq!(ids.iter().filter(|i| **i == m.id).count(), 1, "one folder for the edited entry: {ids:?}");
+        assert_eq!(ids.len(), 2, "and the other entry's");
+        assert!(old.dir.join("manifest.json").is_file() && files[1].starts_with(&old.dir.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")), "the old folder was replaced in place, not left stale beside a new one");
+        assert_eq!(std::fs::read(theirs.dir.join("01.png")).unwrap(), png(200));
+        assert_eq!(folders(&base), ["data", "handoff"]);
+    }
+
+    #[test]
+    fn a_copy_from_history_whose_handoff_folder_cannot_be_written_names_historys_own_files() {
+        let (base, s, _) = agents_lab("unwritable");
+        let m = s.save(&two(), AT, 2000).unwrap();
+        // The root is a file: no folder can be made in it.
+        let root = base.join("blocked");
+        std::fs::write(&root, b"not a folder").unwrap();
+        let plain = s.export_for_agents(&m.id, Some(&root), false, AT).unwrap().plain;
+        let kept = s.prompt_files(&m.id);
+        assert_eq!(kept.len(), 2);
+        assert!(plain.contains(&format!("[image 1] `{}`", kept[0])) && plain.contains(&format!("[image 2] `{}`", kept[1])), "{plain}");
+        assert_eq!(std::fs::read(&root).unwrap(), b"not a folder");
+        assert_eq!(folders(&base), ["blocked", "data"]);
     }
 
     #[test]
@@ -763,6 +996,27 @@ mod tests {
     }
 
     #[test]
+    fn the_microphone_of_an_entry_is_kept_with_it_and_survives_a_new_run_and_new_words() {
+        let s = store("mic");
+        let said = |t: &str| [Item::Speech { t_ms: 0, end_ms: 900, text: t.into() }];
+        let a = s.save(&said("older"), 1_793_000_000_000, 900).unwrap();
+        let b = s.save(&said("newer"), 1_793_000_001_000, 900).unwrap();
+        let mic = MicRun { mic: "Headset (WH-1000XM4)".into(), open_ms: 1_420, peak_db: -71 };
+        s.note_mic(&b.id, &mic).unwrap();
+        s.note_run(&b.id, &Run { engine: "gpu".into(), transcribe_ms: 9, audio_ms: 900, ..Run::default() }).unwrap();
+        s.replace_speech(&b.id, &said("again")).unwrap();
+        let m = s.list().into_iter().find(|m| m.id == b.id).unwrap();
+        assert_eq!((m.mic.as_str(), m.mic_open_ms, m.mic_peak_db), ("Headset (WH-1000XM4)", 1_420, -71));
+        assert_eq!(s.recent_mics(5), vec![mic], "only entries that name their microphone count");
+        s.note_mic(&a.id, &MicRun { mic: "USB".into(), open_ms: 90, peak_db: -12 }).unwrap();
+        assert_eq!(s.recent_mics(1).len(), 1);
+        assert_eq!(s.recent_mics(5)[1].mic, "USB", "newest first");
+        let old: Meta = serde_json::from_str(r#"{"id":"x","created_ms":1,"duration_ms":2,"preview":"","images":0}"#).unwrap();
+        assert_eq!((old.mic, old.mic_open_ms, old.mic_peak_db), (String::new(), 0, 0), "an older entry reads with none");
+        assert!(s.note_mic("nope", &MicRun::default()).is_err());
+    }
+
+    #[test]
     fn an_entry_with_audio_and_no_words_says_how_to_get_them_while_it_can() {
         let s = store("no-words");
         s.append_audio(&tone(32_000)).unwrap();
@@ -840,7 +1094,7 @@ mod tests {
     }
 
     fn label(n: u32, text: &str) -> Label {
-        Label { n, text: text.into() }
+        Label { n, text: text.into(), ..Default::default() }
     }
 
     #[test]
@@ -867,6 +1121,36 @@ mod tests {
         let dir = s.history().join(&m.id);
         let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(left.iter().all(|f| !f.ends_with(".tmp")), "{left:?}");
+    }
+
+    #[test]
+    fn hidden_areas_marked_again_add_to_the_one_note_and_take_no_pin_number() {
+        let s = store("replace-hidden");
+        let m = s.save(&two_pictures(), 1_793_000_000_000, 2000).unwrap();
+        let new = png_of(3, 2, 10);
+        let mut first = vec![label(1, "too far left")];
+        prompt::note_hidden(&mut first, 1);
+        s.replace(&m.id, 1, &new, first).unwrap();
+        let mut again = vec![];
+        prompt::note_hidden(&mut again, 2);
+        s.replace(&m.id, 1, &new, again).unwrap();
+        let after = s.export(&m.id).unwrap();
+        let note = Label { n: 0, text: "3 areas hidden".into(), kind: prompt::LabelKind::Note };
+        assert_eq!(after.images[0].labels, vec![label(1, "this one"), label(2, "too far left"), note]);
+        assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; 2=too far left; 3 areas hidden]"#), "{}", after.plain);
+    }
+
+    #[test]
+    fn steps_added_to_a_stored_picture_stay_steps_and_are_numbered_on_from_its_labels() {
+        let s = store("replace-steps");
+        let m = s.save(&two_pictures(), 1_793_000_000_000, 2000).unwrap();
+        let step = |n: u32, text: &str| Label { n, text: text.into(), kind: prompt::LabelKind::Step };
+        s.replace(&m.id, 1, &png_of(3, 2, 10), vec![step(1, ""), step(2, "save")]).unwrap();
+        let after = s.export(&m.id).unwrap();
+        assert_eq!(after.images[0].labels, vec![label(1, "this one"), step(2, ""), step(3, "save")]);
+        assert!(after.plain.contains(r#"[image 1: button "Place order"; 1=this one; steps: 2, 3=save]"#), "{}", after.plain);
+        // Read back from disk, the stored pin (written before steps had a kind) is still a pin.
+        assert_eq!(s.picture(&m.id, 1).unwrap().labels[0].kind, prompt::LabelKind::Pin);
     }
 
     #[test]

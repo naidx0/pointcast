@@ -2,9 +2,10 @@
 use crate::prompt::{assemble_clipboard_files, Item};
 use crate::settings::OutputMode;
 
-/// `files` are the pictures' files in History, named in the plain text; none leaves the markers as they were.
-pub fn copy_session(items: &[Item], files: &[String]) -> Result<(String, String), String> {
-    let payload = assemble_clipboard_files(items, files);
+/// `files` are the pictures' files in History, named in the plain text; none leaves the markers as they were. `tidy`
+/// puts the text in paragraphs.
+pub fn copy_session(items: &[Item], files: &[String], tidy: bool) -> Result<(String, String), String> {
+    let payload = assemble_clipboard_files(items, files, tidy);
     if payload.plain.is_empty() && payload.html.is_empty() {
         return Err("nothing to copy".into());
     }
@@ -238,20 +239,20 @@ fn send_paste() -> Result<(), String> {
     Ok(())
 }
 
-pub fn deliver(items: &[Item], files: &[String], mode: OutputMode, also_clipboard: bool) -> Result<String, String> {
+pub fn deliver(items: &[Item], files: &[String], mode: OutputMode, also_clipboard: bool, tidy: bool) -> Result<String, String> {
     match mode {
         OutputMode::Clipboard => {
-            copy_session(items, files)?;
+            copy_session(items, files, tidy)?;
             Ok("Copied to clipboard".into())
         }
         OutputMode::AutoPaste => {
-            copy_session(items, files)?;
+            copy_session(items, files, tidy)?;
             paste_now()?;
             Ok("Pasted into the focused app".into())
         }
         OutputMode::Folder => {
             if also_clipboard {
-                let _ = copy_session(items, files);
+                let _ = copy_session(items, files, tidy);
             }
             Ok("Exported".into())
         }
@@ -288,6 +289,7 @@ mod tests {
         let _ = (OutputMode::Clipboard, png(), Label {
             n: 1,
             text: "x".into(),
+            ..Default::default()
         }, CaptureKind::Full, Capture {
             id: 1,
             kind: CaptureKind::Full,

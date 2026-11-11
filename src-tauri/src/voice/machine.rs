@@ -35,10 +35,15 @@ pub fn probe(ms: u64) -> u64 {
     n
 }
 
+/// This machine, measured once per launch.
+pub fn this() -> &'static Machine {
+    static M: std::sync::OnceLock<Machine> = std::sync::OnceLock::new();
+    M.get_or_init(measure)
+}
+
 /// The recommendation for this machine, measured once per launch.
 pub fn recommended() -> &'static str {
-    static R: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    R.get_or_init(|| recommend(&measure()))
+    recommend(this())
 }
 
 /// Which model this machine should start with: Whisper Turbo on the graphics card where one can run it, else Moonshine.

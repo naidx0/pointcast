@@ -51,9 +51,9 @@ the one-line install avoids: on macOS, drag Pointcast to Applications, then righ
 the first time (on macOS 15: **System Settings → Privacy & Security → Open Anyway**); on Windows, choose
 **More info → Run anyway**.
 
-A setup assistant then takes about a minute: allow access, pick a speech model, try the shortcuts and
-make a practice recording. Pointcast opens at login from then on and updates itself from
-**Settings → General**.
+A setup assistant then takes about a minute: allow access, try the shortcuts and make a practice
+recording while the recommended speech model downloads. Pointcast opens at login from then
+on and updates itself from **Settings → General**.
 
 ## How it works
 
@@ -70,6 +70,8 @@ and you can hold the key while you talk instead of tapping it.
 
 ## Features
 
+### Talk
+
 - **On-device speech.** Pick a model once; it downloads and then runs offline.
 
   | Model | Download | Best for |
@@ -81,40 +83,114 @@ and you can hold the key while you talk instead of tapping it.
   | Parakeet v3 | 487 MB | 25 European languages, detected automatically. |
 
   Whisper Turbo runs on your graphics card through [whisper.cpp](https://github.com/ggml-org/whisper.cpp):
-  any Vulkan GPU on Windows and Linux, Metal on a Mac, with beam search for fewer wrong words than the
-  processor build. On an RTX 2060 Super it transcribes a 10-second sentence in under a second. Without a
-  usable graphics card it falls back to the processor, and Settings says which one it runs on. The
-  574 MB model and a small helper program download with it; there is nothing else to install.
+  any Vulkan GPU on Windows and Linux, Metal on a Mac. Without a usable graphics card it falls back to the
+  processor, and Settings says which one it runs on. If you start on the processor version, Pointcast fetches the
+  graphics card version in the background while you are not recording and checks once that your card runs
+  it. Turn that off with "Get the faster GPU version by itself" in Settings › Speech.
+- **The same audio gives the same words.** Transcribing a recording again gives the same text every time.
+- **Every word after the press.** The microphone opens first, and the red dot shows as soon as audio is
+  flowing. A microphone that is slow to start gets a "Getting ready…" line until it is.
+- **Short replies are heard in context.** A short piece ("yes", "no, the other one") is decoded with the
+  audio before it, so it is not guessed from a second of sound.
+- **Tidy the text.** Paragraphs at your pauses, repeated words and a standalone "um" removed. Nothing is
+  reworded or summarized. Turn it off in Settings › Output.
+- **History and Transcribe again.** The last 100 prompts are kept on this computer. **Transcribe again**
+  writes a recording down afresh, for example after switching to a larger model. Each prompt says how it
+  was transcribed, such as "Transcribed on your graphics card (RTX 2060 SUPER) in 6 s · 20x real time".
+  **Undo** brings back a deleted entry for 5 seconds.
 
-  The fast engine installs itself. If you use Whisper Turbo on the processor (from an earlier version, say),
-  Pointcast downloads the graphics card version in the background while you are not recording, checks once
-  that your graphics card runs it, and uses it from then on; the Whisper Turbo card in Settings › Speech
-  shows how far it is, with a Cancel. A computer whose graphics card cannot run it keeps the processor
-  version and is not asked again. To turn this off, switch off "Get the faster GPU version by itself" in
-  Settings › Speech. Each prompt in History says how it was transcribed: "Transcribed on your graphics card
-  (RTX 2060 SUPER) in 6 s · 20x real time" means Whisper ran on that card, at 20 times the speed of the
-  recording; "on your processor" means it did not, and a graphics card would be much faster.
+### Point
 
-- **Mark-up tools.** The screen freezes; drag a box, then use pins with labels (P), arrows (A),
-  rectangles (R), the highlighter (H), the pen (D), text (T) and a 2× magnifier (M). Five colors,
-  undo and redo. **Return** captures, **Esc** steps back.
+- **Mark-up tools.** The screen freezes; drag a box, then pick a tool. Keys 1 to 5 pick the color.
+
+  | Tool | Key | What it does |
+  | --- | --- | --- |
+  | Pin | P | A numbered dot with a label |
+  | Step | S | A marker that counts up by itself: 1, 2, 3 |
+  | Arrow | A | Points at something |
+  | Rectangle | R | Outlines an area |
+  | Highlighter | H | Marks over text |
+  | Pen | D | Freehand |
+  | Text | T | A note on the picture |
+  | Magnify 2x | M | A 2x loupe on a detail |
+  | Redact | X | Hides an area |
+
+  **C** crops the picture after capture; marks stay where they are. **Return** captures, **Esc** steps
+  back, **Cancel** leaves without capturing.
 - **Pointing marks.** Rest the pointer on something for half a second and it gets a ring. The button,
   link or field under it is outlined and named in the prompt, like `button "Place order"`. Say "this"
   or "here" and the spot you pointed at in that moment is marked. Each is a switch in
   **Settings → Capture**.
-- **History and Transcribe again.** The last 100 prompts are kept on this computer. Click a picture to
-  mark it up again. **Transcribe again** writes a recording down afresh, for example after switching to
-  a larger model.
-- **Pastes anywhere.** Chat apps get the pictures inline; plain text with `[image n]` markers is the
-  fallback. A recording with no pictures is plain dictation. You can also copy only, or save a
-  `prompt.md` with PNGs (**Settings → Output**).
-- **Pictures as file paths.** The prompt names each picture's file, so terminal agents such as Claude
-  Code can open the screenshots.
-- **Coding agents over MCP.** A local server lets Claude Code, Cursor and Codex fetch the latest prompt
-  themselves. **Settings → Output → Agent setup** copies the setup for each one.
-- **Native on each OS.** System Settings layout and system fonts on macOS; Mica, Segoe UI Variable and
-  a Windows 11 Settings layout on Windows. Light and dark follow the system.
-- **Private by default.** See below.
+
+### Paste
+
+- **Short markers and one picture list.** The text carries `[image 1]`, `[image 2]` where you took the
+  pictures. At the end, one list names each picture with its path, kind, size and marks, such as
+  `[image 1] region 933x73 · pins: 1=too far left`. Switch the paths off in **Settings → Output**.
+- **A folder an agent can open.** Each recording's pictures are saved as `~/Pointcast/<date_time>/01.png`,
+  `02.png` and so on, in the order of the prompt, with a `prompt.md` and a `manifest.json`. Folders are
+  deleted after 7 days or beyond the newest 30. Only folders Pointcast wrote are touched.
+- **Copy from History is the same.** It uses the same markers, list and folder.
+- **Pastes anywhere.** The prompt is plain text; the pictures are also on the clipboard as HTML, and apps
+  differ in whether they take them. You can also copy only, or save a `prompt.md` with PNGs
+  (**Settings → Output**).
+
+### Lean
+
+- **One small process when idle.** The speech engine is freed one minute after its last use, and the
+  hidden capsule and overlay windows go after a minute. Loading the engine again happens while you talk.
+  In **Settings › Speech**, choose 1, 5, 10 or 30 minutes, or Never.
+
+### This computer
+
+- **The microphone.** **Settings › Speech** shows the microphone in use with a live level, and says
+  when it is silent, very quiet or slow to start. Each recording remembers which microphone it used, and
+  History says if it was silent or slow.
+- **The graphics card and speed.** A short block names your card, the engine in use and how fast it runs
+  here, and says what to do if the card could help.
+
+## Coding agents over MCP
+
+With **Share over MCP** on, Pointcast runs an MCP server on this computer (`http://127.0.0.1:47821/mcp`,
+streamable HTTP, protocol 2025-06-18). In **Settings › Output › Agents**, **Set up** adds a `pointcast`
+entry with this computer's key to the agent's own user settings, changes nothing else in that file (the
+first change keeps a `.pointcast-backup` copy), then checks that the server answers. **Remove** takes out
+only that entry. Set up turns sharing on if it was off.
+
+| Agent | File | Entry |
+|---|---|---|
+| Claude Code | `~/.claude.json` | `mcpServers.pointcast`: `type: "http"`, `url`, `headers.Authorization` |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers.pointcast`: `url`, `headers.Authorization` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.pointcast]`: `url`, `http_headers = { Authorization = ... }` |
+
+An agent that is not on this computer is never set up; **Copy command** or **Copy entry** gives you the
+same entry to add by hand. Never put it in a project file: the key is this computer's. Five tool names:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `pointcast_latest` | `images?`, `copy_to?` | The last prompt with its pictures |
+| `pointcast_get` | `id`, `images?`, `copy_to?` | A prompt from History |
+| `pointcast_list` | `limit?` (10) | The newest prompts: id, when, length, first words, picture count |
+| `pointcast_shot` | `id`, `n` | Picture `n` at full size |
+| `get_latest_session` | | The older name for `pointcast_latest` |
+
+Ask your agent "get my latest Pointcast prompt". The result is the prompt's text, then for each picture a caption such as
+`[image 1] region 933x73 · pins: 1=too far left` followed by the picture as an image. Pictures are scaled
+down to 1568 px on the long side, and a large one is sent as a JPEG (a PNG over 256 KB). One result holds
+about 18,000 tokens and 1.5 MB of images; the rest come as file links, and `pointcast_shot` shows any one
+of them. `images: "links"` gives only links, `"none"` only text.
+
+`copy_to` takes your project's absolute path and copies the pictures and `prompt.md` into
+`<project>/.pointcast/<time>/`, for agents that read only files inside the project. Pointcast writes
+nothing else there. Add `.pointcast/` to your `.gitignore`.
+
+Agents that limit file reads to the project can also be allowed to read `~/Pointcast`, where the
+pictures are kept:
+
+- Claude Code: `"permissions": { "additionalDirectories": ["~/Pointcast"] }` in `~/.claude/settings.json`
+  (**Let Claude Code open the pictures folder** in Settings › Output adds it for you).
+- Gemini CLI: `gemini --include-directories ~/Pointcast`.
+- OpenCode: `"permission": { "external_directory": "allow" }` in `opencode.json`.
 
 ## Privacy
 
@@ -126,6 +202,8 @@ and you can hold the key while you talk instead of tapping it.
 - Password managers (1Password, Bitwarden, KeePass, Dashlane, LastPass, Keeper, NordPass, Enpass,
   RoboForm, Proton Pass, Keychain Access, Credential Manager, Windows Security) are painted out before
   a picture is kept. Add your own apps in **Settings → Capture → Never capture**.
+- Hidden areas (Redact) are replaced in the saved picture, and a recording with one carries no key frames.
+  While you are marking up, the on-screen magnifier can still enlarge an area.
 - The MCP server listens only on this computer, needs this computer's key and refuses web pages.
 - Pointcast goes online only to download a speech model and, once a day, to ask GitHub whether a newer
   version is out. Turn that off in **Settings → General**.
@@ -139,6 +217,14 @@ and you can hold the key while you talk instead of tapping it.
   and farther speech** on. Turn it off if it ever makes your voice sound wrong.
 - **A shortcut does nothing.** Another app may own it. **Settings → Shortcuts** says which one is taken;
   click it and press new keys.
+- **The first words are missing.** Wait for the red dot before you talk; a microphone that is slow to
+  start shows "Getting ready…" until audio flows. **Settings › Speech** says when a microphone is slow to start (Bluetooth headsets
+  are); a wired one starts at once.
+- **No sound from this microphone.** Check it is not muted, or pick another one in **Settings › Speech**,
+  which also shows its live level.
+- **An agent cannot open the pictures.** Turn on **Let Claude Code open the pictures folder**
+  (Settings › Output), or allow `~/Pointcast` in your agent (see above), or have it call
+  `pointcast_latest` with `copy_to` set to your project.
 - **Transcription is slow.** Pointcast says when a model is slower than real time on your computer.
   Pick **Moonshine Base** in **Settings → Speech**.
 - **Transcribing at the end takes long.** The capsule shows a progress bar; **Cancel** saves what is

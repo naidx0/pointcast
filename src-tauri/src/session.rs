@@ -56,6 +56,11 @@ pub struct UiState {
     /// Where the engine in memory transcribes, for the HUD: "your graphics card" or "your processor". None before a
     /// model is loaded.
     pub engine_label: Option<&'static str>,
+    /// After a stop, the History entry the prompt was saved as, so the capsule's notice can open it. None when nothing
+    /// was saved.
+    pub entry: Option<String>,
+    /// Auto-paste was chosen but the OS would not take it (macOS without Accessibility), so the prompt was copied.
+    pub paste_blocked: bool,
 }
 
 impl Default for UiState {
@@ -78,7 +83,18 @@ impl Default for UiState {
             progress: None,
             preparing_gpu: false,
             engine_label: None,
+            entry: None,
+            paste_blocked: false,
         }
+    }
+}
+
+/// Notes the engine used when it goes out of scope, on every way out of a stop.
+struct Used<'a>(&'a App);
+
+impl Drop for Used<'_> {
+    fn drop(&mut self) {
+        self.0.note_use();
     }
 }
 
@@ -91,6 +107,12 @@ pub struct App {
     take_no: AtomicU64,
     stop: AtomicBool,
     mic: Mutex<Option<Mic>>,
+    /// How a recording opens the microphone (`Mic::open`; tests put a slow one in its place).
+    open_mic: fn(Option<String>, Arc<Take>) -> Result<Mic, String>,
+    /// The recording whose microphone has opened or failed to, and the one whose model has loaded or failed to: the HUD
+    /// says it records only once both have.
+    mic_tried: AtomicU64,
+    loaded: AtomicU64,
     take: Mutex<Option<Arc<Take>>>,
     engine: Mutex<Option<Engine>>,
     /// Whether the engine in memory was loaded with the GPU version of its model here, so one set up since is loaded.
@@ -105,6 +127,9 @@ pub struct App {
     loading: Mutex<()>,
     /// How the last attempt to load the model and run it went; none before the first.
     checked: Mutex<Option<Result<(), String>>>,
+    /// When the engine was last loaded or heard a piece, or a recording or a Transcribe again ended: the idle loop frees
+    /// the engine a while after it.
+    used: Mutex<Option<std::time::Instant>>,
     /// Held for the whole of a stop, so a second stop or a Quit waits for it instead of racing it.
     finishing: Mutex<()>,
     /// Set by Discard: the worker skips transcribing what is left.
@@ -162,6 +187,8 @@ pub struct App {
     pub hotkey_errors: Mutex<Vec<(String, String)>>,
     /// Mic opened outside a session (onboarding level meter).
     pub monitor: Mutex<Option<(Mic, Arc<Take>)>>,
+    /// When the monitor closes unless asked again (Settings asks every second or so while it shows the meter).
+    monitor_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl App {
@@ -179,6 +206,15 @@ impl App {
             take_no: AtomicU64::new(0),
             stop: AtomicBool::new(true),
             mic: Mutex::default(),
+            #[cfg(not(test))]
+            open_mic: Mic::open,
+            // A test never opens the machine's microphone: a test owns its specimen, and many opens at once from
+            // parallel tests crash the audio library on Linux. It hears silence; the measurements that want the real
+            // one ask for it.
+            #[cfg(test)]
+            open_mic: |_, take| Ok(Mic::from_samples(Vec::new(), take)),
+            mic_tried: AtomicU64::new(0),
+            loaded: AtomicU64::new(0),
             take: Mutex::default(),
             engine: Mutex::default(),
             engine_gpu: AtomicBool::new(false),
@@ -187,6 +223,7 @@ impl App {
             ran: Mutex::default(),
             loading: Mutex::default(),
             checked: Mutex::default(),
+            used: Mutex::default(),
             finishing: Mutex::default(),
             cancel: AtomicBool::new(false),
             audio_at: AtomicU64::new(0),
@@ -217,6 +254,7 @@ impl App {
             hold_from: Mutex::default(),
             hotkey_errors: Mutex::default(),
             monitor: Mutex::default(),
+            monitor_until: Mutex::default(),
         })
     }
 
@@ -225,8 +263,11 @@ impl App {
         if let Some(t) = self.take.lock().unwrap().as_ref() {
             s.level = t.level();
         }
+        // The clock runs from the first audio: before the microphone is live a recording has recorded nothing.
         if let Some(t0) = *self.t0.lock().unwrap() {
-            s.duration_ms = now_ms().saturating_sub(t0);
+            let getting_ready = matches!(s.phase, Phase::Recording | Phase::Loading) && !s.mic;
+            let from = t0 + self.audio_at.load(Ordering::SeqCst);
+            s.duration_ms = if getting_ready { 0 } else { now_ms().saturating_sub(from) };
         }
         s.behind_ms = self.behind.load(Ordering::SeqCst) * 1000 / audio::RATE as u64;
         let (heard, spent) = *self.pace.lock().unwrap();
@@ -275,7 +316,23 @@ impl App {
     pub fn ensure_engine(&self) -> Result<(), String> {
         let r = self.load_engine();
         *self.checked.lock().unwrap() = Some(r.clone());
+        self.note_use();
         r
+    }
+
+    /// The engine was just used: the time to free it counts from now.
+    fn note_use(&self) {
+        *self.used.lock().unwrap() = Some(std::time::Instant::now());
+        crate::wake();
+    }
+
+    /// When the engine in memory was last used; none when none is in memory. One at work right now is used now.
+    pub fn engine_used(&self) -> Option<std::time::Instant> {
+        match self.engine.try_lock() {
+            Ok(g) if g.is_none() => None,
+            Ok(_) => Some(self.used.lock().unwrap().unwrap_or_else(std::time::Instant::now)),
+            Err(_) => Some(std::time::Instant::now()),
+        }
     }
 
     fn load_engine(&self) -> Result<(), String> {
@@ -322,6 +379,7 @@ impl App {
 
     /// The engine heard a piece: note where it runs now, and say it when it can hear nothing any more.
     fn after_piece(&self, eng: &Engine) -> Option<String> {
+        self.note_use();
         *self.backend.lock().unwrap() = Some((eng.model().to_string(), eng.backend()));
         *self.ran.lock().unwrap() = Some((eng.label(), eng.device()));
         let failed = eng.failure();
@@ -376,6 +434,34 @@ impl App {
             Phase::Transcribing => return Err(BUSY.into()),
             _ => {}
         }
+        // The microphone opens first, on its own thread, before anything that touches the disk: every word after the
+        // press is kept, and the start never waits for the device. It says it records once the first samples arrive.
+        self.cancel.store(false, Ordering::SeqCst);
+        self.stop.store(false, Ordering::SeqCst);
+        let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        self.items.lock().unwrap().clear();
+        *self.t0.lock().unwrap() = Some(now_ms());
+        self.audio_at.store(0, Ordering::SeqCst);
+        {
+            let mut st = self.state.lock().unwrap();
+            st.phase = Phase::Loading;
+            st.error = None;
+            st.partial.clear();
+            st.notice = None;
+            st.entry = None;
+            st.paste_blocked = false;
+            st.text.clear();
+            st.mic = false;
+            st.screen = true;
+        }
+        let settings = self.settings.lock().unwrap().clone();
+        let take = Arc::new(Take::default());
+        *self.take.lock().unwrap() = Some(take.clone());
+        let me = Arc::clone(self);
+        let (device, t2) = (settings.device.clone(), take.clone());
+        std::thread::spawn(move || me.open_for(no, device, t2));
+        // The idle scheduler pulses the HUD while the session runs.
+        crate::wake();
         self.monitor_off();
         // The background GPU upgrade never runs beside a recording: it stops where it is and goes on later.
         crate::voice::upgrade::pause();
@@ -384,41 +470,6 @@ impl App {
         if self.history.recover().is_none() {
             self.history.clear_checkpoint();
         }
-        self.cancel.store(false, Ordering::SeqCst);
-        self.stop.store(false, Ordering::SeqCst);
-        self.items.lock().unwrap().clear();
-        *self.t0.lock().unwrap() = Some(now_ms());
-        {
-            let mut st = self.state.lock().unwrap();
-            st.phase = Phase::Loading;
-            st.error = None;
-            st.partial.clear();
-            st.notice = None;
-            st.text.clear();
-            st.mic = false;
-            st.screen = true;
-        }
-        let settings = self.settings.lock().unwrap().clone();
-        let take = Arc::new(Take::default());
-        match Mic::open(settings.device.clone(), take.clone()) {
-            Ok(mic) => {
-                let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
-                self.audio_at.store(now_ms().saturating_sub(t0), Ordering::SeqCst);
-                *self.mic.lock().unwrap() = Some(mic);
-                *self.take.lock().unwrap() = Some(take.clone());
-                self.state.lock().unwrap().mic = true;
-            }
-            Err(e) => {
-                let mut st = self.state.lock().unwrap();
-                st.error = Some(format!("Microphone: {e}"));
-            }
-        }
-        // The worker loads the model if it is not in memory yet; audio waits in the take meanwhile. A model busy with a
-        // piece of a History entry transcribed again is in memory: the start never waits for that piece.
-        if self.engine.try_lock().map_or(true, |e| e.is_some()) {
-            self.state.lock().unwrap().phase = Phase::Recording;
-        }
-        let no = self.take_no.fetch_add(1, Ordering::SeqCst) + 1;
         self.trail.lock().unwrap().clear();
         self.tokens.lock().unwrap().clear();
         // Nothing of the last recording's audio is written for this one; its worker says what it keeps.
@@ -429,6 +480,81 @@ impl App {
         let me = Arc::clone(self);
         *self.worker.lock().unwrap() = Some(std::thread::spawn(move || me.worker(no, take)));
         Ok(())
+    }
+
+    /// Whether recording `no` is still the one under way.
+    fn current(&self, no: u64) -> bool {
+        !self.stop.load(Ordering::SeqCst) && self.take_no.load(Ordering::SeqCst) == no
+    }
+
+    /// Open the microphone for recording `no` into `take`, and say it records once the first samples arrive. The audio
+    /// starts `audio_at` into the session: from the press to when the first sample was heard. A microphone that opens
+    /// after its recording stopped is closed at once.
+    fn open_for(&self, no: u64, device: Option<String>, take: Arc<Take>) {
+        match (self.open_mic)(device.clone(), take.clone()) {
+            Ok(mic) => {
+                // The device opened names itself; one that does not is the one asked for.
+                if take.device().is_none() {
+                    *take.device.lock().unwrap() = device;
+                }
+                {
+                    // A stop sets its flag before it takes the microphone under this lock: one of the two closes it.
+                    let mut m = self.mic.lock().unwrap();
+                    if !self.current(no) {
+                        return;
+                    }
+                    *m = Some(mic);
+                }
+                while take.first_at().is_none() {
+                    if !self.current(no) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let mut st = self.state.lock().unwrap();
+                if !self.current(no) {
+                    return;
+                }
+                self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+                st.mic = true;
+            }
+            Err(e) => {
+                if self.current(no) {
+                    self.state.lock().unwrap().error = Some(format!("Microphone: {e}"));
+                }
+            }
+        }
+        self.mic_tried.store(no, Ordering::SeqCst);
+        self.settle(no);
+    }
+
+    /// What the microphone of `take` did, for History: its name, how long after the press its first sample came (all of
+    /// the recording when none came) and its loudest sample. None for a take no microphone opened.
+    fn mic_run(&self, take: &Take) -> Option<crate::history::MicRun> {
+        let mic = take.device()?;
+        let open_ms = match take.first_at() {
+            Some(_) => self.lead_in(take),
+            None => now_ms().saturating_sub(self.t0.lock().unwrap().unwrap_or_else(now_ms)),
+        };
+        Some(crate::history::MicRun { mic, open_ms, peak_db: take.peak_db() })
+    }
+
+    /// Milliseconds from the press to the first sample of `take`; 0 before audio flows. Fixed by the take, so whoever
+    /// reads it first (the microphone's thread, the worker, a stop cut short) gets the same.
+    fn lead_in(&self, take: &Take) -> u64 {
+        let t0 = self.t0.lock().unwrap().unwrap_or_else(now_ms);
+        take.first_at().map_or(0, |f| f.saturating_sub(t0))
+    }
+
+    /// Recording `no` records, on the HUD, once its microphone has opened (or failed to, which the HUD says) and the
+    /// model is in memory (or failed to load). A model busy with a piece of a History entry transcribed again is in
+    /// memory: the start never waits for that piece.
+    fn settle(&self, no: u64) {
+        let mut st = self.state.lock().unwrap();
+        let model = self.loaded.load(Ordering::SeqCst) == no || self.engine.try_lock().map_or(true, |e| e.is_some());
+        if self.current(no) && st.phase == Phase::Loading && self.mic_tried.load(Ordering::SeqCst) == no && model {
+            st.phase = Phase::Recording;
+        }
     }
 
     /// Only the recording started while onboarding asked for practice is a practice run.
@@ -455,6 +581,8 @@ impl App {
         if !matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
             return Ok(None);
         }
+        // However the stop ends, the engine's free time counts from its end.
+        let _used = Used(self);
         self.cancel.store(cancel, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         // A Cancel can only be meant for this stop once it waits.
@@ -485,6 +613,7 @@ impl App {
             p.finish();
         }
         let audio_ms = self.take.lock().unwrap().as_ref().map_or(0, |t| t.len() as u64 * 1000 / audio::RATE as u64);
+        let mic_run = self.take.lock().unwrap().as_ref().and_then(|t| self.mic_run(t));
         *self.take.lock().unwrap() = None;
         if cancel {
             self.items.lock().unwrap().clear();
@@ -506,12 +635,13 @@ impl App {
         if self.practice.load(Ordering::SeqCst) {
             self.history.clear_checkpoint();
             self.state.lock().unwrap().phase = Phase::Ready;
-            return Ok(Some(prompt::assemble_export(&items)));
+            return Ok(Some(prompt::assemble_export_files(&items, &[], settings.tidy)));
         }
         // The checkpoint goes only once History has the prompt: a failed save leaves it for
         // the next launch to recover. A recording that came back with no words keeps its audio there, to transcribe
         // again; only one with neither is let go.
         let mut saved = None;
+        let mut created_ms = 0;
         let mut has_audio = false;
         if items.is_empty() && !self.history.kept_audio() {
             self.history.clear_checkpoint();
@@ -520,33 +650,42 @@ impl App {
             let save = if partial { crate::history::Store::save_partial } else { crate::history::Store::save_recorded };
             if let Ok(m) = save(&self.history, &items, t0, now_ms().saturating_sub(t0)) {
                 let _ = self.history.note_run(&m.id, &self.run(self.pace.lock().unwrap().1, audio_ms));
+                if let Some(r) = &mic_run {
+                    let _ = self.history.note_mic(&m.id, r);
+                }
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
+                created_ms = m.created_ms;
                 saved = Some(m.id);
                 self.history.clear_checkpoint();
             }
         }
-        // Saved, the prompt can name its pictures' files for agents in a terminal; unsaved, it marks them as before.
+        // Saved, the pictures are copied to a handoff folder and the prompt lists their files for agents in a terminal;
+        // unsaved, it marks them as before.
         let files = match &saved {
-            Some(id) if settings.picture_paths => self.history.files(id),
-            _ => vec![],
+            Some(id) => agent_files(&self.history, &prompt::handoff_root(&settings), id, created_ms, &items, settings.picture_paths, settings.tidy),
+            None => vec![],
         };
-        let exp = prompt::assemble_export_files(&items, &files);
+        let exp = prompt::assemble_export_files(&items, &files, settings.tidy);
         *self.last_export.lock().unwrap() = Some(exp.clone());
         let audio_kept = saved.is_some();
+        let entry = saved.clone();
         self.latest.set(saved, exp.clone());
         // History keeps every prompt; a folder in Documents only when the user chose Save.
         if settings.output == OutputMode::Folder {
             let dir = export_dir(&settings, &chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
             let _ = std::fs::create_dir_all(&dir);
-            if let Ok(p) = prompt::export_folder(&items, &dir) {
+            if let Ok(p) = prompt::export_folder(&items, &dir, settings.tidy) {
                 *self.last_dir.lock().unwrap() = Some(p.parent().unwrap_or(&dir).to_path_buf());
             }
         }
-        let mode = paste_or_copy(settings.output, crate::permissions::can_paste());
-        let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard);
+        let can_paste = crate::permissions::can_paste();
+        let mode = paste_or_copy(settings.output, can_paste);
+        let delivered = crate::clipboard::deliver(&items, &files, mode, settings.also_clipboard, settings.tidy);
         let mut st = self.state.lock().unwrap();
         st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
+        st.entry = entry;
+        st.paste_blocked = paste_blocked(settings.output, can_paste);
         st.phase = Phase::Ready;
         Ok(Some(exp))
     }
@@ -599,7 +738,11 @@ impl App {
         self.abort_piece();
         self.state.lock().unwrap().partial.clear();
         if let (Some((mut held, read)), Some(take)) = (unsaved.take(), self.take.lock().unwrap().clone()) {
-            held.extend(take.read_from(read));
+            let rest = take.read_from(read);
+            if read == 0 && !rest.is_empty() {
+                held.resize(self.lead_in(&take) as usize * audio::RATE as usize / 1000, 0.0);
+            }
+            held.extend(rest);
             let _ = self.history.append_audio(&held);
         }
     }
@@ -628,25 +771,60 @@ impl App {
         }
     }
 
-    /// Open the mic without a session; `level()` reads it.
-    pub fn monitor_on(&self) -> Result<(), String> {
+    /// Open the mic without a session; `monitor_level` reads it. With a `lease`, it closes by itself unless asked again
+    /// within that time: a window that stops asking (gone, asleep, minimised) never leaves the microphone open.
+    pub fn monitor_on(&self, lease: Option<std::time::Duration>) -> Result<(), String> {
         let mut m = self.monitor.lock().unwrap();
+        *self.monitor_until.lock().unwrap() = lease.map(|l| std::time::Instant::now() + l);
         if m.is_some() {
             return Ok(());
         }
         let device = self.settings.lock().unwrap().device.clone();
         let take = Arc::new(Take::default());
-        let mic = Mic::open(device, take.clone())?;
+        let mic = (self.open_mic)(device, take.clone())?;
         *m = Some((mic, take));
         Ok(())
     }
 
     pub fn monitor_off(&self) {
         self.monitor.lock().unwrap().take();
+        *self.monitor_until.lock().unwrap() = None;
     }
 
     pub fn monitor_level(&self) -> Option<f32> {
-        self.monitor.lock().unwrap().as_ref().map(|(_, t)| t.level())
+        self.monitor_read().map(|r| r.0)
+    }
+
+    /// The monitor's level now and the loudest sample since the last read (dBFS); None once it is off, or its lease ran
+    /// out (which closes it). What it heard is let go at each read.
+    pub fn monitor_read(&self) -> Option<(f32, i32)> {
+        if self.monitor_until.lock().unwrap().is_some_and(|t| std::time::Instant::now() >= t) {
+            self.monitor_off();
+            return None;
+        }
+        let m = self.monitor.lock().unwrap();
+        let t = &m.as_ref()?.1;
+        let loud = t.drain().iter().fold(0f32, |m, v| m.max(v.abs()));
+        Some((t.level(), audio::db(loud)))
+    }
+
+    /// Listen to each of `names` for `ms` in turn and say how loud each got (dBFS), to find a microphone that hears the
+    /// person when the chosen one does not. Never beside a recording. A Bluetooth headset's hands-free input is left
+    /// alone: opening it switches the headset's sound to phone quality.
+    pub fn scan_inputs(&self, names: &[String], ms: u64) -> Vec<(String, i32)> {
+        let mut out = vec![];
+        for n in names.iter().filter(|n| !n.contains("Hands-Free")).take(4) {
+            if matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
+                break;
+            }
+            let take = Arc::new(Take::default());
+            if let Ok(mic) = (self.open_mic)(Some(n.clone()), take.clone()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                drop(mic);
+                out.push((n.clone(), take.peak_db()));
+            }
+        }
+        out
     }
 
     pub fn inject_speech(&self, text: &str) {
@@ -848,7 +1026,21 @@ impl App {
     /// Make a history entry the one "Paste Last Prompt" uses. When coding agents read that entry, they read it as it
     /// is now (after a picture in it was edited).
     pub fn set_last(&self, id: &str) -> Result<SessionExport, String> {
-        let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
+        let s = self.settings.lock().unwrap().clone();
+        let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
+        self.make_last(id, exp)
+    }
+
+    /// `set_last` for a copy, paste or send from History: with picture paths on, the prompt names the entry's handoff
+    /// folder, kept while it holds these pictures and written again when it does not (`Store::agent_files`).
+    pub fn copy_from_history(&self, id: &str) -> Result<SessionExport, String> {
+        let s = self.settings.lock().unwrap().clone();
+        let root = s.picture_paths.then(|| prompt::handoff_root(&s));
+        let exp = self.history.export_for_agents(id, root.as_deref(), s.tidy, now_ms())?;
+        self.make_last(id, exp)
+    }
+
+    fn make_last(&self, id: &str, exp: SessionExport) -> Result<SessionExport, String> {
         *self.last_export.lock().unwrap() = Some(exp.clone());
         *self.last_id.lock().unwrap() = Some(id.to_string());
         self.latest.changed(id, &exp);
@@ -878,19 +1070,26 @@ impl App {
     /// starts; a refusal or failure leaves the entry as it was.
     pub fn retranscribe(&self, id: &str, progress: impl FnMut(u64, u64)) -> Result<(), String> {
         crate::voice::upgrade::pause();
-        let hear = |s: &[f32], voiced: u64| -> Result<Option<Heard>, String> {
+        self.again(id, || self.ensure_engine(), self.hearing(), progress)
+    }
+
+    /// How a recording transcribed again hears its pieces: each piece `r` of the whole recording `x` through the engine
+    /// in memory, by `hear_range` as it was heard live, from a fresh start (so its language is detected again).
+    fn hearing(&self) -> impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String> + '_ {
+        let mut last = Before::default();
+        move |x: &[f32], r: std::ops::Range<usize>, voiced: u64| {
             let g = self.engine.lock().unwrap();
             let eng = g.as_ref().ok_or(NO_MODEL)?;
             let began = std::time::Instant::now();
-            let heard = crate::voice::stt::hear_piece(s, voiced, |p| eng.hear(p));
-            self.timed(eng.model(), s.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
+            let held = |q: std::ops::Range<usize>| x.get(q).map_or_else(Vec::new, <[f32]>::to_vec);
+            let heard = hear_range(eng, &mut last, &r, &x[r.clone()], voiced, held);
+            self.timed(eng.model(), r.len() as u64 * 1000 / audio::RATE as u64, began.elapsed().as_millis() as u64);
             // An engine that stopped working would leave the entry without words: it stays as it was.
             match self.after_piece(eng) {
                 Some(e) => Err(e),
                 None => Ok(heard),
             }
-        };
-        self.again(id, || self.ensure_engine(), hear, progress)
+        }
     }
 
     /// `model` transcribed `heard_ms` of audio in `spent_ms`.
@@ -917,12 +1116,12 @@ impl App {
         self.ran.lock().unwrap().as_ref().and_then(|r| r.1.clone())
     }
 
-    /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`.
+    /// `retranscribe` with the model loaded by `load` and each piece heard through `hear`, as `transcribe_all` hears it.
     fn again(
         &self,
         id: &str,
         load: impl FnOnce() -> Result<(), String>,
-        mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+        mut hear: impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String>,
         progress: impl FnMut(u64, u64),
     ) -> Result<(), String> {
         let busy = || match self.state.lock().unwrap().phase {
@@ -940,11 +1139,11 @@ impl App {
             let mut x = self.history.audio(id)?;
             load()?;
             let mut spent = 0u64;
-            let piece = |s: &[f32], voiced: u64| match busy() {
+            let piece = |x: &[f32], r: std::ops::Range<usize>, voiced: u64| match busy() {
                 Ok(()) if stopped() => Err(AGAIN_CANCELLED.into()),
                 Ok(()) => {
                     let began = std::time::Instant::now();
-                    let h = hear(s, voiced);
+                    let h = hear(x, r, voiced);
                     spent += began.elapsed().as_millis() as u64;
                     h
                 }
@@ -957,7 +1156,8 @@ impl App {
             }
             self.history.replace_speech(id, &said)?;
             let _ = self.history.note_run(id, &self.run(spent, x.len() as u64 * 1000 / audio::RATE as u64));
-            let exp = self.history.export_with(id, self.settings.lock().unwrap().picture_paths)?;
+            let s = self.settings.lock().unwrap().clone();
+            let exp = self.history.export_with(id, s.picture_paths, s.tidy)?;
             if self.last_id.lock().unwrap().as_deref() == Some(id) {
                 *self.last_export.lock().unwrap() = Some(exp.clone());
             }
@@ -965,6 +1165,7 @@ impl App {
             Ok(())
         };
         let r = run();
+        self.note_use();
         self.again_stop.store(false, Ordering::SeqCst);
         self.retranscribing.store(false, Ordering::SeqCst);
         r
@@ -986,11 +1187,11 @@ impl App {
         // it, and History can transcribe it again. Never for a practice run, nor with Keep audio off. Held from before
         // the model loads, so a stop cut short meanwhile still keeps all of it.
         let keep = self.settings.lock().unwrap().keep_audio && !self.practice.load(Ordering::SeqCst);
-        let lead = self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000;
+        // It starts at the press: the silence up to the microphone's first sample goes in ahead of that sample.
         {
             let mut u = self.unsaved.lock().unwrap();
             if self.take_no.load(Ordering::SeqCst) == no {
-                *u = keep.then(|| (vec![0.0; lead], 0));
+                *u = keep.then(|| (vec![], 0));
             }
         }
         *self.waiting.lock().unwrap() = (0, 0);
@@ -998,12 +1199,8 @@ impl App {
             // Screenshots still work; the transcript stays empty.
             self.state.lock().unwrap().error = Some(e);
         }
-        {
-            let mut st = self.state.lock().unwrap();
-            if st.phase == Phase::Loading {
-                st.phase = Phase::Recording;
-            }
-        }
+        self.loaded.store(no, Ordering::SeqCst);
+        self.settle(no);
         let mut seg = segmenter();
         // Only what arrived since the last look is copied out of the take, so a long recording costs no more per
         // look than a short one and the microphone never waits behind a copy of all of it.
@@ -1012,6 +1209,8 @@ impl App {
         // it came. Only the part the pieces still to come are cut from is held.
         let mut boost = self.settings.lock().unwrap().voice_boost.then(audio::Boost::default);
         let mut heard = audio::Tail::default();
+        // What this recording heard so far, to hear a short piece in context and settle its language: nothing yet.
+        let mut last = Before::default();
         *self.pace.lock().unwrap() = (0, 0);
         self.state.lock().unwrap().quiet_mic = None;
         loop {
@@ -1019,6 +1218,10 @@ impl App {
                 break;
             }
             let mut new = take.read_from(pos);
+            if pos == 0 && !new.is_empty() {
+                // Speech times count from the press, whether or not the microphone's thread has said it is live yet.
+                self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+            }
             pos += new.len();
             self.keep_audio(no, &new, false);
             if let Some(b) = boost.as_mut() {
@@ -1033,7 +1236,7 @@ impl App {
                 None => audio::mic_note(&seg.recent(), seg.floor()),
             };
             self.state.lock().unwrap().quiet_mic = note.map(String::from);
-            self.decode_ranges(no, &take, &heard, &ranges, seg.floor(), pos);
+            self.decode_ranges(no, &take, &heard, &mut last, &ranges, seg.floor(), pos);
             // A live caption only when one is due and nothing waits to be transcribed: the last few seconds of the open
             // sentence.
             let due = self.engine.lock().unwrap().as_ref().is_some_and(|e| e.wants_partial());
@@ -1048,7 +1251,8 @@ impl App {
             if self.take_no.load(Ordering::SeqCst) != no {
                 break;
             }
-            heard.drop_before(seg.keep_from());
+            // Held from up to `CONTEXT_MS` before the open piece: a short piece is heard again with that audio.
+            heard.drop_before(seg.keep_from().saturating_sub(CONTEXT));
             self.behind.store(take.len().saturating_sub(pos) as u64, Ordering::SeqCst);
             // The next look in 120 ms, or at once when stop is pressed: the stop waits only for the last words.
             let looked = std::time::Instant::now();
@@ -1065,6 +1269,9 @@ impl App {
             return;
         }
         let mut new = take.read_from(pos);
+        if pos == 0 && !new.is_empty() {
+            self.audio_at.store(self.lead_in(&take), Ordering::SeqCst);
+        }
         self.keep_audio(no, &new, true);
         if let Some(b) = boost.as_mut() {
             b.process(&mut new);
@@ -1075,7 +1282,7 @@ impl App {
         if let Some(p) = self.progress.lock().unwrap().as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) {
             p.rest(rest.iter().map(|r| r.len() as u64 * 1000 / audio::RATE as u64).sum());
         }
-        self.decode_ranges(no, &take, &heard, &rest, seg.floor(), pos + new.len());
+        self.decode_ranges(no, &take, &heard, &mut last, &rest, seg.floor(), pos + new.len());
         if self.take_no.load(Ordering::SeqCst) == no {
             self.behind.store(0, Ordering::SeqCst);
             self.state.lock().unwrap().partial.clear();
@@ -1089,6 +1296,9 @@ impl App {
         let Some((held, read)) = u.as_mut().filter(|_| self.take_no.load(Ordering::SeqCst) == no) else {
             return;
         };
+        if *read == 0 && !new.is_empty() {
+            held.resize(self.audio_at.load(Ordering::SeqCst) as usize * audio::RATE as usize / 1000, 0.0);
+        }
         held.extend_from_slice(new);
         *read += new.len();
         if all || held.len() >= audio::RATE as usize {
@@ -1098,7 +1308,18 @@ impl App {
 
     /// Transcribe pieces of the take for recording `no`, cut from what the worker `heard` against a room at `floor`; the
     /// worker has read the take up to `pos`. Once that recording is no longer the current one, the pieces left are not.
-    fn decode_ranges(&self, no: u64, take: &Take, heard: &audio::Tail, ranges: &[std::ops::Range<usize>], floor: f32, pos: usize) {
+    /// Each piece is heard through `hear_range`, given what the recording kept before it (`last`).
+    #[allow(clippy::too_many_arguments)]
+    fn decode_ranges(
+        &self,
+        no: u64,
+        take: &Take,
+        heard: &audio::Tail,
+        last: &mut Before,
+        ranges: &[std::ops::Range<usize>],
+        floor: f32,
+        pos: usize,
+    ) {
         let mine = || self.take_no.load(Ordering::SeqCst) == no;
         for (i, r) in ranges.iter().enumerate() {
             if !mine() {
@@ -1116,7 +1337,7 @@ impl App {
                 let g = self.engine.lock().unwrap();
                 g.as_ref().and_then(|eng| {
                     model = Some(eng.model().to_string());
-                    let h = crate::voice::stt::hear_piece(&samples, voiced, |s| eng.hear(s));
+                    let h = hear_range(eng, last, r, &samples, voiced, |q| heard.copy(q));
                     self.after_piece(eng);
                     h
                 })
@@ -1172,11 +1393,22 @@ impl App {
 }
 
 /// One new folder per recording, named by when it was saved, in the chosen folder or Documents › Pointcast.
+/// Copy a saved recording's pictures to a handoff folder under `root` and return the files its prompt lists, in prompt
+/// order: the handoff copies, or History's own when the folder could not be written; none when `paths` is off.
+fn agent_files(history: &crate::history::Store, root: &std::path::Path, id: &str, created_ms: u64, items: &[Item], paths: bool, tidy: bool) -> Vec<String> {
+    let handoff = prompt::write_handoff(root, id, created_ms, items, now_ms(), tidy);
+    match handoff {
+        _ if !paths => vec![],
+        Ok(h) => h.files,
+        Err(_) => history.prompt_files(id),
+    }
+}
+
 fn export_dir(s: &Settings, stamp: &str) -> std::path::PathBuf {
     let base = match &s.export_dir {
         Some(d) => std::path::PathBuf::from(d),
         None => dirs::document_dir()
-            .or_else(dirs::home_dir)
+            .or_else(crate::settings::home_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("Pointcast"),
     };
@@ -1194,6 +1426,11 @@ pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
     } else {
         mode
     }
+}
+
+/// The prompt was copied only because auto-paste lacked the OS permission: the capsule then offers to turn it on.
+pub fn paste_blocked(mode: OutputMode, can_paste: bool) -> bool {
+    mode == OutputMode::AutoPaste && !can_paste
 }
 
 /// What the HUD says after a stop. `cut` when Cancel saved it before every word was in: whether its audio was kept.
@@ -1216,6 +1453,71 @@ pub fn sherpa_threads(cores: usize) -> i32 {
 
 /// A model's pace is judged once this much audio (5 s) has been transcribed.
 const JUDGED_MS: u64 = 5_000;
+
+/// `stt::CONTEXT_MS` in samples: how far before the open piece the worker holds audio.
+const CONTEXT: usize = (crate::voice::stt::CONTEXT_MS * audio::RATE as u64 / 1000) as usize;
+
+/// What the worker of a recording heard so far: the last piece it kept, and whether the engine was told a new
+/// recording began (so the helper detects its language again).
+#[derive(Default)]
+struct Before {
+    kept: Option<Kept>,
+    begun: bool,
+}
+
+/// A piece of a recording that was kept: where it was cut from and what it said.
+struct Kept {
+    range: std::ops::Range<usize>,
+    text: String,
+}
+
+impl Kept {
+    /// The audio from this piece's start, or from `CONTEXT` before `r` when that is later, through the end of `r` (from
+    /// `held`, which copies what is held of a span of the recording), with what this piece said; None when nothing of this
+    /// piece lies within `CONTEXT` before `r` or none of it is held.
+    fn before(&self, held: impl Fn(std::ops::Range<usize>) -> Vec<f32>, r: &std::ops::Range<usize>) -> Option<(Vec<f32>, String)> {
+        let from = self.range.start.max(r.start.saturating_sub(CONTEXT));
+        if self.range.end <= from || from >= r.start {
+            return None;
+        }
+        let joined = held(from..r.end);
+        (joined.len() > r.len()).then(|| (joined, self.text.clone()))
+    }
+}
+
+/// Hear piece `r` of a recording (`samples`, with `voiced` ms of voice) through `eng`, given what the recording kept
+/// before it (`last`), the one way a recording is heard, live and when transcribed again. The first piece starts a new
+/// recording, so the helper settles its language again (on the first piece of `engine::SETTLE_MS`). Through the helper, a
+/// short piece is heard again joined to the audio before it, back to the last kept piece's start (`stt::in_context`,
+/// with that audio from `held`), and only its new words are kept; on the processor each piece is heard once. `last`
+/// moves on with each piece kept.
+fn hear_range(
+    eng: &Engine,
+    last: &mut Before,
+    r: &std::ops::Range<usize>,
+    samples: &[f32],
+    voiced: u64,
+    held: impl Fn(std::ops::Range<usize>) -> Vec<f32>,
+) -> Option<Heard> {
+    if !last.begun {
+        eng.new_recording();
+        last.begun = true;
+    }
+    let heard_ms = r.len() as u64 * 1000 / audio::RATE as u64;
+    let mut h = crate::voice::stt::hear_piece(samples, voiced, |s| eng.hear(s));
+    if eng.hears_in_context() {
+        h = h.and_then(|h| {
+            let before = last.kept.as_ref().and_then(|k| k.before(&held, r));
+            let said = before.as_ref().map(|b| b.1.as_str());
+            let joined = || before.as_ref().map_or_else(String::new, |b| eng.hear_joined(&audio::louder(&b.0, false)).text);
+            crate::voice::stt::in_context(h, heard_ms, voiced, said, joined)
+        });
+    }
+    if let Some(h) = &h {
+        last.kept = Some(Kept { range: r.clone(), text: h.text.clone() });
+    }
+    h
+}
 
 /// Slower than real time, judged once 5 s of audio has been transcribed.
 pub fn slow(heard_ms: u64, spent_ms: u64) -> bool {
@@ -1330,13 +1632,13 @@ const LOOK: usize = audio::RATE as usize * 120 / 1000;
 
 /// A whole recording, 16 kHz mono from the session's start, transcribed as it was live: through the front end when
 /// `boost` is on (in place), cut by the same segmenter, fed in the same small steps, each piece with how long it is voice
-/// against the room's level then, through `hear` (which may refuse and so stop it). Its words at their times in the
-/// session. `progress(done_ms, total_ms)` before each piece, done being where that piece starts, and at the end with done
-/// the total.
+/// against the room's level then, through `hear(x, piece, voiced_ms)` with the whole recording as heard (which may refuse
+/// and so stop it). Its words at their times in the session. `progress(done_ms, total_ms)` before each piece, done being
+/// where that piece starts, and at the end with done the total.
 pub fn transcribe_all(
     x: &mut [f32],
     boost: bool,
-    mut hear: impl FnMut(&[f32], u64) -> Result<Option<Heard>, String>,
+    mut hear: impl FnMut(&[f32], std::ops::Range<usize>, u64) -> Result<Option<Heard>, String>,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Vec<Item>, String> {
     let ms = |n: usize| n as u64 * 1000 / audio::RATE as u64;
@@ -1346,6 +1648,22 @@ pub fn transcribe_all(
         audio::Boost::default().process(&mut x[from..]);
     }
     let x = &*x;
+    let total = ms(x.len());
+    let mut said = vec![];
+    for (r, floor) in cut(x, from) {
+        progress(ms(r.start), total);
+        let r = r.start.min(x.len())..r.end.min(x.len());
+        let samples = &x[r.clone()];
+        if let Some(h) = hear(x, r.clone(), audio::voiced_ms(samples, floor))? {
+            said.push(Item::Speech { t_ms: ms(r.start), end_ms: ms(r.end), text: h.text });
+        }
+    }
+    progress(total, total);
+    Ok(said)
+}
+
+/// The pieces of recording `x` from sample `from` on, cut as the worker cuts them live, each with the room's level then.
+fn cut(x: &[f32], from: usize) -> Vec<(std::ops::Range<usize>, f32)> {
     let mut seg = segmenter();
     let mut pieces = vec![];
     for step in x[from..].chunks(LOOK) {
@@ -1354,17 +1672,7 @@ pub fn transcribe_all(
     }
     let last = seg.close();
     pieces.extend(last.into_iter().map(|r| (r.start + from..r.end + from, seg.floor())));
-    let total = ms(x.len());
-    let mut said = vec![];
-    for (r, floor) in pieces {
-        progress(ms(r.start), total);
-        let samples = &x[r.start.min(x.len())..r.end.min(x.len())];
-        if let Some(h) = hear(samples, audio::voiced_ms(samples, floor))? {
-            said.push(Item::Speech { t_ms: ms(r.start), end_ms: ms(r.end), text: h.text });
-        }
-    }
-    progress(total, total);
-    Ok(said)
+    pieces
 }
 
 pub const BUSY: &str = "Pointcast is still finishing the last recording.";
@@ -1398,7 +1706,8 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pc-session-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let mut a = App::new(Settings::default(), d.join("settings.json"));
+        // The text as said: tidying has its own tests (prompt.rs) and one here.
+        let mut a = App::new(Settings { tidy: false, ..Settings::default() }, d.join("settings.json"));
         // History and the recovery checkpoint live in the test's own folder, never the real app's.
         Arc::get_mut(&mut a).expect("not shared yet").history = crate::history::Store::new(&d);
         // A practice run checkpoints nothing and delivers nowhere: a stop never pastes into the desktop.
@@ -1431,7 +1740,7 @@ mod tests {
         a.state.lock().unwrap().phase = Phase::Recording;
         let rect = crate::element::Bounds { x: 4, y: 6, w: 116, h: 41 };
         let mark = ElementMark { role: "button".into(), name: "Place order".into(), rect };
-        let pin = vec![Label { n: 1, text: "too far left".into() }];
+        let pin = vec![Label { n: 1, text: "too far left".into(), ..Default::default() }];
         let cap = a.commit_region(png(), pin, Some(mark.clone())).unwrap();
         assert_eq!(cap.element, Some(mark));
         assert_eq!(a.ui().text, r#"[image 1: button "Place order"; 1=too far left]"#);
@@ -1519,6 +1828,35 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_a_transcribe_again_and_a_load_push_back_when_the_engine_is_freed() {
+        let a = app("engine-used");
+        let long_ago = || Some(std::time::Instant::now() - std::time::Duration::from_secs(3_600));
+        assert_eq!(a.engine_used(), None, "nothing in memory, nothing to free");
+        // A stop, by any way out.
+        *a.used.lock().unwrap() = long_ago();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop(false).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a recording's end");
+        *a.used.lock().unwrap() = long_ago();
+        a.state.lock().unwrap().phase = Phase::Recording;
+        a.stop(true).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a discarded one too");
+        // Transcribe again, finished or failed.
+        let (id, _) = kept(&a);
+        let hear = |_: &[f32], _: u64| -> Result<Option<Heard>, String> { Ok(None) };
+        *a.used.lock().unwrap() = long_ago();
+        a.again(&id, || Ok(()), each(hear), |_, _| {}).unwrap();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a Transcribe again's end");
+        *a.used.lock().unwrap() = long_ago();
+        let _ = a.again(&id, || Err("the speech model did not load".into()), each(hear), |_, _| {});
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "and one that failed");
+        // A load outside a recording (a model change, Settings' check, the GPU version set up).
+        *a.used.lock().unwrap() = long_ago();
+        let _ = a.ensure_engine();
+        assert!(a.used.lock().unwrap().unwrap().elapsed().as_secs() < 60, "a load");
+    }
+
+    #[test]
     fn a_stop_with_nothing_recording_saves_nothing() {
         let a = app("idle-stop");
         *a.t0.lock().unwrap() = Some(now_ms());
@@ -1529,6 +1867,190 @@ mod tests {
         assert!(a.history.list().is_empty(), "and saves nothing twice");
         a.state.lock().unwrap().phase = Phase::Transcribing;
         assert_eq!(a.start().unwrap_err(), BUSY, "a start while finishing is refused");
+    }
+
+    /// A microphone that takes 1.5 s to open, then plays a ramp whose every sample can be told apart.
+    fn slow_mic(_: Option<String>, take: Arc<Take>) -> Result<Mic, String> {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        Ok(Mic::from_samples((1..=32_000).map(|i| i as f32 / 32_000.0).collect(), take))
+    }
+
+    #[test]
+    fn the_start_never_waits_for_a_slow_microphone_and_keeps_every_sample_from_the_first() {
+        let mut a = app("slow-mic");
+        let dir = std::env::temp_dir().join(format!("pc-session-slow-mic-{}", std::process::id()));
+        {
+            let m = Arc::get_mut(&mut a).expect("not shared yet");
+            m.open_mic = slow_mic;
+            m.settings.get_mut().unwrap().keep_audio = true;
+            m.settings.get_mut().unwrap().device = None;
+        }
+        let began = std::time::Instant::now();
+        a.start().unwrap();
+        let took = began.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "the start returned after {took:?}");
+        // Nothing flows yet: the HUD must not say it records, and its clock has not started.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let ui = a.ui();
+        assert!(!ui.mic, "no samples yet, so the microphone is not live");
+        assert_eq!(ui.phase, Phase::Loading, "not shown as recording before audio flows");
+        assert_eq!(ui.duration_ms, 0, "the clock waits for the first audio");
+        until("the microphone goes live", || a.ui().mic);
+        until("the HUD says it records", || a.ui().phase == Phase::Recording);
+        let at = a.audio_at.load(Ordering::SeqCst);
+        assert!((1_450..1_900).contains(&at), "the audio starts {at} ms after the press");
+        assert!(a.ui().duration_ms < 1_000, "the clock counts from the first audio, not the press: {}", a.ui().duration_ms);
+        // The take holds the microphone's very first sample.
+        let take = a.take.lock().unwrap().clone().unwrap();
+        assert_eq!(take.copy(0..2), vec![1.0 / 32_000.0, 2.0 / 32_000.0]);
+        // The kept audio is silence from the press to the first sample, then every sample from that one on.
+        let lead = at as usize * audio::RATE as usize / 1000;
+        let pcm = dir.join("recovery").join("audio.pcm");
+        let read = || {
+            std::fs::read(&pcm).unwrap_or_default().chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>()
+        };
+        until("the kept audio reaches past the first sample", || read().len() > lead + 200);
+        let kept = read();
+        assert!(kept[..lead].iter().all(|v| *v == 0), "silence up to the first sample");
+        let ramp = |i: usize| (i as f32 / 32_000.0 * 32767.0).round() as i16;
+        assert_eq!(&kept[lead..lead + 200], &(1..=200).map(ramp).collect::<Vec<_>>()[..], "then the ramp from its first sample");
+        a.stop(true).unwrap();
+        assert!(a.mic.lock().unwrap().is_none(), "Discard closed the microphone");
+    }
+
+    /// A microphone that names nothing and plays a quarter of full scale (-12 dBFS).
+    fn loud_mic(_: Option<String>, take: Arc<Take>) -> Result<Mic, String> {
+        Ok(Mic::from_samples(vec![0.25; 16_000], take))
+    }
+
+    #[test]
+    fn every_recording_keeps_the_microphone_it_was_made_on_how_long_it_took_to_start_and_how_loud_it_got() {
+        let out = std::env::temp_dir().join(format!("pc-session-mic-meta-out-{}", std::process::id()));
+        let mut a = app("mic-meta");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = loud_mic;
+        real(&a, &out);
+        a.stop.store(false, Ordering::SeqCst);
+        let no = a.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let take = Arc::new(Take::default());
+        *a.take.lock().unwrap() = Some(take.clone());
+        a.open_for(no, Some("USB Microphone".into()), take.clone());
+        assert!(a.ui().mic, "live");
+        a.push(Item::Speech { t_ms: 0, end_ms: 900, text: "make it sticky".into() }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        a.stop(false).unwrap().unwrap();
+        let m = a.history.list()[0].clone();
+        assert_eq!((m.mic.as_str(), m.mic_peak_db), ("USB Microphone", -12), "the one asked for, when the device names nothing");
+        assert!(m.mic_open_ms < 1_000, "from the press to the first sample: {}", m.mic_open_ms);
+        // A device that names itself is kept by that name; one that never delivered a sample took all of the recording.
+        let t = Take::default();
+        *t.device.lock().unwrap() = Some("Headset (WH-1000XM4)".into());
+        *a.t0.lock().unwrap() = Some(now_ms() - 2_400);
+        let r = a.mic_run(&t).unwrap();
+        assert_eq!((r.mic.as_str(), r.peak_db), ("Headset (WH-1000XM4)", audio::SILENT_DB));
+        assert!(r.open_ms >= 2_400, "{}", r.open_ms);
+        assert!(a.mic_run(&Take::default()).is_none(), "no microphone opened, nothing to say");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn the_microphone_a_recording_was_made_on_survives_transcribe_again() {
+        let a = app("mic-again");
+        let (id, _) = kept(&a);
+        let mic = crate::history::MicRun { mic: "Microphone (Realtek(R) Audio)".into(), open_ms: 1_400, peak_db: -31 };
+        a.history.note_mic(&id, &mic).unwrap();
+        let hear = counting();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
+        let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"], "transcribed again");
+        assert_eq!((m.mic, m.mic_open_ms, m.mic_peak_db), (mic.mic, 1_400, -31));
+    }
+
+    #[test]
+    fn the_microphone_check_stops_when_asked_and_by_itself_once_its_window_stops_asking() {
+        let mut a = app("monitor");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = loud_mic;
+        a.monitor_on(None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(a.monitor_read().map(|r| r.1), Some(-12), "it hears the microphone");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = a.monitor_read();
+        assert!(a.monitor.lock().unwrap().as_ref().unwrap().1.len() < 1_000, "and holds none of what it read");
+        a.monitor_off();
+        assert!(a.monitor_read().is_none() && a.monitor.lock().unwrap().is_none(), "asked to stop: closed");
+        // On a lease: asked again in time it stays open; once the window stops asking, it closes.
+        let lease = std::time::Duration::from_millis(150);
+        a.monitor_on(Some(lease)).unwrap();
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            a.monitor_on(Some(lease)).unwrap();
+            assert!(a.monitor_read().is_some(), "renewed");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(a.monitor_read().is_none(), "the lease ran out");
+        assert!(a.monitor.lock().unwrap().is_none(), "and the microphone is closed");
+        // A recording closes it too.
+        a.monitor_on(None).unwrap();
+        a.monitor_off();
+        assert!(a.monitor_level().is_none());
+    }
+
+    #[test]
+    fn another_microphone_that_picks_up_sound_is_found_and_a_hands_free_headset_is_left_alone() {
+        let mut a = app("scan");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = |d, take| {
+            let loud = if d.as_deref() == Some("USB") { vec![0.25; 16_000] } else { vec![] };
+            if d.as_deref().is_some_and(|d| d.contains("Hands-Free")) {
+                panic!("a hands-free input is never opened");
+            }
+            Ok(Mic::from_samples(loud, take))
+        };
+        let names = ["Laptop mic", "Headset (WH-1000XM4 Hands-Free AG Audio)", "USB"].map(String::from);
+        assert_eq!(a.scan_inputs(&names, 60), [("Laptop mic".to_string(), audio::SILENT_DB), ("USB".to_string(), -12)]);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(a.scan_inputs(&names, 10).is_empty(), "never beside a recording");
+    }
+
+    #[test]
+    fn a_microphone_that_opens_after_its_recording_stopped_is_closed_at_once() {
+        let mut a = app("late-mic");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = slow_mic;
+        a.start().unwrap();
+        a.stop(true).unwrap();
+        // The open finishes 1.5 s after the press, with nothing to record into.
+        std::thread::sleep(std::time::Duration::from_millis(1_800));
+        assert!(a.mic.lock().unwrap().is_none(), "nothing holds the microphone open");
+        let ui = a.ui();
+        assert!(!ui.mic, "and the HUD does not say it is live");
+        assert_eq!(ui.phase, Phase::Idle);
+    }
+
+    /// Ten recordings started on this machine's real microphone (settings' default device): how long `start` took, and
+    /// from the press to the first audio. `cargo test --lib start_to_first_audio -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn start_to_first_audio_on_this_machine() {
+        let mut a = app("real-mic");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = Mic::open;
+        let mut firsts = vec![];
+        for i in 0..10 {
+            let began = std::time::Instant::now();
+            a.start().unwrap();
+            let start_ms = began.elapsed().as_secs_f64() * 1000.0;
+            until("the first sample", || a.take.lock().unwrap().as_ref().is_some_and(|t| t.first_at().is_some()));
+            let first = a.take.lock().unwrap().as_ref().and_then(|t| t.first_at()).unwrap() - a.t0.lock().unwrap().unwrap();
+            until("the HUD says the microphone is live", || a.ui().mic);
+            let live_ms = began.elapsed().as_secs_f64() * 1000.0;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let at = a.audio_at.load(Ordering::SeqCst);
+            a.stop(true).unwrap();
+            println!("#{i:>2}: start() returned in {start_ms:.1} ms | first sample {first} ms after the press | audio_at {at} ms | HUD live at {live_ms:.1} ms");
+            firsts.push(first);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        firsts.sort();
+        println!("press to first audio: median {} ms, worst {} ms", (firsts[4] + firsts[5]) / 2, firsts[9]);
     }
 
     static NEVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1622,6 +2144,19 @@ mod tests {
     }
 
     #[test]
+    fn history_composes_the_tidy_text_when_the_setting_is_on_and_keeps_the_words_as_said() {
+        let a = app("tidy");
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 900, text: "um, the the header".into() }];
+        let m = a.history.save(&items, 1_000, 9).unwrap();
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off: the words as said");
+        a.settings.lock().unwrap().tidy = true;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "The header");
+        assert_eq!(a.history.items(&m.id).unwrap(), items, "History keeps what was said");
+        a.settings.lock().unwrap().tidy = false;
+        assert_eq!(a.set_last(&m.id).unwrap().plain, "um, the the header", "off again: the raw joining");
+    }
+
+    #[test]
     fn deleting_the_last_prompt_or_clearing_history_forgets_it() {
         let a = app("forget");
         let said = |t: &str| vec![Item::Speech { t_ms: 0, end_ms: 9, text: t.into() }];
@@ -1676,12 +2211,12 @@ mod tests {
         let rec = a.history.save(&items, 3_000, 9).unwrap();
         a.latest.set(Some(rec.id.clone()), a.set_last(&rec.id).unwrap());
         // A picture in it marked up again: agents read the new one.
-        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into() }]).unwrap();
+        a.history.replace(&rec.id, 1, &png(), vec![Label { n: 1, text: "this one".into(), ..Default::default() }]).unwrap();
         a.set_last(&rec.id).unwrap();
-        // Their plain text names the picture's file in History, and ends with its folder.
+        // Their plain text closes with the list of pictures: its folder, then the picture's file in History.
         let file = a.history.files(&rec.id)[0].clone();
-        let folder = std::path::Path::new(&file).parent().unwrap().to_string_lossy().into_owned();
-        let named = format!("look [image 1: {file}; 1=this one]\n\nPictures: {folder}");
+        let folder = file.rsplit_once('/').unwrap().0;
+        let named = format!("look [image 1]\n\nPictures (1), in `{folder}/`:\n[image 1] `{file}`  region 1x1 · pins: 1=this one");
         assert_eq!(served(&a), Some(named.clone()));
         // Copying the older prompt makes it the last one; agents still read the recording.
         a.set_last(&older.id).unwrap();
@@ -1703,13 +2238,65 @@ mod tests {
     }
 
     #[test]
+    fn a_handoff_folder_that_cannot_be_written_leaves_the_prompt_on_history_paths() {
+        let a = app("handoff");
+        let pic = |t: u64| Item::Image {
+            t_ms: t,
+            capture: Capture {
+                id: 0,
+                kind: CaptureKind::Full,
+                t_ms: t,
+                png: png(),
+                width: 1,
+                height: 1,
+                labels: vec![],
+                pointer: None,
+                trail: vec![],
+                element: None,
+                place: None,
+                anchors: vec![],
+                auto: false,
+            },
+        };
+        let items = vec![Item::Speech { t_ms: 0, end_ms: 9, text: "look".into() }, pic(10)];
+        let rec = a.history.save(&items, now_ms(), 9).unwrap();
+        // The root is a file: no folder can be made there, and the prompt names History's copies instead.
+        let base = std::env::temp_dir().join(format!("pc-handoff-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let blocked = base.join("a-file");
+        std::fs::write(&blocked, b"not a folder").unwrap();
+        let files = agent_files(&a.history, &blocked, &rec.id, rec.created_ms, &items, true, false);
+        assert_eq!(files, a.history.prompt_files(&rec.id));
+        assert!(files.len() == 1 && files[0].contains("/history/"), "{files:?}");
+        let plain = prompt::assemble_export_files(&items, &files, false).plain;
+        assert!(plain.starts_with("look [image 1]\n\nPictures (1), in `"), "{plain}");
+        assert!(plain.ends_with(&format!("[image 1] `{}`  full 1x1", files[0])), "{plain}");
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"not a folder", "the file is left as it was");
+        // A root that works: the prompt names the handoff copies, numbered as the prompt numbers them.
+        let root = base.join("Pointcast");
+        let files = agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, true, false);
+        let root_fwd = root.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        assert!(files.len() == 1 && files[0].starts_with(&root_fwd) && files[0].ends_with("/01.png"), "{files:?}");
+        assert_eq!(std::fs::read(&files[0]).unwrap(), png());
+        // Paths off: the folder is still written for agents, and the prompt names no file.
+        assert!(agent_files(&a.history, &root, &rec.id, rec.created_ms, &items, false, false).is_empty());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        // The setting picks the root; unset, tests never reach the real home folder.
+        let mine = Settings { handoff_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
+        assert_eq!(prompt::handoff_root(&mine), root);
+        assert!(prompt::handoff_root(&Settings::default()).starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn each_saved_recording_gets_its_own_folder_in_a_chosen_folder_too() {
         let root = std::env::temp_dir().join(format!("pc-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mine = Settings { export_dir: Some(root.to_string_lossy().into_owned()), ..Settings::default() };
         let first = export_dir(&mine, "20261029-101500");
         assert_eq!(first, root.join("20261029-101500"));
-        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first).unwrap();
+        prompt::export_folder(&[Item::Speech { t_ms: 0, end_ms: 9, text: "one".into() }], &first, false).unwrap();
         // A second recording in the same second never writes over the first one's prompt.md.
         let second = export_dir(&mine, "20261029-101500");
         assert_eq!(second, root.join("20261029-101500-2"));
@@ -1763,7 +2350,16 @@ mod tests {
     }
 
     #[test]
+    fn only_auto_paste_without_the_permission_offers_to_turn_it_on() {
+        assert!(paste_blocked(OutputMode::AutoPaste, false));
+        assert!(!paste_blocked(OutputMode::AutoPaste, true));
+        assert!(!paste_blocked(OutputMode::Clipboard, false), "copying was the choice, not a fallback");
+        assert!(!paste_blocked(OutputMode::Folder, false));
+    }
+
+    #[test]
     fn a_long_recording_is_read_once_and_the_microphone_never_waits_behind_the_worker() {
+        let _alone = crate::test_support::alone();
         let a = app("linear");
         *a.t0.lock().unwrap() = Some(now_ms());
         a.state.lock().unwrap().phase = Phase::Recording;
@@ -1803,7 +2399,7 @@ mod tests {
         let mut heard = audio::Tail::default();
         heard.push(&[0.0f32; 40_000]);
         // Read to 40 000; two pieces of 8 000 and 4 000 wait (no model here, so each is let go at once).
-        a.decode_ranges(0, &take, &heard, &[0..8_000, 8_000..12_000], 0.0, 40_000);
+        a.decode_ranges(0, &take, &heard, &mut Before::default(), &[0..8_000, 8_000..12_000], 0.0, 40_000);
         assert_eq!(a.behind.load(Ordering::SeqCst), 4_000 + 8_000, "the last piece and what is unread");
         assert_eq!(a.ui().behind_ms, 750);
         assert!(!slow(4_000, 9_000), "too little heard to judge");
@@ -1912,7 +2508,7 @@ mod tests {
                 levels.borrow_mut().push(audio::rms(s));
                 Ok(Some(Heard { text: "said".into(), tokens: None }))
             };
-            a.again(&m.id, || Ok(()), hear, |_, _| {}).unwrap();
+            a.again(&m.id, || Ok(()), each(hear), |_, _| {}).unwrap();
             let l = levels.take();
             assert!(!l.is_empty() && l.iter().all(|r| if boost { *r > 0.03 } else { *r < 0.005 }), "boost {boost}: {l:?}");
             let kept = a.history.audio(&m.id).unwrap();
@@ -1930,6 +2526,225 @@ mod tests {
                 _ => 0.0005,
             })
             .collect()
+    }
+
+    /// A recording heard through a stand-in helper answering `answers` in turn, with `backup` on the processor: its
+    /// pieces `ranges` of 10 s with a sentence (0.5 to 3 s) and a short word (4 to 4.8 s). What it kept, and how many
+    /// requests the helper had.
+    fn heard_through_helper(name: &str, answers: &[&str], backup: Option<&'static str>, ranges: &[std::ops::Range<usize>]) -> (Vec<String>, usize) {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Server};
+        struct Cpu(&'static str);
+        impl engine::Backup for Cpu {
+            fn hear(&self, _: &[f32]) -> Heard {
+                Heard { text: self.0.into(), tokens: None }
+            }
+        }
+        let path = "/i-short";
+        let f = fake(path, answers.iter().map(|a| if a.is_empty() { Answer::Die } else { Answer::Json(serde_json::json!({ "text": a }).to_string()) }).collect());
+        let load: engine::LoadBackup = Box::new(move || backup.map(|t| Box::new(Cpu(t)) as Box<dyn engine::Backup>).ok_or_else(|| "none".to_string()));
+        let a = app(name);
+        *a.engine.lock().unwrap() = Some(Engine::Gpu(engine::Gpu::new("whisper-turbo", Server::at(f.port, path), load)));
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let x = bursts(10.0, &[(0.5, 3.0), (4.0, 4.8)]);
+        let take = Take::default();
+        take.samples.lock().unwrap().extend_from_slice(&x);
+        let mut heard = audio::Tail::default();
+        heard.push(&x);
+        a.decode_ranges(0, &take, &heard, &mut Before::default(), ranges, 0.0, x.len());
+        let said = a.items.lock().unwrap().iter().filter_map(|i| if let Item::Speech { text, .. } = i { Some(text.clone()) } else { None }).collect();
+        a.state.lock().unwrap().phase = Phase::Idle;
+        let posts = f.posts.lock().unwrap().len();
+        (said, posts)
+    }
+
+    /// The sentence (0.3 to 3.5 s) and the short word (3.8 to 5 s).
+    const SENTENCE: std::ops::Range<usize> = 4_800..56_000;
+    const SHORT: std::ops::Range<usize> = 60_800..80_000;
+
+    #[test]
+    fn a_stray_thank_you_after_a_sentence_goes_when_heard_with_the_sentence() {
+        let (said, posts) = heard_through_helper("stray", &["Make the header sticky.", "Thank you.", "Make the header sticky."], None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky."]);
+        assert_eq!(posts, 3, "the sentence, the short piece, and the two as one");
+    }
+
+    #[test]
+    fn a_real_short_reply_after_a_sentence_is_kept_as_its_own_words() {
+        let answers = ["Make the header sticky.", "okay yeah", "Make the header sticky. Okay, yeah."];
+        let (said, posts) = heard_through_helper("okay", &answers, None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky.", "Okay, yeah."]);
+        assert_eq!(posts, 3);
+        // Words the two cannot be lined up by keep the short piece as it was heard.
+        let answers = ["Make the header sticky.", "Okay, yeah.", "Totally different words. Okay yeah."];
+        let (said, _) = heard_through_helper("miss", &answers, None, &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Make the header sticky.", "Okay, yeah."]);
+    }
+
+    #[test]
+    fn a_first_piece_is_dropped_only_as_a_brief_stray_phrase_and_never_heard_again() {
+        let (said, posts) = heard_through_helper("first-stray", &["Thank you."], None, &[SHORT]);
+        assert_eq!((said.len(), posts), (0, 1));
+        let (said, posts) = heard_through_helper("first-real", &["Okay, yeah."], None, &[SHORT]);
+        assert_eq!((said, posts), (vec!["Okay, yeah.".to_string()], 1));
+    }
+
+    #[test]
+    fn long_pieces_are_heard_once_each() {
+        let (said, posts) = heard_through_helper("long", &["Make the header sticky.", "And the footer too."], None, &[SENTENCE, 56_000..96_000]);
+        assert_eq!(said, ["Make the header sticky.", "And the footer too."]);
+        assert_eq!(posts, 2);
+    }
+
+    #[test]
+    fn on_the_processor_a_short_piece_is_kept_as_it_was_heard() {
+        // The helper dies on the first piece, twice: the processor engine hears everything from then on.
+        let (said, posts) = heard_through_helper("cpu", &["", ""], Some("Thank you."), &[SENTENCE, SHORT]);
+        assert_eq!(said, ["Thank you.", "Thank you."]);
+        assert_eq!(posts, 2, "only the two tries of the first piece");
+    }
+
+    /// A model of single pieces as `transcribe_all` and `again` call one: with the whole recording and a piece of it.
+    fn each<R>(mut f: impl FnMut(&[f32], u64) -> R) -> impl FnMut(&[f32], std::ops::Range<usize>, u64) -> R {
+        move |x: &[f32], r: std::ops::Range<usize>, v: u64| f(&x[r], v)
+    }
+
+    /// An engine through a stand-in helper at `path` answering `answers` in turn (a JSON answer as it is, other words as
+    /// `{"text": ...}`, a slow one where `slow` says), with `backup` on the processor.
+    fn through_helper(path: &str, answers: &[&str], slow: Option<usize>, backup: Option<&'static str>) -> (Engine, crate::voice::whisper_server::tests::Fake) {
+        use crate::voice::whisper_server::{tests::{fake, Answer}, Server};
+        struct Cpu(&'static str);
+        impl engine::Backup for Cpu {
+            fn hear(&self, _: &[f32]) -> Heard {
+                Heard { text: self.0.into(), tokens: None }
+            }
+        }
+        let answer = |(i, a): (usize, &&str)| match a {
+            _ if slow == Some(i) => Answer::Slow(std::time::Duration::from_secs(10)),
+            a if a.starts_with('{') => Answer::Json(a.to_string()),
+            a if a.is_empty() => Answer::Die,
+            a => Answer::Json(serde_json::json!({ "text": a }).to_string()),
+        };
+        let f = fake(path, answers.iter().enumerate().map(answer).collect());
+        let load: engine::LoadBackup = Box::new(move || backup.map(|t| Box::new(Cpu(t)) as Box<dyn engine::Backup>).ok_or_else(|| "none".to_string()));
+        (Engine::Gpu(engine::Gpu::new("whisper-turbo", Server::at(f.port, path), load)), f)
+    }
+
+    /// `x` kept in History with its words unclear, on an app with `eng` in memory: the app and the entry.
+    fn kept_audio(name: &str, x: &[f32], eng: Engine) -> (Arc<App>, String) {
+        let a = app(name);
+        a.settings.lock().unwrap().voice_boost = false;
+        *a.aborter.lock().unwrap() = eng.aborter();
+        *a.engine.lock().unwrap() = Some(eng);
+        a.history.append_audio(x).unwrap();
+        let ms = x.len() as u64 * 1000 / audio::RATE as u64;
+        let m = a.history.save_recorded(&[Item::Speech { t_ms: 300, end_ms: ms, text: crate::voice::stt::UNCLEAR.into() }], 1_793_000_000_000, ms).unwrap();
+        a.history.clear_checkpoint();
+        (a, m.id)
+    }
+
+    /// The same audio `x` heard live, piece by piece as the worker cuts it, and kept then transcribed again, each through
+    /// its own stand-in helper answering `answers` (with `backup` on the processor): what each kept and the requests each
+    /// helper had.
+    fn live_and_again(name: &str, x: &[f32], answers: &[&str], backup: Option<&'static str>) -> [(Vec<String>, Vec<String>); 2] {
+        let (eng, f) = through_helper("/i-live", answers, None, backup);
+        let a = app(&format!("{name}-live"));
+        *a.engine.lock().unwrap() = Some(eng);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let take = Take::default();
+        take.samples.lock().unwrap().extend_from_slice(x);
+        let mut heard = audio::Tail::default();
+        heard.push(x);
+        let mut last = Before::default();
+        let from = x.iter().position(|v| *v != 0.0).unwrap_or(x.len());
+        for (r, floor) in cut(x, from) {
+            a.decode_ranges(0, &take, &heard, &mut last, &[r], floor, x.len());
+        }
+        a.state.lock().unwrap().phase = Phase::Idle;
+        let live = (texts(&a.items.lock().unwrap()), f.posts.lock().unwrap().clone());
+        let (eng, f) = through_helper("/i-again", answers, None, backup);
+        let (b, id) = kept_audio(&format!("{name}-again"), x, eng);
+        b.again(&id, || Ok(()), b.hearing(), |_, _| {}).unwrap();
+        let again = (texts(&b.history.items(&id).unwrap()), f.posts.lock().unwrap().clone());
+        [live, again]
+    }
+
+    /// A sentence (1 to 3.5 s) and a short sound (4.5 to 5.3 s), after 0.3 s from before the microphone opened.
+    fn sentence_and_short() -> Vec<f32> {
+        bursts(10.0, &[(1.0, 3.5), (4.5, 5.3)])
+    }
+
+    /// A field of a request sent to the helper.
+    fn field(post: &str, name: &str) -> String {
+        let crlf = String::from_utf8(vec![13, 10]).unwrap();
+        let at = post.find(&format!("name={q}{name}{q}{crlf}{crlf}", q = '"')).unwrap_or_else(|| panic!("no {name} in {post}"));
+        post[at..].split(crlf.as_str()).nth(2).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_stray_thank_you_goes_the_same_live_and_when_transcribed_again() {
+        let answers = ["Make the header sticky.", "Thank you.", "Make the header sticky."];
+        let [live, again] = live_and_again("same-stray", &sentence_and_short(), &answers, None);
+        assert_eq!(live.0, ["Make the header sticky."]);
+        assert_eq!(again.0, live.0, "the same audio gives the same words");
+        assert_eq!((live.1.len(), again.1.len()), (3, 3), "the sentence, the short piece, and the two as one");
+    }
+
+    #[test]
+    fn a_real_short_reply_is_kept_the_same_live_and_when_transcribed_again() {
+        let answers = ["Make the header sticky.", "okay yeah", "Make the header sticky. Okay, yeah."];
+        let [live, again] = live_and_again("same-okay", &sentence_and_short(), &answers, None);
+        assert_eq!(live.0, ["Make the header sticky.", "Okay, yeah."]);
+        assert_eq!(again.0, live.0);
+        // On the processor each piece is heard once, as it is, both ways.
+        let [live, again] = live_and_again("same-cpu", &sentence_and_short(), &["", ""], Some("Thank you."));
+        assert_eq!(live.0, ["Thank you.", "Thank you."]);
+        assert_eq!((again.0, again.1.len()), (live.0, 2), "only the two tries of the first piece");
+    }
+
+    #[test]
+    fn transcribing_again_hears_each_short_piece_joined_once_and_settles_the_language_once_per_run() {
+        // A sentence of over five seconds, then two short replies.
+        let x = bursts(14.0, &[(1.5, 7.0), (8.0, 8.8), (9.8, 10.6)]);
+        let verbose = r#"{"language":"spanish","text":" Abre la configuracion."}"#;
+        let run = [verbose, "Vale.", "Abre la configuracion. Vale.", "Vale.", "Vale. Vale."];
+        let answers = [run, run].concat();
+        let [live, again] = live_and_again("settle", &x, &answers[..5], None);
+        assert_eq!(live.0, ["Abre la configuracion.", "Vale.", "Vale."]);
+        assert_eq!(again.0, live.0);
+        let sent = |posts: &[String]| posts.iter().map(|p| (field(p, "language"), field(p, "response_format"))).collect::<Vec<_>>();
+        let pair = |l: &str, r: &str| (l.to_string(), r.to_string());
+        let once = [pair("auto", "verbose_json"), pair("spanish", "json"), pair("spanish", "json"), pair("spanish", "json"), pair("spanish", "json")];
+        assert_eq!(sent(&again.1), once, "three pieces and one joined request for each short one; the language settled by the first");
+        assert_eq!(sent(&live.1), sent(&again.1));
+        // Transcribed again once more on the same engine: its language is detected again from the start.
+        let (eng, f) = through_helper("/i-twice", &answers, None, None);
+        let (b, id) = kept_audio("settle-twice", &x, eng);
+        for _ in 0..2 {
+            b.again(&id, || Ok(()), b.hearing(), |_, _| {}).unwrap();
+            assert_eq!(texts(&b.history.items(&id).unwrap()), live.0);
+        }
+        let posts = f.posts.lock().unwrap().clone();
+        assert_eq!(sent(&posts), [once.clone(), once].concat());
+    }
+
+    #[test]
+    fn cancel_during_the_joined_request_of_transcribing_again_leaves_the_entry_as_it_was() {
+        let answers = ["Make the header sticky.", "Thank you.", "Make the header sticky."];
+        let (eng, f) = through_helper("/i-cancel", &answers, Some(2), None);
+        let (a, id) = kept_audio("again-cancel-joined", &sentence_and_short(), eng);
+        let before = a.history.items(&id).unwrap();
+        let t = std::time::Instant::now();
+        let run = {
+            let (a, id) = (a.clone(), id.clone());
+            std::thread::spawn(move || a.again(&id, || Ok(()), a.hearing(), |_, _| {}))
+        };
+        until("the joined request to be sent", || f.posts.lock().unwrap().len() == 3);
+        assert!(a.again_cancel());
+        assert_eq!(run.join().unwrap().unwrap_err(), AGAIN_CANCELLED);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "it stopped with the piece under way: {:?}", t.elapsed());
+        assert_eq!(a.history.items(&id).unwrap(), before);
+        assert_eq!(f.posts.lock().unwrap().len(), 3, "nothing more was sent");
+        assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
     }
 
     /// Two sentences and a short word: under `SURE_VOICE_MS` of voice, enough to be sent (`MIN_VOICED_MS`).
@@ -1960,7 +2775,7 @@ mod tests {
         let total = 8_500;
         let hear = counting();
         let mut seen = vec![];
-        let said = transcribe_all(&mut x.clone(), boost, |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        let said = transcribe_all(&mut x.clone(), boost, each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |d, t| seen.push((d, t))).unwrap();
         assert_eq!(texts(&said), ["piece 1", "piece 2", "piece 3"]);
         let at: Vec<(u64, u64)> = said.iter().map(|i| if let Item::Speech { t_ms, end_ms, .. } = i { (*t_ms, *end_ms) } else { panic!() }).collect();
         for ((t, end), (a, b)) in at.iter().zip(SPANS) {
@@ -1973,7 +2788,7 @@ mod tests {
         assert_eq!((seen[0].0, seen[3]), (at[0].0, (total, total)));
         // A model that hears nothing: the sentences are kept as [unclear], the short sound is let go.
         let deaf = |s: &[f32], v: u64| Ok(crate::voice::stt::hear_piece(s, v, |_| Heard::default()));
-        let said = transcribe_all(&mut x.clone(), boost, deaf, |_, _| {}).unwrap();
+        let said = transcribe_all(&mut x.clone(), boost, each(deaf), |_, _| {}).unwrap();
         assert_eq!(texts(&said), [crate::voice::stt::UNCLEAR; 2]);
         // Refused part way: it stops there, short of the end.
         let mut seen = vec![];
@@ -1982,11 +2797,11 @@ mod tests {
             calls += 1;
             if calls > 1 { Err(INTERRUPTED.to_string()) } else { Ok(Some(Heard { text: "one".into(), tokens: None })) }
         };
-        assert_eq!(transcribe_all(&mut x.clone(), boost, refuse, |d, t| seen.push((d, t))).unwrap_err(), INTERRUPTED);
+        assert_eq!(transcribe_all(&mut x.clone(), boost, each(refuse), |d, t| seen.push((d, t))).unwrap_err(), INTERRUPTED);
         assert!(seen.iter().all(|p| p.0 < total), "{seen:?}");
         // Nothing but a quiet room: no pieces, and done at once.
         let mut seen = vec![];
-        assert!(transcribe_all(&mut bursts(3.0, &[]), boost, |_, _| panic!("nothing to hear"), |d, t| seen.push((d, t))).unwrap().is_empty());
+        assert!(transcribe_all(&mut bursts(3.0, &[]), boost, |_, _, _| panic!("nothing to hear"), |d, t| seen.push((d, t))).unwrap().is_empty());
         assert_eq!(seen, [(3_000, 3_000)]);
     }
 
@@ -2017,20 +2832,20 @@ mod tests {
         a.latest.set(Some(id.clone()), a.last_export().unwrap());
         let hear = counting();
         let mut seen = vec![];
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |d, t| seen.push((d, t))).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |d, t| seen.push((d, t))).unwrap();
         let after = a.history.items(&id).unwrap();
         assert_eq!(texts(&after), ["piece 1", "piece 2", "piece 3"], "no [unclear] left");
         assert_eq!(pictures(&after), pictures(&before), "the pictures, in order, at their times");
         assert_eq!(seen.last(), Some(&(8_500, 8_500)));
         let plain = "piece 1 [image 1] piece 2 piece 3 [image 2]";
         assert_eq!(a.history.export(&id).unwrap().plain, plain);
-        let named = a.history.export_with(&id, true).unwrap().plain;
+        let named = a.history.export_with(&id, true, false).unwrap().plain;
         assert_eq!((a.last_export().unwrap().plain, a.latest.get().unwrap().plain), (named.clone(), named), "the last prompt and agents read it now");
         assert_eq!(a.history.list()[0].preview, "piece 1 piece 2 piece 3");
         // Another entry is the last prompt: it stays the last prompt, untouched.
         let other = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "other".into() }], 1_793_000_100_000, 9).unwrap();
         a.set_last(&other.id).unwrap();
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 4", "piece 5", "piece 6"]);
         assert_eq!(a.last_export().unwrap().plain, "other");
     }
@@ -2043,16 +2858,16 @@ mod tests {
         let ok = || Ok(());
         for (phase, why) in [(Phase::Recording, RECORDING_NOW), (Phase::Loading, RECORDING_NOW), (Phase::Transcribing, BUSY)] {
             a.state.lock().unwrap().phase = phase;
-            assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), why, "{phase:?}");
+            assert_eq!(a.again(&id, ok, each(hear), |_, _| {}).unwrap_err(), why, "{phase:?}");
         }
         a.state.lock().unwrap().phase = Phase::Ready;
         let words = a.history.save(&[Item::Speech { t_ms: 0, end_ms: 9, text: "no audio kept".into() }], 1_793_000_100_000, 9).unwrap();
-        assert_eq!(a.again(&words.id, ok, hear, |_, _| {}).unwrap_err(), crate::history::NO_AUDIO);
-        assert_eq!(a.again("nope", ok, hear, |_, _| {}).unwrap_err(), "no such prompt");
+        assert_eq!(a.again(&words.id, ok, each(hear), |_, _| {}).unwrap_err(), crate::history::NO_AUDIO);
+        assert_eq!(a.again("nope", ok, each(hear), |_, _| {}).unwrap_err(), "no such prompt");
         a.retranscribing.store(true, Ordering::SeqCst);
-        assert_eq!(a.again(&id, ok, hear, |_, _| {}).unwrap_err(), AGAIN_BUSY, "one at a time");
+        assert_eq!(a.again(&id, ok, each(hear), |_, _| {}).unwrap_err(), AGAIN_BUSY, "one at a time");
         a.retranscribing.store(false, Ordering::SeqCst);
-        assert_eq!(a.again(&id, || Err("the speech model did not load".into()), hear, |_, _| {}).unwrap_err(), "the speech model did not load");
+        assert_eq!(a.again(&id, || Err("the speech model did not load".into()), each(hear), |_, _| {}).unwrap_err(), "the speech model did not load");
         // Without a model here, the real one cannot start either.
         assert!(a.retranscribe(&id, |_, _| {}).is_err());
         // A recording starts after the first piece: it stops there and keeps nothing of it.
@@ -2060,7 +2875,7 @@ mod tests {
             a.state.lock().unwrap().phase = Phase::Recording;
             Ok(Some(Heard { text: "half".into(), tokens: None }))
         };
-        assert_eq!(a.again(&id, ok, start, |_, _| {}).unwrap_err(), INTERRUPTED);
+        assert_eq!(a.again(&id, ok, each(start), |_, _| {}).unwrap_err(), INTERRUPTED);
         assert_eq!(a.history.items(&id).unwrap(), before, "every refusal left the entry as it was");
         assert!(!a.retranscribing.load(Ordering::SeqCst), "and the next one may run");
     }
@@ -2102,7 +2917,7 @@ mod tests {
             assert_eq!(a.last_id.lock().unwrap().as_deref(), Some(l[0].id.as_str()));
             // Transcribed again with a model that hears: the words arrive.
             let hear = counting();
-            a.again(&l[0].id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+            a.again(&l[0].id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
             assert_eq!(a.last_export().unwrap().plain, "piece 1 piece 2 piece 3");
         }
         let _ = std::fs::remove_dir_all(&out);
@@ -2328,7 +3143,7 @@ mod tests {
             assert!(a.again_cancel());
             Ok(Some(Heard { text: "half".into(), tokens: None }))
         };
-        assert_eq!(a.again(&id, || Ok(()), hear, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(a.again(&id, || Ok(()), each(hear), |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
         assert_eq!(calls, 1, "the piece under way finished and no other began");
         assert_eq!(a.history.items(&id).unwrap(), before);
         // Cancelled while the model loads: nothing is heard.
@@ -2337,11 +3152,11 @@ mod tests {
             a.again_cancel();
             Ok(())
         };
-        assert_eq!(a.again(&id, load, never, |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
+        assert_eq!(a.again(&id, load, each(never), |_, _| {}).unwrap_err(), AGAIN_CANCELLED);
         assert_eq!(a.history.items(&id).unwrap(), before);
         assert!(!a.retranscribing.load(Ordering::SeqCst) && !a.again_cancel(), "and the next one may run");
         let hear = counting();
-        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(|s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear))), |_, _| {}).unwrap();
         assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"]);
     }
 
@@ -2375,7 +3190,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(15));
             Ok(crate::voice::stt::hear_piece(s, v, counting()))
         };
-        a.again(&id, || Ok(()), slow, |_, _| {}).unwrap();
+        a.again(&id, || Ok(()), each(slow), |_, _| {}).unwrap();
         let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!((m.engine.as_str(), m.device.as_str(), m.audio_ms), ("cpu-sherpa", "", 8_500));
         assert!(m.transcribe_ms >= 45 && m.transcribe_ms < 5_000, "three pieces of 15 ms or more: {}", m.transcribe_ms);
@@ -2384,6 +3199,7 @@ mod tests {
 
     #[test]
     fn a_stop_wakes_the_worker_at_once_rather_than_at_its_next_look() {
+        let _alone = crate::test_support::alone();
         let a = app("wake");
         let mut slow = Vec::new();
         for no in 1..=12u64 {

@@ -605,6 +605,68 @@ html.win .progress {
   transition: height 70ms linear;
 }
 
+/* Settings › Speech: the microphone and this computer. */
+.mic-pick {
+  width: 100%;
+  max-width: 340px;
+}
+.mic-status {
+  margin-top: 6px !important;
+  min-height: 1.4em;
+}
+.mic-status.ok::before,
+.mic-status.warn::before,
+.mic-status.bad::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+  background: var(--green-ink);
+}
+.mic-status.warn::before {
+  background: var(--orange-ink);
+}
+.mic-status.bad::before {
+  background: var(--red-ink);
+}
+.mic-status.bad {
+  color: var(--label-2, var(--label));
+}
+.mic-status.ok,
+.mic-status.warn,
+.mic-status.bad {
+  padding-left: 13px;
+  text-indent: -13px;
+}
+.mic-offer {
+  display: block;
+  text-indent: 0;
+}
+.level {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 11px;
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--sep);
+  overflow: hidden;
+}
+.level i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform 80ms linear;
+}
+.pc-lines .sub + .sub {
+  margin-top: 2px;
+}
+
 /* —— Grouped rows (System Settings / Windows Settings cards) —— */
 .group {
   border-radius: var(--r-box);
@@ -928,6 +990,64 @@ html.win .onb-foot {
   width: 16px;
   border-radius: 3px;
 }
+/* The speech model getting ready in the background: one quiet line beside the step dots. */
+.onb-speech {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  row-gap: 2px;
+  margin: 0 8px 0 4px;
+  color: var(--label-2);
+  text-align: left;
+}
+.onb-speech .spinner {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+.onb-speech .link {
+  font: inherit;
+}
+.onb-speech-ok {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--green);
+  color: #fff;
+}
+.onb-speech-warn {
+  color: var(--orange-ink);
+}
+.onb-note {
+  margin: -12px 0 16px;
+  text-wrap: balance;
+}
+.card.try.down {
+  box-shadow: 0 0 0 2px var(--accent);
+  border-color: transparent;
+}
+
+/* —— About: credits —— */
+.about-credits {
+  margin-top: 28px;
+  max-width: 380px;
+}
+.about-credits-head {
+  font-weight: 600;
+  color: var(--label-2);
+}
+.about-credits ul {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+  line-height: 1.6;
+}
 .cards {
   width: 100%;
   display: grid;
@@ -1027,17 +1147,73 @@ button.card:hover {
 .prompt-doc {
   font-size: var(--fs-body);
   line-height: 1.55;
-  white-space: pre-wrap;
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
 }
+/* Paragraphs are the blank lines of the tidied text; a picture is a block after the paragraph that names it. */
+.prompt-doc p {
+  margin: 0 0 0.8em;
+  white-space: pre-wrap;
+}
+.prompt-doc .pd-block:last-child > p {
+  margin-bottom: 0;
+}
 .prompt-doc figure {
-  margin: 10px 0;
-  display: inline-flex;
+  margin: 6px 0 18px;
+  display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
   max-width: 100%;
+}
+.prompt-doc .pd-block:last-child > figure:last-child {
+  margin-bottom: 0;
+}
+.prompt-doc .pd-block > p + figure {
+  margin-top: 10px;
+}
+.prompt-doc .pd-chip {
+  display: inline-block;
+  height: 20px;
+  padding: 0 7px;
+  margin: 0 1px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--link);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+  vertical-align: 1px;
+  cursor: pointer;
+}
+html.win .prompt-doc .pd-chip {
+  border-radius: 4px;
+}
+.prompt-doc span.pd-chip {
+  cursor: default;
+}
+.prompt-doc button.pd-chip:hover {
+  filter: brightness(0.94);
+}
+.prompt-doc button.pd-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.prompt-doc .pd-fig.lit img {
+  animation: pd-lit 1.4s ease-out;
+}
+@keyframes pd-lit {
+  0%,
+  60% {
+    box-shadow: 0 0 0 3px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
 }
 .prompt-doc img {
   max-width: 100%;
@@ -1059,6 +1235,10 @@ button.card:hover {
   padding: 6px;
 }
 .hud {
+  /* The capsule is dark on both skins and in light and dark mode: its warning colour is one light orange that reads on it
+   * over a white page too (5:1 or more). */
+  --hud-warn: #ffb340;
+  position: relative;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -1076,13 +1256,13 @@ button.card:hover {
   font: 500 13px / 1 var(--font);
   animation: hud-in 260ms var(--spring) both;
 }
+/* The capsule rises into place but is never faded in: its first frame, on a freshly built window too, is what it says. */
 html.win .hud {
   border-radius: 8px;
   font-size: 14px;
 }
 @keyframes hud-in {
   from {
-    opacity: 0;
     transform: translateY(10px) scale(0.96);
   }
 }
@@ -1095,9 +1275,16 @@ html.win .hud {
   animation: rec 1.6s ease-out infinite;
   flex: none;
 }
-.hud .rec.wait {
-  background: var(--orange);
-  animation: none;
+/* Getting ready: the microphone is not live yet, so nothing is recorded. A quiet ring, not the red dot. */
+.hud .rec.ready {
+  background: transparent;
+  box-shadow: 0 0 0 1.5px var(--hud-ink-2) inset;
+  animation: ready 1.2s ease-in-out infinite alternate;
+}
+@keyframes ready {
+  to {
+    opacity: 0.45;
+  }
 }
 @keyframes rec {
   70% {
@@ -1153,17 +1340,77 @@ html.win .hud .hb {
 .hud .hb:active {
   background: rgba(255, 255, 255, 0.2);
 }
-.hud .hb .n {
+/* How many pictures this prompt has: its own small chip beside the tools, not a badge on one of them. */
+.hud .count {
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--hud-ink);
+  font: 600 11px / 18px var(--font);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+html.win .hud .count {
+  border-radius: 4px;
+}
+/* A quiet microphone: the time and the bars stay, lifted a little, and one line in the warning colour sits under them. */
+.hud .time,
+.hud .wave {
+  transition: transform 160ms ease-out;
+}
+.hud.warned .time,
+.hud.warned .wave {
+  transform: translateY(-6px);
+}
+.hud .cap {
   position: absolute;
-  top: 3px;
-  right: 2px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--accent);
+  left: 14px;
+  bottom: 5px;
+  max-width: 118px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+}
+.hud .cap.warn {
+  color: var(--hud-warn);
+}
+/* Discard asks once: the second click discards. "Discard?" grows to the left over the tools, so nothing moves. */
+.hud .discard-slot {
+  position: relative;
+  width: 34px;
+  height: 34px;
+}
+.hud .hb.discard.armed {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: auto;
+  padding: 0 12px;
+  border-radius: 17px;
+  background: var(--red);
   color: #fff;
-  font: 700 10px / 15px var(--font);
+  font: 600 13px / 1 var(--font);
+  white-space: nowrap;
+  z-index: 1;
+}
+html.win .hud .hb.discard.armed {
+  border-radius: 4px;
+  font-size: 14px;
+}
+.hud .hb.discard.armed:hover {
+  filter: brightness(1.08);
+}
+.hud .hb:focus-visible,
+.hud .stop:focus-visible,
+.hud .fin-cancel:focus-visible {
+  outline: 2px solid var(--hud-accent);
+  outline-offset: 1px;
 }
 .hud .stop {
   width: 34px;
@@ -1193,21 +1440,27 @@ html.win .hud .hb {
   white-space: nowrap;
   margin: 0 6px;
 }
-.hud .note.warn {
+/* "Getting ready…" takes the place of the time and the wave. */
+.hud .note.getting {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 3px;
-  width: 136px;
-  max-width: 136px;
-  margin: 0 6px 0 10px;
+  width: 124px;
+  max-width: 124px;
+  margin: 0 6px 0 8px;
+  font-size: 12px;
+  line-height: 14px;
+}
+.hud .note.getting.two {
   font-size: 11px;
   line-height: 13px;
 }
-.hud .note.warn > * {
+.hud .note.getting > * {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.hud .note.warn b {
+.hud .note.getting b {
   color: var(--hud-ink);
   font-weight: 600;
 }
@@ -1353,6 +1606,12 @@ html.win .audio-bar {
 .done-mark.none {
   background: rgba(255, 255, 255, 0.25);
 }
+/* No words yet: a warning, not an empty circle. */
+.done-mark.warn {
+  background: transparent;
+  color: var(--hud-warn);
+  animation: none;
+}
 .done-mark.none svg {
   display: none;
 }
@@ -1379,8 +1638,28 @@ html.win .hud.done .lines b {
 .hud.done .lines span {
   color: var(--hud-ink-2);
 }
+/* The notice is a button: it opens History on the prompt just saved, or does what its second line says. */
+button.hud.done {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 0;
+  text-align: left;
+  cursor: default;
+}
+button.hud.done:hover {
+  background: rgba(48, 48, 50, 0.9);
+}
+button.hud.done:hover .lines .act {
+  color: var(--hud-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+button.hud.done:focus-visible {
+  outline: 2px solid var(--hud-accent);
+  outline-offset: 2px;
+}
 
-/* —— HUD while the last words are transcribed: one line, a determinate bar, Cancel —— */
+/* —— HUD while the last words are written down: one line, a determinate bar, Paste what's done —— */
 .hud.finishing {
   width: 360px;
   gap: 12px;
@@ -1503,8 +1782,7 @@ html.win select.field {
   font-size: var(--fs-caption);
 }
 .stage .prompt-doc figure {
-  margin: 6px 8px 6px 0;
-  vertical-align: top;
+  margin: 4px 0 8px;
 }
 .stage .prompt-doc img {
   max-height: 120px;
@@ -1624,4 +1902,78 @@ html.win select.field {
 .prompt-doc .pd-remove:hover,
 .prompt-doc .pd-remove:focus-visible {
   background: rgba(196, 43, 28, 0.9);
+}
+
+/* —— History: a delete waits 5 seconds behind an Undo bar —— */
+.result {
+  position: relative;
+}
+.result-del {
+  flex: none;
+  margin-left: 4px;
+}
+.result.has-undo .hist-list,
+.result.has-undo .result-body {
+  padding-bottom: 64px;
+}
+.undo-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px 0 14px;
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.94);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: var(--fs-caption);
+  font-weight: 500;
+  white-space: nowrap;
+  animation: undo-in 0.16s ease-out;
+}
+html.win .undo-bar {
+  border-radius: 6px;
+}
+@keyframes undo-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
+.undo-dot {
+  opacity: 0.55;
+}
+.undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #7cc0ff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+html.win .undo-btn {
+  border-radius: 4px;
+}
+.undo-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.undo-btn:focus-visible {
+  outline: 2px solid #7cc0ff;
+  outline-offset: 1px;
+}
+.undo-btn kbd {
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.6);
 }

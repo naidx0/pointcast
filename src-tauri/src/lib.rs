@@ -1,3 +1,4 @@
+mod agents;
 mod anchor;
 mod capture;
 mod chord;
@@ -31,13 +32,126 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use voice::ptt::TalkMode;
 
-/// Quiet time before the floating windows (HUD, overlay) are released. The speech model has its own setting, free_memory_minutes.
-const IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How long the hidden floating windows (HUD, overlay) are kept after they were last hidden or a session last ended.
+/// The speech model has its own setting, free_memory_minutes.
+const REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Whether the speech model should be let go now: it has been quiet for the `minutes` the person chose (0 means never),
-/// and it has not been let go already in this quiet spell.
-fn free_due(quiet: std::time::Duration, minutes: u32, already: bool) -> bool {
-    !already && minutes > 0 && quiet >= std::time::Duration::from_secs(u64::from(minutes) * 60)
+/// The pulse to the HUD and the menu bar clock while a session runs.
+const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// When the idle scheduler looks again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// A session runs: pulse again after this long.
+    Tick(std::time::Duration),
+    /// Nothing runs: sleep until then, or until something wakes the loop.
+    At(std::time::Instant),
+    /// Nothing is held: sleep until something wakes the loop.
+    Never,
+}
+
+/// What the idle scheduler sees.
+#[derive(Debug, Clone, Copy, Default)]
+struct Quiet {
+    /// A session records, loads or finishes.
+    busy: bool,
+    /// A speech setup the person started runs: nothing is let go meanwhile, and its end wakes the loop.
+    hold: bool,
+    /// When the HUD or overlay was last hidden, or a session last ended.
+    hidden: Option<std::time::Instant>,
+    /// `App::engine_used`: when the model in memory was last used, none when none is.
+    used: Option<std::time::Instant>,
+    /// free_memory_minutes.
+    minutes: u32,
+    /// `App::busy`: also a History entry transcribed again; its end notes a use, which wakes the loop.
+    engine_busy: bool,
+}
+
+/// What is due `now`, and when to look again. The next time is never already past, so the loop cannot spin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Due {
+    reap: bool,
+    free: bool,
+    next: Next,
+}
+
+fn due(now: std::time::Instant, q: &Quiet) -> Due {
+    if q.busy {
+        return Due { reap: false, free: false, next: Next::Tick(TICK) };
+    }
+    if q.hold {
+        return Due { reap: false, free: false, next: Next::Never };
+    }
+    let reap_at = q.hidden.map(|h| h + REAP_AFTER);
+    let reap = reap_at.is_some_and(|t| now >= t);
+    let free = free_due(now, q.used, q.minutes, q.engine_busy);
+    // The time `free_due` turns true, from the same inputs.
+    let after = std::time::Duration::from_secs(u64::from(q.minutes) * 60);
+    let free_at = q.used.filter(|_| !q.engine_busy && q.minutes > 0).map(|u| u + after);
+    let next = [reap_at.filter(|_| !reap), free_at.filter(|_| !free)].into_iter().flatten().min();
+    Due { reap, free, next: next.map_or(Next::Never, Next::At) }
+}
+
+/// Wakes the idle scheduler: a session phase changed, the engine was used, a window hid, a setting changed.
+struct Waker {
+    seen: std::sync::Mutex<u64>,
+    cv: std::sync::Condvar,
+}
+
+impl Waker {
+    const fn new() -> Self {
+        Self { seen: std::sync::Mutex::new(0), cv: std::sync::Condvar::new() }
+    }
+
+    fn gen(&self) -> u64 {
+        *self.seen.lock().unwrap()
+    }
+
+    fn wake(&self) {
+        *self.seen.lock().unwrap() += 1;
+        self.cv.notify_all();
+    }
+
+    /// Sleep as `next` says, cut short by a wake after `gen` was read. True when woken.
+    fn wait(&self, gen: u64, next: Next) -> bool {
+        let g = self.seen.lock().unwrap();
+        match next {
+            Next::Tick(d) => {
+                drop(g);
+                std::thread::sleep(d);
+                false
+            }
+            Next::At(t) => {
+                let left = t.saturating_duration_since(std::time::Instant::now());
+                !self.cv.wait_timeout_while(g, left, |s| *s == gen).unwrap().1.timed_out()
+            }
+            Next::Never => {
+                drop(self.cv.wait_while(g, |s| *s == gen).unwrap());
+                true
+            }
+        }
+    }
+}
+
+static WAKE: Waker = Waker::new();
+static HIDDEN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Something the idle scheduler decides on changed: it looks again now.
+pub(crate) fn wake() {
+    WAKE.wake();
+}
+
+/// The HUD or overlay just hid (or a session ended): it is let go REAP_AFTER from now unless shown again.
+fn note_hidden() {
+    *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+    wake();
+}
+
+/// Whether the speech model should be let go `now`: one is in memory, last `used` at least the `minutes` the person chose
+/// ago (0 means never), and nothing is recording, finishing or transcribed again. However it was loaded.
+fn free_due(now: std::time::Instant, used: Option<std::time::Instant>, minutes: u32, busy: bool) -> bool {
+    let after = std::time::Duration::from_secs(u64::from(minutes) * 60);
+    !busy && minutes > 0 && used.is_some_and(|u| now.saturating_duration_since(u) >= after)
 }
 
 /// A hold shorter than this is a tap: the session keeps recording until the next press.
@@ -73,6 +187,9 @@ fn hide_window(app: &AppHandle, label: &str) {
         if platform::DESK.contains(&label) {
             platform::dock(app, Some(label));
         }
+        if matches!(label, "indicator" | "overlay") {
+            note_hidden();
+        }
     }
 }
 
@@ -104,8 +221,9 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     // The installer closes Pointcast: a recording started now would stop mid-sentence.
     if update::installing() {
         svc.refuse(session::UPDATING);
-        platform::show_indicator(app);
+        // A HUD already built shows the new state from its first frame, not the last recording's.
         emit_state(app, svc);
+        platform::show_indicator(app, &svc.ui());
         hide_hud_soon(app, svc);
         return Err(session::UPDATING.into());
     }
@@ -114,22 +232,96 @@ fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     if svc.settings.lock().unwrap().sounds {
         platform::chime(true);
     }
-    platform::show_indicator(app);
     emit_state(app, svc);
+    platform::show_indicator(app, &svc.ui());
+    emit_state_now(app, svc);
     Ok(())
 }
 
-/// The HUD's last word stays a moment, then it goes unless a new recording took it. A save that Cancel cut short has
-/// two lines to read.
+/// The capsule's last word: which one it is (`gen`), whether the pointer is over it or it has focus, and when that
+/// last ended, in ms since it showed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Hold {
+    gen: u64,
+    over: bool,
+    left_ms: Option<u64>,
+}
+
+static HOLD: std::sync::Mutex<(Hold, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((Hold { gen: 0, over: false, left_ms: None }, None));
+
+/// How long a notice shows on its own, and how long it stays after the pointer leaves it. A notice with something to
+/// act on (kept, partial, cut) has two lines to read and stays 4 s after.
+fn notice_times(notice: Option<&str>) -> (u64, u64) {
+    match notice {
+        Some("kept" | "partial" | "cut") => (4500, 4000),
+        _ => (1600, 1600),
+    }
+}
+
+/// When the capsule's last word may hide, in ms since it showed: never while the pointer is over it or it has focus,
+/// and not before its own time nor before the linger after the pointer left.
+fn hide_at(notice: Option<&str>, over: bool, left_ms: Option<u64>) -> Option<u64> {
+    if over {
+        return None;
+    }
+    let (show, linger) = notice_times(notice);
+    Some(left_ms.map_or(show, |left| show.max(left + linger)))
+}
+
+/// The pointer came onto the notice (or it took focus), or went off it at `at_ms`.
+fn hold_step(h: Hold, over: bool, at_ms: u64) -> Hold {
+    match (h.over, over) {
+        (false, true) => Hold { over: true, ..h },
+        (true, false) => Hold { over: false, left_ms: Some(at_ms), ..h },
+        _ => h,
+    }
+}
+
+/// The HUD's last word stays a moment, then it goes unless a new recording took it or the pointer is on it.
 fn hide_hud_soon(app: &AppHandle, svc: &Arc<App>) {
     let (app, svc) = (app.clone(), svc.clone());
-    let ms = if matches!(svc.ui().notice, Some("partial" | "cut")) { 4500 } else { 1600 };
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-        if svc.ui().phase == Phase::Ready {
+    let notice = svc.ui().notice;
+    let gen = {
+        let mut h = HOLD.lock().unwrap();
+        let gen = h.0.gen + 1;
+        *h = (Hold { gen, ..Hold::default() }, Some(std::time::Instant::now()));
+        gen
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (h, shown) = *HOLD.lock().unwrap();
+        // A newer notice runs its own clock; a new recording took the capsule.
+        if h.gen != gen || svc.ui().phase != Phase::Ready {
+            return;
+        }
+        let elapsed = shown.map_or(0, |t| t.elapsed().as_millis() as u64);
+        if hide_at(notice, h.over, h.left_ms).is_some_and(|at| elapsed >= at) {
             hide_window(&app, "indicator");
+            return;
         }
     });
+}
+
+/// The capsule's notice has the pointer or focus (`over`), or lost it.
+#[tauri::command]
+fn hud_hold(over: bool) {
+    let mut h = HOLD.lock().unwrap();
+    let at = h.1.map_or(0, |t| t.elapsed().as_millis() as u64);
+    h.0 = hold_step(h.0, over, at);
+}
+
+/// Open History, on entry `id` when given (the capsule's notice for the prompt just saved). A History window built just
+/// now selects the latest entry, which is that one; one already open hears `history://select`.
+#[tauri::command]
+fn history_open(app: AppHandle, id: Option<String>) {
+    show_window(&app, "result");
+    if let Some(id) = id {
+        let _ = app.emit("history://select", json!({ "id": id }));
+    }
+    if app.try_state::<Arc<App>>().is_some_and(|svc| svc.ui().phase == Phase::Ready) {
+        hide_window(&app, "indicator");
+    }
 }
 
 /// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
@@ -419,7 +611,7 @@ fn settings_view(svc: &App) -> Value {
         "hidden": s.hidden_list(),
         "mcp_bind": s.mcp_bind,
         "mcp_enabled": s.mcp_enabled,
-        "mcp_error": MCP_ERROR.get(),
+        "mcp_error": MCP_ERROR.lock().unwrap().clone(),
         "onboarded": s.onboarded,
         "sounds": s.sounds,
         "reserved": chord::reserved().into_iter().map(|(k, why)| json!({"keys": k, "why": why})).collect::<Vec<_>>(),
@@ -439,6 +631,11 @@ fn settings_view(svc: &App) -> Value {
     v["auto_gpu"] = json!(s.auto_gpu);
     v["free_memory_minutes"] = json!(s.free_memory_minutes);
     v["gpu_upgrade"] = json!(voice::upgrade::status());
+    // What Settings › Speech says about this computer and its microphone.
+    v["machine"] = json!(voice::machine::this());
+    v["gpu_declined"] = json!(voice::upgrade::load_state(&settings::data_dir()).declined);
+    v["default_device"] = json!(voice::audio::default_device());
+    v["mic_recent"] = svc.history.recent_mics(20).into_iter().map(|r| json!({ "mic": r.mic, "open_ms": r.open_ms, "peak_db": r.peak_db })).collect();
     if let Some(why) = voice::upgrade::unusable_here(&settings::data_dir(), &speech.1) {
         for m in v["speech"]["models"].as_array_mut().into_iter().flatten().filter(|m| m["id"] == voice::upgrade::MODEL) {
             m["gpu"]["unusable"] = json!(why);
@@ -497,11 +694,22 @@ fn settings_patch(
     let cur = svc.settings.lock().unwrap().clone();
     let next = merge(&cur, patch)?;
     svc.save_settings(next.clone())?;
+    // A new free_memory_minutes moves the time the model goes.
+    if cur.free_memory_minutes != next.free_memory_minutes {
+        wake();
+    }
     if keys_changed(&cur, &next) {
         rebind(&app, &svc);
     }
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
+    }
+    // Sharing with agents starts and stops with its switch, no reopening.
+    if cur.mcp_enabled != next.mcp_enabled || cur.mcp_bind != next.mcp_bind {
+        mcp_stop();
+        if next.mcp_enabled {
+            let _ = mcp_start(&svc, &next.mcp_bind);
+        }
     }
     if cur.model != next.model && !recording(&svc) {
         let svc = svc.inner().clone();
@@ -634,6 +842,9 @@ struct RegionCommit {
     /// The outlined control, in the cropped picture's pixels, when the person kept it.
     #[serde(default)]
     element: Option<element::ElementMark>,
+    /// How many areas the person blacked out; the prompt carries it as a note on the picture.
+    #[serde(default)]
+    hidden: u32,
 }
 
 #[tauri::command]
@@ -646,18 +857,20 @@ fn region_commit(
     let png = base64::engine::general_purpose::STANDARD
         .decode(body.png_b64.trim())
         .map_err(|e| e.to_string())?;
+    let mut labels = body.labels;
+    prompt::note_hidden(&mut labels, body.hidden);
     // A picture from History goes back into its entry, which becomes the last prompt and is copied again.
-    let (cap, edited) = match EDIT.commit(&svc.history, &png, body.labels.clone()) {
+    let (cap, edited) = match EDIT.commit(&svc.history, &png, labels.clone()) {
         Some(r) => {
             let (id, cap) = r?;
             (cap, Some(id))
         }
-        None => (svc.commit_region(png, body.labels, body.element)?, None),
+        None => (svc.commit_region(png, labels, body.element)?, None),
     };
     close_overlay(&app);
     let last = match edited {
         Some(id) => {
-            let exp = svc.set_last(&id)?;
+            let exp = svc.copy_from_history(&id)?;
             let _ = app.emit("history://changed", json!({ "id": id }));
             Some(exp)
         }
@@ -710,18 +923,19 @@ fn history_list(svc: tauri::State<'_, Arc<App>>) -> Value {
 
 #[tauri::command]
 fn history_get(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<SessionExport, String> {
-    svc.history.export_with(&id, svc.settings.lock().unwrap().picture_paths)
+    let s = svc.settings.lock().unwrap().clone();
+    svc.history.export_with(&id, s.picture_paths, s.tidy)
 }
 
 /// Copy a past prompt; it also becomes the one "Paste Last Prompt" uses.
 #[tauri::command]
 fn history_copy(svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    copy_export(&svc.set_last(&id)?)
+    copy_export(&svc.copy_from_history(&id)?)
 }
 
 #[tauri::command]
 fn history_paste(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> Result<(), String> {
-    copy_export(&svc.set_last(&id)?)?;
+    copy_export(&svc.copy_from_history(&id)?)?;
     paste_from_history(&app)
 }
 
@@ -772,7 +986,7 @@ fn paste() -> Result<(), String> {
 #[tauri::command]
 fn history_remove(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n: usize) -> Result<SessionExport, String> {
     svc.history.remove(&id, n)?;
-    let exp = svc.set_last(&id)?;
+    let exp = svc.copy_from_history(&id)?;
     let _ = app.emit("history://changed", json!({ "id": id }));
     copy_export(&exp)?;
     Ok(exp)
@@ -858,24 +1072,120 @@ fn copy_again(svc: tauri::State<'_, Arc<App>>) -> Result<(), String> {
 /// Copy the MCP setup for coding agents, token included. The token never passes through a window.
 #[tauri::command]
 fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), String> {
+    let agent = agents::Agent::parse(&agent)?;
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
-    let text = agent_setup(&agent, &bind, &token)?;
-    clipboard::copy_secret(&text)
+    clipboard::copy_secret(&agents::copy_text(agent, &mcp_url(&bind), &token))
 }
 
-/// For the user's own settings only, never a project file people commit: the key is this computer's. Claude Code gets
-/// its user-scope command, Cursor the one server entry for `~/.cursor/mcp.json`.
-fn agent_setup(agent: &str, bind: &str, token: &str) -> Result<String, String> {
-    let all = mcp::client_config(bind, token);
-    let server = &all["mcpServers"]["pointcast"];
-    let url = server["url"].as_str().ok_or("no MCP address")?;
-    let auth = server["headers"]["Authorization"].as_str().ok_or("no MCP key")?;
-    match agent {
-        "claude" => Ok(format!("claude mcp add --transport http --scope user pointcast {url} --header {q}Authorization: {auth}{q}", q = '"')),
-        "cursor" => Ok(format!("{q}pointcast{q}: {}", serde_json::to_string_pretty(server).map_err(|e| e.to_string())?, q = '"')),
-        _ => Err("Unknown agent.".into()),
+fn mcp_url(bind: &str) -> String {
+    format!("http://{bind}/mcp")
+}
+
+fn home() -> Result<std::path::PathBuf, String> {
+    settings::home_dir().ok_or_else(|| "Pointcast could not find your home folder.".to_string())
+}
+
+/// The running agent server: its address and the flag that stops it.
+static MCP_SERVER: std::sync::Mutex<Option<(std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>)>> = std::sync::Mutex::new(None);
+
+/// Start sharing with coding agents unless it is already running. Errors name the problem, never the token.
+fn mcp_start(svc: &App, bind: &str) -> Result<std::net::SocketAddr, String> {
+    let mut server = MCP_SERVER.lock().unwrap();
+    if let Some((addr, _)) = server.as_ref() {
+        return Ok(*addr);
     }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn_stoppable(bind, svc.latest.clone(), t, stop.clone()));
+    *MCP_ERROR.lock().unwrap() = started.as_ref().err().cloned();
+    let addr = started?;
+    *server = Some((addr, stop));
+    Ok(addr)
+}
+
+fn mcp_stop() {
+    if let Some((addr, stop)) = MCP_SERVER.lock().unwrap().take() {
+        mcp::stop_at(addr, &stop);
+    }
+    *MCP_ERROR.lock().unwrap() = None;
+}
+
+/// Turn sharing on (saved, so it stays on) and make sure the server runs.
+fn mcp_on(svc: &App) -> Result<std::net::SocketAddr, String> {
+    let mut s = svc.settings.lock().unwrap().clone();
+    if !s.mcp_enabled {
+        s.mcp_enabled = true;
+        svc.save_settings(s.clone())?;
+    }
+    mcp_start(svc, &s.mcp_bind).map_err(|e| format!("Pointcast's agent server did not start: {e}."))
+}
+
+/// Each agent's state for Settings › Output, plus Claude Code's pictures folder and whether the server answers.
+fn agents_view(svc: &App, home: &std::path::Path) -> Result<Value, String> {
+    let s = svc.settings.lock().unwrap().clone();
+    let token = mcp::token(&mcp::token_path())?;
+    let url = mcp_url(&s.mcp_bind);
+    let folder = prompt::handoff_root(&s).to_string_lossy().into_owned();
+    let running = MCP_SERVER.lock().unwrap().as_ref().map(|(a, _)| *a);
+    let server = match running {
+        Some(addr) => mcp::probe(addr, &token).map(|_| ()),
+        None if s.mcp_enabled => Err(MCP_ERROR.lock().unwrap().clone().unwrap_or_else(|| "it is not running".into())),
+        None => Err("sharing is off".into()),
+    };
+    Ok(json!({
+        "agents": agents::ALL.iter().map(|a| agents::view(*a, home, settings::home_is_custom(), &url, &token)).collect::<Vec<_>>(),
+        "server_ok": server.is_ok(),
+        "server_error": server.err(),
+        "folder": folder,
+        "folder_allowed": agents::folder_allowed(home, &folder),
+    }))
+}
+
+#[tauri::command]
+fn agents_status(svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
+    agents_view(&svc, &home()?)
+}
+
+/// Set up one agent in one click: sharing on, the entry written into the agent's user settings, then checked (the
+/// entry is in the file and the server answers an MCP client with its five tools).
+#[tauri::command]
+fn agent_connect(svc: tauri::State<'_, Arc<App>>, agent: String, folder: bool) -> Result<Value, String> {
+    let agent = agents::Agent::parse(&agent)?;
+    let home = home()?;
+    if !agent.installed(&home) {
+        return Err(agent.not_found());
+    }
+    let addr = mcp_on(&svc)?;
+    let token = mcp::token(&mcp::token_path())?;
+    let url = mcp_url(&svc.settings.lock().unwrap().mcp_bind);
+    agents::set_up(agent, &home, &url, &token)?;
+    if agent == agents::Agent::Claude && folder {
+        let dir = prompt::handoff_root(&svc.settings.lock().unwrap()).to_string_lossy().into_owned();
+        agents::allow_folder(&home, &dir, true)?;
+    }
+    if agents::entry(agent, &home, &url, &token)? != agents::Entry::Current {
+        return Err(format!("Pointcast wrote {} but could not find its entry there afterwards.", agent.shown()));
+    }
+    mcp::probe(addr, &token)?;
+    agents_view(&svc, &home)
+}
+
+/// Take Pointcast's entry out of one agent's settings, and nothing else.
+#[tauri::command]
+fn agent_remove(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<Value, String> {
+    let agent = agents::Agent::parse(&agent)?;
+    let home = home()?;
+    agents::remove(agent, &home)?;
+    agents_view(&svc, &home)
+}
+
+/// Let Claude Code open the pictures folder without asking, or stop it.
+#[tauri::command]
+fn agent_folder(svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<Value, String> {
+    let home = home()?;
+    let dir = prompt::handoff_root(&svc.settings.lock().unwrap()).to_string_lossy().into_owned();
+    agents::allow_folder(&home, &dir, on)?;
+    agents_view(&svc, &home)
 }
 
 #[tauri::command]
@@ -884,8 +1194,8 @@ fn paste_again(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result<(), St
     paste_from_history(&app)
 }
 
-/// Why sharing with coding agents did not start at launch (the address is taken, say), for Settings.
-static MCP_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Why sharing with coding agents did not start (the address is taken, say), for Settings.
+static MCP_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The latest setup progress, so a window opened mid-download picks it up.
 static SPEECH: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
@@ -923,6 +1233,11 @@ fn speech_setup(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String) -> 
         }
         *SPEECH.lock().unwrap() = None;
         SPEECH_BUSY.store(false, Ordering::SeqCst);
+        wake();
+        // What is installed decides which model recordings use: an upgrade found "not Whisper Turbo" may now start.
+        if r.is_ok() {
+            kick_upgrade(&app, &svc);
+        }
         let _ = app.emit("speech://done", json!({ "id": id, "ok": r.is_ok(), "error": r.err() }));
     });
     Ok(())
@@ -1002,6 +1317,16 @@ fn speech_cancel() {
 }
 
 /// Cancel on the Whisper Turbo card while the faster GPU version downloads by itself.
+/// Settings › Speech › Try again: forget that the graphics card could not run the engine here, or that its download was
+/// stopped, so the next setup tries it.
+#[tauri::command]
+fn gpu_retry() {
+    let data = settings::data_dir();
+    let mut s = voice::upgrade::load_state(&data);
+    (s.gpu_unusable, s.declined) = (None, false);
+    voice::upgrade::save_state(&data, &s);
+}
+
 #[tauri::command]
 fn gpu_upgrade_cancel() {
     voice::upgrade::cancel(&settings::data_dir());
@@ -1026,18 +1351,22 @@ fn upgrade_report(app: &AppHandle, s: &voice::upgrade::Status) {
 }
 
 /// Run the background GPU upgrade if it should run now, or show the note when something the person can fix stops it.
-/// Not before the setup assistant is done: it sets up a model of its own.
-fn try_upgrade(app: &AppHandle, svc: &Arc<App>) {
+/// Not before the setup assistant is done: it sets up a model of its own. True when the answer is final until
+/// `kick_upgrade` asks again (leaving the setup assistant does).
+fn try_upgrade(app: &AppHandle, svc: &Arc<App>) -> bool {
     use voice::upgrade as up;
     let s = svc.settings.lock().unwrap().clone();
     if !s.onboarded {
-        return;
+        return true;
     }
     let (root, data, cat) = (voice::models::speech_dir(), settings::data_dir(), voice::models::catalog());
     let busy = || svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst);
     let report = |st: &up::Status| upgrade_report(app, st);
     match up::decide(&up::facts(&root, &data, &cat, &s.model, s.auto_gpu, busy())) {
-        up::Decision::Skip(why) => up::noted(&why, &report),
+        up::Decision::Skip(why) => {
+            up::noted(&why, &report);
+            up::settled(&why)
+        }
         up::Decision::Start => {
             let check = || voice::engine::probe(&root, &cat, up::MODEL);
             let out = up::run(&root, &data, &cat, &up::Hooks { busy: &busy, check: &check, report: &report });
@@ -1046,13 +1375,55 @@ fn try_upgrade(app: &AppHandle, svc: &Arc<App>) {
             if matches!(out, up::Outcome::Gpu(_)) && !busy() {
                 let _ = svc.ensure_engine();
             }
+            up::finished(&out)
         }
     }
 }
 
+static UPGRADE_LOOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static UPGRADE_KICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ask now, and keep asking in the background while the answer can change by itself.
 fn kick_upgrade(app: &AppHandle, svc: &Arc<App>) {
+    UPGRADE_KICKS.fetch_add(1, Ordering::SeqCst);
     let (app, svc) = (app.clone(), svc.clone());
-    std::thread::spawn(move || try_upgrade(&app, &svc));
+    std::thread::spawn(move || {
+        if !try_upgrade(&app, &svc) {
+            upgrade_loop(&app, &svc);
+        }
+    });
+}
+
+/// The faster GPU engine sets itself up once nothing was recorded for 30 s, and goes on after a recording. The loop
+/// ends once the answer is final; `kick_upgrade` starts it again. One at a time.
+fn upgrade_loop(app: &AppHandle, svc: &Arc<App>) {
+    if UPGRADE_LOOP.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (app, svc) = (app.clone(), svc.clone());
+    std::thread::spawn(move || {
+        let mut quiet_since = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst) {
+                quiet_since = std::time::Instant::now();
+                continue;
+            }
+            if quiet_since.elapsed() < std::time::Duration::from_secs(30) {
+                continue;
+            }
+            let kicks = UPGRADE_KICKS.load(Ordering::SeqCst);
+            let settled = try_upgrade(&app, &svc);
+            quiet_since = std::time::Instant::now();
+            if settled {
+                UPGRADE_LOOP.store(false, Ordering::SeqCst);
+                // A kick meanwhile may have found the loop still running: go on for it, unless another loop took over.
+                if UPGRADE_KICKS.load(Ordering::SeqCst) == kicks || UPGRADE_LOOP.swap(true, Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1205,25 +1576,49 @@ fn end_practice(app: &AppHandle, svc: &App) {
     }
 }
 
-/// Live input level outside a session, for the microphone check.
+/// Live input level outside a session, for the microphone check: `mic://level` (the meter) and `mic://peak` (the
+/// loudest sample of the last 50 ms, dBFS). With `lease_ms` the microphone closes by itself unless asked again within
+/// that time (Settings asks while its meter shows).
 #[tauri::command]
-fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
+fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool, lease_ms: Option<u64>) -> Result<(), String> {
+    static EMITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !on {
         svc.monitor_off();
         return Ok(());
     }
-    let fresh = svc.monitor_level().is_none();
-    svc.monitor_on()?;
-    if fresh {
+    svc.monitor_on(lease_ms.map(std::time::Duration::from_millis))?;
+    if !EMITTING.swap(true, Ordering::SeqCst) {
         let svc = svc.inner().clone();
-        std::thread::spawn(move || {
-            while let Some(level) = svc.monitor_level() {
+        std::thread::spawn(move || loop {
+            while let Some((level, peak)) = svc.monitor_read() {
                 let _ = app.emit("mic://level", level);
+                let _ = app.emit("mic://peak", peak);
                 std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            EMITTING.store(false, Ordering::SeqCst);
+            // Turned on again as this one ended: carry on rather than leave it without a reader.
+            if svc.monitor.lock().unwrap().is_none() || EMITTING.swap(true, Ordering::SeqCst) {
+                break;
             }
         });
     }
     Ok(())
+}
+
+/// Listen briefly to each microphone other than the one chosen and say which pick up sound, loudest first: Settings
+/// offers one when the chosen one is silent.
+#[tauri::command]
+async fn mic_scan(svc: tauri::State<'_, Arc<App>>) -> Result<Vec<Value>, String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let chosen = svc.settings.lock().unwrap().device.clone().or_else(voice::audio::default_device);
+        let others: Vec<String> = voice::audio::devices().into_iter().filter(|d| Some(d) != chosen.as_ref()).collect();
+        let mut v = svc.scan_inputs(&others, 600);
+        v.sort_by_key(|(_, db)| -db);
+        v.into_iter().map(|(name, peak_db)| json!({ "name": name, "peak_db": peak_db })).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Whatever step the assistant was on, shortcuts and sessions go back to normal. On a thread of its own: discarding a
@@ -1359,12 +1754,9 @@ pub fn run() {
     let svc = App::new(settings.clone(), settings_path);
     if settings.mcp_enabled {
         // Errors name the problem, never the token.
-        match mcp::token(&mcp::token_path()).and_then(|t| mcp::spawn(&settings.mcp_bind, svc.latest.clone(), t)) {
+        match mcp_start(&svc, &settings.mcp_bind) {
             Ok(addr) => eprintln!("Pointcast MCP on http://{addr}"),
-            Err(e) => {
-                eprintln!("Pointcast MCP did not start: {e}");
-                let _ = MCP_ERROR.set(e);
-            }
+            Err(e) => eprintln!("Pointcast MCP did not start: {e}"),
         }
     }
 
@@ -1390,6 +1782,8 @@ pub fn run() {
             session_toggle,
             session_cancel,
             session_finish_now,
+            hud_hold,
+            history_open,
             capture_full,
             capture_zoom,
             region_begin,
@@ -1401,6 +1795,10 @@ pub fn run() {
             open_folder,
             copy_again,
             mcp_copy_setup,
+            agents_status,
+            agent_connect,
+            agent_remove,
+            agent_folder,
             paste_again,
             speech_setup,
             history_list,
@@ -1415,6 +1813,7 @@ pub fn run() {
             history_clear,
             speech_cancel,
             gpu_upgrade_cancel,
+            gpu_retry,
             speech_status,
             speech_remove,
             permissions_get,
@@ -1432,6 +1831,7 @@ pub fn run() {
             hotkey_test,
             practice,
             mic_monitor,
+            mic_scan,
             onboarding_finish,
             login_get,
             login_set,
@@ -1491,54 +1891,54 @@ pub fn run() {
                     }
                 });
             }
-            // The faster GPU engine sets itself up once nothing was recorded for 30 s, and goes on after a recording.
-            {
-                let (handle, svc) = (handle.clone(), svc.clone());
-                std::thread::spawn(move || {
-                    let mut quiet_since = std::time::Instant::now();
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        if svc.busy() || SPEECH_BUSY.load(Ordering::SeqCst) {
-                            quiet_since = std::time::Instant::now();
-                        } else if quiet_since.elapsed() >= std::time::Duration::from_secs(30) {
-                            try_upgrade(&handle, &svc);
-                            quiet_since = std::time::Instant::now();
-                        }
-                    }
-                });
-            }
-            // Pulse live state to the HUD and the menu bar clock while a session runs. After
-            // IDLE without one, the floating windows and the speech model are let go.
+            // The faster GPU engine sets itself up once nothing was recorded for 30 s, until its answer is final.
+            upgrade_loop(&handle, &svc);
+            // Pulse live state to the HUD and the menu bar clock while a session runs. Otherwise sleep until something
+            // wakes the loop or the next deadline: the hidden floating windows go REAP_AFTER after they hid or the
+            // session ended; the speech model, the chosen time after its last use.
             let svc2 = svc.clone();
             std::thread::spawn(move || {
-                let mut busy_at = std::time::Instant::now();
-                let mut reaped_at = busy_at;
-                let mut freed = false;
+                // Windows made hidden at launch go too.
+                *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+                let mut was_busy = false;
                 loop {
+                    let gen = WAKE.gen();
                     let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
                     if busy {
                         emit_state(&handle, &svc2);
-                        busy_at = std::time::Instant::now();
-                        reaped_at = busy_at;
-                        freed = false;
+                        was_busy = true;
                         // The app the prompt goes to at stop is the last one in front that is not Pointcast: a
                         // click on the HUD's Stop can bring Pointcast forward on macOS.
                         #[cfg(target_os = "macos")]
                         if recording(&svc2) && !handle.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
                             platform::remember_front();
                         }
-                    } else if !SPEECH_BUSY.load(Ordering::SeqCst) {
-                        if busy_at.elapsed() >= IDLE && reaped_at.elapsed() >= IDLE {
-                            platform::reap(&handle);
-                            reaped_at = std::time::Instant::now();
-                        }
-                        let minutes = svc2.settings.lock().unwrap().free_memory_minutes;
-                        if free_due(busy_at.elapsed(), minutes, freed) && !svc2.busy() {
-                            svc2.unload_engine();
-                            freed = true;
+                    } else if was_busy {
+                        was_busy = false;
+                        *HIDDEN.lock().unwrap() = Some(std::time::Instant::now());
+                    }
+                    let hidden = *HIDDEN.lock().unwrap();
+                    let q = Quiet {
+                        busy,
+                        hold: SPEECH_BUSY.load(Ordering::SeqCst),
+                        hidden,
+                        used: svc2.engine_used(),
+                        minutes: svc2.settings.lock().unwrap().free_memory_minutes,
+                        engine_busy: svc2.busy(),
+                    };
+                    let d = due(std::time::Instant::now(), &q);
+                    if d.reap {
+                        platform::reap(&handle);
+                        let mut h = HIDDEN.lock().unwrap();
+                        // A hide since the look counts from then.
+                        if *h == hidden {
+                            *h = None;
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(if busy { 100 } else { 400 }));
+                    if d.free {
+                        svc2.unload_engine();
+                    }
+                    WAKE.wait(gen, d.next);
                 }
             });
             Ok(())
@@ -1560,6 +1960,12 @@ pub fn run() {
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
                         rebind(window.app_handle(), &svc);
+                    }
+                }
+                // The microphone check in Settings never outlives its window.
+                if window.label() == "settings" {
+                    if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
+                        svc.monitor_off();
                     }
                 }
                 if window.label() == "onboarding" {
@@ -1589,20 +1995,147 @@ pub fn run() {
         });
 }
 
+/// For tests that measure time and tests that keep every core busy for seconds: one at a time, so a timing test
+/// measures the code and not its neighbours.
+#[cfg(test)]
+pub(crate) mod test_support {
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub fn alone() -> std::sync::MutexGuard<'static, ()> {
+        ALONE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_speech_model_is_freed_once_per_quiet_spell_at_the_time_chosen() {
-        use std::time::Duration;
-        let min = |m: u64| Duration::from_secs(m * 60);
-        assert!(!free_due(min(4), 5, false), "not before the chosen time");
-        assert!(free_due(min(5), 5, false), "at it");
-        assert!(free_due(min(30), 5, false), "and after it, if it was missed");
-        assert!(!free_due(min(30), 5, true), "but only once, until the next recording");
-        assert!(!free_due(min(600), 0, false), "0 keeps the model loaded however long it is quiet");
-        assert!(free_due(min(2), 2, false) && !free_due(min(1), 2, false), "the shortest choice");
+    fn a_notice_hides_on_its_own_time_unless_the_pointer_is_on_it() {
+        assert_eq!(hide_at(Some("pasted"), false, None), Some(1600), "pasted keeps today's timing");
+        assert_eq!(hide_at(Some("copied"), false, None), Some(1600));
+        assert_eq!(hide_at(Some("partial"), false, None), Some(4500));
+        assert_eq!(hide_at(Some("kept"), false, None), Some(4500), "two lines to read");
+        for n in ["pasted", "kept", "partial", "cut", "empty"] {
+            assert_eq!(hide_at(Some(n), true, None), None, "{n}: never while hovered or focused");
+            assert_eq!(hide_at(Some(n), true, Some(100)), None, "{n}: back on it after leaving");
+        }
+    }
+
+    #[test]
+    fn kept_partial_and_cut_stay_four_seconds_after_the_pointer_leaves() {
+        for n in ["kept", "partial", "cut"] {
+            assert_eq!(hide_at(Some(n), false, Some(10_000)), Some(14_000), "{n}");
+            assert_eq!(hide_at(Some(n), false, Some(200)), Some(4_500), "{n}: never before its own time");
+        }
+        assert_eq!(hide_at(Some("pasted"), false, Some(10_000)), Some(11_600), "others linger their usual time");
+    }
+
+    #[test]
+    fn the_hold_follows_the_pointer_and_remembers_when_it_left() {
+        let h = Hold { gen: 3, ..Hold::default() };
+        let on = hold_step(h, true, 500);
+        assert_eq!(on, Hold { gen: 3, over: true, left_ms: None });
+        let off = hold_step(on, false, 7_000);
+        assert_eq!(off, Hold { gen: 3, over: false, left_ms: Some(7_000) });
+        assert_eq!(hold_step(off, false, 9_000), off, "a second leave does not move the time");
+        let walk = [true, false, true, false].iter().zip([1_000, 2_000, 3_000, 8_000]).fold(h, |h, (o, t)| hold_step(h, *o, t));
+        assert_eq!(hide_at(Some("cut"), walk.over, walk.left_ms), Some(12_000));
+    }
+
+    #[test]
+    fn the_speech_model_is_freed_the_chosen_time_after_its_last_use_however_it_was_loaded() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // Loaded outside a recording (Transcribe again, a model change, the check, the GPU version) at t0.
+        let loaded = Some(t0);
+        assert!(!free_due(at(59), loaded, 1, false), "not before the chosen time");
+        assert!(free_due(at(60), loaded, 1, false), "at it");
+        assert!(free_due(at(3_600), loaded, 1, false), "and after it, if it was missed");
+        // Loaded again after it was freed: freed again, with no recording in between.
+        assert!(free_due(at(7_200), Some(at(7_000)), 1, false), "every load, not once per quiet spell");
+        // A recording, a Transcribe again or a piece heard at 50 s pushes the time to 110 s.
+        assert!(!free_due(at(60), Some(at(50)), 1, false), "a use in between pushes it back");
+        assert!(free_due(at(110), Some(at(50)), 1, false), "to a minute after that use");
+        assert!(!free_due(at(3_600), loaded, 1, true), "never while recording, finishing or transcribed again");
+        assert!(!free_due(at(36_000), loaded, 0, false), "0 keeps the model loaded however long it is quiet");
+        assert!(!free_due(at(3_600), None, 1, false), "nothing in memory, nothing to free");
+        assert!(free_due(at(300), loaded, 5, false) && !free_due(at(299), loaded, 5, false), "a longer choice");
+    }
+
+    #[test]
+    fn the_idle_scheduler_sleeps_until_the_next_deadline_and_ticks_only_while_a_session_runs() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let quiet = Quiet { minutes: 1, ..Default::default() };
+        // Nothing loaded, no window hidden: nothing to wake for.
+        assert_eq!(due(at(0), &quiet), Due { reap: false, free: false, next: Next::Never });
+        assert_eq!(due(at(86_400), &quiet).next, Next::Never, "however long it is quiet");
+        // The HUD hid at 10 s: it goes at 70 s, not ten minutes later.
+        let hid = Quiet { hidden: Some(at(10)), ..quiet };
+        assert_eq!(due(at(11), &hid), Due { reap: false, free: false, next: Next::At(at(70)) });
+        assert_eq!(due(at(69), &hid).next, Next::At(at(70)));
+        assert_eq!(due(at(70), &hid), Due { reap: true, free: false, next: Next::Never }, "and then nothing is left");
+        assert!(due(at(600), &hid).reap, "a late look still lets it go");
+        // The engine, at its own time: the chosen minutes after its last use.
+        let loaded = Quiet { used: Some(at(5)), ..quiet };
+        assert_eq!(due(at(6), &loaded), Due { reap: false, free: false, next: Next::At(at(65)) });
+        assert_eq!(due(at(65), &loaded), Due { reap: false, free: true, next: Next::Never });
+        let five = Quiet { minutes: 5, ..loaded };
+        assert_eq!(due(at(6), &five).next, Next::At(at(305)));
+        assert_eq!(due(at(6), &Quiet { minutes: 0, ..loaded }).next, Next::Never, "0 keeps it loaded: no deadline");
+        // Both: the earlier first, then the other.
+        let both = Quiet { hidden: Some(at(10)), used: Some(at(30)), ..quiet };
+        assert_eq!(due(at(11), &both).next, Next::At(at(70)));
+        assert_eq!(due(at(70), &both), Due { reap: true, free: false, next: Next::At(at(90)) });
+        assert_eq!(due(at(90), &Quiet { hidden: None, ..both }), Due { reap: false, free: true, next: Next::Never });
+        let early = Quiet { hidden: Some(at(50)), used: Some(at(0)), ..quiet };
+        assert_eq!(due(at(1), &early).next, Next::At(at(60)));
+        assert_eq!(due(at(60), &early), Due { reap: false, free: true, next: Next::At(at(110)) });
+        // A session runs: the 100 ms pulse, and nothing is let go meanwhile.
+        let busy = Quiet { busy: true, engine_busy: true, ..both };
+        assert_eq!(due(at(3_600), &busy), Due { reap: false, free: false, next: Next::Tick(Duration::from_millis(100)) });
+        assert_eq!(due(at(0), &Quiet { busy: true, ..quiet }).next, Next::Tick(Duration::from_millis(100)));
+        // A History entry transcribed again or a speech setup: nothing goes, and their end wakes the loop.
+        assert_eq!(due(at(3_600), &Quiet { engine_busy: true, ..loaded }), Due { reap: false, free: false, next: Next::Never });
+        assert_eq!(due(at(3_600), &Quiet { hold: true, ..both }), Due { reap: false, free: false, next: Next::Never });
+        // Never a deadline already past (the loop would spin), over a spread of inputs.
+        for now in (0..200).step_by(7) {
+            for q in [quiet, hid, loaded, five, both, early] {
+                if let Next::At(t) = due(at(now), &q).next {
+                    assert!(t > at(now), "{q:?} at {now}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wake_cuts_the_idle_sleep_short_and_a_deadline_ends_it() {
+        use std::time::{Duration, Instant};
+        let w = Arc::new(Waker::new());
+        // Woken while asleep with no deadline.
+        let gen = w.gen();
+        let w2 = w.clone();
+        let t = Instant::now();
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            w2.wake();
+        });
+        assert!(w.wait(gen, Next::Never));
+        waker.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(5));
+        // A wake between the look and the sleep is not lost.
+        let gen = w.gen();
+        w.wake();
+        assert!(w.wait(gen, Next::Never), "returns at once");
+        // A deadline with no wake ends the sleep, not woken.
+        let gen = w.gen();
+        let t = Instant::now();
+        assert!(!w.wait(gen, Next::At(t + Duration::from_millis(30))));
+        assert!(t.elapsed() >= Duration::from_millis(30));
+        assert!(!w.wait(w.gen(), Next::Tick(Duration::from_millis(1))));
     }
 
     #[test]
@@ -1698,6 +2231,9 @@ mod tests {
         assert!(old.element.is_none());
         let gone: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "element": null })).unwrap();
         assert!(gone.element.is_none());
+        let steps: RegionCommit = serde_json::from_value(json!({ "png_b64": "", "labels": [{ "n": 1, "text": "x" }, { "n": 2, "text": "", "kind": "step" }] })).unwrap();
+        let kinds: Vec<_> = steps.labels.iter().map(|l| l.kind).collect();
+        assert_eq!(kinds, [prompt::LabelKind::Pin, prompt::LabelKind::Step]);
     }
 
     #[test]
@@ -1758,7 +2294,7 @@ mod tests {
             png: png(2, 200),
             width: 2,
             height: 1,
-            labels: vec![Label { n: 1, text: "old".into() }],
+            labels: vec![Label { n: 1, text: "old".into(), ..Default::default() }],
             pointer: None,
             trail: vec![],
             element: None,
@@ -1788,7 +2324,7 @@ mod tests {
         ed.begin(&store, &m.id, 1).unwrap();
         assert!(ed.commit(&store, b"not a png", vec![]).unwrap().is_err());
         assert!(ed.0.lock().unwrap().is_some(), "a failed write keeps the edit open");
-        let (id, cap) = ed.commit(&store, &png(3, 1), vec![Label { n: 1, text: "new".into() }]).unwrap().unwrap();
+        let (id, cap) = ed.commit(&store, &png(3, 1), vec![Label { n: 1, text: "new".into(), ..Default::default() }]).unwrap().unwrap();
         assert_eq!((id.as_str(), cap.width, cap.labels.len()), (m.id.as_str(), 3, 2));
         assert_eq!(store.picture(&m.id, 1).unwrap().png, png(3, 1));
         assert!(ed.commit(&store, &png(4, 1), vec![]).is_none(), "written once; the next commit is the recording's again");
@@ -1855,20 +2391,6 @@ mod tests {
         log.borrow_mut().clear();
         assert!(paste_out_of(true, || step("hide"), pasted, || step("back")).is_ok());
         assert_eq!(*log.borrow(), ["hide", "paste"]);
-    }
-
-    #[test]
-    fn agent_setup_is_the_one_server_for_user_settings_not_a_whole_project_file() {
-        let token = "ab".repeat(32);
-        let claude = agent_setup("claude", "127.0.0.1:47821", &token).unwrap();
-        assert_eq!(
-            claude,
-            format!("claude mcp add --transport http --scope user pointcast http://127.0.0.1:47821/mcp --header {q}Authorization: Bearer {token}{q}", q = '"')
-        );
-        let cursor = agent_setup("cursor", "127.0.0.1:47821", &token).unwrap();
-        assert!(cursor.starts_with(r#""pointcast": {"#) && cursor.contains(&token) && cursor.contains("http://127.0.0.1:47821/mcp"));
-        assert!(!cursor.contains("mcpServers"), "{cursor}");
-        assert!(agent_setup("vim", "127.0.0.1:47821", &token).is_err());
     }
 
     #[test]

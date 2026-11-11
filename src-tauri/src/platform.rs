@@ -8,11 +8,20 @@ static PROTECT: AtomicBool = AtomicBool::new(true);
 /// A window from its tauri.conf.json entry, built the first time it is needed. Nothing is built
 /// at launch, so an idle Pointcast is a tray icon and no web views.
 pub fn ensure(app: &AppHandle, label: &str) -> Option<WebviewWindow> {
+    ensure_with(app, label, None)
+}
+
+/// `ensure`, running `init` in the page before its own scripts when the window is built now.
+fn ensure_with(app: &AppHandle, label: &str, init: Option<String>) -> Option<WebviewWindow> {
     if let Some(w) = app.get_webview_window(label) {
         return Some(w);
     }
     let cfg = app.config().app.windows.iter().find(|w| w.label == label)?.clone();
-    let w = tauri::WebviewWindowBuilder::from_config(app, &cfg).ok()?.build().ok()?;
+    let mut b = tauri::WebviewWindowBuilder::from_config(app, &cfg).ok()?;
+    if let Some(js) = init {
+        b = b.initialization_script(&js);
+    }
+    let w = b.build().ok()?;
     if matches!(label, "indicator" | "overlay") {
         let _ = w.set_content_protected(PROTECT.load(Ordering::SeqCst));
     }
@@ -146,9 +155,14 @@ pub fn hud_spot(area: (i32, i32, u32, u32), scale: f64, size: (u32, u32), hud_sc
     )
 }
 
-/// Show the recording HUD without taking focus from the app being talked about.
-pub fn show_indicator(app: &AppHandle) {
-    let Some(w) = ensure(app, "indicator") else {
+/// The script that hands a freshly built HUD the state it is shown for, so its first frame is that state.
+pub fn hud_first(st: &crate::session::UiState) -> String {
+    format!("window.__POINTCAST_HUD__ = {};", serde_json::to_string(st).unwrap_or_else(|_| "null".into()))
+}
+
+/// Show the recording HUD for state `st` without taking focus from the app being talked about.
+pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
+    let Some(w) = ensure_with(app, "indicator", Some(hud_first(st))) else {
         return;
     };
     if let (Some(m), Ok(size)) = (pointer_monitor(app), w.outer_size()) {

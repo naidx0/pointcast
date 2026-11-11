@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ClipboardPaste, Copy, FolderOpen, Mic, Pencil, RotateCw, Send, Trash2, X } from "lucide-react";
 import {
   detectTools,
@@ -21,17 +21,23 @@ import {
   preview,
   ranText,
   sendToTool,
+  onHistorySelect,
   subscribe,
   type DetectedTool,
   type HistoryMeta,
   type SessionExport,
 } from "@/lib/api";
+import { micText } from "@/lib/hardware";
+import { captionMarks } from "@/lib/marks";
 import { platform } from "@/lib/theme";
+import { UNDO_MS, close as closeUndo, due, startDelete, undo as undoDelete, undoView, visible, type Pending } from "@/lib/undo";
 
 /** Every prompt you made, newest first; the selected one as it will read in the AI tool. */
 export function Result() {
   const [entries, setEntries] = useState<HistoryMeta[]>([]);
   const [sel, setSel] = useState<string | null>(null);
+  const selRef = useRef<string | null>(null);
+  selRef.current = sel;
   const [exp, setExp] = useState<SessionExport | null>(null);
   const [done, setDone] = useState<"" | "copied" | "pasted">("");
   const [tools, setTools] = useState<DetectedTool[]>([]);
@@ -50,6 +56,11 @@ export function Result() {
   const cancelled = useRef(false);
   const progressAt = useRef(0);
   const mac = platform() === "mac";
+  // A delete waits 5 seconds behind the Undo bar; until then the entry is only hidden (src/lib/undo.ts).
+  const [pending, setPending] = useState<Pending | null>(null);
+  const pendingRef = useRef<Pending | null>(null);
+  const entriesRef = useRef<HistoryMeta[]>([]);
+  const previewGone = useRef(new Set<string>());
 
   /** `latest`: a recording just finished, so its prompt is the one shown, whatever was picked before. */
   const load = useCallback(async (pick?: string | null, latest = false) => {
@@ -63,7 +74,10 @@ export function Result() {
             : engine === "cpu"
               ? { engine: "cpu-sherpa", transcribe_ms: 24_000, audio_ms: 121_000 }
               : {};
-        setEntries(PREVIEW_ENTRIES.map((e, i) => (i === 0 ? { ...e, ...ran } : e)));
+        // ?mic=slow|silent: and which microphone it was made on.
+        const m = new URLSearchParams(location.search).get("mic");
+        if (m) Object.assign(ran, { mic: "Headset (WH-1000XM4)", mic_open_ms: m === "slow" ? 1_420 : 120, mic_peak_db: m === "silent" ? -100 : -14 });
+        setEntries(PREVIEW_ENTRIES.filter((e) => !previewGone.current.has(e.id)).map((e, i) => (i === 0 ? { ...e, ...ran } : e)));
         setSel((s) => pick ?? s ?? PREVIEW_ENTRIES[0].id);
         setExp(PREVIEW_EXPORT);
       }
@@ -92,6 +106,7 @@ export function Result() {
     window.addEventListener("focus", onFocus);
     const off = subscribe(
       onResult(() => load(null, true)),
+      onHistorySelect((c) => load(c.id)),
       onHistoryChanged((c) => {
         setRev((r) => r + 1);
         setJob((j) => (j && j.id === c.id ? null : j));
@@ -165,21 +180,130 @@ export function Result() {
     if (inTauri) historyRetranscribeCancel().catch(() => undefined);
   };
 
+  pendingRef.current = pending;
+  entriesRef.current = entries;
+
+  /** Make a delete real. A failure shows as the note, and the entry comes back with the next load. */
+  const commit = useCallback(
+    async (id: string) => {
+      try {
+        if (inTauri) await historyDelete(id);
+        else previewGone.current.add(id);
+      } catch (e) {
+        noteAt.current = Date.now();
+        setNote(String(e).replace(/^Error: ?/, ""));
+      }
+      await load(null);
+    },
+    [load],
+  );
+
+  const removeEntry = useCallback(
+    (id: string) => {
+      const r = startDelete(pendingRef.current, entriesRef.current, id, Date.now());
+      if (r.commit) void commit(r.commit);
+      pendingRef.current = r.pending;
+      setPending(r.pending);
+      if (id === selRef.current) setSel(r.next);
+      setNote("");
+    },
+    [commit],
+  );
+
+  // Browser preview: ?delete=b shows that entry already deleted, with the bar up (add undo=hold to keep it).
+  const previewDeleted = useRef(false);
+  useEffect(() => {
+    const id = preview && !inTauri ? new URLSearchParams(location.search).get("delete") : null;
+    if (!id || previewDeleted.current || !entries.some((e) => e.id === id)) return;
+    previewDeleted.current = true;
+    removeEntry(id);
+  }, [entries, removeEntry]);
+
+  const undoEntry = useCallback(() => {
+    const r = undoDelete(pendingRef.current);
+    pendingRef.current = null;
+    setPending(null);
+    if (r.restore) setSel(r.restore);
+  }, []);
+
+  // The 5 seconds. ?undo=hold in the browser preview keeps the bar up for a look.
+  useEffect(() => {
+    if (!pending || (preview && !inTauri && location.search.includes("undo=hold"))) return;
+    const t = setTimeout(
+      () => {
+        if (!due(pendingRef.current, Date.now())) return;
+        const r = closeUndo(pendingRef.current);
+        pendingRef.current = null;
+        setPending(null);
+        if (r.commit) void commit(r.commit);
+      },
+      Math.max(0, UNDO_MS - (Date.now() - pending.at)),
+    );
+    return () => clearTimeout(t);
+  }, [pending, commit]);
+
+  // The window closes: the pending delete is made real, there is nothing left to undo it from.
+  useEffect(() => {
+    const flush = () => {
+      const r = closeUndo(pendingRef.current);
+      pendingRef.current = null;
+      if (r.commit && inTauri) void historyDelete(r.commit).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, []);
+
+  // Delete removes the selected entry; Ctrl or Cmd+Z undoes it while the bar shows. Neither in a text field.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      if (ev.key === "Delete" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey && selRef.current) {
+        ev.preventDefault();
+        removeEntry(selRef.current);
+      } else if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && ev.key.toLowerCase() === "z" && pendingRef.current) {
+        ev.preventDefault();
+        undoEntry();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [removeEntry, undoEntry]);
+
+  const shown = visible(entries, pending);
   const ai = tools.filter((t) => t.kind === "ai");
-  const cur = entries.find((e) => e.id === sel);
+  const cur = shown.find((e) => e.id === sel);
+  const bar = undoView(pending);
 
   return (
-    <div className="result">
+    <div className={`result${bar ? " has-undo" : ""}`}>
       <header className="result-bar drag">
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: "0 1 auto", minWidth: 0 }}>
           <div className="t-head" style={{ fontSize: 14 }}>
             History
           </div>
           <div className="t-small" role={note ? "alert" : undefined} style={note ? { color: "var(--orange-ink)" } : undefined}>
             {note ||
-              (entries.length ? `${entries.length} ${entries.length === 1 ? "prompt" : "prompts"} on this computer` : " ")}
+              (shown.length ? `${shown.length} ${shown.length === 1 ? "prompt" : "prompts"} on this computer` : " ")}
           </div>
         </div>
+        {sel && exp ? (
+          <button
+            type="button"
+            className="btn icon result-del"
+            title={`Delete (${mac ? "Delete key" : "Del"})`}
+            aria-label="Delete this prompt"
+            onClick={() => removeEntry(sel)}
+          >
+            <Trash2 size={15} />
+          </button>
+        ) : null}
+        <div style={{ flex: 1 }} />
         {sel && exp ? (
           <>
             {ai.map((t) => (
@@ -204,7 +328,7 @@ export function Result() {
                 {t.name}
               </button>
             ))}
-            {folder && sel === entries[0]?.id ? (
+            {folder && sel === shown[0]?.id ? (
               <button
                 type="button"
                 className="btn icon"
@@ -215,22 +339,6 @@ export function Result() {
                 <FolderOpen size={15} />
               </button>
             ) : null}
-            <button
-              type="button"
-              className="btn icon"
-              title="Delete"
-              aria-label="Delete this prompt"
-              disabled={busy}
-              onClick={() =>
-                run(async () => {
-                  await historyDelete(sel);
-                  setSel(null);
-                  await load(null);
-                })
-              }
-            >
-              <Trash2 size={15} />
-            </button>
             <button type="button" className="btn" disabled={busy} onClick={() => run(() => historyCopy(sel), "copied")}>
               <Copy size={14} />
               {done === "copied" ? "Copied" : "Copy"}
@@ -248,10 +356,10 @@ export function Result() {
           </>
         ) : null}
       </header>
-      {entries.length ? (
+      {shown.length ? (
         <div className="hist">
           <nav className="hist-list" aria-label="Past prompts">
-            {entries.map((e) => (
+            {shown.map((e) => (
               <button
                 key={e.id}
                 type="button"
@@ -279,9 +387,9 @@ export function Result() {
                 Pointcast closed while this was recording. Everything transcribed or captured before then was kept.
               </p>
             ) : null}
-            {cur && ranText(cur) ? (
+            {cur && (ranText(cur) || micText(cur)) ? (
               <p className="t-small ran-line" style={{ margin: "0 0 10px" }}>
-                {ranText(cur)}
+                {[ranText(cur), micText(cur)].filter(Boolean).join(" · ")}
               </p>
             ) : null}
             {cur ? (
@@ -324,6 +432,18 @@ export function Result() {
           </div>
         </main>
       )}
+      {bar ? (
+        <div className="undo-bar" role="status">
+          <span>{bar.text}</span>
+          <span className="undo-dot" aria-hidden="true">
+            ·
+          </span>
+          <button type="button" className="undo-btn" onClick={undoEntry}>
+            {bar.action}
+            <kbd>{mac ? "⌘Z" : "Ctrl+Z"}</kbd>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -470,50 +590,96 @@ export function PromptDoc({
   onEdit?: (n: number) => void;
   onRemove?: (n: number) => void;
 }) {
+  const uid = useId();
+  // The picture a chip was just clicked for, lit for a moment.
+  const [lit, setLit] = useState<number | null>(null);
+  const litTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(litTimer.current), []);
+  const figId = (n: number) => `pd-${uid}-${n}`;
+  const show = (n: number) => {
+    document.getElementById(figId(n))?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    setLit(n);
+    clearTimeout(litTimer.current);
+    litTimer.current = setTimeout(() => setLit(null), 1400);
+  };
+
+  const figure = (n: number) => {
+    const img = exp.images[n - 1];
+    return (
+      <figure key={`f${n}`} id={figId(n)} className={`pd-fig${lit === n ? " lit" : ""}`}>
+        {onEdit && img ? (
+          <span className="pd-frame">
+            <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${n}`} onClick={() => onEdit(n)}>
+              <img src={img.data_url} alt={`Image ${n}`} />
+              <span className="pd-edit" aria-hidden="true">
+                <Pencil size={12} strokeWidth={2} />
+                Edit picture
+              </span>
+            </button>
+            {img.auto ? (
+              <span className="pd-auto" title="Pointcast picked this moment from your recording">
+                Auto
+              </span>
+            ) : null}
+            {img.auto && onRemove ? (
+              <button
+                type="button"
+                className="pd-remove"
+                title="Take this picture out of the prompt"
+                aria-label={`Remove picture ${n}`}
+                onClick={() => onRemove(n)}
+              >
+                <X size={12} strokeWidth={2} />
+                Remove
+              </button>
+            ) : null}
+          </span>
+        ) : (
+          <img src={img?.data_url} alt={`Image ${n}`} />
+        )}
+        <figcaption>
+          [image {n}]
+          {img?.labels.length ? ` · ${captionMarks(img.labels).join(" · ")}` : ""}
+        </figcaption>
+      </figure>
+    );
+  };
+
+  // Paragraphs are the tidied text's blank lines. A picture shows once, after the first paragraph that names it.
+  const placed = new Set<number>();
   return (
     <div className="prompt-doc">
-      {splitMarkers(exp.plain).map((p, i) => {
-        if (p.kind === "text") return <span key={i}>{p.value}</span>;
-        const img = exp.images[p.n - 1];
-        return (
-          <figure key={i}>
-            {onEdit && img ? (
-              <span className="pd-frame">
-                <button type="button" className="pd-pic" title="Mark up this picture again" aria-label={`Edit picture ${p.n}`} onClick={() => onEdit(p.n)}>
-                  <img src={img.data_url} alt={p.value} />
-                  <span className="pd-edit" aria-hidden="true">
-                    <Pencil size={12} strokeWidth={2} />
-                    Edit picture
-                  </span>
-                </button>
-                {img.auto ? (
-                  <span className="pd-auto" title="Pointcast picked this moment from your recording">
-                    Auto
-                  </span>
-                ) : null}
-                {img.auto && onRemove ? (
-                  <button
-                    type="button"
-                    className="pd-remove"
-                    title="Take this picture out of the prompt"
-                    aria-label={`Remove picture ${p.n}`}
-                    onClick={() => onRemove(p.n)}
-                  >
-                    <X size={12} strokeWidth={2} />
-                    Remove
-                  </button>
-                ) : null}
-              </span>
-            ) : (
-              <img src={img?.data_url} alt={p.value} />
-            )}
-            <figcaption>
-              Image {p.n}
-              {img?.labels.length ? ` · ${img.labels.map((l) => `${l.n} ${l.text}`).join(" · ")}` : ""}
-            </figcaption>
-          </figure>
-        );
-      })}
+      {exp.plain
+        .split(/\n[ \t]*\n+/)
+        .filter((para) => para.trim())
+        .map((para, k) => {
+          const parts = splitMarkers(para);
+          const pics = parts.filter((p) => p.kind === "img" && !placed.has(p.n)).map((p) => p.n);
+          pics.forEach((n) => placed.add(n));
+          const onlyPics = parts.every((p) => p.kind === "img" || !p.value.trim());
+          return (
+            <div key={k} className="pd-block">
+              {onlyPics ? null : (
+                <p>
+                  {parts.map((p, i) =>
+                    p.kind === "text" ? (
+                      <span key={i}>{p.value}</span>
+                    ) : exp.images[p.n - 1] ? (
+                      <button key={i} type="button" className="pd-chip" title={`Go to image ${p.n}`} onClick={() => show(p.n)}>
+                        [image {p.n}]
+                      </button>
+                    ) : (
+                      <span key={i} className="pd-chip">
+                        [image {p.n}]
+                      </span>
+                    ),
+                  )}
+                </p>
+              )}
+              {Array.from(new Set(pics)).map(figure)}
+            </div>
+          );
+        })}
     </div>
   );
 }
