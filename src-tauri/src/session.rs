@@ -187,6 +187,8 @@ pub struct App {
     pub hotkey_errors: Mutex<Vec<(String, String)>>,
     /// Mic opened outside a session (onboarding level meter).
     pub monitor: Mutex<Option<(Mic, Arc<Take>)>>,
+    /// When the monitor closes unless asked again (Settings asks every second or so while it shows the meter).
+    monitor_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl App {
@@ -252,6 +254,7 @@ impl App {
             hold_from: Mutex::default(),
             hotkey_errors: Mutex::default(),
             monitor: Mutex::default(),
+            monitor_until: Mutex::default(),
         })
     }
 
@@ -488,8 +491,12 @@ impl App {
     /// starts `audio_at` into the session: from the press to when the first sample was heard. A microphone that opens
     /// after its recording stopped is closed at once.
     fn open_for(&self, no: u64, device: Option<String>, take: Arc<Take>) {
-        match (self.open_mic)(device, take.clone()) {
+        match (self.open_mic)(device.clone(), take.clone()) {
             Ok(mic) => {
+                // The device opened names itself; one that does not is the one asked for.
+                if take.device().is_none() {
+                    *take.device.lock().unwrap() = device;
+                }
                 {
                     // A stop sets its flag before it takes the microphone under this lock: one of the two closes it.
                     let mut m = self.mic.lock().unwrap();
@@ -519,6 +526,17 @@ impl App {
         }
         self.mic_tried.store(no, Ordering::SeqCst);
         self.settle(no);
+    }
+
+    /// What the microphone of `take` did, for History: its name, how long after the press its first sample came (all of
+    /// the recording when none came) and its loudest sample. None for a take no microphone opened.
+    fn mic_run(&self, take: &Take) -> Option<crate::history::MicRun> {
+        let mic = take.device()?;
+        let open_ms = match take.first_at() {
+            Some(_) => self.lead_in(take),
+            None => now_ms().saturating_sub(self.t0.lock().unwrap().unwrap_or_else(now_ms)),
+        };
+        Some(crate::history::MicRun { mic, open_ms, peak_db: take.peak_db() })
     }
 
     /// Milliseconds from the press to the first sample of `take`; 0 before audio flows. Fixed by the take, so whoever
@@ -595,6 +613,7 @@ impl App {
             p.finish();
         }
         let audio_ms = self.take.lock().unwrap().as_ref().map_or(0, |t| t.len() as u64 * 1000 / audio::RATE as u64);
+        let mic_run = self.take.lock().unwrap().as_ref().and_then(|t| self.mic_run(t));
         *self.take.lock().unwrap() = None;
         if cancel {
             self.items.lock().unwrap().clear();
@@ -631,6 +650,9 @@ impl App {
             let save = if partial { crate::history::Store::save_partial } else { crate::history::Store::save_recorded };
             if let Ok(m) = save(&self.history, &items, t0, now_ms().saturating_sub(t0)) {
                 let _ = self.history.note_run(&m.id, &self.run(self.pace.lock().unwrap().1, audio_ms));
+                if let Some(r) = &mic_run {
+                    let _ = self.history.note_mic(&m.id, r);
+                }
                 *self.last_id.lock().unwrap() = Some(m.id.clone());
                 has_audio = m.has_audio;
                 created_ms = m.created_ms;
@@ -749,25 +771,60 @@ impl App {
         }
     }
 
-    /// Open the mic without a session; `level()` reads it.
-    pub fn monitor_on(&self) -> Result<(), String> {
+    /// Open the mic without a session; `monitor_level` reads it. With a `lease`, it closes by itself unless asked again
+    /// within that time: a window that stops asking (gone, asleep, minimised) never leaves the microphone open.
+    pub fn monitor_on(&self, lease: Option<std::time::Duration>) -> Result<(), String> {
         let mut m = self.monitor.lock().unwrap();
+        *self.monitor_until.lock().unwrap() = lease.map(|l| std::time::Instant::now() + l);
         if m.is_some() {
             return Ok(());
         }
         let device = self.settings.lock().unwrap().device.clone();
         let take = Arc::new(Take::default());
-        let mic = Mic::open(device, take.clone())?;
+        let mic = (self.open_mic)(device, take.clone())?;
         *m = Some((mic, take));
         Ok(())
     }
 
     pub fn monitor_off(&self) {
         self.monitor.lock().unwrap().take();
+        *self.monitor_until.lock().unwrap() = None;
     }
 
     pub fn monitor_level(&self) -> Option<f32> {
-        self.monitor.lock().unwrap().as_ref().map(|(_, t)| t.level())
+        self.monitor_read().map(|r| r.0)
+    }
+
+    /// The monitor's level now and the loudest sample since the last read (dBFS); None once it is off, or its lease ran
+    /// out (which closes it). What it heard is let go at each read.
+    pub fn monitor_read(&self) -> Option<(f32, i32)> {
+        if self.monitor_until.lock().unwrap().is_some_and(|t| std::time::Instant::now() >= t) {
+            self.monitor_off();
+            return None;
+        }
+        let m = self.monitor.lock().unwrap();
+        let t = &m.as_ref()?.1;
+        let loud = t.drain().iter().fold(0f32, |m, v| m.max(v.abs()));
+        Some((t.level(), audio::db(loud)))
+    }
+
+    /// Listen to each of `names` for `ms` in turn and say how loud each got (dBFS), to find a microphone that hears the
+    /// person when the chosen one does not. Never beside a recording. A Bluetooth headset's hands-free input is left
+    /// alone: opening it switches the headset's sound to phone quality.
+    pub fn scan_inputs(&self, names: &[String], ms: u64) -> Vec<(String, i32)> {
+        let mut out = vec![];
+        for n in names.iter().filter(|n| !n.contains("Hands-Free")).take(4) {
+            if matches!(self.state.lock().unwrap().phase, Phase::Recording | Phase::Loading) {
+                break;
+            }
+            let take = Arc::new(Take::default());
+            if let Ok(mic) = (self.open_mic)(Some(n.clone()), take.clone()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                drop(mic);
+                out.push((n.clone(), take.peak_db()));
+            }
+        }
+        out
     }
 
     pub fn inject_speech(&self, text: &str) {
@@ -1767,6 +1824,100 @@ mod tests {
         assert_eq!(&kept[lead..lead + 200], &(1..=200).map(ramp).collect::<Vec<_>>()[..], "then the ramp from its first sample");
         a.stop(true).unwrap();
         assert!(a.mic.lock().unwrap().is_none(), "Discard closed the microphone");
+    }
+
+    /// A microphone that names nothing and plays a quarter of full scale (-12 dBFS).
+    fn loud_mic(_: Option<String>, take: Arc<Take>) -> Result<Mic, String> {
+        Ok(Mic::from_samples(vec![0.25; 16_000], take))
+    }
+
+    #[test]
+    fn every_recording_keeps_the_microphone_it_was_made_on_how_long_it_took_to_start_and_how_loud_it_got() {
+        let out = std::env::temp_dir().join(format!("pc-session-mic-meta-out-{}", std::process::id()));
+        let mut a = app("mic-meta");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = loud_mic;
+        real(&a, &out);
+        a.stop.store(false, Ordering::SeqCst);
+        let no = a.take_no.fetch_add(1, Ordering::SeqCst) + 1;
+        *a.t0.lock().unwrap() = Some(now_ms());
+        a.state.lock().unwrap().phase = Phase::Recording;
+        let take = Arc::new(Take::default());
+        *a.take.lock().unwrap() = Some(take.clone());
+        a.open_for(no, Some("USB Microphone".into()), take.clone());
+        assert!(a.ui().mic, "live");
+        a.push(Item::Speech { t_ms: 0, end_ms: 900, text: "make it sticky".into() }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        a.stop(false).unwrap().unwrap();
+        let m = a.history.list()[0].clone();
+        assert_eq!((m.mic.as_str(), m.mic_peak_db), ("USB Microphone", -12), "the one asked for, when the device names nothing");
+        assert!(m.mic_open_ms < 1_000, "from the press to the first sample: {}", m.mic_open_ms);
+        // A device that names itself is kept by that name; one that never delivered a sample took all of the recording.
+        let t = Take::default();
+        *t.device.lock().unwrap() = Some("Headset (WH-1000XM4)".into());
+        *a.t0.lock().unwrap() = Some(now_ms() - 2_400);
+        let r = a.mic_run(&t).unwrap();
+        assert_eq!((r.mic.as_str(), r.peak_db), ("Headset (WH-1000XM4)", audio::SILENT_DB));
+        assert!(r.open_ms >= 2_400, "{}", r.open_ms);
+        assert!(a.mic_run(&Take::default()).is_none(), "no microphone opened, nothing to say");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn the_microphone_a_recording_was_made_on_survives_transcribe_again() {
+        let a = app("mic-again");
+        let (id, _) = kept(&a);
+        let mic = crate::history::MicRun { mic: "Microphone (Realtek(R) Audio)".into(), open_ms: 1_400, peak_db: -31 };
+        a.history.note_mic(&id, &mic).unwrap();
+        let hear = counting();
+        a.again(&id, || Ok(()), |s, v| Ok(crate::voice::stt::hear_piece(s, v, &hear)), |_, _| {}).unwrap();
+        let m = a.history.list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(texts(&a.history.items(&id).unwrap()), ["piece 1", "piece 2", "piece 3"], "transcribed again");
+        assert_eq!((m.mic, m.mic_open_ms, m.mic_peak_db), (mic.mic, 1_400, -31));
+    }
+
+    #[test]
+    fn the_microphone_check_stops_when_asked_and_by_itself_once_its_window_stops_asking() {
+        let mut a = app("monitor");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = loud_mic;
+        a.monitor_on(None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(a.monitor_read().map(|r| r.1), Some(-12), "it hears the microphone");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = a.monitor_read();
+        assert!(a.monitor.lock().unwrap().as_ref().unwrap().1.len() < 1_000, "and holds none of what it read");
+        a.monitor_off();
+        assert!(a.monitor_read().is_none() && a.monitor.lock().unwrap().is_none(), "asked to stop: closed");
+        // On a lease: asked again in time it stays open; once the window stops asking, it closes.
+        let lease = std::time::Duration::from_millis(150);
+        a.monitor_on(Some(lease)).unwrap();
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            a.monitor_on(Some(lease)).unwrap();
+            assert!(a.monitor_read().is_some(), "renewed");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(a.monitor_read().is_none(), "the lease ran out");
+        assert!(a.monitor.lock().unwrap().is_none(), "and the microphone is closed");
+        // A recording closes it too.
+        a.monitor_on(None).unwrap();
+        a.monitor_off();
+        assert!(a.monitor_level().is_none());
+    }
+
+    #[test]
+    fn another_microphone_that_picks_up_sound_is_found_and_a_hands_free_headset_is_left_alone() {
+        let mut a = app("scan");
+        Arc::get_mut(&mut a).expect("not shared yet").open_mic = |d, take| {
+            let loud = if d.as_deref() == Some("USB") { vec![0.25; 16_000] } else { vec![] };
+            if d.as_deref().is_some_and(|d| d.contains("Hands-Free")) {
+                panic!("a hands-free input is never opened");
+            }
+            Ok(Mic::from_samples(loud, take))
+        };
+        let names = ["Laptop mic", "Headset (WH-1000XM4 Hands-Free AG Audio)", "USB"].map(String::from);
+        assert_eq!(a.scan_inputs(&names, 60), [("Laptop mic".to_string(), audio::SILENT_DB), ("USB".to_string(), -12)]);
+        a.state.lock().unwrap().phase = Phase::Recording;
+        assert!(a.scan_inputs(&names, 10).is_empty(), "never beside a recording");
     }
 
     #[test]

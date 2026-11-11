@@ -630,6 +630,11 @@ fn settings_view(svc: &App) -> Value {
     v["auto_gpu"] = json!(s.auto_gpu);
     v["free_memory_minutes"] = json!(s.free_memory_minutes);
     v["gpu_upgrade"] = json!(voice::upgrade::status());
+    // What Settings › Speech says about this computer and its microphone.
+    v["machine"] = json!(voice::machine::this());
+    v["gpu_declined"] = json!(voice::upgrade::load_state(&settings::data_dir()).declined);
+    v["default_device"] = json!(voice::audio::default_device());
+    v["mic_recent"] = svc.history.recent_mics(20).into_iter().map(|r| json!({ "mic": r.mic, "open_ms": r.open_ms, "peak_db": r.peak_db })).collect();
     if let Some(why) = voice::upgrade::unusable_here(&settings::data_dir(), &speech.1) {
         for m in v["speech"]["models"].as_array_mut().into_iter().flatten().filter(|m| m["id"] == voice::upgrade::MODEL) {
             m["gpu"]["unusable"] = json!(why);
@@ -1452,25 +1457,49 @@ fn end_practice(app: &AppHandle, svc: &App) {
     }
 }
 
-/// Live input level outside a session, for the microphone check.
+/// Live input level outside a session, for the microphone check: `mic://level` (the meter) and `mic://peak` (the
+/// loudest sample of the last 50 ms, dBFS). With `lease_ms` the microphone closes by itself unless asked again within
+/// that time (Settings asks while its meter shows).
 #[tauri::command]
-fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
+fn mic_monitor(app: AppHandle, svc: tauri::State<'_, Arc<App>>, on: bool, lease_ms: Option<u64>) -> Result<(), String> {
+    static EMITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !on {
         svc.monitor_off();
         return Ok(());
     }
-    let fresh = svc.monitor_level().is_none();
-    svc.monitor_on()?;
-    if fresh {
+    svc.monitor_on(lease_ms.map(std::time::Duration::from_millis))?;
+    if !EMITTING.swap(true, Ordering::SeqCst) {
         let svc = svc.inner().clone();
-        std::thread::spawn(move || {
-            while let Some(level) = svc.monitor_level() {
+        std::thread::spawn(move || loop {
+            while let Some((level, peak)) = svc.monitor_read() {
                 let _ = app.emit("mic://level", level);
+                let _ = app.emit("mic://peak", peak);
                 std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            EMITTING.store(false, Ordering::SeqCst);
+            // Turned on again as this one ended: carry on rather than leave it without a reader.
+            if svc.monitor.lock().unwrap().is_none() || EMITTING.swap(true, Ordering::SeqCst) {
+                break;
             }
         });
     }
     Ok(())
+}
+
+/// Listen briefly to each microphone other than the one chosen and say which pick up sound, loudest first: Settings
+/// offers one when the chosen one is silent.
+#[tauri::command]
+async fn mic_scan(svc: tauri::State<'_, Arc<App>>) -> Result<Vec<Value>, String> {
+    let svc = svc.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let chosen = svc.settings.lock().unwrap().device.clone().or_else(voice::audio::default_device);
+        let others: Vec<String> = voice::audio::devices().into_iter().filter(|d| Some(d) != chosen.as_ref()).collect();
+        let mut v = svc.scan_inputs(&others, 600);
+        v.sort_by_key(|(_, db)| -db);
+        v.into_iter().map(|(name, peak_db)| json!({ "name": name, "peak_db": peak_db })).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Whatever step the assistant was on, shortcuts and sessions go back to normal. On a thread of its own: discarding a
@@ -1681,6 +1710,7 @@ pub fn run() {
             hotkey_test,
             practice,
             mic_monitor,
+            mic_scan,
             onboarding_finish,
             login_get,
             login_set,
@@ -1809,6 +1839,12 @@ pub fn run() {
                 if PAUSED.swap(false, Ordering::SeqCst) {
                     if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
                         rebind(window.app_handle(), &svc);
+                    }
+                }
+                // The microphone check in Settings never outlives its window.
+                if window.label() == "settings" {
+                    if let Some(svc) = window.app_handle().try_state::<Arc<App>>() {
+                        svc.monitor_off();
                     }
                 }
                 if window.label() == "onboarding" {
