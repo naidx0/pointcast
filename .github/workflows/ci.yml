@@ -29,6 +29,9 @@ jobs:
       - run: npm ci
       - name: Typecheck frontend
         run: npx tsc --noEmit
+      # The pure helpers under src/lib carry the front end's logic; nothing else in CI runs their tests.
+      - name: Front-end unit tests
+        run: node --experimental-strip-types --test src/lib/*.test.mjs
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --offline || cargo test --manifest-path src-tauri/Cargo.toml
       - name: Linux bundle (optional smoke)
