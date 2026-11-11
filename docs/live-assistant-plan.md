@@ -77,6 +77,18 @@ adds the person's own `~/.codex/AGENTS.md` (`instructionSources`), which no sett
 where the AI is chosen and records it in what was sent rather than hiding it. No Codex process outlived the
 handshake. Script and results are kept outside the repository.
 
+## What Hermes and T3 Code do (2026-11-11, read at the owner's request)
+
+T3 Code connects ChatGPT plans through OpenAI's own "Sign in with ChatGPT" for open-source apps (its own registered
+client, a loopback callback, plan sharing), with `codex app-server` on the person's login as the fallback, Claude
+through the Agent SDK, and other agents through ACP. Hermes connects every subscription, but its Claude, ChatGPT and
+Copilot sign-ins reuse other apps' stored tokens or client ids and call private endpoints, which those vendors do not
+allow; its `codex app-server` and `copilot --acp --stdio` routes are sanctioned. Consequences for this plan: a
+"Sign in with ChatGPT" route (no Codex install, no `~/.codex/AGENTS.md` added) becomes the preferred ChatGPT route
+for Plus and Pro plans once a spike on a paid account confirms pictures and streaming; Codex stays the route for Free
+plans like the owner's; Copilot goes through `copilot --acp --stdio`; Hermes's handling of an expired sign-in (never
+retried in a loop, one plain "sign in again") is copied, its routes are not. Report kept outside the repository.
+
 ## Slices
 
 Each slice is one branch off the program branch, gated on its own, merged back when green. No slice sits behind a flag.
