@@ -87,6 +87,22 @@
         "create": false
       },
       {
+        "label": "live",
+        "title": "Pointcast",
+        "url": "live.html",
+        "width": 380,
+        "height": 640,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true,
+        "create": false
+      },
+      {
         "label": "overlay",
         "title": "Pointcast annotate",
         "url": "overlay.html",

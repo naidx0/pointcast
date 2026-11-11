@@ -2,8 +2,6 @@
 //! count. A session is `session.json` and `history/<turn id>/`: exactly a History entry for the question, so every
 //! History operation works on a turn, plus `answer.json` and the copy of each picture as it was sent (`sent-<n>.png`
 //! or `.jpg`). A picture sent again when a session is resumed is those bytes, never the original.
-// Nothing outside the tests calls this yet: the Ask loop (`live`) does, in the commit after this one, and removes this line.
-#![allow(dead_code)]
 
 use crate::assist::Mime;
 use crate::history::{self, Meta, Store};
@@ -164,6 +162,7 @@ impl Sessions {
     }
 
     /// Newest first, by when each was last added to.
+    #[allow(dead_code)] // The session list arrives with slice 6.
     pub fn list(&self) -> Vec<Session> {
         let mut v: Vec<Session> = std::fs::read_dir(&self.root)
             .into_iter()
@@ -191,6 +190,7 @@ impl Sessions {
         Ok((session, turns))
     }
 
+    #[allow(dead_code)] // Deleting a session arrives with slice 6.
     pub fn delete(&self, id: &str) -> Result<(), String> {
         std::fs::remove_dir_all(self.dir(id)?).map_err(|e| e.to_string())
     }

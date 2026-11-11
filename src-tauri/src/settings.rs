@@ -93,6 +93,8 @@ pub struct Settings {
     pub region_hotkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zoom_hotkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_hotkey: Option<String>,
     #[serde(default)]
     pub talk_mode: TalkMode,
     #[serde(default = "default_model")]
@@ -206,6 +208,7 @@ impl Default for Settings {
             full_hotkey: None,
             region_hotkey: None,
             zoom_hotkey: None,
+            ask_hotkey: None,
             talk_mode: TalkMode::default(),
             model: default_model(),
             device: None,
@@ -298,6 +301,9 @@ impl Settings {
     pub fn zoom_chord(&self) -> Chord {
         Self::parse_ok(&self.zoom_hotkey, chord::default_zoom)
     }
+    pub fn ask_chord(&self) -> Chord {
+        Self::parse_ok(&self.ask_hotkey, chord::default_ask)
+    }
     pub fn hidden_list(&self) -> Vec<String> {
         self.hidden
             .clone()
@@ -382,6 +388,18 @@ mod tests {
         assert_eq!(home_override(Some(scratch.clone().into_os_string())), Some(scratch));
         assert_eq!(home_override(Some(std::ffi::OsString::new())), None);
         assert_eq!(home_override(None), None);
+    }
+
+    #[test]
+    fn the_ask_key_is_the_default_until_one_is_saved_and_a_garbled_one_falls_back() {
+        assert_eq!(Settings::default().ask_chord(), chord::default_ask());
+        let mine = Settings { ask_hotkey: Some("Ctrl+Alt+A".into()), ..Settings::default() };
+        assert_eq!(mine.ask_chord().label(), "Ctrl+Alt+A");
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&mine).unwrap()).unwrap();
+        assert_eq!(back.ask_hotkey.as_deref(), Some("Ctrl+Alt+A"));
+        let garbled = Settings { ask_hotkey: Some("Ctrl+Shift+Nope".into()), ..Settings::default() };
+        assert_eq!(garbled.ask_chord(), chord::default_ask());
+        assert!(!serde_json::to_string(&Settings::default()).unwrap().contains("ask_hotkey"), "unset, it is not written");
     }
 
     #[test]

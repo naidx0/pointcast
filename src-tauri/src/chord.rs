@@ -1,4 +1,4 @@
-//! A global shortcut: modifiers plus one key (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`).
+//! A global shortcut: modifiers plus one key (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`, `/`).
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -58,10 +58,22 @@ pub fn default_zoom() -> Chord {
     }
 }
 
+/// Ask about this: Ctrl+Shift+/ on every system, the key that types a question mark on a US keyboard, bound by where
+/// the key is and not by what it types.
+pub fn default_ask() -> Chord {
+    Chord {
+        ctrl: true,
+        shift: true,
+        key: "/".into(),
+        ..Chord::default()
+    }
+}
+
 fn norm_key(k: &str) -> Option<String> {
     let up = k.trim().to_ascii_uppercase();
     match up.as_str() {
         "SPACE" => return Some("Space".into()),
+        "/" | "?" | "SLASH" => return Some("/".into()),
         s if s.len() == 1 && s.chars().all(|c| c.is_ascii_alphanumeric()) => return Some(up),
         _ => {}
     }
@@ -141,7 +153,8 @@ impl Chord {
                 "Super"
             });
         }
-        v.push(self.key.as_str());
+        // The key by its place on the keyboard: the accelerator's name for it.
+        v.push(if self.key == "/" { "Slash" } else { self.key.as_str() });
         v.join("+")
     }
 }
@@ -326,5 +339,18 @@ mod tests {
         let mut r = Recorder::default();
         r.feed(&[Ctrl, k("4")]);
         assert_eq!(r.feed(&[Ctrl, Esc]), Step::Cancel);
+    }
+
+    #[test]
+    fn the_ask_key_is_ctrl_shift_slash_by_default_and_parses_as_any_other() {
+        let d = default_ask();
+        assert_eq!((d.ctrl, d.shift, d.alt, d.meta, d.key.as_str()), (true, true, false, false, "/"));
+        assert_eq!(d.label(), "Ctrl+Shift+/");
+        assert_eq!(d.accelerator(), "Control+Shift+Slash", "bound by the key's place, not the character it types");
+        assert_eq!(refusal(&d), None);
+        for said in ["Ctrl+Shift+/", "ctrl + shift + slash", "Control+Shift+?"] {
+            assert_eq!(Chord::parse(said).unwrap(), d, "{said}");
+        }
+        assert_ne!(d, default_session());
     }
 }

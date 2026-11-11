@@ -8,6 +8,7 @@ mod element;
 mod history;
 mod image_ops;
 mod keyframes;
+mod live;
 mod login;
 mod mcp;
 mod overlay;
@@ -167,6 +168,7 @@ pub enum Action {
     Full,
     Region,
     Zoom,
+    Ask,
 }
 
 pub fn show_window(app: &AppHandle, label: &str) {
@@ -190,7 +192,7 @@ fn hide_window(app: &AppHandle, label: &str) {
         if platform::DESK.contains(&label) {
             platform::dock(app, Some(label));
         }
-        if matches!(label, "indicator" | "overlay") {
+        if matches!(label, "indicator" | "overlay" | "live") {
             note_hidden();
         }
     }
@@ -218,6 +220,100 @@ fn recording(svc: &App) -> bool {
 /// No recording runs or is finishing.
 fn idle(svc: &App) -> bool {
     matches!(svc.ui().phase, Phase::Idle | Phase::Ready | Phase::Error)
+}
+
+/// A question is being said: the recording under way is the Ask loop's.
+fn asking(svc: &App) -> bool {
+    recording(svc) && svc.purpose() == session::Purpose::Ask
+}
+
+/// What a chord does, given what is recording: the Ask key asks unless a dictation records or onboarding is testing
+/// keys, and every other chord leaves a question being said alone. None when the chord does nothing.
+fn routed(action: Action, rec: bool, asking: bool, testing: bool) -> Option<bool> {
+    match action {
+        Action::Ask if testing || (rec && !asking) => None,
+        Action::Ask => Some(true),
+        _ if asking => None,
+        _ => Some(false),
+    }
+}
+
+/// The Ask key: down starts a question, or ends the one being said; up ends a held one, as dictation's key does.
+fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
+    let Some(live) = app.try_state::<Arc<live::Live>>() else {
+        return;
+    };
+    let live = live.inner().clone();
+    if pressed {
+        if live.listening() {
+            *svc.hold_from.lock().unwrap() = None;
+            live.release();
+        } else if !update::installing() && live.press() {
+            *svc.hold_from.lock().unwrap() = Some(now_ms());
+        }
+    } else {
+        let from = svc.hold_from.lock().unwrap().take();
+        let mode = svc.settings.lock().unwrap().talk_mode;
+        if live.listening() && release_stops(mode, from, now_ms()) {
+            live.release();
+        }
+    }
+}
+
+/// The Ask loop as the app runs it: the recording path for its words, one frame of the screen for its picture, and
+/// the panel for what it says.
+fn live_for(app: &AppHandle, svc: &Arc<App>) -> Arc<live::Live> {
+    let (handle, shots, tidy) = (app.clone(), svc.clone(), svc.clone());
+    live::Live::new(
+        live::Deps {
+            voice: Arc::new(live::AppVoice(svc.clone())),
+            grab: Box::new(move || {
+                let s = shots.settings.lock().unwrap().clone();
+                let frame = capture::grab_ask_frame(&s)?;
+                let target = s.ask_target;
+                let cut: live::Frame = Box::new(move || frame.finish(&s, target, capture::ASK_EDGE));
+                Ok(cut)
+            }),
+            // No AI is configured until the person chooses one in Settings (slice 3).
+            provider: Box::new(|| None),
+            out: Box::new(move |o| match o {
+                live::Out::State(s) => {
+                    let _ = handle.emit("live://state", &s);
+                }
+                live::Out::Delta { turn, text } => {
+                    let _ = handle.emit("live://delta", json!({ "turn": turn, "text": text }));
+                }
+                live::Out::Show => platform::show_panel(&handle),
+                live::Out::Hide => hide_window(&handle, platform::PANEL),
+            }),
+            now: Box::new(now_ms),
+            tidy: Box::new(move || tidy.settings.lock().unwrap().tidy),
+        },
+        &settings::data_dir(),
+    )
+}
+
+#[tauri::command]
+fn live_state(live: tauri::State<'_, Arc<live::Live>>) -> live::Snapshot {
+    live.snapshot()
+}
+
+#[tauri::command]
+fn live_drop_picture(live: tauri::State<'_, Arc<live::Live>>) {
+    live.drop_picture();
+}
+
+/// Async: discarding a question waits for the speech worker, which must not hold the event loop.
+#[tauri::command]
+async fn live_stop(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    live.stop();
+    Ok(())
+}
+
+#[tauri::command]
+async fn live_close(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    live.close();
+    Ok(())
 }
 
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
@@ -337,6 +433,13 @@ fn close_overlay(app: &AppHandle) {
 }
 
 fn finish(app: &AppHandle, svc: &Arc<App>) -> Result<Option<SessionExport>, String> {
+    // A question being said ends in the Ask loop, whatever asked for the stop: never in a paste.
+    if asking(svc) {
+        if let Some(live) = app.try_state::<Arc<live::Live>>() {
+            live.release();
+        }
+        return Ok(None);
+    }
     close_overlay(app);
     if svc.settings.lock().unwrap().sounds {
         platform::chime(false);
@@ -517,6 +620,11 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
     };
     let svc = svc.inner().clone();
     let rec = recording(&svc);
+    match routed(action, rec, asking(&svc), svc.hotkey_test.load(Ordering::SeqCst)) {
+        Some(true) => return ask_key(app, &svc, pressed),
+        Some(false) => {}
+        None => return,
+    }
     // While a recording runs, its shortcuts still work: the test must not trap it.
     if svc.hotkey_test.load(Ordering::SeqCst) && !rec {
         return;
@@ -585,11 +693,13 @@ fn settings_view(svc: &App) -> Value {
         "full_hotkey": s.full_chord().label(),
         "region_hotkey": s.region_chord().label(),
         "zoom_hotkey": s.zoom_chord().label(),
+        "ask_hotkey": s.ask_chord().label(),
         "hotkeys": {
             "session": chord(s.session_chord(), chord::default_session()),
             "full": chord(s.full_chord(), chord::default_full()),
             "region": chord(s.region_chord(), chord::default_region()),
             "zoom": chord(s.zoom_chord(), chord::default_zoom()),
+            "ask": chord(s.ask_chord(), chord::default_ask()),
         },
         "hotkey_errors": errors,
         "talk_mode": s.talk_mode,
@@ -751,6 +861,7 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
         ("Capture screen", &cur.full_hotkey, &next.full_hotkey),
         ("Capture region", &cur.region_hotkey, &next.region_hotkey),
         ("Capture around pointer", &cur.zoom_hotkey, &next.zoom_hotkey),
+        ("Ask about this", &cur.ask_hotkey, &next.ask_hotkey),
     ];
     let mut seen: Vec<(&str, chord::Chord)> = vec![];
     for (name, was, raw) in chords {
@@ -778,8 +889,8 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
 }
 
 fn keys_changed(a: &Settings, b: &Settings) -> bool {
-    (a.session_chord(), a.full_chord(), a.region_chord(), a.zoom_chord())
-        != (b.session_chord(), b.full_chord(), b.region_chord(), b.zoom_chord())
+    (a.session_chord(), a.full_chord(), a.region_chord(), a.zoom_chord(), a.ask_chord())
+        != (b.session_chord(), b.full_chord(), b.region_chord(), b.zoom_chord(), b.ask_chord())
 }
 
 fn rebind(app: &AppHandle, svc: &Arc<App>) {
@@ -1727,6 +1838,7 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
         (Action::Full, "full", s.full_chord()),
         (Action::Region, "region", s.region_chord()),
         (Action::Zoom, "zoom", s.zoom_chord()),
+        (Action::Ask, "ask", s.ask_chord()),
     ];
     for (action, name, chord) in chords {
         let res = Shortcut::from_str(&chord.accelerator())
@@ -1753,6 +1865,7 @@ fn refused(s: &Settings) -> Vec<(String, String)> {
         ("full", &s.full_hotkey, s.full_chord()),
         ("region", &s.region_hotkey, s.region_chord()),
         ("zoom", &s.zoom_hotkey, s.zoom_chord()),
+        ("ask", &s.ask_hotkey, s.ask_chord()),
     ];
     saved
         .into_iter()
@@ -1857,6 +1970,10 @@ pub fn run() {
             update_check,
             update_install,
             window_open,
+            live_state,
+            live_drop_picture,
+            live_stop,
+            live_close,
             platform_info,
         ])
         .setup(move |app| {
@@ -1865,6 +1982,7 @@ pub fn run() {
             let handle = app.handle().clone();
             clipboard::bind(&handle);
             tray::setup(&handle, &svc)?;
+            app.manage(live_for(&handle, &svc));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
             if let Some(m) = svc.history.recover() {
@@ -2427,5 +2545,36 @@ mod tests {
     fn the_clock_reads_minutes_and_seconds() {
         assert_eq!(clock(0), "0:00");
         assert_eq!(clock(65_400), "1:05");
+    }
+
+    #[test]
+    fn the_ask_key_asks_only_when_no_dictation_records_and_other_keys_leave_a_question_alone() {
+        use Action::*;
+        // Nothing records: the Ask key asks, the others go their usual way.
+        assert_eq!(routed(Ask, false, false, false), Some(true));
+        assert_eq!([Session, Full, Region, Zoom].map(|a| routed(a, false, false, false)), [Some(false); 4]);
+        // A dictation records: the Ask key does nothing, so a dictation never opens the panel.
+        assert_eq!(routed(Ask, true, false, false), None);
+        assert_eq!(routed(Session, true, false, false), Some(false));
+        // A question is being said: the Ask key ends it, and no other chord stops, pastes or adds a picture to it.
+        assert_eq!(routed(Ask, true, true, false), Some(true));
+        assert_eq!([Session, Full, Region, Zoom].map(|a| routed(a, true, true, false)), [None; 4]);
+        // Onboarding's key test only hears the Ask key.
+        assert_eq!(routed(Ask, false, false, true), None);
+    }
+
+    #[test]
+    fn the_ask_key_is_refused_when_it_is_another_shortcut_and_rebinds_like_the_others() {
+        let cur = Settings::default();
+        let p = |v: Value| v.as_object().unwrap().clone();
+        assert_eq!(merge(&cur, p(json!({ "ask_hotkey": "Ctrl+Alt+A" }))).unwrap().ask_chord().label(), "Ctrl+Alt+A");
+        // Refused the way the others are: a chord saved for another shortcut cannot also be the Ask key.
+        let err = merge(&cur, p(json!({ "session_hotkey": "Ctrl+Alt+F9", "ask_hotkey": "Ctrl+Alt+F9" }))).unwrap_err();
+        assert!(err.contains("already Start / stop"), "{err}");
+        let taken = Settings { zoom_hotkey: Some("Ctrl+Shift+F8".into()), ..Settings::default() };
+        let err = merge(&taken, p(json!({ "ask_hotkey": "Ctrl+Shift+F8" }))).unwrap_err();
+        assert!(err.contains("already Capture around pointer"), "{err}");
+        assert!(merge(&cur, p(json!({ "ask_hotkey": "Shift" }))).is_err(), "a chord needs a key");
+        assert!(keys_changed(&cur, &Settings { ask_hotkey: Some("Ctrl+Alt+A".into()), ..Settings::default() }));
     }
 }
