@@ -1192,15 +1192,76 @@ html.win .home-recent button {
   text-align: right;
   white-space: nowrap;
 }
-.home-keys {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 32px;
+/* The hub: the two features side by side, one look for both; the name and words tell them apart. A surface lifts by
+   fill alone. Inside: the name, one line of what it does, its keys, and where it is set up. */
+.home-hub {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
-.home-keys > span {
+.home-hub + section,
+.home-hub + .home-quiet {
+  margin-top: 40px;
+}
+.feature {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 16px;
+  border-radius: var(--r-card);
+  background: var(--fill);
+}
+.feature h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-head);
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: -0.01em;
+}
+.feature p {
+  margin: 4px 0 0;
+  font-size: var(--fs-small);
+  line-height: 16px;
+  color: var(--label-2);
+}
+/* Each key's name and its caps on one row; the caps of every row start on one edge. */
+.feature-keys {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  justify-content: start;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 16px;
+}
+.feature-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 16px;
+  margin-top: auto;
+  padding-top: 16px;
+  font-size: var(--fs-small);
+  line-height: 16px;
+}
+/* Its links are quiet, as the page's are; the one that still needs doing (Choose an AI) is in the text colour. */
+.feature .link {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
+  font: inherit;
+  color: var(--label-2);
+}
+.feature .link:hover {
+  color: var(--label);
+  text-decoration: none;
+}
+.feature .link.strong {
+  color: var(--label);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--label-3);
+  text-underline-offset: 2px;
 }
 .home-foot {
   display: flex;
@@ -1217,19 +1278,6 @@ html.win .home-recent button {
 }
 html.win .home-foot .btn {
   margin-right: -14px;
-}
-/* Before an AI is chosen, Ask is one quiet line under the keys. */
-.home-ask {
-  margin: 12px 0 0;
-  font-size: var(--fs-caption);
-  color: var(--label-2);
-}
-.home-ask .link {
-  font: inherit;
-  color: var(--label);
-  text-decoration: underline;
-  text-decoration-color: var(--label-3);
-  text-underline-offset: 2px;
 }
 
 /* —— AI: the chosen AI on top, then each way to one as a plain row. Rows keep the pane's grouped look on both skins; what
