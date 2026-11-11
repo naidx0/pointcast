@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Check, House, Image, Info, Keyboard, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, House, Image, Info, Keyboard, MessageCircleQuestion, Settings2, Share } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
@@ -11,6 +12,13 @@ import {
   agentFolder,
   agentRemove,
   agentsStatus,
+  assistChoose,
+  assistForget,
+  assistKeySet,
+  assistModels,
+  assistOfflineOnly,
+  assistProviders,
+  assistSignIn,
   gpuRetry,
   historyClear,
   historyList,
@@ -20,6 +28,7 @@ import {
   loginGet,
   loginSet,
   mcpCopySetup,
+  onPaneAsk,
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
@@ -27,6 +36,7 @@ import {
   statsGet,
   statsReset,
   subscribe,
+  takePaneAsk,
   updateCheck,
   updateInstall,
   windowOpen,
@@ -42,9 +52,24 @@ import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
 import { recentRows, type RecentRow } from "@/lib/home";
+import {
+  askReady,
+  chosenRoute,
+  consentText,
+  defaultModel,
+  groups,
+  modelLabel,
+  needsConsent,
+  nowView,
+  type Assist,
+  type AssistModel,
+  type Route,
+  type RouteView,
+} from "@/lib/assist";
 
 const PANES = [
   { id: "home", name: "Home", icon: House, tile: "tile-teal" },
+  { id: "ai", name: "AI", icon: MessageCircleQuestion, tile: "tile-blue" },
   { id: "general", name: "General", icon: Settings2, tile: "tile-gray" },
   { id: "shortcuts", name: "Shortcuts", icon: Keyboard, tile: "tile-indigo" },
   { id: "speech", name: "Speech", icon: AudioLines, tile: "tile-orange" },
@@ -59,9 +84,12 @@ const paneOf = (q: string | null): Pane | null => (q === "usage" ? "home" : PANE
 
 type Patch = (p: Record<string, unknown>) => Promise<string | null>;
 
+/** The pane another window asked for as this one opened (the Ask panel's Open Settings), read once per window. */
+const askedPane = typeof window !== "undefined" ? paneOf(takePaneAsk()) : null;
+
 export function Settings() {
   const { cfg, setCfg, patch, refresh, error } = useConfig();
-  const [pane, setPane] = useState<Pane>(() => paneOf(new URLSearchParams(location.search).get("pane")) ?? "home");
+  const [pane, setPane] = useState<Pane>(() => paneOf(new URLSearchParams(location.search).get("pane")) ?? askedPane ?? "home");
   const [scrolled, setScrolled] = useState(false);
   const main = useRef<HTMLElement | null>(null);
   const mac = platform() === "mac";
@@ -80,6 +108,14 @@ export function Settings() {
           if (to) setPane(to);
         }),
       ),
+    [],
+  );
+  useEffect(
+    () =>
+      onPaneAsk((p) => {
+        const to = paneOf(p);
+        if (to) setPane(to);
+      }),
     [],
   );
 
@@ -124,6 +160,8 @@ export function Settings() {
           ) : null}
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} />
+          ) : pane === "ai" ? (
+            <Ai />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -415,7 +453,12 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   const [recent, setRecent] = useState<RecentRow[]>([]);
   const [range, setRange] = useState<Range>("week");
   const [sure, setSure] = useState(false);
+  // Ask joins the ways in once an AI is chosen; null until the engine says.
+  const [ask, setAsk] = useState<boolean | null>(null);
   useEffect(() => {
+    assistProviders()
+      .then((a) => setAsk(askReady(a)))
+      .catch(() => setAsk(false));
     statsGet()
       .catch(() => null)
       .then((u) => setCounts(readUsage(u, Date.now())));
@@ -525,7 +568,20 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
           <span>
             Mark up <Keycaps label={cfg.hotkeys.region.label} />
           </span>
+          {ask && cfg.hotkeys.ask ? (
+            <span>
+              Ask <Keycaps label={cfg.hotkeys.ask.label} />
+            </span>
+          ) : null}
         </div>
+        {ask === false && cfg.hotkeys.ask ? (
+          <p className="home-ask">
+            Ask about your screen:{" "}
+            <button type="button" className="link" onClick={() => go("ai")}>
+              choose an AI
+            </button>
+          </p>
+        ) : null}
       </section>
       <div className="home-foot">
         <span>{v.since}</span>
@@ -546,6 +602,345 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
         </button>
       </div>
     </div>
+  );
+}
+
+/** An engine error as one plain line. */
+const plain = (e: unknown) => String(e).replace(/^Error: */, "");
+
+/** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
+ * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
+function Ai() {
+  const [a, setA] = useState<Assist | null>(null);
+  const [busy, setBusy] = useState("");
+  const [errs, setErrs] = useState<Record<string, string>>({});
+  const [more, setMore] = useState<{ id: string; what: "key" | "help" } | null>(null);
+  const [consent, setConsent] = useState<Route | null>(null);
+  const [found, setFound] = useState<{ id: string; list: AssistModel[] } | null>(null);
+  const [finding, setFinding] = useState(false);
+  const load = () =>
+    assistProviders()
+      .then(setA)
+      .catch(() => undefined);
+  useEffect(() => {
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, []);
+  const chosen = a ? chosenRoute(a) : null;
+  // The chosen route's full model list can take a few seconds: the quick list stands in until it comes.
+  useEffect(() => {
+    if (!chosen) return;
+    let live = true;
+    setFinding(true);
+    assistModels(chosen.id)
+      .then((list) => live && setFound({ id: chosen.id, list }))
+      .catch(() => undefined)
+      .finally(() => live && setFinding(false));
+    return () => {
+      live = false;
+    };
+  }, [chosen?.id]);
+  if (!a) return null;
+
+  const run = async (id: string, job: () => Promise<unknown>) => {
+    setErrs((e) => ({ ...e, [id]: "" }));
+    setBusy(id);
+    try {
+      await job();
+      return true;
+    } catch (e) {
+      setErrs((x) => ({ ...x, [id]: plain(e) }));
+      return false;
+    } finally {
+      setBusy("");
+      await load();
+    }
+  };
+  const choose = (p: Route, consent: boolean) => run(p.id, () => assistChoose(p.id, defaultModel(p), consent));
+  const act = (v: RouteView, p: Route) => {
+    if (v.action === "use") return needsConsent(p) ? setConsent(p) : choose(p, false);
+    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id));
+    if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
+    if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
+    if (v.action === "check") return run(p.id, () => Promise.resolve());
+  };
+
+  const now = nowView(a);
+  const quick = chosen?.models ?? [];
+  const list = found && found.id === chosen?.id && found.list.length ? found.list : quick;
+  const model = chosen ? (a.model ?? defaultModel(chosen)) : null;
+  const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: model, images: true }, ...list] : list;
+  return (
+    <>
+      <div className="group">
+        <Row label={now.title} sub={now.line}>
+          {chosen ? (
+            <select
+              className="field ai-model"
+              aria-label="Model"
+              value={model ?? ""}
+              disabled={!models.length || busy === chosen.id}
+              onChange={(e) => run(chosen.id, () => assistChoose(chosen.id, e.target.value, false))}
+            >
+              {models.length ? (
+                models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {modelLabel(m)}
+                  </option>
+                ))
+              ) : (
+                <option value="">{finding ? "Finding models…" : "No models found"}</option>
+              )}
+            </select>
+          ) : null}
+        </Row>
+        <Row
+          label="Only on this computer"
+          sub={errs.offline ? <span style={{ color: "var(--red-ink)" }}>{errs.offline}</span> : "Hides every AI that sends your words off this computer."}
+        >
+          <Toggle label="Only on this computer" on={a.offline_only} set={(v) => run("offline", () => assistOfflineOnly(v))} />
+        </Row>
+      </div>
+      {groups(a).map((g) => (
+        <Fragment key={g.kind}>
+          <h2 className="group-title">{g.title}</h2>
+          <div className="group">
+            {g.routes.map((v) => {
+              const p = a.providers.find((x) => x.id === v.id)!;
+              const open = more?.id === v.id ? more.what : null;
+              return (
+                <RouteRow
+                  key={v.id}
+                  v={v}
+                  busy={busy === v.id}
+                  err={errs[v.id] ?? ""}
+                  more={open}
+                  act={() => act(v, p)}
+                  close={() => setMore(null)}
+                  check={() => run(p.id, () => Promise.resolve())}
+                  forget={() => run(p.id, () => assistForget(p.id))}
+                  saveKey={(key) => run(p.id, () => assistKeySet(p.id, key)).then((ok) => ok && setMore(null))}
+                />
+              );
+            })}
+          </div>
+        </Fragment>
+      ))}
+      {consent ? (
+        <ConsentSheet
+          route={consent}
+          allow={() => {
+            setConsent(null);
+            choose(consent, true);
+          }}
+          cancel={() => setConsent(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+const BUSY: Partial<Record<NonNullable<RouteView["action"]>, string>> = { sign_in: "Signing in…", check: "Checking…" };
+
+/** One way to an AI: its name, its state in plain words, and the one action that fits; a key or the install help opens
+ * under it. */
+function RouteRow(props: {
+  v: RouteView;
+  busy: boolean;
+  err: string;
+  more: "key" | "help" | null;
+  act: () => void;
+  close: () => void;
+  check: () => void;
+  forget: () => void;
+  saveKey: (key: string) => void;
+}) {
+  const { v, busy, err, more } = props;
+  const [sure, setSure] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+  const line = err ? (
+    <span style={{ color: "var(--red-ink)" }}>{err}</span>
+  ) : busy && v.action === "sign_in" ? (
+    "Finish signing in in your browser"
+  ) : (
+    v.line
+  );
+  const cmd = v.help?.command;
+  return (
+    <div className="row ai-route">
+      <div className="grow">
+        <div className="lbl">{v.name}</div>
+        <div className="sub">{line}</div>
+      </div>
+      {v.chosen ? (
+        <span className="ai-inuse">
+          <Check size={12} strokeWidth={2.5} aria-hidden />
+          In use
+        </span>
+      ) : null}
+      {v.forget ? (
+        <button
+          type="button"
+          className={`btn plain ${sure ? "danger" : ""}`}
+          disabled={busy}
+          onBlur={() => setSure(false)}
+          onClick={() => {
+            if (!sure) return setSure(true);
+            setSure(false);
+            props.forget();
+          }}
+        >
+          {sure ? "Click again to forget" : "Forget"}
+        </button>
+      ) : null}
+      {v.action && more !== "key" ? (
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          aria-expanded={v.action === "get" ? more === "help" : undefined}
+          onClick={props.act}
+        >
+          {(busy && BUSY[v.action]) || v.label}
+        </button>
+      ) : null}
+      {more === "key" ? <KeyForm name={v.name} busy={busy} save={props.saveKey} cancel={props.close} /> : null}
+      {more === "help" && v.help ? (
+        <div className="ai-more">
+          <p className="ai-help">{v.help.text}</p>
+          <div className="ai-help-row">
+            {cmd ? (
+              <div className="ai-cmd">
+                <code>{cmd}</code>
+                <button
+                  type="button"
+                  className="btn plain"
+                  aria-label={copied ? "Copied" : "Copy the command"}
+                  onClick={() =>
+                    navigator.clipboard
+                      ?.writeText(cmd)
+                      .then(() => setCopied(true))
+                      .catch(() => undefined)
+                  }
+                >
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            ) : null}
+            <button type="button" className="btn" disabled={busy} onClick={props.check}>
+              {busy ? "Checking…" : "Check again"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** The key goes from the field straight to the engine: never in state, never echoed, never prefilled, and the field is
+ * emptied the moment it is sent. Only whether the field has anything is kept, to enable Save. */
+function KeyForm({ name, busy, save, cancel }: { name: string; busy: boolean; save: (key: string) => void; cancel: () => void }) {
+  const field = useRef<HTMLInputElement>(null);
+  const [filled, setFilled] = useState(false);
+  useEffect(() => field.current?.focus(), []);
+  return (
+    <form
+      className="ai-more ai-key"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const el = field.current;
+        const key = el?.value.trim() ?? "";
+        if (el) el.value = "";
+        setFilled(false);
+        if (key) save(key);
+      }}
+    >
+      <input
+        ref={field}
+        type="password"
+        className="field"
+        aria-label={`${name} key`}
+        placeholder="Paste your key"
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(e) => setFilled(!!e.currentTarget.value.trim())}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+      />
+      <button type="button" className="btn plain" onClick={cancel}>
+        Cancel
+      </button>
+      <button type="submit" className="btn primary" disabled={!filled || busy}>
+        {busy ? "Saving…" : "Save"}
+      </button>
+    </form>
+  );
+}
+
+/** Consent, once per AI and destination: a sheet on a Mac, a dialog on Windows. The rest of the window is inert while it
+ * is open, Tab stays inside it, and Esc is Not now. */
+function ConsentSheet({ route, allow, cancel }: { route: Route; allow: () => void; cancel: () => void }) {
+  const t = consentText(route);
+  const box = useRef<HTMLDivElement>(null);
+  const off = useRef(cancel);
+  off.current = cancel;
+  const win = platform() === "win";
+  useEffect(() => {
+    const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const root = document.getElementById("root");
+    root?.setAttribute("inert", "");
+    box.current?.querySelector<HTMLButtonElement>(".btn.primary")?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        off.current();
+      } else if (e.key === "Tab" && box.current) {
+        const all = [...box.current.querySelectorAll<HTMLElement>("button")];
+        const i = all.indexOf(document.activeElement as HTMLElement);
+        e.preventDefault();
+        all[(i + (e.shiftKey ? -1 : 1) + all.length) % all.length]?.focus();
+      }
+    };
+    document.addEventListener("keydown", key, true);
+    return () => {
+      document.removeEventListener("keydown", key, true);
+      root?.removeAttribute("inert");
+      if (back?.isConnected) back.focus();
+    };
+  }, []);
+  const yes = (
+    <button type="button" className="btn primary" onClick={allow}>
+      Allow
+    </button>
+  );
+  const no = (
+    <button type="button" className="btn" onClick={cancel}>
+      Not now
+    </button>
+  );
+  return createPortal(
+    <div className="sheet-scrim">
+      <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="consent-title" aria-describedby="consent-body" ref={box}>
+        <h2 id="consent-title">{t.title}</h2>
+        <p id="consent-body">{t.body}</p>
+        <div className="sheet-actions">
+          {win ? yes : no}
+          {win ? no : yes}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

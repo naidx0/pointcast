@@ -31,6 +31,8 @@ const route = (o = {}) => ({
   offline: false,
   consented: false,
   models: [],
+  plan: null,
+  adds: [],
   ...o,
 });
 const none = { chosen: null, offline_only: false };
@@ -59,6 +61,21 @@ test("each state offers the action that fits it", () => {
   assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_running" }), ["check", "Check again"]);
   assert.deepEqual(act({ state: "unsupported" }), [null, null]);
   assert.deepEqual(act({ state: "ready" }, { chosen: "codex", offline_only: false }), [null, null], "the chosen route offers nothing to press");
+});
+
+test("a signed-in plan says which plan, in plain words", () => {
+  assert.equal(routeView(route({ state: "ready", plan: "free" }), none).line, "ChatGPT Free, through Codex");
+  assert.equal(routeView(route({ state: "ready", plan: "PLUS" }), none).line, "ChatGPT Plus, through Codex");
+  assert.equal(routeView(route({ state: "ready" }), none).line, "Signed in", "no plan said: no plan guessed");
+  assert.equal(normalizeAssist({ providers: [{ id: "codex", kind: "plan", planType: "free" }] }).providers[0].plan, "free");
+  assert.equal(routeView(previewAssist("codex-ready").providers[0], previewAssist("codex-ready")).line, "ChatGPT Free, through Codex");
+});
+
+test("a route on this computer drops the words its group already says", () => {
+  const v = routeView(route({ kind: "local", id: "ollama", name: "Ollama on this computer", offline: true }), none);
+  assert.equal(v.name, "Ollama");
+  assert.equal(nowView(previewAssist("local")).title, "Ollama");
+  assert.equal(routeView(route(), none).name, "ChatGPT");
 });
 
 test("the lines say the state in plain words", () => {
@@ -134,6 +151,14 @@ test("consent names the destination and the account; a model on this computer sa
     "Ask sends your words and the picture you take to OpenAI, on your account. Nothing goes to Pointcast. You see each picture before it leaves.",
   );
   assert.equal(consentText(route({ kind: "local", offline: true, name: "Ollama on this computer" })).body, "Nothing leaves this computer.");
+  assert.equal(
+    consentText(route({ adds: ["AGENTS.md"] })).body,
+    "Ask sends your words and the picture you take to OpenAI, on your account. Nothing goes to Pointcast. You see each picture before it leaves. Codex also sends your Codex instructions file (AGENTS.md).",
+    "what Codex always adds is said, in one more sentence",
+  );
+  assert.doesNotMatch(consentText(route()).body, /also sends/, "only when the engine reports it");
+  assert.match(consentText(previewAssist("codex-signed-out").providers[0]).body, /AGENTS\.md/, "the fixture reports it for Codex");
+  assert.equal(consentText(route({ kind: "local", id: "ollama", offline: true, name: "Ollama on this computer", adds: ["x"] })).title, "Use Ollama for Ask?");
   assert.equal(needsConsent(route()), true);
   assert.equal(needsConsent(route({ consented: true })), false);
 });
@@ -144,6 +169,7 @@ test("a route starts on a model that can see pictures, and one that cannot is ma
     { id: "b", name: "B", images: true },
   ];
   assert.equal(defaultModel({ models }), "b");
+  assert.equal(defaultModel({ models: [...models, { id: "c", name: "C", images: true, default: true }] }), "c", "the route's own default first");
   assert.equal(defaultModel({ models: [models[0]] }), "a");
   assert.equal(defaultModel({ models: [] }), null);
   assert.equal(modelLabel(models[0]), "A (words only)");
@@ -172,7 +198,7 @@ test("every preview kind is a whole reply, and the preview commands change it as
   assert.equal(previewApply(a, { cmd: "choose", id: "codex", model: null, consent: false }), "Allow ChatGPT in Settings first");
   a = previewApply(a, { cmd: "choose", id: "codex", model: null, consent: true });
   assert.equal(a.chosen, "codex");
-  assert.equal(a.model, "gpt-5.5");
+  assert.equal(a.model, "gpt-6-luna", "the plan's own default");
   assert.equal(a.providers[0].consented, true);
   a = previewApply(a, { cmd: "forget", id: "codex" });
   assert.equal(a.chosen, null);

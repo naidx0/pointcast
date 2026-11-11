@@ -4,7 +4,8 @@
 
 export type RouteKind = "plan" | "key" | "local";
 export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported";
-export type AssistModel = { id: string; name: string; images: boolean };
+/** `default`: the model the route itself starts with. */
+export type AssistModel = { id: string; name: string; images: boolean; default?: boolean };
 
 /** One way to an AI, as `assist_providers` lists it. */
 export type Route = {
@@ -21,6 +22,10 @@ export type Route = {
   /** The person allowed this AI and destination once. */
   consented: boolean;
   models: AssistModel[];
+  /** The ChatGPT plan Codex is signed in with ("free", "plus"); null when not said. Read from `plan` or `planType`. */
+  plan: string | null;
+  /** Files the route always sends along with each question (Codex: the person's own AGENTS.md); empty when none. */
+  adds: string[];
 };
 
 /** The reply of `assist_providers`. */
@@ -72,6 +77,8 @@ export function normalizeAssist(x: unknown): Assist {
       offline: p.offline === true || p.kind === "local",
       consented: p.consented === true,
       models: normalizeModels(p.models),
+      plan: str(p.plan) || str((p as { planType?: unknown }).planType) || null,
+      adds: (Array.isArray(p.adds) ? p.adds : []).filter((f) => typeof f === "string" && f.trim()),
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
   return { chosen, model: str(v.model) || null, offline_only: v.offline_only === true, providers };
@@ -80,7 +87,7 @@ export function normalizeAssist(x: unknown): Assist {
 export function normalizeModels(x: unknown): AssistModel[] {
   return (Array.isArray(x) ? x : [])
     .filter((m) => m && typeof m === "object" && str(m.id))
-    .map((m) => ({ id: m.id, name: str(m.name) || m.id, images: m.images === true }));
+    .map((m) => ({ id: m.id, name: str(m.name) || m.id, images: m.images === true, ...(m.default === true ? { default: true } : {}) }));
 }
 
 /** The routes the list shows: only those on this computer while "Only on this computer" is on. */
@@ -106,16 +113,30 @@ export function groups(a: Assist): { kind: RouteKind; title: string; routes: Rou
   );
 }
 
-const app = (p: Route) => (p.id === "lmstudio" ? "LM Studio" : p.id === "ollama" ? "Ollama" : p.id === "codex" ? "Codex" : p.name);
+const app = (p: Pick<Route, "id" | "name">) => (p.id === "lmstudio" ? "LM Studio" : p.id === "ollama" ? "Ollama" : p.id === "codex" ? "Codex" : p.name);
+
+/** A route's name as the page says it: "Ollama on this computer" is "Ollama" under This computer, where the rest goes
+ * without saying. */
+export const shortName = (p: Pick<Route, "name">) => p.name.replace(/ on this computer$/i, "") || p.name;
+
+/** A ChatGPT plan in plain words: "free" is "Free", "plus" is "Plus". */
+const planName = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase();
+
+/** A signed-in plan: "ChatGPT Free, through Codex". */
+function planLine(p: Route): string {
+  if (!p.plan) return "Signed in";
+  const named = `${p.name} ${planName(p.plan)}`;
+  return p.id === "codex" ? `${named}, through Codex` : named;
+}
 
 /** A route's one line in plain words, and the one action that fits its state. */
 export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">): RouteView {
   const chosen = a.chosen === p.id && (!a.offline_only || p.offline);
-  const base = { id: p.id, name: p.name, chosen, forget: chosen || p.consented || (p.kind === "key" && p.state !== "no_key"), help: null };
+  const base = { id: p.id, name: shortName(p), chosen, forget: chosen || p.consented || (p.kind === "key" && p.state !== "no_key"), help: null };
   const use = (line: string): RouteView => ({ ...base, line, action: chosen ? null : "use", label: chosen ? null : "Use" });
   switch (p.state) {
     case "ready":
-      return use(p.kind === "plan" ? "Signed in" : p.kind === "key" ? "Key saved" : "Running, free");
+      return use(p.kind === "plan" ? planLine(p) : p.kind === "key" ? "Key saved" : "Running, free");
     case "signed_out":
       return { ...base, line: "Not signed in", action: "sign_in", label: "Sign in" };
     case "no_key":
@@ -163,22 +184,25 @@ export function nowView(a: Assist): { title: string; line: string } {
     return { title: "Nothing chosen", line: "Choose an AI below. Until then nothing leaves this computer." };
   }
   const m = p.models.find((x) => x.id === a.model);
-  return { title: p.name, line: goesLine(p, m ? m.images : true) };
+  return { title: shortName(p), line: goesLine(p, m ? m.images : true) };
 }
 
-/** The consent sheet: once per AI and destination, before its first use. */
-export function consentText(p: Pick<Route, "name" | "goes_to" | "offline">): { title: string; body: string } {
-  const title = `Use ${p.name} for Ask?`;
+/** The consent sheet: once per AI and destination, before its first use. What a route always sends along (Codex's
+ * AGENTS.md) is said in one more sentence, only when the engine reports it. */
+export function consentText(p: Pick<Route, "id" | "name" | "goes_to" | "offline" | "adds">): { title: string; body: string } {
+  const title = `Use ${shortName(p)} for Ask?`;
   if (p.offline) return { title, body: "Nothing leaves this computer." };
+  const files = p.adds.join(", ");
+  const also = !files ? "" : p.id === "codex" ? ` Codex also sends your Codex instructions file (${files}).` : ` ${app(p)} also sends ${files}.`;
   return {
     title,
-    body: `Ask sends your words and the picture you take to ${p.goes_to || p.name}, on your account. Nothing goes to Pointcast. You see each picture before it leaves.`,
+    body: `Ask sends your words and the picture you take to ${p.goes_to || p.name}, on your account. Nothing goes to Pointcast. You see each picture before it leaves.${also}`,
   };
 }
 
-/** The model a route starts with when chosen: the first that can see pictures, else the first. */
+/** The model a route starts with when chosen: its own default, else the first that can see pictures, else the first. */
 export function defaultModel(p: Pick<Route, "models">): string | null {
-  return (p.models.find((m) => m.images) ?? p.models[0])?.id ?? null;
+  return (p.models.find((m) => m.default) ?? p.models.find((m) => m.images) ?? p.models[0])?.id ?? null;
 }
 
 /** A model as the select lists it; one that cannot see pictures says so. */
@@ -192,9 +216,11 @@ export const needsConsent = (p: Pick<Route, "consented">) => !p.consented;
 export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key", "local", "offline"] as const;
 
 const MODELS: Record<string, AssistModel[]> = {
+  // As Codex's model/list answered for a ChatGPT Free plan.
   codex: [
-    { id: "gpt-5.5", name: "GPT-5.5", images: true },
-    { id: "gpt-5.5-mini", name: "GPT-5.5 mini", images: true },
+    { id: "gpt-6-luna", name: "GPT-6-Luna", images: true, default: true },
+    { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", images: true },
+    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", images: true },
   ],
   openai: [
     { id: "gpt-5.5", name: "GPT-5.5", images: true },
@@ -224,6 +250,8 @@ export function previewAssist(kind: string): Assist {
     offline: k === "local",
     consented: false,
     models: state === "ready" ? MODELS[id] ?? [] : [],
+    plan: null,
+    adds: id === "codex" ? ["AGENTS.md"] : [],
   });
   const a: Assist = {
     chosen: null,
@@ -247,7 +275,10 @@ export function previewAssist(kind: string): Assist {
     a.model = defaultModel(a.providers.find((x) => x.id === id)!);
   };
   if (kind === "codex-signed-out") set("codex", { state: "signed_out" });
-  if (kind === "codex-ready") choose("codex");
+  if (kind === "codex-ready") {
+    choose("codex");
+    set("codex", { plan: "free" });
+  }
   if (kind === "key") {
     set("codex", { state: "signed_out" });
     choose("openai");
@@ -286,7 +317,7 @@ export function previewApply(
     case "key_delete":
       return { ...map(c.id, (p) => ({ ...p, state: "no_key", models: [] })), ...(a.chosen === c.id ? { chosen: null, model: null } : {}) };
     case "signed_in":
-      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [] }));
+      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [], plan: p.kind === "plan" ? "free" : p.plan }));
   }
 }
 

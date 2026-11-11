@@ -103,9 +103,9 @@ export type Phase = "closed" | "listening" | "finishing" | "thinking" | "answeri
 export type LineMode = "voice" | "loops" | "margin" | "rest" | "none";
 /** ink: the work is on this computer. accent: going to or coming from the AI. warn: a wait ran long or failed. */
 export type Tone = "ink" | "accent" | "warn" | "quiet";
-/** The one action an error offers: open Settings, stop the request still in flight, or close the panel. (Try again
- * needs an engine command that does not exist yet; pressing Ask again asks again.) */
-export type ErrorAction = "settings" | "stop" | "close" | null;
+/** The one action an error offers: open Settings (no AI chosen, or one not allowed yet), ask the kept question again,
+ * stop the request still in flight, or close the panel. */
+export type ErrorAction = "settings" | "retry" | "stop" | "close" | null;
 export type LiveErrorView = { text: string; action: ErrorAction; label: string | null };
 
 export type LiveView = {
@@ -148,12 +148,16 @@ export function safePicture(p: LivePicture | null): LivePicture | null {
   return src.startsWith("data:image/") || src.startsWith("blob:") ? p : null;
 }
 
-export function errorView(e: LiveErrorPayload, provider: string): LiveErrorView {
+/** `kept`: the engine still holds the question, so Try again asks it again. */
+export function errorView(e: LiveErrorPayload, provider: string, kept = false): LiveErrorView {
   const code = typeof e === "object" && e ? e.code ?? "" : "";
   const message = (typeof e === "string" ? e : e?.message ?? "").trim();
   if (code === "no_provider" || (!provider && !message) || /^choose an ai/i.test(message))
     return { text: "Choose an AI in Settings first", action: "settings", label: "Open Settings" };
-  return { text: message || `${provider || "The AI"} could not answer`, action: "close", label: "Close" };
+  if (code === "not_allowed" || /^allow .+ in settings first/i.test(message))
+    return { text: message || `Allow ${provider || "the AI"} in Settings first`, action: "settings", label: "Open Settings" };
+  const text = message || `${provider || "The AI"} could not answer`;
+  return kept ? { text, action: "retry", label: "Try again" } : { text, action: "close", label: "Close" };
 }
 
 /** The first words of the question, for the header until the engine gives the session a title. */
@@ -217,7 +221,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     case "shown":
       return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, announce: "Answer ready" };
     case "error": {
-      const err = errorView(s.error, provider);
+      const err = errorView(s.error, provider, !!s.words.trim());
       return { ...base, phase: "error", line: "rest", tone: "warn", error: err, announce: err.text };
     }
   }
@@ -295,7 +299,9 @@ export function previewSnapshot(kind: string, o: { error?: string | null; provid
     case "error":
       return o.error === "provider"
         ? { ...common, state: "error", error: { code: "provider", message: "ChatGPT could not be reached" } }
-        : { ...common, state: "error", provider: "", error: "Choose an AI in Settings first" };
+        : o.error === "allow"
+          ? { ...common, state: "error", error: { code: "not_allowed", message: "Allow ChatGPT in Settings first" } }
+          : { ...common, state: "error", provider: "", error: "Choose an AI in Settings first" };
     default:
       return { ...common, state: "sending" };
   }

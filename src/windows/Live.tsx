@@ -6,6 +6,7 @@ import {
   liveDropPicture,
   liveFit,
   liveOpenSettings,
+  liveRetry,
   liveState,
   liveStop,
   onLiveDelta,
@@ -277,7 +278,10 @@ function LineRow({ v, levels }: { v: LiveView; levels: { v: number[]; first: num
 }
 
 function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {
-  const act = () => (err.action === "settings" ? liveOpenSettings() : err.action === "stop" ? liveStop() : liveClose()).catch(noop);
+  const act = () =>
+    (err.action === "settings" ? liveOpenSettings() : err.action === "retry" ? liveRetry() : err.action === "stop" ? liveStop() : liveClose()).catch(
+      noop,
+    );
   return (
     <div className="live-err live-in">
       <svg className="ln warn" width={16} height={20} viewBox="0 0 16 20" aria-hidden="true">
