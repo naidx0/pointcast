@@ -14,8 +14,9 @@ export function nextButton(step: Step, practiced: boolean): { label: string; ena
     case "welcome":
       return { label: "Get started" };
     case "access":
-    case "ask":
       return { label: "Continue" };
+    case "ask":
+      return { label: "Continue", skip: "Skip" };
     case "try":
       return { label: "Continue", enabled: practiced, skip: "Skip" };
     case "done":

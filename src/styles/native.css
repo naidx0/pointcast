@@ -2943,3 +2943,57 @@ html.win .undo-btn {
   vertical-align: middle;
   margin: 0 2px;
 }
+
+/* —— Onboarding: the AIs on this computer, one click each —— */
+.onb-ais {
+  width: 100%;
+  max-width: 440px;
+  margin-top: 14px;
+  border: 0.5px solid var(--box-line);
+  border-radius: 10px;
+  background: var(--fill);
+  text-align: left;
+}
+.onb-ai-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 12px;
+}
+.onb-ai-row + .onb-ai-row {
+  border-top: 0.5px solid var(--sep);
+}
+.onb-ai-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+.onb-ai-row .lbl {
+  font-weight: 500;
+}
+.onb-ai-row .t-caption {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onb-ai-row .btn {
+  flex: none;
+}
+.onb-ai-err {
+  color: var(--red-ink);
+}
+.onb-ai-on {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--label-2);
+  font-size: var(--fs-small);
+  flex: none;
+}
+.onb-ai-more {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border-top: 0.5px solid var(--sep);
+  text-align: left;
+}

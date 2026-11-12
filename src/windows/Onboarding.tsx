@@ -4,9 +4,14 @@ import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField } from "@/components/Shortc
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
 import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
-import { askReady, chosenRoute, shortName } from "@/lib/assist";
+import { askReady, chosenRoute, defaultModel, destination, onboardingChoices, shortName, type Assist, type RouteView } from "@/lib/assist";
+import { BrandTile } from "@/components/Brands";
 import {
+  assistChoose,
   assistProviders,
+  assistSetup,
+  assistSignIn,
+  onAssistProviders,
   inTauri,
   loginSet,
   onboardingFinish,
@@ -40,6 +45,8 @@ export function Onboarding() {
   // "Change model…" shows the model cards in place of the step, until Done.
   const [models, setModels] = useState(() => preview && new URLSearchParams(location.search).get("models") === "1");
   const [practiced, setPracticed] = useState(false);
+  // An AI is chosen on the Ask step: Skip has nothing left to skip.
+  const [aiChosen, setAiChosen] = useState(false);
   const i = STEPS.indexOf(step);
   const go = (d: number) => setStep(STEPS[Math.min(STEPS.length - 1, Math.max(0, i + d))]);
 
@@ -93,7 +100,7 @@ export function Onboarding() {
                 onResult={() => setPracticed(true)}
               />
             )}
-            {step === "ask" && <AskStep cfg={cfg} patch={patch} />}
+            {step === "ask" && <AskStep cfg={cfg} patch={patch} onChosen={setAiChosen} />}
             {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
           </>
         )}
@@ -129,7 +136,7 @@ export function Onboarding() {
                 Back
               </button>
             ) : null}
-            {n.skip && n.enabled === false ? (
+            {n.skip && !(step === "ask" && aiChosen) ? (
               <button type="button" className="btn" onClick={() => go(1)}>
                 {n.skip}
               </button>
@@ -257,32 +264,32 @@ function Welcome() {
 }
 
 /** One calm step for Ask: what it does, its key, and where its AI is chosen. Nothing here is required. */
-function AskStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
+function AskStep({ cfg, patch, onChosen }: { cfg: Config; patch: (p: Record<string, unknown>) => Promise<string | null>; onChosen: (on: boolean) => void }) {
   // Seen here, Ask needs no card on Home later.
   useEffect(() => {
     if (!cfg.ask_intro_seen) patch({ ask_intro_seen: true }).catch(() => undefined);
   }, []);
-  // The AI that answers, by its short name; "" when none is chosen, null until the engine says. Read again when the
-  // window comes back from Settings.
-  const [ai, setAi] = useState<string | null>(null);
+  // Every AI this computer has, as the engine sees it; null until it says. Read again when the window comes back.
+  const [list, setList] = useState<Assist | null>(null);
   useEffect(() => {
     const load = () =>
       assistProviders()
-        .then((a) => {
-          const r = askReady(a) ? chosenRoute(a) : null;
-          setAi(r ? shortName(r) : "");
-        })
-        .catch(() => setAi(""));
+        .then(setList)
+        .catch(() => undefined);
     load();
+    const off = onAssistProviders(setList);
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
+    return () => {
+      off();
+      window.removeEventListener("focus", load);
+    };
   }, []);
+  const chosen = list && askReady(list) ? chosenRoute(list) : null;
+  const ai = list == null ? null : chosen ? shortName(chosen) : "";
+  useEffect(() => onChosen(!!chosen), [!!chosen]);
   const key = cfg.hotkeys.ask?.label;
   return (
     <div className="onb-step">
-      <Glyph>
-        <MessageCircleQuestion size={32} strokeWidth={1.5} />
-      </Glyph>
       <h1 className="t-title">Prompt with your screen</h1>
       <p className="t-body">Press the key and say what you want about what is on your screen. Your AI answers beside your work.</p>
       <div className="onb-rows">
@@ -290,27 +297,116 @@ function AskStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknow
           <span className="lbl">Ask</span>
           {key ? <Keycaps label={key} /> : <span className="t-caption">Set a key in Settings › Shortcuts</span>}
         </div>
-        <div className="onb-row">
-          <span className="lbl">AI</span>
-          {ai == null ? null : (
-            <button
-              type="button"
-              className={`link onb-ai${ai ? "" : " strong"}`}
-              aria-label={ai ? `Answers come from ${ai}. Change it in Settings` : "Choose an AI in Settings"}
-              onClick={() => void settingsOpenOn("ai").catch(() => undefined)}
-            >
-              {ai || "Choose an AI"}
-              <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
-            </button>
-          )}
-        </div>
       </div>
+      {list ? <AiPick a={list} setA={setList} /> : null}
       {key && ai ? (
         <p className="t-body onb-try">
           Try it: press <Keycaps label={key} /> and ask what is on your screen.
         </p>
       ) : null}
-      <p className="t-caption onb-later">{ai ? "You can change it any time in Settings." : "You can skip this and choose one later in Settings."}</p>
+      <p className="t-caption onb-later">
+        {ai ? "You can change it any time in Settings." : "Not now? Skip. You can choose one any time in Settings."}
+      </p>
+    </div>
+  );
+}
+
+/** The AIs on this computer, each one click from answering: Use picks it (the line under it says where the words go,
+ * so the click is the consent), Install and Update run the vendor's own package, Sign in opens the vendor's own
+ * sign-in and is watched until it is done. Nothing is typed here. */
+function AiPick({ a, setA }: { a: Assist; setA: (a: Assist) => void }) {
+  const [busy, setBusy] = useState("");
+  const [waiting, setWaiting] = useState("");
+  const [err, setErr] = useState<Record<string, string>>({});
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const reload = (refresh = true) => assistProviders(refresh).then(setA).catch(() => undefined);
+  const watch = (id: string) => {
+    setWaiting(id);
+    const started = Date.now();
+    const tick = () =>
+      assistProviders(true)
+        .then((x) => {
+          setA(x);
+          const r = x.providers.find((q) => q.id === id);
+          if ((r && r.state !== "signed_out" && r.state !== "checking") || Date.now() - started > 300_000) return setWaiting("");
+          timer.current = window.setTimeout(tick, 3000);
+        })
+        .catch(() => setWaiting(""));
+    timer.current = window.setTimeout(tick, 3000);
+  };
+  const act = async (v: RouteView) => {
+    const p = a.providers.find((x) => x.id === v.id)!;
+    setErr((e) => ({ ...e, [v.id]: "" }));
+    setBusy(v.id);
+    try {
+      if (v.action === "use") await assistChoose(p.id, defaultModel(p), true);
+      else if (v.action === "install" || v.action === "update") await assistSetup(p.id, v.action);
+      else if (v.action === "sign_in") {
+        if (p.id === "codex") await assistSignIn(p.id);
+        else {
+          await assistSetup(p.id, "sign_in");
+          watch(p.id);
+        }
+      }
+    } catch (e) {
+      setErr((x) => ({ ...x, [v.id]: String(e).replace(/^Error:\s*/, "") }));
+    } finally {
+      setBusy("");
+      await reload(v.action !== "use");
+    }
+  };
+  // The few that matter first; the rest are one click away, here, never in another window.
+  const [all, setAll] = useState(false);
+  const every = onboardingChoices(a, 99);
+  const choices = all ? every : every.slice(0, 3);
+  if (!choices.length) return null;
+  const doing: Record<string, string> = { install: "Installing…", update: "Updating…", sign_in: "Signing in…", use: "Choosing…" };
+  return (
+    <div className="onb-ais" role="list" aria-label="AIs on this computer">
+      {choices.map((v) => {
+        const p = a.providers.find((x) => x.id === v.id)!;
+        const line = err[v.id]
+          ? err[v.id]
+          : waiting === v.id
+            ? "Finish signing in in the window that opened."
+            : busy === v.id && (v.action === "install" || v.action === "update")
+              ? "This can take a minute."
+              : v.action === "use" || v.chosen
+                ? p.offline
+                  ? "Stays on this computer"
+                  : `Sends your words and pictures to ${destination(p.goes_to).split(",")[0] || "the AI"}`
+                : v.line;
+        return (
+          <div key={v.id} className="onb-ai-row" role="listitem">
+            <BrandTile id={v.id} name={v.name} size={24} />
+            <div className="grow">
+              <div className="lbl">{v.name}</div>
+              <div className={`t-caption${err[v.id] ? " onb-ai-err" : ""}`}>{line}</div>
+            </div>
+            {v.chosen ? (
+              <span className="onb-ai-on">
+                <Check size={12} strokeWidth={2.5} aria-hidden="true" />
+                In use
+              </span>
+            ) : (
+              <button
+                type="button"
+                className={`btn${v.action === "use" ? " primary" : ""}`}
+                disabled={!!busy || waiting === v.id}
+                onClick={() => void act(v)}
+              >
+                {waiting === v.id ? "Waiting…" : busy === v.id ? doing[v.action ?? ""] : v.label}
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {every.length > choices.length ? (
+        <button type="button" className="link onb-ai-more" onClick={() => setAll(true)}>
+          Show {every.length - choices.length} more
+        </button>
+      ) : null}
     </div>
   );
 }

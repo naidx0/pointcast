@@ -585,3 +585,16 @@ export function previewApply(
 }
 
 export const previewModels = (id: string): AssistModel[] => MODELS[id] ?? [];
+
+/** The AIs onboarding offers, each with its one click: the ones ready on this computer first, then the ones a click
+ * signs in or updates, then the ones a click installs; at most `max`. Keys, addresses and apps Pointcast cannot
+ * install wait in Settings, so the step asks for nothing typed. */
+export function onboardingChoices(a: Assist, max = 5): RouteView[] {
+  const rank = (v: RouteView) => (v.chosen ? 0 : v.action === "use" ? 1 : v.action === "sign_in" || v.action === "update" ? 2 : v.action === "install" ? 3 : 9);
+  return visibleRoutes(a)
+    .filter((p) => p.available && p.kind !== "key" && p.id !== CUSTOM)
+    .map((p) => routeView(p, a))
+    .filter((v) => rank(v) < 9)
+    .sort((x, y) => rank(x) - rank(y))
+    .slice(0, max);
+}
