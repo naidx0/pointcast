@@ -810,6 +810,10 @@ pub struct Manifest {
     /// `created_ms` in local time, RFC 3339.
     pub created: String,
     pub pictures: Vec<ManifestPicture>,
+    /// What the folder is when it is not a recording's handoff: a session's export says `session`
+    /// (`sessions::EXPORT_KIND`), and is never pruned.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -862,7 +866,7 @@ fn is_handoff_name(name: &str) -> bool {
 }
 
 /// A folder only its owner can open (0700 on Unix). Fails when it already exists.
-fn create_private(p: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private(p: &Path) -> std::io::Result<()> {
     #[allow(unused_mut)] // set only on Unix
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
@@ -912,6 +916,7 @@ pub fn write_handoff(root: &Path, id: &str, created_ms: u64, items: &[Item], now
             id: id.into(),
             created_ms,
             created: local.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+            kind: String::new(),
             pictures: captures
                 .iter()
                 .map(|c| ManifestPicture {
@@ -942,7 +947,7 @@ pub fn write_handoff(root: &Path, id: &str, created_ms: u64, items: &[Item], now
 
 /// Remove handoff folders beyond the newest `HANDOFF_KEEP` or older than `HANDOFF_KEEP_DAYS`. Only folders named like
 /// one whose `manifest.json` Pointcast wrote: anything else in the root is never touched, nor `spare` (the folder just
-/// written, whatever its time says).
+/// written, whatever its time says), nor a session's export, wherever it lies and whatever it is named.
 pub fn prune_handoff(root: &Path, now_ms: u64, spare: Option<&Path>) {
     let mut ours: Vec<(u64, String, std::path::PathBuf)> = std::fs::read_dir(root)
         .into_iter()
@@ -955,7 +960,7 @@ pub fn prune_handoff(root: &Path, now_ms: u64, spare: Option<&Path>) {
                 return None;
             }
             let m: Manifest = serde_json::from_slice(&std::fs::read(e.path().join("manifest.json")).ok()?).ok()?;
-            (m.app == HANDOFF_APP).then(|| (m.created_ms, name, e.path()))
+            (m.app == HANDOFF_APP && m.kind != crate::sessions::EXPORT_KIND).then(|| (m.created_ms, name, e.path()))
         })
         .collect();
     ours.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));

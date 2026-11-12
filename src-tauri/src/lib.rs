@@ -448,6 +448,59 @@ async fn live_retry(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), Strin
     live.retry()
 }
 
+/// Ask a typed question in the session the panel is on, with a fresh picture of the screen when `picture`.
+/// Async: the screen is read and the AI is asked off the event loop.
+#[tauri::command]
+async fn live_ask_typed(live: tauri::State<'_, Arc<live::Live>>, text: String, picture: bool) -> Result<(), String> {
+    live.ask_typed(&text, picture)
+}
+
+/// Exactly what was sent for turn `turn` of the open session, read back from what was kept.
+#[tauri::command]
+async fn live_sent(live: tauri::State<'_, Arc<live::Live>>, turn: u32) -> Result<live::SentView, String> {
+    live.sent(turn)
+}
+
+#[tauri::command]
+async fn sessions_list(live: tauri::State<'_, Arc<live::Live>>) -> Result<Vec<sessions::Row>, String> {
+    Ok(live.sessions().rows())
+}
+
+/// The panel shows session `id` with its turns, and the next question goes on in it.
+#[tauri::command]
+async fn sessions_open(live: tauri::State<'_, Arc<live::Live>>, id: String) -> Result<(), String> {
+    live.open(&id)
+}
+
+/// The next question starts a session of its own.
+#[tauri::command]
+async fn sessions_new(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    live.fresh();
+    Ok(())
+}
+
+#[tauri::command]
+async fn sessions_rename(live: tauri::State<'_, Arc<live::Live>>, id: String, title: String) -> Result<(), String> {
+    live.rename(&id, &title)
+}
+
+#[tauri::command]
+async fn sessions_delete(live: tauri::State<'_, Arc<live::Live>>, id: String) -> Result<(), String> {
+    live.delete(&id)
+}
+
+#[tauri::command]
+async fn sessions_search(live: tauri::State<'_, Arc<live::Live>>, q: String) -> Result<Vec<sessions::Row>, String> {
+    Ok(live.sessions().search(&q))
+}
+
+/// Write session `id` out as a folder of markdown and pictures under the handoff folder. Returns the folder.
+#[tauri::command]
+async fn sessions_export(svc: tauri::State<'_, Arc<App>>, live: tauri::State<'_, Arc<live::Live>>, id: String) -> Result<String, String> {
+    let root = prompt::handoff_root(&svc.settings.lock().unwrap());
+    live.sessions().export(&id, &root, now_ms()).map(|dir| dir.to_string_lossy().into_owned())
+}
+
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     // The installer closes Pointcast: a recording started now would stop mid-sentence.
     if update::installing() {
@@ -1411,7 +1464,7 @@ fn agents_status(svc: tauri::State<'_, Arc<App>>) -> Result<Value, String> {
 }
 
 /// Set up one agent in one click: sharing on, the entry written into the agent's user settings, then checked (the
-/// entry is in the file and the server answers an MCP client with its five tools).
+/// entry is in the file and the server answers an MCP client with its tools).
 #[tauri::command]
 fn agent_connect(svc: tauri::State<'_, Arc<App>>, agent: String, folder: bool) -> Result<Value, String> {
     let agent = agents::Agent::parse(&agent)?;
@@ -2111,6 +2164,15 @@ pub fn run() {
             live_stop,
             live_close,
             live_retry,
+            live_ask_typed,
+            live_sent,
+            sessions_list,
+            sessions_open,
+            sessions_new,
+            sessions_rename,
+            sessions_delete,
+            sessions_search,
+            sessions_export,
             assist_providers,
             assist_models,
             assist_choose,

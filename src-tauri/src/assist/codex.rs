@@ -21,7 +21,7 @@ pub const ID: &str = "codex";
 
 /// Every method Pointcast sends. The sender refuses anything else, so no later change can reach for a sign-in
 /// call without a test failing.
-pub const SENDS: &[&str] = &["initialize", "initialized", "account/read", "model/list", "thread/start", "turn/start", "turn/interrupt", "account/rateLimits/read"];
+pub const SENDS: &[&str] = &["initialize", "initialized", "account/read", "model/list", "config/read", "thread/start", "turn/start", "turn/interrupt", "account/rateLimits/read"];
 
 /// Every method a sign-in sends, on a line of its own that never asks anything: the greeting, and the start of Codex's
 /// own ChatGPT sign-in, whose page the browser shows.
@@ -52,15 +52,35 @@ pub const INTERRUPT_GRACE: Duration = Duration::from_millis(1500);
 /// The pictures of how many earlier questions ride with a resumed conversation.
 pub const KEEP_PICTURES: usize = 2;
 
-/// The parameters of `thread/start`: the fence around the conversation.
-fn thread_start(cwd: &Path, system: &str, model: Option<&str>) -> Value {
+/// How an entry of what Codex added to a conversation names an MCP server of the person's that started in it.
+pub const MCP_STARTED: &str = "MCP server started by Codex: ";
+
+/// The names of the MCP servers the person's own Codex is set up with, from the answer to `config/read`. Only the
+/// names are read: what a server runs and the environment it is given never leave that answer.
+fn servers_of(read: &Value) -> Vec<String> {
+    // UNCONFIRMED on a real app-server: the generated schema (0.164.0) types `config` in the answer as a table that
+    // takes keys it does not name, and names no `mcp_servers` among those it does; that the table is there under
+    // that key, one entry a server, is read from Codex's config file, not from the schema.
+    let mut names: Vec<String> = read["config"]["mcp_servers"].as_object().into_iter().flatten().map(|(name, _)| name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// The parameters of `thread/start`: the fence around the conversation. `servers` are the MCP servers the person's
+/// Codex is set up with: each is switched off for this thread by name.
+fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String]) -> Value {
     // Checked against Codex 0.164.0: its generated schema takes `config` here as a free table and names
     // `model_provider` and `web_search` among the keys of a config; every name in `FEATURES_OFF` is in
     // `codex features list`. UNCONFIRMED, since no schema lists them and no real app-server has been asked: that
     // `mcp_servers`, `notify` and `project_doc_max_bytes` are honoured when they arrive this way, and that a dotted
     // `features.<name>` key is read as that feature's switch.
+    // Measured on the real CLI: an empty `mcp_servers` table is laid over the person's config, not put in its place,
+    // so their servers still start. So each one is named with `enabled = false`, which the same laying-over carries
+    // onto the person's entry. UNCONFIRMED until a real turn shows no `mcpServer/startupStatus/updated`: that a
+    // server's entry takes `enabled`, and that a nested table here is merged as the empty one was.
+    let off: serde_json::Map<String, Value> = servers.iter().map(|name| (name.clone(), json!({ "enabled": false }))).collect();
     let mut config = serde_json::Map::new();
-    config.insert("mcp_servers".into(), json!({}));
+    config.insert("mcp_servers".into(), Value::Object(off));
     config.insert("model_provider".into(), json!(OPENAI));
     config.insert("web_search".into(), json!("disabled"));
     config.insert("notify".into(), json!([]));
@@ -221,6 +241,8 @@ struct Inner {
     dead: bool,
     /// Turns of Codex that have ended: a late word of one is not the next turn's.
     over: HashSet<String>,
+    /// The MCP servers of the person's that Codex said it started or had ready, although each was switched off.
+    servers: Vec<String>,
 }
 
 struct Shared {
@@ -372,6 +394,19 @@ impl Shared {
                 let _ = tx.send(p.clone());
                 return;
             }
+        }
+        // A server of the person's that starts in Pointcast's thread is through the fence: it is not a reason to fail
+        // the answer (a tool it offers still ends the turn when called), but it is said with what was sent.
+        if method == "mcpServer/startupStatus/updated" {
+            let name = p["name"].as_str().unwrap_or_default();
+            if matches!(p["status"].as_str(), Some("starting" | "ready")) && !name.is_empty() {
+                let mut s = self.inner.lock().unwrap();
+                if !s.servers.iter().any(|n| n == name) {
+                    s.servers.push(name.to_owned());
+                    eprintln!("pointcast: Codex started the MCP server \"{name}\" in a conversation that switched it off");
+                }
+            }
+            return;
         }
         if !HEARD.contains(&method) {
             self.ignored.fetch_add(1, Ordering::SeqCst);
@@ -608,7 +643,12 @@ impl CodexChat {
         self.pictures = takes_pictures(model);
         self.effort = setup.effort.filter(|e| offers_effort(model, e)).map(str::to_owned);
         self.context = replay(setup.earlier, if self.pictures { KEEP_PICTURES } else { 0 });
-        let started = self.shared.call("thread/start", thread_start(setup.cwd, setup.system, Some(&id)), ANSWER_WITHIN)?;
+        // The person's own MCP servers, by name, so that each can be switched off for this thread. Read only: nothing
+        // is written, and only the names are kept. A Codex that does not answer starts the thread with none named; a
+        // server that starts then is still said (`noted`).
+        let read = self.shared.call("config/read", json!({ "includeLayers": false, "cwd": setup.cwd.to_string_lossy() }), ANSWER_WITHIN);
+        let servers = read.as_ref().map(servers_of).unwrap_or_default();
+        let started = self.shared.call("thread/start", thread_start(setup.cwd, setup.system, Some(&id), &servers), ANSWER_WITHIN)?;
         self.model = Some(id);
         self.adds = started["instructionSources"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect();
         // The person agreed to a question going to OpenAI. A config that points Codex elsewhere must not make that false.
@@ -693,7 +733,8 @@ impl Chat for CodexChat {
     }
 
     fn adds(&self) -> Vec<String> {
-        self.adds.clone()
+        let started = self.shared.inner.lock().unwrap().servers.clone();
+        self.adds.iter().cloned().chain(started.iter().map(|name| format!("{MCP_STARTED}{name}"))).collect()
     }
 }
 
@@ -997,13 +1038,14 @@ pub mod tests {
         assert_eq!(words(&got), fake::WORDS, "three pieces in order, and the whole message not shown again");
         assert_eq!((endings(&got), got.last()), (1, Some(&Kind::Done)));
 
-        assert_eq!(methods(&seen), ["initialize", "initialized", "account/read", "model/list", "thread/start", "turn/start"]);
+        assert_eq!(methods(&seen), ["initialize", "initialized", "account/read", "model/list", "config/read", "thread/start", "turn/start"]);
         let all = seen.lock().unwrap().clone();
         assert!(all.iter().all(|m| m.get("jsonrpc").is_none()));
         assert_eq!(all[0]["params"]["clientInfo"]["name"], "pointcast");
         assert_eq!(all[1], json!({ "method": "initialized" }));
         assert_eq!(all[2]["params"], json!({ "refreshToken": false }));
-        let t = &all[4]["params"];
+        assert_eq!(all[4]["params"], json!({ "includeLayers": false, "cwd": CWD }));
+        let t = &all[5]["params"];
         assert_eq!((&t["ephemeral"], &t["sandbox"], &t["approvalPolicy"], &t["cwd"]), (&json!(true), &json!("read-only"), &json!("untrusted"), &json!(CWD)));
         let told = t["developerInstructions"].as_str().unwrap();
         assert!(told.contains("No tools exist") && told.ends_with("Be brief."), "{told}");
@@ -1016,7 +1058,7 @@ pub mod tests {
             assert!(FEATURES_OFF.contains(&f), "{f} is among those turned off");
         }
         assert_eq!(
-            all[5]["params"],
+            all[6]["params"],
             json!({ "threadId": chat.thread(), "effort": "low", "input": [{ "type": "text", "text": "What is two plus two?" }, { "type": "localImage", "path": "/pointcast/turn/01.png" }] })
         );
     }
@@ -1201,7 +1243,7 @@ pub mod tests {
         let new = of(second);
         assert_eq!((words(&new), new.last(), endings(&new)), (fake::WORDS.map(String::from).to_vec(), Some(&Kind::Done), 1));
         assert!(!format!("{got:?}").contains(fake::NEVER_SHOWN), "the first turn's late words were dropped");
-        assert_eq!(methods(&seen)[5..], ["turn/start", "turn/interrupt", "turn/start"]);
+        assert_eq!(methods(&seen)[6..], ["turn/start", "turn/interrupt", "turn/start"]);
     }
 
     #[test]
@@ -1301,6 +1343,36 @@ pub mod tests {
         let (chat, seen) = wire_with("no-models", &[]);
         assert_eq!(chat.err(), Some(Failure::Broken("Codex did not list its models, so Pointcast did not ask.".into())));
         assert!(sent(&seen, "thread/start").is_empty());
+    }
+
+    #[test]
+    fn each_mcp_server_of_the_persons_codex_is_switched_off_by_name_when_the_thread_starts() {
+        assert_eq!(servers_of(&json!({ "config": { "mcp_servers": { "b": { "command": "x" }, "a": {} } } })), ["a", "b"]);
+        assert!(servers_of(&json!({ "config": {} })).is_empty() && servers_of(&Value::Null).is_empty());
+        let (chat, seen) = wire("servers");
+        let started = &sent(&seen, "thread/start")[0];
+        let off = json!({ (fake::SERVERS[0]): { "enabled": false }, (fake::SERVERS[1]): { "enabled": false } });
+        assert_eq!(started["config"]["mcp_servers"], off, "each by its name, whatever the name holds");
+        // Only the names were taken: what a server runs and is given stays in Codex's answer.
+        let all = format!("{:?}", seen.lock().unwrap());
+        assert!(!all.contains(fake::SERVER_SECRET) && !all.contains("notes-mcp"), "{all}");
+        assert!(Chat::adds(&chat).iter().all(|a| !a.starts_with(MCP_STARTED)), "none started, so none is said");
+        // A Codex with no servers, and one too old to say: the thread starts with none named.
+        for mode in ["normal", "old"] {
+            let (_chat, seen) = wire(mode);
+            assert_eq!(sent(&seen, "thread/start")[0]["config"]["mcp_servers"], json!({}), "{mode}");
+            assert_eq!(methods(&seen)[4..], ["config/read", "thread/start"], "{mode}: asked once, before the thread");
+        }
+    }
+
+    #[test]
+    fn an_mcp_server_that_starts_anyway_is_said_with_what_was_sent_and_the_answer_still_comes() {
+        let (mut chat, _) = wire("servers-start");
+        let got = answer(&mut chat, said("anything"));
+        assert_eq!((words(&got), got.last()), (fake::WORDS.map(String::from).to_vec(), Some(&Kind::Done)), "the turn is not failed for it");
+        // The one that started or was ready, once; the one that failed to start is not through the fence.
+        assert_eq!(Chat::adds(&chat), [fake::INSTRUCTIONS.to_owned(), format!("{MCP_STARTED}{}", fake::SERVERS[1])]);
+        assert_eq!(chat.adds, [fake::INSTRUCTIONS.to_owned()], "the files Codex adds are still only the files");
     }
 
     #[test]
