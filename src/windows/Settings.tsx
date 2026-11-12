@@ -39,6 +39,7 @@ import {
   relaunch,
   statsGet,
   statsReset,
+  onLiveState,
   subscribe,
   takePaneAsk,
   updateCheck,
@@ -547,10 +548,28 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   const [ai, setAi] = useState<string | null>(null);
   // Ask's newest sessions, which open the panel on themselves.
   const [asks, setAsks] = useState<SessionRow[]>([]);
+  // Ask's sessions change while Home is open: read again when an answer settles or the panel closes, and on focus.
   useEffect(() => {
-    sessionsList()
-      .then((l) => setAsks(sessionRows(l, new Date(), { n: RECENT_SESSIONS })))
-      .catch(() => undefined);
+    const load = () =>
+      sessionsList()
+        .then((l) => setAsks(sessionRows(l, new Date(), { n: RECENT_SESSIONS })))
+        .catch(() => undefined);
+    load();
+    let was = "";
+    const off = subscribe(
+      onLiveState((s) => {
+        const now = String((s as { state?: unknown })?.state ?? "");
+        if (now !== was && (now === "shown" || now === "closed")) load();
+        was = now;
+      }),
+    );
+    window.addEventListener("focus", load);
+    return () => {
+      off();
+      window.removeEventListener("focus", load);
+    };
+  }, []);
+  useEffect(() => {
     assistProviders()
       .then((a) => {
         const r = askReady(a) ? chosenRoute(a) : null;
