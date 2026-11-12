@@ -476,6 +476,8 @@ test("onboarding offers only what one click sets up, ready ones first, nothing t
   assert.deepEqual(ranks, [...ranks].sort((x, y) => x - y), "ready first, installs last");
   assert.ok(!list.some((v) => v.action === "add_key" || v.action === "get"), "no key to paste, no download page");
   assert.equal(onboardingChoices(a, 2).length, 2);
+});
+
 test("Claude says who is signed in and on which plan, as ChatGPT does", () => {
   const claude = { id: "claude-code", name: "Claude", kind: "agent", state: "ready", line: "Claude Code 2.1.295 is installed. You are signed in.", plan: "pro", email: "a@b.c", available: true, models: [], efforts: [], adds: [], goes_to: "Anthropic", offline: false, consented: true };
   const v = routeView(claude, none);
