@@ -12,8 +12,8 @@ export const ACTIONS: { id: Action; name: string; sub: string }[] = [
 /** Ask, in a group of its own: the key that asks your AI about the screen. */
 export const ASK_ACTION: { id: Action; name: string; sub: string } = {
   id: "ask",
-  name: "Ask about your screen",
-  sub: "Ask your AI out loud about what you see. The answer opens beside your work.",
+  name: "Prompt with your screen",
+  sub: "Say what you want about what is on your screen. Your AI answers beside your work.",
 };
 
 /** Tap or hold for Ask, which follows "Start or stop by". */

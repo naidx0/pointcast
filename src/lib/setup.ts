@@ -1,6 +1,6 @@
 // First-run setup's step logic, kept free of React and Tauri so `node --test src/lib/setup.test.mjs` can run it.
 
-/** `ask`: one calm step for Ask about your screen, its key and where its AI is chosen; nothing on it is required. */
+/** `ask`: one calm step for Prompt with your screen, its key and where its AI is chosen; nothing on it is required. */
 export const STEPS = ["welcome", "access", "try", "ask", "done"] as const;
 export type Step = (typeof STEPS)[number];
 

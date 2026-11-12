@@ -283,8 +283,8 @@ function AskStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknow
       <Glyph>
         <MessageCircleQuestion size={32} strokeWidth={1.5} />
       </Glyph>
-      <h1 className="t-title">Ask about your screen</h1>
-      <p className="t-body">Press the key and ask out loud about what you see. The answer opens beside your work.</p>
+      <h1 className="t-title">Prompt with your screen</h1>
+      <p className="t-body">Press the key and say what you want about what is on your screen. Your AI answers beside your work.</p>
       <div className="onb-rows">
         <div className="onb-row">
           <span className="lbl">Ask</span>

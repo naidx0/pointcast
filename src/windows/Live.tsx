@@ -374,7 +374,7 @@ export function Live() {
 
   if (v.compact)
     return (
-      <div className={`live compact phase-${v.phase}`} ref={root} aria-label="Ask about the screen">
+      <div className={`live compact phase-${v.phase}`} ref={root} aria-label="Prompt with your screen">
         <div className={`live-row${cap ? " capped" : ""}`}>
           {v.phase === "discarded" ? (
             <p className="live-ended live-in">{v.note}</p>
@@ -465,7 +465,7 @@ export function Live() {
     </>
   );
   return (
-    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Ask about the screen">
+    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Prompt with your screen">
       <header className="live-head">
         {sheet ? (
           <span className="live-title">Sessions</span>
@@ -1320,7 +1320,7 @@ function EmptySession() {
   const key = cfg?.hotkeys.ask?.label;
   return (
     <div className="live-blank live-in">
-      <span>Ask about your screen</span>
+      <span>Prompt with your screen</span>
       {key ? <Keycaps label={key} /> : null}
     </div>
   );
