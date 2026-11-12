@@ -825,6 +825,8 @@ function Ai() {
   const [failed, setFailed] = useState(false);
   // What the last flip of "Only on this computer" did, in one quiet line.
   const [said, setSaid] = useState("");
+  // When Refresh last finished, for "Checked just now".
+  const [checked, setChecked] = useState(0);
   // The agent whose sign-in window is open, watched until it says it is signed in.
   const [waiting, setWaiting] = useState("");
   const watchTimer = useRef<number | undefined>(undefined);
@@ -964,7 +966,14 @@ function Ai() {
           </div>
         </div>
         {chosen && chosen.kind !== "agent" ? (
-          <Row label="Model" sub="The models your plan or key offers. Words only means it cannot see your pictures.">
+          <Row
+            label="Model"
+            sub={
+              chosen.kind === "plan" && chosen.plan
+                ? `The models your ChatGPT ${chosen.plan.charAt(0).toUpperCase() + chosen.plan.slice(1)} plan offers through Codex. Words only means it cannot see your pictures.`
+                : "The models your plan or key offers. Words only means it cannot see your pictures."
+            }
+          >
             <select
               className="field ai-model"
               aria-label="Model"
@@ -1007,8 +1016,24 @@ function Ai() {
           <div className="group-title ai-group-title">
             <h2>{g.title}</h2>
             {i === 0 ? (
-              <button type="button" className="btn plain" disabled={busy === "refresh"} onClick={() => run("refresh", () => Promise.resolve(), true)} title="Look again for the AIs on this computer">
-                {busy === "refresh" ? "Looking…" : "Refresh"}
+              <button
+                type="button"
+                className="btn plain ai-refresh"
+                disabled={busy === "refresh" || a.checking}
+                aria-busy={a.checking || busy === "refresh"}
+                onClick={() => run("refresh", () => Promise.resolve(), true).then(() => setChecked(Date.now()))}
+                title="Look again for the AIs on this computer"
+              >
+                {a.checking || busy === "refresh" ? (
+                  <>
+                    <span className="spin" aria-hidden="true" />
+                    Checking…
+                  </>
+                ) : checked && Date.now() - checked < 60_000 ? (
+                  "Checked just now"
+                ) : (
+                  "Refresh"
+                )}
               </button>
             ) : null}
           </div>
@@ -1127,7 +1152,7 @@ function RouteRow(props: {
             </button>
           </div>
         ) : null}
-        {v.account && !err ? (
+        {v.account && !err && v.id === "codex" ? (
           <div className="ai-account">
             <button type="button" className="link" disabled={busy} onClick={props.switchAccount}>
               {busy ? "Finish in your browser" : "Use another account"}
@@ -1167,7 +1192,19 @@ function RouteRow(props: {
           aria-expanded={v.action === "get" ? more === "help" : undefined}
           onClick={props.act}
         >
-          {props.waiting && v.action === "sign_in" ? "Waiting…" : (busy && BUSY[v.action]) || v.label}
+          {props.waiting && v.action === "sign_in" ? (
+            <>
+              <span className="spin" aria-hidden="true" />
+              Waiting…
+            </>
+          ) : busy && BUSY[v.action] ? (
+            <>
+              <span className="spin" aria-hidden="true" />
+              {BUSY[v.action]}
+            </>
+          ) : (
+            v.label
+          )}
         </button>
       ) : null}
       {more === "key" ? props.form : null}

@@ -100,7 +100,8 @@
             "popover",
             "acrylic"
           ],
-          "state": "active"
+          "state": "active",
+          "radius": 14
         },
         "alwaysOnTop": true,
         "skipTaskbar": true,

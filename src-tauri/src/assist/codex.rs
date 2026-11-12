@@ -207,6 +207,20 @@ impl std::fmt::Debug for Account {
     }
 }
 
+/// Every model of a paged `model/list`, following `nextCursor` for at most 20 pages.
+fn all_pages(mut page: impl FnMut(Option<&str>) -> Option<Value>) -> Vec<Value> {
+    let (mut all, mut cursor) = (Vec::new(), None::<String>);
+    for _ in 0..20 {
+        let Some(v) = page(cursor.as_deref()) else { break };
+        all.extend(v["data"].as_array().cloned().unwrap_or_default());
+        cursor = v["nextCursor"].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    all
+}
+
 fn account_of(v: &Value) -> Option<Account> {
     let a = v.get("account").filter(|a| a.is_object())?;
     let email = a["email"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned);
@@ -628,8 +642,8 @@ impl CodexChat {
             Shared::allowed("initialized").and_then(|_| shared.rpc.notify("initialized")).map_err(|_| Failure::Broken(stopped(&shared.last_words())))?;
             let who = shared.call("account/read", json!({ "refreshToken": false }), ANSWER_WITHIN)?;
             let account = account_of(&who).ok_or(Failure::SignedOut)?;
-            // Without the list a model is taken to read pictures, as one that lists nothing is.
-            let models = shared.call("model/list", json!({}), ANSWER_WITHIN).ok().and_then(|m| m["data"].as_array().cloned()).unwrap_or_default();
+            // Every page of the list. Without it a model is taken to read pictures, as one that lists nothing is.
+            let models = all_pages(|cursor| shared.call("model/list", cursor.map_or(json!({}), |c| json!({ "cursor": c })), ANSWER_WITHIN).ok());
             Ok((account, models))
         };
         match greet() {
@@ -1540,4 +1554,18 @@ pub mod tests {
         std::fs::write(d.join("notes.txt"), b"x").unwrap();
         assert!(matches!(empty_folder(&home), Err(Failure::Broken(_))));
     }
+
+    #[test]
+    fn every_page_of_the_model_list_is_read() {
+        let pages = [json!({ "data": [{ "id": "a" }], "nextCursor": "2" }), json!({ "data": [{ "id": "b" }], "nextCursor": null })];
+        let mut asked = Vec::new();
+        let all = all_pages(|c| {
+            asked.push(c.map(str::to_owned));
+            Some(pages[asked.len() - 1].clone())
+        });
+        assert_eq!(all.iter().map(|m| m["id"].as_str().unwrap()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(asked, [None, Some("2".to_owned())]);
+        assert_eq!(all_pages(|_| None), Vec::<Value>::new(), "no answer: no models");
+    }
+
 }
