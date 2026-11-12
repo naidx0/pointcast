@@ -1336,20 +1336,13 @@ impl Live {
         let keep = |a: &Answer| {
             let _ = self.sessions.write_answer(&sid, &tid, a, now());
         };
-        // A conversation still open holds the earlier turns. One opened anew is given them as one transcript and the
-        // pictures of the last two questions, and exactly that is kept as sent.
-        let context = if chat.is_none() { assist::replay(&before.turns, 2) } else { Vec::new() };
-        answer.sent.replay = context.iter().find_map(|p| if let Part::Text(t) = p { Some(t.clone()) } else { None }).unwrap_or_default();
-        let again = |p: &Part| if let Part::Picture { path, .. } = p { before.pictures.iter().find(|(file, _)| file == path).map(|(_, a)| a.clone()) } else { None };
-        answer.sent.again = context.iter().filter_map(again).collect();
-        if context.is_empty() {
-            answer.sent.earlier.clear();
-        }
+        // A conversation still open holds the earlier turns. One opened anew is given them as they were said, and makes
+        // them into its own context (`assist::replay`, once, by the contract of `Provider::open`).
+        let fresh = chat.is_none();
         // Opening can take a while (a helper starts): never under the lock.
         let opened = match chat {
             Some(c) => Ok(c),
-            None if context.is_empty() => provider.open(SYSTEM, &[]),
-            None => provider.open(SYSTEM, &[Turn { role: Role::Person, parts: context }]),
+            None => provider.open(SYSTEM, &before.turns),
         };
         let mut chat = match opened {
             Ok(c) => c,
@@ -1378,6 +1371,15 @@ impl Live {
                 keep(&answer);
                 return;
             }
+        }
+        // What goes ahead of the question is the conversation's own context, so what is kept as sent is exactly what
+        // went: its transcript, and only the pictures it sends again (none for a model that takes none).
+        let context = if fresh { chat.context() } else { Vec::new() };
+        answer.sent.replay = context.iter().find_map(|p| if let Part::Text(t) = p { Some(t.clone()) } else { None }).unwrap_or_default();
+        let again = |p: &Part| if let Part::Picture { path, .. } = p { before.pictures.iter().find(|(file, _)| file == path).map(|(_, a)| a.clone()) } else { None };
+        answer.sent.again = context.iter().filter_map(again).collect();
+        if context.is_empty() {
+            answer.sent.earlier.clear();
         }
         // What the AI's own app adds to the question goes along too, and is kept as sent.
         answer.sent.adds = chat.adds();
@@ -2044,9 +2046,12 @@ mod tests {
         r.ask("and this", State::Error);
         let opened = script.opened.lock().unwrap().clone();
         assert_eq!(opened.len(), 2);
-        assert!(opened[0].1.is_empty());
-        let Part::Text(context) = &opened[1].1[0].parts[0] else { panic!("no context: {opened:?}") };
-        assert!(context.contains("what is this") && context.contains("par"), "{context}");
+        // Rule changed (one replay, made by the conversation): it is opened on the turns as they were said, and what
+        // went on the wire ahead of the question is their transcript.
+        assert!(opened[0].1.is_empty() && opened[1].1.len() == 2, "{opened:?}");
+        let wire = script.wire.lock().unwrap().clone();
+        let Part::Text(context) = &wire[1][0] else { panic!("no context: {wire:?}") };
+        assert!(context.contains("You: what is this") && context.contains("Assistant: par"), "{context}");
         assert_eq!(r.kept()[0].1[1].answer.clone().unwrap().sent.earlier, [turn.meta.id.clone()]);
         r.end();
     }
@@ -2661,15 +2666,18 @@ mod tests {
         let ids: Vec<String> = turns[..3].iter().map(|t| t.meta.id.clone()).collect();
         assert_eq!((opened.len(), &fourth.sent.earlier), (2, &ids));
         // What the AI was given: one transcript of the three turns, then the pictures of the last two only. What is
-        // kept as sent is exactly that.
-        let context = &opened[1].1;
-        assert_eq!((context.len(), &context[0].parts[0]), (1, &Part::Text(fourth.sent.replay.clone())));
+        // kept as sent is exactly that. Rule changed (one replay, made by the conversation): the conversation is opened
+        // on the turns as they were said, and what went is read off the wire ahead of the question.
+        assert_eq!(opened[1].1.len(), 6, "three questions and three answers, as said");
+        let wire = script.wire.lock().unwrap()[3].clone();
+        let context = &wire[..wire.len() - asked[3].parts.len()];
+        assert_eq!(context[0], Part::Text(fourth.sent.replay.clone()));
         let replay = &fourth.sent.replay;
         assert!(replay.contains("You: one") && replay.contains("You: three") && replay.contains("Assistant: Yes."), "{replay}");
         assert_eq!((replay.matches("[a picture, not sent again]").count(), replay.matches("attached]").count()), (1, 2), "{replay}");
         let store = Sessions::new(&r.dir);
         let said: Vec<PathBuf> = fourth.sent.again.iter().map(|p| store.sent_picture(&session.id, &p.turn, p.n).unwrap().0).collect();
-        let given: Vec<PathBuf> = context[0].parts[1..].iter().map(|p| if let Part::Picture { path, .. } = p { path.clone() } else { panic!("{p:?}") }).collect();
+        let given: Vec<PathBuf> = context[1..].iter().map(|p| if let Part::Picture { path, .. } = p { path.clone() } else { panic!("{p:?}") }).collect();
         assert_eq!(given, said);
         assert_eq!(fourth.sent.again.iter().map(|p| (p.turn.clone(), p.n)).collect::<Vec<_>>(), [(ids[1].clone(), 1), (ids[2].clone(), 1)]);
         // A picture sent again is the bytes kept in its turn's folder: what was sent the first time.
@@ -2833,8 +2841,8 @@ mod tests {
         let snap = r.live.snapshot();
         assert_eq!((snap.session.id.as_str(), snap.session.turns, snap.turns.len(), snap.words.as_str()), (old.as_str(), 3, 2, "three"));
         assert_eq!(Sessions::new(&r.dir).read(&old).unwrap().1.len(), 3);
-        let context = script.opened.lock().unwrap().last().unwrap().1.clone();
-        assert!(matches!(&context[0].parts[0], Part::Text(t) if t.contains("You: one") && t.contains("You: two")), "{context:?}");
+        let wire = script.wire.lock().unwrap().last().unwrap().clone();
+        assert!(matches!(&wire[0], Part::Text(t) if t.contains("You: one") && t.contains("You: two")), "{wire:?}");
 
         // Renamed: the panel shows the new title of the one it is on, and only of that one.
         assert_eq!(r.live.rename(&old, "Cells"), Ok(()));
@@ -2908,5 +2916,49 @@ mod tests {
             assert!(r.live.inner.lock().unwrap().chat.is_none(), "the conversation opened for nothing is closed");
             r.end();
         }
+    }
+
+    #[test]
+    fn a_reopened_conversation_gets_the_earlier_turns_once_and_what_is_kept_as_sent_is_what_went() {
+        let with = Scripted::new(&[(1, "Yes.")]);
+        let mut without = Scripted::new(&[(1, "Words only.")]);
+        without.pictures = false;
+        let current = Arc::new(Mutex::new(with.clone()));
+        let c = current.clone();
+        let r = rig_with("replay-once", Box::new(move || Ok(Arc::new(c.lock().unwrap().clone()) as Arc<dyn Provider>)), FIRST_WAIT);
+        r.ask("one", State::Shown);
+        r.ask("two", State::Shown);
+        r.live.let_go();
+        r.ask("three", State::Shown);
+        let store = Sessions::new(&r.dir);
+        // What went on the wire for the third question: the earlier turns once, then the question with its picture.
+        let wire = with.wire.lock().unwrap()[2].clone();
+        let question = with.asked.lock().unwrap()[2].parts.clone();
+        let context = &wire[..wire.len() - question.len()];
+        let Part::Text(head) = &context[0] else { panic!("the transcript comes first: {wire:?}") };
+        assert_eq!(head.matches("Earlier in this conversation").count(), 1, "one header: {head}");
+        assert!(head.starts_with("Earlier in this conversation, for context:\n\nYou: one"), "{head}");
+        assert_eq!((head.matches("\nYou: ").count(), head.matches("\nAssistant: Yes.").count()), (2, 2), "each turn once, by its own side: {head}");
+        let kept = r.kept();
+        let (session, turns) = &kept[0];
+        let third = turns[2].answer.clone().unwrap();
+        assert_eq!(&third.sent.replay, head, "kept as sent");
+        let given: Vec<PathBuf> = context[1..].iter().map(|p| if let Part::Picture { path, .. } = p { path.clone() } else { panic!("{p:?}") }).collect();
+        let said: Vec<PathBuf> = third.sent.again.iter().map(|p| store.sent_picture(&session.id, &p.turn, p.n).unwrap().0).collect();
+        assert_eq!((given.len(), &said), (2, &given));
+
+        // A model that takes no pictures: the earlier ones are said not to go again, and none is kept as sent again.
+        *current.lock().unwrap() = without.clone();
+        r.live.let_go();
+        assert_eq!(r.live.ask_typed("four", false), Ok(()));
+        r.wait("the fourth answer", || r.live.snapshot().state == State::Shown && without.asked.lock().unwrap().len() == 1);
+        let wire = without.wire.lock().unwrap()[0].clone();
+        assert_eq!(wire.len(), 2, "the transcript and the question, no picture: {wire:?}");
+        let Part::Text(head) = &wire[0] else { panic!("{wire:?}") };
+        assert_eq!((head.matches("Earlier in this conversation").count(), head.matches("[a picture, not sent again]").count()), (1, 3), "{head}");
+        // A typed turn is named by the clock's second, so it is found by its words, not by its place.
+        let fourth = r.kept()[0].1.iter().filter_map(|k| k.answer.clone()).find(|a| a.sent.text == "four").unwrap();
+        assert_eq!((&fourth.sent.replay, fourth.sent.again.len(), fourth.sent.earlier.len()), (head, 0, 3));
+        r.end();
     }
 }

@@ -462,6 +462,11 @@ impl Chat for AcpChat {
     fn close(&mut self) {
         self.shared.shut(child::CLOSE_GRACE);
     }
+
+    /// The preamble without its fence (the instructions, not anything said before).
+    fn context(&self) -> Vec<Part> {
+        self.preamble.iter().skip(1).cloned().collect()
+    }
 }
 
 impl Drop for AcpChat {

@@ -463,6 +463,15 @@ impl Chat for ClaudeChat {
     fn close(&mut self) {
         self.shared.shut(child::CLOSE_GRACE);
     }
+
+    fn context(&self) -> Vec<Part> {
+        let s = self.shared.inner.lock().unwrap();
+        if s.untold {
+            replay(&s.history, KEEP_PICTURES)
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl Drop for ClaudeChat {
