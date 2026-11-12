@@ -2,7 +2,9 @@
 //! Binds loopback only. Tools: `pointcast_latest`, `pointcast_get`, `pointcast_list`, `pointcast_shot`, and
 //! `get_latest_session` (the same as `pointcast_latest`, for setups made before). A prompt comes back as its text,
 //! then each picture's caption and the picture as an image block (downscaled, a JPEG when its PNG is large, within a
-//! token and byte budget; the rest as file links), never as base64 inside text.
+//! token and byte budget; the rest as file links), never as base64 inside text. `pointcast_sessions` and
+//! `pointcast_session` hand out the conversations with the assistant: a list, and one as markdown with its pictures
+//! as file links.
 //!
 //! The session holds screenshots, so only a local MCP client may read it: every request must
 //! carry this install's token as `Authorization: Bearer <token>`. Anything a browser sends is
@@ -220,7 +222,7 @@ pub fn probe(addr: SocketAddr, token: &str) -> Result<Vec<String>, String> {
         .and_then(Value::as_array)
         .map(|t| t.iter().filter_map(|t| t["name"].as_str().map(String::from)).collect())
         .unwrap_or_default();
-    if names.len() != 5 || !names.iter().any(|n| n == "pointcast_latest") {
+    if names.len() != TOOL_NAMES.len() || !names.iter().any(|n| n == "pointcast_latest") {
         return Err("Pointcast's agent server did not list its tools".into());
     }
     Ok(names)
@@ -482,7 +484,7 @@ fn rpc(body: &str, latest: &Latest) -> (u16, String) {
 }
 
 /// Every tool `tools/list` names; `tools/call` with any other name is an unknown tool.
-const TOOL_NAMES: [&str; 5] = ["pointcast_latest", "get_latest_session", "pointcast_get", "pointcast_list", "pointcast_shot"];
+const TOOL_NAMES: [&str; 7] = ["pointcast_latest", "get_latest_session", "pointcast_get", "pointcast_list", "pointcast_shot", "pointcast_sessions", "pointcast_session"];
 
 /// The protocol this server speaks, and the one it gave every client before (still given to a client that asks for
 /// an older version).
@@ -559,6 +561,23 @@ fn tools() -> Value {
             "name": "get_latest_session",
             "description": format!("Same as pointcast_latest (kept for existing setups). {latest_text}"),
             "inputSchema": latest
+        },
+        {
+            "name": "pointcast_sessions",
+            "description": "The person's conversations with the assistant in Pointcast, newest first: id, title, when it was last added to, how many turns and pictures.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 } }
+            }
+        },
+        {
+            "name": "pointcast_session",
+            "description": "One conversation with the assistant as markdown: each question and answer in order, with each picture as a link to its file (never inline). A long conversation is cut; structured content lists every picture's file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "A session id from pointcast_sessions, or the word latest." } },
+                "required": ["id"]
+            }
         }
     ])
 }
@@ -1024,6 +1043,56 @@ fn list_result(latest: &Latest, args: &Value) -> Result<Value, String> {
     }))
 }
 
+fn sessions_result(latest: &Latest, args: &Value) -> Result<Value, String> {
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 10,
+        Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or("limit must be a whole number of at least 1.")?.min(100) as usize,
+    };
+    let rows: Vec<Value> = crate::sessions::Sessions::new(&latest.library().data_dir)
+        .list()
+        .into_iter()
+        .take(limit)
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "title": s.title.chars().take(80).collect::<String>(),
+                "updated": local_time(s.updated_ms).to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                "turns": s.turns,
+                "pictures": s.pictures
+            })
+        })
+        .collect();
+    let line = |r: &Value| format!("{}  {}  {} turns  {} pictures  {}", r["id"].as_str().unwrap_or(""), r["updated"].as_str().unwrap_or(""), r["turns"], r["pictures"], r["title"].as_str().unwrap_or(""));
+    let text = if rows.is_empty() { "Pointcast keeps no sessions.".to_string() } else { rows.iter().map(line).collect::<Vec<_>>().join("\n") };
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": { "sessions": rows }
+    }))
+}
+
+/// One session as markdown, cut at the text budget of a result, its pictures as links to the files Pointcast keeps:
+/// no picture is inlined, so the result stays far inside the image and byte budgets however long the session is.
+fn session_result(latest: &Latest, args: &Value) -> Result<Value, String> {
+    let id = args.get("id").and_then(Value::as_str).ok_or("pointcast_session needs an id; pointcast_sessions names them.")?;
+    let store = crate::sessions::Sessions::new(&latest.library().data_dir);
+    let id = if id == "latest" { store.list().first().map(|s| s.id.clone()).ok_or("Pointcast keeps no sessions.")? } else { id.to_string() };
+    let (session, md, pictures) = store.markdown(&id).map_err(|_| format!("No Pointcast session with id {id:?}; pointcast_sessions names them."))?;
+    let text = if md.len() <= TEXT_MAX {
+        md
+    } else {
+        let mut end = TEXT_MAX;
+        while !md.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{} [... cut here; the rest of the session is in Pointcast]", &md[..end])
+    };
+    let files: Vec<Value> = pictures.iter().map(|p| json!({ "n": p.n, "turn": p.turn, "file": slashes(&p.file), "width": p.w, "height": p.h })).collect();
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": { "id": session.id, "title": session.title, "turns": session.turns, "pictures": files }
+    }))
+}
+
 fn shot_result(latest: &Latest, args: &Value) -> Result<Value, String> {
     let id = args.get("id").and_then(Value::as_str).ok_or("pointcast_shot needs an id (or \"latest\") and n.")?;
     let n = args.get("n").and_then(Value::as_u64).ok_or("pointcast_shot needs n, the picture's number (1 for [image 1]).")?;
@@ -1063,6 +1132,8 @@ fn call_tool(name: &str, args: &Value, latest: &Latest) -> Result<Value, String>
         }
         "pointcast_list" => list_result(latest, args),
         "pointcast_shot" => shot_result(latest, args),
+        "pointcast_sessions" => sessions_result(latest, args),
+        "pointcast_session" => session_result(latest, args),
         _ => Err("unknown tool".into()),
     }
 }
@@ -1073,14 +1144,14 @@ mod tests {
     use crate::prompt::{assemble_export, Item};
 
     #[test]
-    fn tools_list_names_the_five_tools_with_schemas() {
+    fn tools_list_names_the_seven_tools_with_schemas() {
         let latest = Latest::default();
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let reply: Value = serde_json::from_str(&mcp_rpc(body, &latest)).unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();
         let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         names.sort();
-        assert_eq!(names, ["get_latest_session", "pointcast_get", "pointcast_latest", "pointcast_list", "pointcast_shot"]);
+        assert_eq!(names, ["get_latest_session", "pointcast_get", "pointcast_latest", "pointcast_list", "pointcast_session", "pointcast_sessions", "pointcast_shot"]);
         for t in tools {
             let s = &t["inputSchema"];
             assert_eq!(s["type"], "object", "{t}");
@@ -1093,6 +1164,8 @@ mod tests {
         assert_eq!(schema("pointcast_latest")["properties"]["images"]["enum"], json!(["inline", "links", "none"]));
         assert_eq!(schema("pointcast_latest"), schema("get_latest_session"));
         assert_eq!(schema("pointcast_list")["properties"]["limit"]["type"], "integer");
+        assert_eq!(schema("pointcast_session")["required"], json!(["id"]));
+        assert_eq!(schema("pointcast_sessions")["properties"]["limit"]["type"], "integer");
     }
 
     #[test]
@@ -1181,6 +1254,68 @@ mod tests {
         let latest = Latest::default().with_library(lab.lib.clone());
         latest.set(Some(id.clone()), store.export_with(&id, true, lab.lib.tidy).unwrap());
         (latest, id)
+    }
+
+    /// A kept conversation with the assistant in the lab's data folder: `turns` questions, each with one picture as
+    /// sent and `answer`. Its id.
+    fn conversation(lab: &Lab, turns: u64, answer: &str) -> String {
+        use crate::sessions::{Answer, Question, Sent, Sessions, Wire};
+        let (store, picture) = (Sessions::new(&lab.lib.data_dir), noisy_png(8, 6, 5));
+        let mut id = None;
+        for i in 0..turns {
+            let asked = format!("question {} about the nucleus", i + 1);
+            let items = [words(0, 900, &asked)];
+            let wires = [Wire { bytes: &picture, w: 8, h: 6, mime: crate::assist::Mime::Png, label: "Cells.pdf" }];
+            let a = Answer { text: answer.into(), sent: Sent { text: asked.clone(), ..Sent::default() }, ..Answer::default() };
+            let q = Question { items: &items, created_ms: CREATED + i * 1000, duration_ms: 900, audio: None, pictures: &wires };
+            id = Some(store.save_turn(id.as_deref(), q, a, "", CREATED + i * 1000).unwrap().session.id);
+        }
+        id.unwrap()
+    }
+
+    #[test]
+    fn the_session_tools_list_the_conversations_and_give_one_as_markdown_with_its_pictures_as_links_within_the_budget() {
+        let short = lab("sessions");
+        let latest = Latest::default().with_library(short.lib.clone());
+        assert_eq!(texts(&call(&latest, "pointcast_sessions", json!({}))), ["Pointcast keeps no sessions."]);
+        assert_eq!(call(&latest, "pointcast_session", json!({ "id": "latest" }))["isError"], true);
+        let id = conversation(&short, 2, "It holds the cell's DNA.");
+
+        let r = call(&latest, "pointcast_sessions", json!({ "limit": 5 }));
+        let rows = r["structuredContent"]["sessions"].as_array().unwrap();
+        assert_eq!((rows.len(), &rows[0]["id"], &rows[0]["turns"], &rows[0]["pictures"]), (1, &json!(id), &json!(2), &json!(2)));
+        assert_eq!(rows[0]["title"], "question 1 about the nucleus");
+        assert!(texts(&r)[0].contains(&id) && texts(&r)[0].contains("2 turns  2 pictures  question 1 about the nucleus"), "{r}");
+
+        for ask in [id.as_str(), "latest"] {
+            let r = call(&latest, "pointcast_session", json!({ "id": ask }));
+            assert_eq!(kinds(&r), ["text"], "the pictures are links, never images");
+            let md = &texts(&r)[0];
+            let at = |what: &str| md.find(what).unwrap_or_else(|| panic!("no {what} in {md}"));
+            assert!(at(r#"<a id="t1"></a>"#) < at("**You:** question 1") && at("**You:** question 1") < at(r#"<a id="t2"></a>"#) && at(r#"<a id="t2"></a>"#) < at("question 2 about"), "{md}");
+            assert!(md.contains("It holds the cell's DNA."));
+            // Every picture is named with its file, and each link in the markdown is one of those files.
+            let files = r["structuredContent"]["pictures"].as_array().unwrap();
+            assert_eq!((files.len(), &r["structuredContent"]["id"], &r["structuredContent"]["turns"]), (2, &json!(id), &json!(2)));
+            for (k, f) in files.iter().enumerate() {
+                let path = f["file"].as_str().unwrap();
+                assert_eq!((std::fs::read(path).unwrap(), &f["n"], &f["turn"]), (noisy_png(8, 6, 5), &json!(k + 1), &json!(k + 1)));
+                assert!(md.contains(&format!("![Cells.pdf]({})", file_uri(path))), "{md}");
+            }
+            assert_eq!(md.matches("](").count(), 2);
+        }
+
+        // A long conversation: the text is cut at the budget of a result, nothing is inlined, every picture is named.
+        let long = lab("sessions-long");
+        let latest = Latest::default().with_library(long.lib.clone());
+        let id = conversation(&long, 40, &"word ".repeat(400));
+        let r = call(&latest, "pointcast_session", json!({ "id": id }));
+        let text = &texts(&r)[0];
+        assert!(text.len() <= TEXT_MAX + 80 && text.ends_with("the rest of the session is in Pointcast]"), "{} bytes", text.len());
+        assert_eq!((kinds(&r), r["structuredContent"]["pictures"].as_array().unwrap().len()), (vec!["text".to_string()], 40));
+        assert!(r.to_string().len() < INLINE_BYTES, "far inside the byte budget");
+        assert_eq!(call(&latest, "pointcast_sessions", json!({ "limit": 0 }))["isError"], true);
+        assert_eq!(call(&latest, "pointcast_session", json!({ "id": "../x" }))["isError"], true);
     }
 
     fn call(latest: &Latest, name: &str, args: Value) -> Value {
@@ -1911,6 +2046,7 @@ mod tests {
         let lab = lab("conformance");
         let items = [words(0, 900, "the save button is grey"), pic(1000, &noisy_png(64, 48, 3), vec![])];
         let (latest, id) = saved(&lab, &items, CREATED, false);
+        let session = conversation(&lab, 1, "A cell.");
         let addr = spawn("127.0.0.1:0", latest, TOKEN.into()).unwrap();
         let mut n = 0u64;
         let mut ask = |method: &str, params: Value| -> Value {
@@ -1943,7 +2079,7 @@ mod tests {
 
         let r = ask("tools/list", json!({}));
         let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 5, "{names:?}");
+        assert_eq!(names.len(), 7, "{names:?}");
 
         // Each tool with arguments it takes: a result that is not an error, with content.
         let valid = [
@@ -1952,6 +2088,8 @@ mod tests {
             ("pointcast_get", json!({ "id": id, "images": "none" })),
             ("pointcast_list", json!({ "limit": 1 })),
             ("pointcast_shot", json!({ "id": id, "n": 1 })),
+            ("pointcast_sessions", json!({ "limit": 1 })),
+            ("pointcast_session", json!({ "id": session })),
         ];
         for (name, args) in valid.iter() {
             let r = ask("tools/call", json!({ "name": name, "arguments": args }));
@@ -1969,6 +2107,9 @@ mod tests {
             ("pointcast_list", json!({ "limit": "ten" })),
             ("pointcast_shot", json!({ "id": id })),
             ("pointcast_shot", json!({ "id": id, "n": 99 })),
+            ("pointcast_sessions", json!({ "limit": "ten" })),
+            ("pointcast_session", json!({})),
+            ("pointcast_session", json!({ "id": "no-such-session" })),
         ];
         for (name, args) in invalid {
             let r = ask("tools/call", json!({ "name": name, "arguments": args }));
@@ -2026,10 +2167,10 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_sees_the_five_tools_and_a_stopped_server_is_gone() {
+    fn the_probe_sees_the_seven_tools_and_a_stopped_server_is_gone() {
         let stop = Arc::new(AtomicBool::new(false));
         let addr = spawn_stoppable("127.0.0.1:0", Latest::default(), TOKEN.into(), stop.clone()).unwrap();
-        assert_eq!(probe(addr, TOKEN).unwrap().len(), 5);
+        assert_eq!(probe(addr, TOKEN).unwrap().len(), 7);
         let e = probe(addr, "wrong-token-000000000000").unwrap_err();
         assert!(e.contains("refused") && !e.contains(TOKEN), "{e}");
         stop_at(addr, &stop);
