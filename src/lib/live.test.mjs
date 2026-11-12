@@ -17,6 +17,7 @@ import {
   previewLevel,
   previewPicture,
   previewSnapshot,
+  pictureCaption,
   safePicture,
   sentLine,
 } from "./live.ts";
@@ -163,6 +164,13 @@ test("only a picture held on this computer is shown: never a web address", () =>
   assert.ok(safePicture({ src: "data:image/png;base64,AAAA", w: 1, h: 1 }));
   assert.ok(safePicture({ src: "blob:tauri://localhost/1", w: 1, h: 1 }));
   assert.equal(liveView(at(snap({ state: "listening", picture: { src: "https://x/y.png", w: 1, h: 1 } })), 0).thumb, null);
+});
+
+test("the caption under the listening row says what the picture is of, or the screen when the engine gives no name", () => {
+  assert.equal(pictureCaption("Snipping Tool"), "Picture of Snipping Tool");
+  assert.equal(pictureCaption("  Visual Studio Code "), "Picture of Visual Studio Code");
+  assert.equal(pictureCaption(""), "Picture of your screen");
+  assert.equal(pictureCaption("   "), "Picture of your screen");
 });
 
 test("no AI chosen is the Settings error; any other failure offers Try again", () => {

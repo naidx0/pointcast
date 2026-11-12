@@ -245,6 +245,12 @@ export function safePicture(p: LivePicture | null): LivePicture | null {
   return src.startsWith("data:image/") || src.startsWith("blob:") ? p : null;
 }
 
+/** The one quiet line under the listening row: what the picture that will go is of. */
+export function pictureCaption(label: string): string {
+  const of = label.trim();
+  return of ? `Picture of ${of}` : "Picture of your screen";
+}
+
 /** `kept`: the engine still holds the question, so Try again asks it again. */
 export function errorView(e: LiveErrorPayload, provider: string, kept = false): LiveErrorView {
   const code = typeof e === "object" && e ? e.code ?? "" : "";

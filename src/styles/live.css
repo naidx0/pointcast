@@ -80,35 +80,67 @@ html.win .live-hb:not(.stop) {
 
 /* —— Listening: one row, as quiet as the dictation capsule. The stop, the line the voice draws with its red dot, and
    the picture that would go with the app it is of. Nothing else. —— */
+/* Three things on one centre line, the same 16 px of air on every side: Stop, the line, the picture. What the picture
+   is of sits under them as one centred caption, so nothing hangs off the thumbnail. */
 .live-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 58px;
-  padding: 7px 12px 7px 14px;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px;
 }
-html.win .live-row {
-  padding-left: 16px;
+.live-row.capped {
+  padding-bottom: 10px;
+}
+.live-row .live-hb {
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
 }
 .live-row-line {
   flex: 1;
   min-width: 0;
+  height: 40px;
   display: flex;
   align-items: center;
+  justify-content: center;
+}
+/* No picture: the same width as Stop stays empty on the right, and the line keeps the panel's centre. */
+.live-row-end {
+  flex: none;
+  width: 28px;
 }
 .live-voice {
   flex: 1;
   min-width: 0;
   height: 36px;
+  /* The line's baseline (22 of its 36 px) rests on the row's centre, level with Stop and the picture; the voice writes
+     above it. */
+  transform: translateY(-4px);
   /* The past fades out to the left: the ink is freshest at the pen. */
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 28px);
-  mask-image: linear-gradient(to right, transparent 0, #000 28px);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 32px);
+  mask-image: linear-gradient(to right, transparent 0, #000 32px);
 }
 .live-row .live-line {
   margin: 0;
 }
 .live-ended {
+  flex: 1;
   margin: 0;
+  line-height: 40px;
+  text-align: center;
+  color: var(--live-quiet);
+}
+.live-cap {
+  margin: 0;
+  padding: 0 16px 14px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  letter-spacing: 0.01em;
   color: var(--live-quiet);
 }
 
@@ -295,12 +327,9 @@ html.win .live.multi .live-now {
   margin: 0;
   min-width: 0;
 }
-/* Under the thumbnail the name may run wider than it, to the left, below the line: the row never changes width. */
+/* In the listening row the picture stands alone, on the row's centre line; its name is the caption under the row. */
 .live-shot.under {
-  width: 76px;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
+  width: 64px;
 }
 .live-thumb {
   position: relative;
@@ -309,8 +338,8 @@ html.win .live.multi .live-now {
   height: 45px;
 }
 .live-shot.under .live-thumb {
-  width: 76px;
-  height: 43px;
+  width: 64px;
+  height: 40px;
 }
 .live-thumb-btn {
   position: relative;
@@ -349,12 +378,6 @@ html.win .live-thumb-btn {
   line-height: 16px;
   color: var(--live-quiet);
 }
-.live-shot.under .live-label {
-  flex: none;
-  max-width: 150px;
-  font-size: 11px;
-  line-height: 13px;
-}
 .live-drop {
   position: absolute;
   top: 3px;
@@ -387,7 +410,7 @@ html.win .live-thumb-btn {
 }
 .live.compact .live-big {
   width: auto;
-  margin: 0 12px 12px 14px;
+  margin: 0 16px 16px;
 }
 html.win .live-big {
   border-width: 1px;
