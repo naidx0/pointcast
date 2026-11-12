@@ -70,7 +70,9 @@ test("a new session is open on nothing: never 'Not sent', never hidden, the fiel
   const v = liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot("empty"), now: 0 }), 0);
   assert.deepEqual([v.phase, v.empty, v.hide, v.note, v.complete, v.thumb], ["shown", true, false, null, false, null]);
   assert.equal(followUpShown(v), true);
-  assert.deepEqual([fieldPlaceholder(true), fieldPlaceholder(false)], ["Type a question", "Ask a follow-up"]);
+  assert.deepEqual([fieldPlaceholder(true), fieldPlaceholder(false)], ["Type a question", "Ask a follow-up, or press Ctrl+Shift+/ to say it"]);
+  assert.equal(fieldPlaceholder(false, "⌃⇧/"), "Ask a follow-up, or press ⌃⇧/ to say it", "the person's own chord");
+  assert.equal(fieldPlaceholder(false, ""), fieldPlaceholder(false), "an unknown chord says the default");
   assert.equal(earlierRows(previewSnapshot("empty")).length, 0);
 });
 

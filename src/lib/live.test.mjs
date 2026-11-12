@@ -389,3 +389,16 @@ test("the panel opens bigger: 452 wide, a reading surface once an answer shows, 
   assert.equal(panelHeight(180, 400, true), 240, "a short screen wins over the minimum");
   assert.equal(panelHeight(NaN, 1040, false), 0);
 });
+
+test("a spoken follow-up is heard inside the conversation; only a brand-new question is the one quiet row", () => {
+  const at = (kind) => liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot(kind), now: 0 }), 0);
+  const fresh = at("listening");
+  assert.deepEqual([fresh.phase, fresh.compact, fresh.title, fresh.mic, fresh.line], ["listening", true, "", true, "voice"]);
+  const follow = at("follow");
+  assert.deepEqual([follow.phase, follow.compact, follow.title, follow.mic, follow.line, follow.question], ["listening", false, "Bayes' rule on the slide", true, "voice", ""]);
+  assert.equal(follow.stop, true, "Esc and Stop still stop the follow-up");
+  // Finishing the follow-up's words: still the conversation.
+  const snap = { ...previewSnapshot("follow"), state: "finishing" };
+  const fin = liveView(liveReduce(initialLive(), { type: "snapshot", snap, now: 0 }), 0);
+  assert.deepEqual([fin.phase, fin.compact, fin.line], ["finishing", false, "loops"]);
+});

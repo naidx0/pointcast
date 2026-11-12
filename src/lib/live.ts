@@ -352,7 +352,11 @@ export function liveView(m: LiveModel, now: number): LiveView {
     empty: false,
     next: safePicture(s.next_picture),
   };
-  const hearing = { compact: true, title: "", question: "" };
+  // A brand-new question is heard in one quiet row. A spoken follow-up (the session already has a turn: the engine
+  // lists the one just answered in `turns` as soon as the press listens) keeps the conversation in view, its title and
+  // the earlier turns above, the listening row where the field was, so the person sees it goes on.
+  const follow = s.turns.length > 0;
+  const hearing = follow ? { compact: false, question: "" } : { compact: true, title: "", question: "" };
   const name = provider || "the AI";
   switch (s.state) {
     case "closed":
@@ -590,7 +594,7 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
 /** The preview's snapshot for a state named in the address, shaped as the engine sends it. `conversation` is a session
  * of three turns, the third in the panel's own fields (asked as this panel opening's first question, so `turn` is 1);
  * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
- * session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
+ * session; `follow` is a spoken follow-up being heard in that session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
  * next one. */
 export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
@@ -608,6 +612,9 @@ export function previewSnapshot(kind: string, o: { error?: string | null; provid
       return { ...CLOSED, state: "shown", next_picture };
     case "listening":
       return { ...common, state: "listening", session: { ...session, title: "" }, words: "" };
+    case "follow":
+      // Ctrl+Shift+/ again after an answer: listening for a follow-up, the turns so far kept.
+      return { ...common, state: "listening", session: three, turns: previewTurns(), words: "" };
     case "finishing":
       return { ...common, state: "finishing" };
     case "answering":

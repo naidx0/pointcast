@@ -2695,6 +2695,32 @@ mod tests {
     }
 
     #[test]
+    fn a_spoken_follow_up_while_an_answer_shows_listens_in_the_same_conversation_with_the_earlier_turns_in_view() {
+        let (script, provider) = scripted(&[(1, "Yes.")]);
+        let r = rig("spoken-follow", provider, FIRST_WAIT);
+        r.ask("one", State::Shown);
+        let first = r.live.snapshot().session.id.clone();
+        // Ctrl+Shift+/ again while the answer shows: the panel listens for a follow-up, and the turn just answered is
+        // already one of the session's turns, so the panel keeps the conversation in view while the voice is heard.
+        assert!(r.live.press(), "the press listens");
+        let snap = r.live.snapshot();
+        assert_eq!((snap.state, snap.session.id.as_str()), (State::Listening, first.as_str()));
+        let seen: Vec<_> = snap.turns.iter().map(|t| (t.n, t.question.as_str(), t.answer.as_str())).collect();
+        assert_eq!(seen, [(1, "one", "Yes.")]);
+        *r.voice.say.lock().unwrap() = "two".into();
+        r.live.release();
+        r.until(State::Shown);
+        // The follow-up went into the open conversation (one opening, nothing replayed) and is kept in the same session.
+        let opened = script.opened.lock().unwrap().clone();
+        assert!(opened.len() == 1 && opened[0].1.is_empty(), "{opened:?}");
+        let kept = r.kept();
+        assert_eq!((kept.len(), kept[0].0.id.as_str(), kept[0].1.len()), (1, first.as_str(), 2));
+        let second = kept[0].1[1].answer.clone().unwrap();
+        assert!(second.sent.replay.is_empty(), "{:?}", second.sent);
+        r.end();
+    }
+
+    #[test]
     fn the_snapshot_lists_the_finished_turns_in_order_and_the_current_one_stays_in_its_own_fields() {
         let (_, provider) = scripted(&[(1, "Yes.")]);
         let r = rig("turns", provider, FIRST_WAIT);

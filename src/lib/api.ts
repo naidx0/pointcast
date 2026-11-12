@@ -900,7 +900,7 @@ export function startLivePreview(kind?: string) {
   }
   const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1" });
   pvEmit(snap);
-  if (state === "listening") {
+  if (state === "listening" || state === "follow") {
     let i = 0;
     const tick = () => {
       livePv.level.forEach((f) => f(previewLevel(i)));

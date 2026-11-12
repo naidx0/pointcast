@@ -1052,6 +1052,13 @@ html.win .live-send {
   color: var(--live-faint);
   pointer-events: none;
 }
+/* A spoken follow-up heard where the field was: the line and the picture, the caption under them. */
+.live-hearing .live-row {
+  padding: 2px 0;
+}
+.live-hearing .live-cap {
+  margin: 4px 0 0;
+}
 .live-follow-err {
   margin: 6px 4px 0;
   font-size: var(--fs-caption);

@@ -71,6 +71,7 @@ import { canSummarize, noSummary, summaryReduce, summaryText, summaryView, type 
 import { marginPath, restPath } from "@/lib/line";
 import { platform } from "@/lib/theme";
 import { useConfig } from "@/lib/useConfig";
+import { chordText } from "@/lib/keys";
 import { Line, type LevelSource } from "@/components/Line";
 import { Keycaps } from "@/components/Shortcut";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
@@ -403,6 +404,8 @@ export function Live() {
     );
 
   const asked = v.phase === "answering" || v.phase === "shown";
+  // A spoken follow-up being heard (liveView keeps the conversation for it): the listening row takes the field's place.
+  const hearing = v.phase === "listening" || v.phase === "finishing";
   const toggleSent = (n: number) => setSentOf((s) => (s === n ? null : n));
   const toggleOpen = (n: number) =>
     setOpened((o) => {
@@ -427,6 +430,7 @@ export function Live() {
           ))}
         </ol>
       ) : null}
+      {hearing ? null : (
       <section className="live-now" id={`turn-${turnN}`} ref={now_} aria-label={multi ? `Question ${turnN}` : undefined}>
         {multi ? <Question key={m.snap.turn} text={v.question} now /> : null}
         {v.thumb ? (
@@ -457,6 +461,7 @@ export function Live() {
         ) : null}
         {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
       </section>
+      )}
     </>
   );
   return (
@@ -509,7 +514,25 @@ export function Live() {
           )}
         </div>
       </div>
-      {showField ? <FollowUp field={field} first={first} pic={fieldPic} setPic={setFieldPic} next={v.next} note={fieldNote} setNote={setFieldNote} /> : null}
+      {showField ? (
+        <FollowUp field={field} first={first} pic={fieldPic} setPic={setFieldPic} next={v.next} note={fieldNote} setNote={setFieldNote} />
+      ) : hearing && !sheet && !sumOpen ? (
+        <footer className="live-follow live-hearing live-in" aria-label="Your follow-up">
+          <div className="live-row">
+            <div className="live-row-line">
+              {v.line === "voice" ? <Line mode="listen" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
+            </div>
+            {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : null}
+          </div>
+          {v.thumb ? (
+            <p className="live-cap">
+              <span className="live-cap-text">{pictureCaption(v.label)}</span>
+              {v.canDrop ? <MarkUpControl marked={!!v.thumb.marked} /> : null}
+            </p>
+          ) : null}
+          {bigPic}
+        </footer>
+      ) : null}
       {sr}
     </div>
   );
@@ -966,7 +989,10 @@ function FollowUp({
       .finally(() => setBusy(false));
   };
   const ready = canSend(text, busy);
-  const ask = fieldPlaceholder(first);
+  // The person's own Ask chord, so the field says how to ask the follow-up by voice.
+  const { cfg } = useConfig();
+  const askKey = cfg?.hotkeys.ask?.label;
+  const ask = fieldPlaceholder(first, askKey ? chordText(askKey) : undefined);
   return (
     <footer className="live-follow live-in">
       {next ? (
