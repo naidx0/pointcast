@@ -341,6 +341,41 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
     )
 }
 
+/// Summarize as the app runs it: the AI an Ask would go to now, and the panel for where the summary stands.
+fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<summary::Maker> {
+    let (handle, chooser) = (app.clone(), svc.clone());
+    summary::Maker::new(
+        summary::Deps {
+            chosen: Box::new(move || {
+                let s = chooser.settings.lock().unwrap().clone();
+                held.provider(&s).map(|p| (p, s.assist_model.clone()))
+            }),
+            out: Box::new(move |state| {
+                let _ = handle.emit("summary://state", &state);
+            }),
+        },
+        &settings::data_dir(),
+    )
+}
+
+/// Start a summary of session `id` with the chosen AI; `summary://state` says where it stands.
+#[tauri::command]
+async fn summary_make(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<(), String> {
+    maker.make(&id)
+}
+
+#[tauri::command]
+async fn summary_stop(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<(), String> {
+    maker.stop(&id);
+    Ok(())
+}
+
+/// The summary kept for session `id`, or none.
+#[tauri::command]
+async fn summary_get(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<Option<summary::Summary>, String> {
+    maker.get(&id)
+}
+
 #[tauri::command]
 fn live_state(live: tauri::State<'_, Arc<live::Live>>) -> live::Snapshot {
     live.snapshot()
@@ -2173,6 +2208,9 @@ pub fn run() {
             sessions_delete,
             sessions_search,
             sessions_export,
+            summary_make,
+            summary_stop,
+            summary_get,
             assist_providers,
             assist_models,
             assist_choose,
@@ -2191,6 +2229,7 @@ pub fn run() {
             tray::setup(&handle, &svc)?;
             let held = Arc::new(assist::catalog::Held::new(assist_home()));
             app.manage(held.clone());
+            app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);

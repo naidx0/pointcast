@@ -3,9 +3,7 @@
 //! whose quote is not in the turn it cites is dropped and counted. A summary is faithful to the session, not a
 //! guarantee the session was right, so a point from an answer says it is the AI's explanation. It is asked through
 //! `Provider::once`, never the session's own conversation, and kept beside the session as `summary.json`.
-
-// Nothing calls this module yet: the wiring slice adds the command and the panel, and removes this line.
-#![allow(dead_code)]
+//! `Maker` is what the panel's commands reach: it makes one on a thread of its own and says where it stands.
 
 use crate::assist::{Event, Failure, Kind, Part, Provider, Role, Turn};
 use crate::history;
@@ -13,9 +11,11 @@ use crate::prompt::{self, Item};
 use crate::sessions::Sessions;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A summary holds at most this many of each; what the AI wrote past them is left out.
@@ -319,12 +319,23 @@ pub fn counts(summary: &Summary) -> String {
 /// its quote under it.
 pub fn to_markdown(summary: &Summary, session: &Told) -> String {
     let title = if summary.title.is_empty() { &session.title } else { &summary.title };
-    let mut md = format!("# {title}\n\nA summary of {} turns. {}.\n", session.turns.len(), counts(summary));
+    format!("# {title}\n\nA summary of {} turns. {}.\n{}", session.turns.len(), counts(summary), points(summary, "##"))
+}
+
+/// The summary as a section at the end of its session's markdown, where the `#tN` links land on the turns above.
+pub fn to_section(summary: &Summary, session: &Told) -> String {
+    let title = if summary.title.is_empty() { &session.title } else { &summary.title };
+    format!("\n## Summary\n\n{title}. A summary of {} turns. {}.\n{}", session.turns.len(), counts(summary), points(summary, "###"))
+}
+
+/// Each list that has points, under a heading of `level`.
+fn points(summary: &Summary, level: &str) -> String {
+    let mut md = String::new();
     for (heading, points) in [("Key points", &summary.key_points), ("Open questions", &summary.open_questions)] {
         if points.is_empty() {
             continue;
         }
-        md.push_str(&format!("\n## {heading}\n\n"));
+        md.push_str(&format!("\n{level} {heading}\n\n"));
         for p in points {
             let whose = if p.from == From::Question { "your question" } else { "the AI's explanation" };
             let quote = p.quote.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -332,6 +343,114 @@ pub fn to_markdown(summary: &Summary, session: &Told) -> String {
         }
     }
     md
+}
+
+/// The newest summary kept for session `id`, with the session as it reads now; none when it has none.
+pub fn newest(sessions: &Sessions, id: &str) -> Option<(Summary, Told)> {
+    let session = told(sessions, id).ok()?;
+    load(&session).map(|s| (s, session))
+}
+
+pub const UNDER_WAY: &str = "A summary of this session is already being made.";
+
+/// Where a summary stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Working,
+    Done,
+    Error,
+    Stopped,
+}
+
+/// What the panel is told about the summary of session `id` (`summary://state`): the summary and its counts line once
+/// it is done, the line to show when it failed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct State {
+    pub id: String,
+    pub state: Stage,
+    pub summary: Option<Summary>,
+    pub counts: String,
+    pub error: Option<String>,
+}
+
+fn state(id: &str, state: Stage, summary: Option<Summary>, error: Option<String>) -> State {
+    State { id: id.into(), state, counts: summary.as_ref().map(counts).unwrap_or_default(), summary, error }
+}
+
+pub struct Deps {
+    /// The AI the person chose and the model the settings name, by the rules of an Ask; else the line shown instead.
+    pub chosen: Box<dyn Fn() -> Result<(Arc<dyn Provider>, Option<String>), String> + Send + Sync>,
+    pub out: Box<dyn Fn(State) + Send + Sync>,
+}
+
+/// Makes summaries, one a session at a time, each on a thread of its own.
+pub struct Maker {
+    sessions: Sessions,
+    deps: Deps,
+    /// The sessions being summarised, each with what stops it.
+    running: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl Maker {
+    pub fn new(deps: Deps, data_dir: &Path) -> Arc<Maker> {
+        Arc::new(Maker { sessions: Sessions::new(data_dir), deps, running: Mutex::default() })
+    }
+
+    /// Start a summary of session `id` with the chosen AI. Everything an Ask must have holds for it: without an AI
+    /// chosen and allowed nothing is sent, and the line that says why is both returned and told.
+    pub fn make(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        let session = told(&self.sessions, id)?;
+        let (provider, model) = match (self.deps.chosen)() {
+            Ok(chosen) => chosen,
+            Err(why) => {
+                (self.deps.out)(state(&session.id, Stage::Error, None, Some(why.clone())));
+                return Err(why);
+            }
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut running = self.running.lock().unwrap();
+            if running.contains_key(&session.id) {
+                return Err(UNDER_WAY.into());
+            }
+            running.insert(session.id.clone(), cancel.clone());
+        }
+        (self.deps.out)(state(&session.id, Stage::Working, None, None));
+        let me = self.clone();
+        std::thread::spawn(move || {
+            // A stop that came as the reply ended still stops it: nothing is kept.
+            let made = run(&*provider, &session, &cancel).and_then(|s| if cancel.load(Ordering::SeqCst) { Err(Failure::Stopped) } else { Ok(s) });
+            let end = match made {
+                Ok(s) => {
+                    // The person reads the AI by its name; an AI with none here keeps its id.
+                    let name = crate::assist::catalog::name_of(&s.provider);
+                    let s = Summary { provider: if name.is_empty() { s.provider } else { name.into() }, model, ..s };
+                    match save(&session, &s).and_then(|_| me.sessions.set_summary(&session.id, true)) {
+                        Ok(()) => state(&session.id, Stage::Done, Some(s), None),
+                        Err(e) => state(&session.id, Stage::Error, None, Some(format!("The summary could not be kept: {e}"))),
+                    }
+                }
+                Err(Failure::Stopped) => state(&session.id, Stage::Stopped, None, None),
+                Err(f) => state(&session.id, Stage::Error, None, Some(crate::live::line(&f))),
+            };
+            me.running.lock().unwrap().remove(&session.id);
+            (me.deps.out)(end);
+        });
+        Ok(())
+    }
+
+    /// Stop the summary of session `id` being made, if one is: nothing of it is kept.
+    pub fn stop(&self, id: &str) {
+        if let Some(cancel) = self.running.lock().unwrap().get(id) {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The summary kept for session `id`, when it has one.
+    pub fn get(&self, id: &str) -> Result<Option<Summary>, String> {
+        told(&self.sessions, id).map(|session| load(&session))
+    }
 }
 
 #[cfg(test)]
@@ -617,5 +736,135 @@ mod tests {
         // Nothing kept: the title and the count, and no empty heading.
         let none = Summary { dropped: 0, key_points: vec![], open_questions: vec![], kept: 0, title: String::new(), ..s };
         assert_eq!(to_markdown(&none, &session()), "# what does the denominator in this\n\nA summary of 2 turns. 0 kept.\n");
+    }
+
+    /// A maker over the data folder `told` is kept in, with every state it told. `chosen` is the AI the settings name,
+    /// or the line that says why there is none.
+    fn maker(told: &Told, chosen: Result<Scripted, &'static str>) -> (Arc<Maker>, Arc<Mutex<Vec<State>>>) {
+        let outs = Arc::new(Mutex::new(vec![]));
+        let o = outs.clone();
+        let deps = Deps {
+            chosen: Box::new(move || match &chosen {
+                Ok(s) => Ok((Arc::new(s.clone()) as Arc<dyn Provider>, Some("m-1".to_string()))),
+                Err(why) => Err(why.to_string()),
+            }),
+            out: Box::new(move |s| o.lock().unwrap().push(s)),
+        };
+        (Maker::new(deps, told.dir.ancestors().nth(2).unwrap()), outs)
+    }
+
+    fn told_of(outs: &Mutex<Vec<State>>, n: usize) -> Vec<State> {
+        let t = std::time::Instant::now();
+        while outs.lock().unwrap().len() < n {
+            assert!(t.elapsed() < Duration::from_secs(10), "never {n} states: {:?}", outs.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        outs.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn making_a_summary_says_working_then_done_keeps_it_and_marks_its_session() {
+        let (sessions, told) = kept("make");
+        let reply = json!({
+            "title": "The order button",
+            "key_points": [
+                { "text": "The button places the order.", "turn": 1, "from": "answer", "quote": "It places the order" },
+                { "text": "It cannot be undone.", "turn": 1, "from": "answer", "quote": "an order cannot be undone" },
+            ],
+            "open_questions": [],
+        });
+        let script = Scripted { id: crate::assist::codex::ID, ..Scripted::new(&[(1, &reply.to_string())]) };
+        let (maker, outs) = maker(&told, Ok(script.clone()));
+        assert_eq!((maker.get(&told.id), sessions.rows()[0].has_summary), (Ok(None), false));
+        maker.make(&told.id).unwrap();
+        let states = told_of(&outs, 2);
+        assert_eq!(states[0], State { id: told.id.clone(), state: Stage::Working, summary: None, counts: String::new(), error: None });
+        let made = states[1].summary.clone().expect("done carries the summary");
+        assert_eq!((states[1].state, states[1].counts.as_str(), &states[1].error, states.len()), (Stage::Done, "1 kept, 1 dropped: no source", &None, 2));
+        // Who made it is the AI as the person knows it, with the model the settings name.
+        assert_eq!((made.provider.as_str(), made.model.as_deref(), made.kept, made.dropped, made.title.as_str()), ("ChatGPT", Some("m-1"), 1, 1, "The order button"));
+        assert_eq!(made.key_points, [Point { text: "The button places the order.".into(), turn: 1, from: From::Answer, quote: "It places the order".into() }]);
+        // Kept beside the session, which says so in its own line and in the list.
+        assert_eq!((load(&told).as_ref(), maker.get(&told.id)), (Some(&made), Ok(Some(made.clone()))));
+        assert!(sessions.head(&told.id).unwrap().has_summary && sessions.rows()[0].has_summary);
+        assert_eq!(serde_json::to_value(sessions.rows()).unwrap()[0]["has_summary"], true);
+        // Asked once, through a conversation of its own.
+        assert_eq!((script.opened.lock().unwrap().len(), script.asked.lock().unwrap().len()), (1, 1));
+        // What the panel is told, as it reads it.
+        let wire = serde_json::to_value(&states[1]).unwrap();
+        assert_eq!((&wire["id"], &wire["state"], &wire["counts"], &wire["error"]), (&json!(told.id), &json!("done"), &json!("1 kept, 1 dropped: no source"), &Value::Null));
+        assert_eq!(wire["summary"]["key_points"][0], json!({ "text": "The button places the order.", "turn": 1, "from": "answer", "quote": "It places the order" }));
+        assert_eq!((&wire["summary"]["provider"], &wire["summary"]["model"]), (&json!("ChatGPT"), &json!("m-1")));
+        assert_eq!(["working", "error", "stopped"].map(|s| json!(s)), [Stage::Working, Stage::Error, Stage::Stopped].map(|s| serde_json::to_value(s).unwrap()));
+        assert_eq!(maker.make("no-such-session"), Err("no such session".into()));
+    }
+
+    #[test]
+    fn a_summary_that_is_stopped_says_stopped_and_keeps_nothing() {
+        let (sessions, told) = kept("stop");
+        let script = Scripted::new(&[(5_000, "{}")]);
+        let (maker, outs) = maker(&told, Ok(script.clone()));
+        maker.make(&told.id).unwrap();
+        assert_eq!(maker.make(&told.id), Err(UNDER_WAY.into()), "one a session at a time");
+        // Stopping another session's summary stops nothing.
+        maker.stop("another");
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(outs.lock().unwrap().len(), 1);
+        maker.stop(&told.id);
+        let states = told_of(&outs, 2);
+        assert_eq!(states.iter().map(|s| s.state).collect::<Vec<_>>(), [Stage::Working, Stage::Stopped]);
+        assert_eq!(states[1], State { id: told.id.clone(), state: Stage::Stopped, summary: None, counts: String::new(), error: None });
+        assert!(!told.dir.join(FILE).exists() && load(&told).is_none() && !sessions.head(&told.id).unwrap().has_summary);
+        assert_eq!(maker.get(&told.id), Ok(None));
+        // It can be asked for again.
+        maker.make(&told.id).unwrap();
+        maker.stop(&told.id);
+        assert_eq!(told_of(&outs, 4)[3].state, Stage::Stopped);
+    }
+
+    #[test]
+    fn without_an_ai_chosen_a_summary_is_an_error_and_nothing_is_asked() {
+        let (sessions, told) = kept("no-ai");
+        let (none, outs) = maker(&told, Err(crate::live::NO_PROVIDER));
+        assert_eq!(none.make(&told.id), Err(crate::live::NO_PROVIDER.into()));
+        std::thread::sleep(Duration::from_millis(50));
+        let line = Some(crate::live::NO_PROVIDER.to_string());
+        assert_eq!(*outs.lock().unwrap(), [State { id: told.id.clone(), state: Stage::Error, summary: None, counts: String::new(), error: line }]);
+        assert!(load(&told).is_none() && !sessions.head(&told.id).unwrap().has_summary);
+        // An AI that fails says why in the line an Ask would show, and nothing is kept.
+        let script = Scripted::new(&[(1, "{")]).failing(Failure::Offline);
+        let (failing, outs) = maker(&told, Ok(script.clone()));
+        failing.make(&told.id).unwrap();
+        let states = told_of(&outs, 2);
+        assert_eq!((states[1].state, states[1].error.clone()), (Stage::Error, Some(crate::live::line(&Failure::Offline))));
+        assert!(load(&told).is_none() && script.asked.lock().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn an_exported_session_has_its_summary_and_every_turn_it_cites_is_an_anchor_in_the_session() {
+        let (sessions, told) = kept("export");
+        let root = scratch("export-out");
+        let none = sessions.export(&told.id, &root, T0).unwrap();
+        assert!(none.join("session.md").is_file() && !none.join("summary.md").exists(), "no summary, no file");
+        let p = |text: &str, turn, from, quote: &str| Point { text: text.into(), turn, from, quote: quote.into() };
+        let summary = Summary {
+            title: "The order button".into(),
+            key_points: vec![p("The button places the order.", 1, From::Answer, "It places the order")],
+            open_questions: vec![p("Whether it is safe to press.", 2, From::Question, "is it safe to press")],
+            kept: 2,
+            ..Summary::default()
+        };
+        save(&told, &summary).unwrap();
+        let dir = sessions.export(&told.id, &root, T0).unwrap();
+        assert_eq!(dir, none, "the same folder, written anew");
+        let (md, session) = (std::fs::read_to_string(dir.join("summary.md")).unwrap(), std::fs::read_to_string(dir.join("session.md")).unwrap());
+        assert_eq!(md, to_markdown(&summary, &told).replace("](#t", "](session.md#t"));
+        let cited: Vec<&str> = md.split("](session.md#t").skip(1).map(|rest| rest.split(')').next().unwrap()).collect();
+        assert_eq!(cited, ["1", "2"], "{md}");
+        for n in cited {
+            assert!(session.contains(&format!(r#"<a id="t{n}"></a>"#)), "turn {n} is an anchor in {session}");
+        }
+        assert!(!md.contains("](#t"), "no link that lands nowhere in its own file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

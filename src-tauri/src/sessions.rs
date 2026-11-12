@@ -329,6 +329,14 @@ impl Sessions {
         Ok(s)
     }
 
+    /// Say whether a summary is kept beside a session. When it was last added to stays what it was.
+    pub fn set_summary(&self, id: &str, has: bool) -> Result<(), String> {
+        let at = self.dir(id)?.join(SESSION);
+        let mut s: Session = read_json(&at).ok_or("no such session")?;
+        s.has_summary = has;
+        write_json(&at, &s)
+    }
+
     /// A session as the list shows it, with the bytes its folder holds.
     fn row(&self, s: Session, hit: Option<String>) -> Row {
         let name = crate::assist::catalog::name_of(&s.provider);
@@ -340,6 +348,7 @@ impl Sessions {
             updated_ms: s.updated_ms,
             turns: s.turns,
             pictures: s.pictures,
+            has_summary: s.has_summary,
             hit,
         }
     }
@@ -394,7 +403,7 @@ impl Sessions {
     /// Write a session out for a person or an agent to read: `<root>/sessions/<YYYY-MM-DD_HHMM> <slug>/` with
     /// `session.md` (each turn under its anchor), its pictures as they were sent (`01.png`, ...) and `manifest.json`,
     /// which says `"kind": "session"` so that pruning the handoff folders never takes it. Exporting a session again
-    /// writes its folder anew. Returns the folder.
+    /// writes its folder anew. A session with a summary gets that too, as `summary.md`. Returns the folder.
     pub fn export(&self, id: &str, root: &Path, now_ms: u64) -> Result<PathBuf, String> {
         use chrono::TimeZone;
         let (session, turns) = self.read(id)?;
@@ -419,6 +428,11 @@ impl Sessions {
             }
             let md = markdown_of(&session, &turns, &pictures, &name);
             std::fs::write(dir.join("session.md"), md).map_err(|e| e.to_string())?;
+            // Its summary, when it has one, beside it: each point's turn is a link into `session.md`.
+            if let Some((summary, told)) = crate::summary::newest(self, id) {
+                let md = crate::summary::to_markdown(&summary, &told).replace("](#t", "](session.md#t");
+                std::fs::write(dir.join("summary.md"), md).map_err(|e| e.to_string())?;
+            }
             let manifest = serde_json::json!({
                 "app": "pointcast",
                 "kind": EXPORT_KIND,
@@ -458,6 +472,8 @@ pub struct Row {
     /// The AI that answered last, as the person knows it.
     pub provider: String,
     pub size_bytes: u64,
+    /// A summary is kept beside it (`summary`).
+    pub has_summary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hit: Option<String>,
 }
@@ -820,7 +836,9 @@ mod tests {
         let json = serde_json::to_value(&rows[0]).unwrap();
         let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["id", "pictures", "provider", "size_bytes", "title", "turns", "updated_ms"], "no hit outside a search");
+        // Rule changed: a row says whether its session has a summary.
+        assert_eq!(keys, ["has_summary", "id", "pictures", "provider", "size_bytes", "title", "turns", "updated_ms"], "no hit outside a search");
+        assert_eq!(json["has_summary"], false);
 
         // The search, whatever the case: a title, a question, an answer, a picture's label; newest first.
         let ids = |q: &str| s.search(q).into_iter().map(|r| r.id).collect::<Vec<_>>();
