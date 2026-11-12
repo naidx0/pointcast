@@ -935,7 +935,7 @@ mod tests {
         let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
         let look = Look {
             agents: vec![
-                ("gemini-cli", h(State::Ready, "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in.")),
+                ("gemini-cli", h(State::Ready, "Gemini CLI 0.9.0 is installed.")),
                 (CLAUDE_CODE, h(State::Ready, &format!("Claude Code 2.1.322 is installed. {}", claude::SIGNED_IN))),
             ],
             ..Look::default()
@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn an_agent_is_a_subscription_that_needs_no_model_and_says_how_it_was_found() {
         let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
-        let ready = "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in.";
+        let ready = "Gemini CLI 0.9.0 is installed.";
         let look = Look { agents: vec![("gemini-cli", h(State::Ready, ready)), ("copilot", h(State::Unknown, "said"))], ..Look::default() };
         let mut s = Settings::default();
         let list = providers(&s, &look);

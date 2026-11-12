@@ -1,3 +1,4 @@
+mod shell_path;
 mod agents;
 mod anchor;
 mod assist;
@@ -2198,6 +2199,8 @@ fn refused(s: &Settings) -> Vec<(String, String)> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before any thread or child: the AI apps need the PATH a terminal has (shell_path).
+    shell_path::widen();
     let settings_path = settings::settings_path();
     let settings = Settings::load(&settings_path);
     let svc = App::new(settings.clone(), settings_path);

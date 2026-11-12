@@ -204,8 +204,14 @@ pub fn run(plan: &Plan) -> Result<(), String> {
 
 /// The error for a failed install: the command and its last meaningful line.
 pub fn failed(typed: &str, said: &str) -> String {
-    let last = said.lines().map(str::trim).filter(|l| !l.is_empty()).filter(|l| !l.starts_with("npm notice")).last().unwrap_or("");
-    if last.contains("EACCES") {
+    // npm ends every failure with where its log is: the line before that says what went wrong.
+    let last = said
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("npm notice") && !l.contains("A complete log of this run"))
+        .last()
+        .unwrap_or("");
+    if said.contains("EACCES") || said.contains("EPERM") {
         return format!("{typed} needs permission to write where Node.js keeps its apps. Run it in a terminal with sudo, then Refresh.");
     }
     if last.is_empty() {
@@ -342,6 +348,10 @@ mod tests {
     fn a_failure_says_its_last_line_and_permission_is_named() {
         assert_eq!(failed("npm install -g x", "a\nnpm error 404 Not Found\nnpm notice x\n"), "npm install -g x did not finish: npm error 404 Not Found");
         assert!(failed("npm install -g x", "npm error code EACCES").contains("sudo"));
+        // As npm 11 really says it: the permission error, then where the log is.
+        let real = "npm error code EACCES\nnpm error path /usr/local/lib/node_modules/@google\nnpm error A complete log of this run can be found in: /x.log\n";
+        assert!(failed("npm install -g x", real).contains("needs permission"), "the log line does not hide the permission error");
+        assert_eq!(failed("npm install -g x", "npm error 404 Not Found\nnpm error A complete log of this run can be found in: /x.log"), "npm install -g x did not finish: npm error 404 Not Found");
         assert_eq!(failed("brew upgrade codex", ""), "brew upgrade codex did not finish.");
     }
 
@@ -387,11 +397,13 @@ mod on_this_computer {
 
 #[cfg(test)]
 mod really {
-    /// Runs the Update button's own path for `POINTCAST_SETUP_ID`. Changes this computer; run by hand only.
+    /// Runs a button's own path: `POINTCAST_SETUP_ID` and `POINTCAST_SETUP_JOB` (install, update, sign_in). Changes
+    /// this computer; run by hand only.
     #[test]
     #[ignore]
-    fn update_for_real() {
+    fn setup_for_real() {
         let id = std::env::var("POINTCAST_SETUP_ID").expect("POINTCAST_SETUP_ID");
-        println!("result: {:?}", super::setup(&id, super::Job::Update));
+        let job = super::Job::parse(&std::env::var("POINTCAST_SETUP_JOB").unwrap_or_else(|_| "update".into())).expect("a job");
+        println!("result: {:?}", super::setup(&id, job));
     }
 }

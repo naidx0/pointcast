@@ -525,7 +525,7 @@ pub const SIGNED_IN: &str = "You are signed in.";
 
 fn health_of(found: Option<(Result<String, String>, Option<bool>)>) -> Health {
     let (state, line) = match found {
-        None => (State::NotInstalled, "Claude Code is not installed on this computer. Install it first.".to_owned()),
+        None => (State::NotInstalled, "Claude Code is not installed on this computer. Choose Install.".to_owned()),
         Some((Err(why), _)) => (State::Unknown, format!("Claude Code is installed, but Pointcast could not read its version: {why}.")),
         Some((Ok(said), signed)) => {
             let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();

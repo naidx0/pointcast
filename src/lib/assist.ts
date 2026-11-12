@@ -74,10 +74,10 @@ export type Help = { text: string; command: string | null; page?: string; accoun
 
 /** Each agent's official install line, page and own sign-in, as its vendor publishes them. */
 export const AGENT_INSTALL: Record<string, { command: string; page: string; account: string }> = {
-  "gemini-cli": { command: "npm install -g @google/gemini-cli", page: "https://github.com/google-gemini/gemini-cli", account: "Then run gemini in a terminal once and sign in with Google." },
-  copilot: { command: "npm install -g @github/copilot", page: "https://github.com/github/copilot-cli", account: "Then run copilot in a terminal once and sign in with /login." },
-  opencode: { command: "npm install -g opencode-ai", page: "https://opencode.ai/docs", account: "Then run opencode auth login in a terminal and choose your AI." },
-  "claude-code": { command: "npm install -g @anthropic-ai/claude-code", page: "https://docs.claude.com/en/docs/claude-code/setup", account: "Then run claude in a terminal once and sign in." },
+  "gemini-cli": { command: "npm install -g @google/gemini-cli", page: "https://github.com/google-gemini/gemini-cli", account: "Then choose Sign in: Gemini opens Google's own sign-in." },
+  copilot: { command: "npm install -g @github/copilot", page: "https://github.com/github/copilot-cli", account: "Then choose Sign in: Copilot opens GitHub's own sign-in." },
+  opencode: { command: "npm install -g opencode-ai", page: "https://opencode.ai/docs", account: "Then choose Sign in and pick your AI." },
+  "claude-code": { command: "npm install -g @anthropic-ai/claude-code", page: "https://docs.claude.com/en/docs/claude-code/setup", account: "Then choose Sign in: Claude opens its own sign-in." },
 };
 
 /** The page's groups. What is ready on this computer comes first; every other route sits under the way it is set up,
@@ -241,7 +241,7 @@ function stateView(p: Route, base: Omit<RouteView, "line" | "action" | "label">,
         label: "Check again",
       };
     case "not_installed":
-      return { ...base, line: `${app(p)} is not on this computer`, action: p.id === "codex" ? "install" : "get", label: "Install", help: installHelp(p) };
+      return { ...base, line: `${app(p)} is not on this computer`, action: p.id === "codex" ? "install" : "get", label: p.id === "codex" ? "Install" : "Download", help: installHelp(p) };
     case "too_old":
       return { ...base, line: p.line || `This ${app(p)} is too old`, action: p.id === "codex" ? "update" : "get", label: "Update", help: installHelp(p, true) };
     case "unsupported":
@@ -282,8 +282,8 @@ export function installHelp(p: Pick<Route, "id" | "name">, update = false): Help
     };
   const agent = AGENT_INSTALL[p.id];
   if (agent) return { text: `Install ${p.name}'s own app in a terminal, then check again. It needs Node.js.`, ...agent };
-  if (p.id === "ollama") return { text: `Get Ollama from ollama.com, start it, then check again.`, command: null };
-  if (p.id === "lmstudio") return { text: "Get LM Studio from lmstudio.ai, start its server, then check again.", command: null };
+  if (p.id === "ollama") return { text: `Get Ollama from ollama.com, start it, then check again.`, command: null, page: "https://ollama.com/download" };
+  if (p.id === "lmstudio") return { text: "Get LM Studio from lmstudio.ai, start its server, then check again.", command: null, page: "https://lmstudio.ai/download" };
   return { text: `Install ${p.name}, then check again.`, command: null };
 }
 
@@ -480,7 +480,7 @@ export function previewAssist(kind: string): Assist {
     // An installed agent that cannot say whether anyone is signed in (Gemini here) is usable but not sure.
     sure: state === "ready" && (k !== "agent" || id === "claude-code"),
   });
-  const missing = (cli: string) => `${cli} is not installed on this computer. Install it first.`;
+  const missing = (cli: string) => `${cli} is not installed on this computer. Choose Install.`;
   const a: Assist = {
     chosen: null,
     model: null,
@@ -488,7 +488,7 @@ export function previewAssist(kind: string): Assist {
     offline_only: false,
     providers: [
       r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
-      r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in."),
+      r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed."),
       r("copilot", "GitHub Copilot", "agent", "not_installed", "GitHub, through your Copilot plan", missing("GitHub Copilot CLI")),
       r("opencode", "OpenCode", "agent", "not_installed", "the AI you set up in OpenCode", missing("OpenCode")),
       r("claude-code", "Claude", "agent", "ready", "Anthropic, through your Claude plan", "Signed in to Claude Code."),
