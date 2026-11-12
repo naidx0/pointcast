@@ -98,7 +98,7 @@ export type Access = "granted" | "unknown" | "denied";
 export type PermissionKind = "microphone" | "screen" | "accessibility";
 export type Permissions = Record<PermissionKind, Access> & { gated: Record<PermissionKind, boolean> };
 
-export type Action = "session" | "full" | "region" | "zoom";
+export type Action = "session" | "full" | "region" | "zoom" | "ask";
 export type HotkeyView = { label: string; keys: string[]; default: string };
 
 /** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
@@ -194,6 +194,8 @@ export type Config = {
   /** Why sharing with agents did not start at launch. */
   mcp_error?: string | null;
   onboarded: boolean;
+  /** Ask was introduced: the setup assistant's step, or Home's one-time card. */
+  ask_intro_seen?: boolean;
   sounds: boolean;
   speech: SpeechView;
   /** How the last load-and-run of the speech engine went; null before the first. */
@@ -218,6 +220,7 @@ export const HOTKEY_FIELD: Record<Action, string> = {
   full: "full_hotkey",
   region: "region_hotkey",
   zoom: "zoom_hotkey",
+  ask: "ask_hotkey",
 };
 
 export const settingsGet = () => invoke<Config>("settings_get");

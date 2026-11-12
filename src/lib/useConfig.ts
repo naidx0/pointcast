@@ -85,7 +85,7 @@ function previewConfig(): Config {
     hidden: ["1Password", "Bitwarden", "KeePass", "Dashlane", "LastPass", "Keychain Access"],
     mcp_bind: "127.0.0.1:47821",
     mcp_enabled: true,
-    onboarded: false,
+    onboarded: typeof location !== "undefined" && location.search.includes("news=1"),
     sounds: true,
     speech: {
       runtime: { id: "runtime", installed: false, lib: "" },

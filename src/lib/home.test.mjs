@@ -1,7 +1,7 @@
 // Run: node --test src/lib/home.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NO_WORDS, RECENT, dayLabel, firstWords, lengthLabel, recentRows, timeLabel, wordsLabel } from "./home.ts";
+import { NO_WORDS, RECENT, askNews, dayLabel, firstWords, lengthLabel, recentRows, timeLabel, wordsLabel } from "./home.ts";
 
 // Wednesday 11 November 2026, 15:00 local.
 const NOW = new Date(2026, 10, 11, 15, 0);
@@ -129,4 +129,11 @@ test("a long preview is cut for the row", () => {
   const [r] = recentRows([entry("a", at(2026, 11, 11, 10), long)], NOW, RECENT, "en-GB");
   assert.ok(r.text.endsWith("…") && r.text.length <= 57);
   assert.ok(long.startsWith(`${r.text.slice(0, -1)} `), "ends on a whole word");
+});
+
+test("the Ask card shows once, only to someone who finished setup before Ask was introduced", () => {
+  assert.equal(askNews({ onboarded: true }), true, "a settings file from before Ask");
+  assert.equal(askNews({ onboarded: true, ask_intro_seen: false }), true);
+  assert.equal(askNews({ onboarded: true, ask_intro_seen: true }), false, "dismissed, or seen in setup");
+  assert.equal(askNews({ onboarded: false }), false, "setup shows Ask itself");
 });

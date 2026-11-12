@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AudioLines, Check, ChevronRight, ClipboardPaste, MessageCircleQuestion, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
-import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
+import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
 import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
@@ -93,7 +93,7 @@ export function Onboarding() {
                 onResult={() => setPracticed(true)}
               />
             )}
-            {step === "ask" && <AskStep cfg={cfg} />}
+            {step === "ask" && <AskStep cfg={cfg} patch={patch} />}
             {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
           </>
         )}
@@ -257,7 +257,11 @@ function Welcome() {
 }
 
 /** One calm step for Ask: what it does, its key, and where its AI is chosen. Nothing here is required. */
-function AskStep({ cfg }: { cfg: Config }) {
+function AskStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
+  // Seen here, Ask needs no card on Home later.
+  useEffect(() => {
+    if (!cfg.ask_intro_seen) patch({ ask_intro_seen: true }).catch(() => undefined);
+  }, []);
   // The AI that answers, by its short name; "" when none is chosen, null until the engine says. Read again when the
   // window comes back from Settings.
   const [ai, setAi] = useState<string | null>(null);
@@ -301,6 +305,11 @@ function AskStep({ cfg }: { cfg: Config }) {
           )}
         </div>
       </div>
+      {key && ai ? (
+        <p className="t-body onb-try">
+          Try it: press <Keycaps label={key} /> and ask what is on your screen.
+        </p>
+      ) : null}
       <p className="t-caption onb-later">{ai ? "You can change it any time in Settings." : "You can skip this and choose one later in Settings."}</p>
     </div>
   );
@@ -443,6 +452,7 @@ function TryStep({
     region: `Freeze the screen, drag a box, then press ${enter}.`,
     full: ACTIONS.find((a) => a.id === "full")!.sub,
     zoom: ACTIONS.find((a) => a.id === "zoom")!.sub,
+    ask: ASK_ACTION.sub,
   };
   const used = (a: Action) => !!fired[a] || (a === "session" && seen.started);
   const caption = rec

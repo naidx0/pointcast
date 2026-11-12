@@ -149,6 +149,10 @@ pub struct Settings {
     /// First-run setup finished; until then the onboarding window opens at launch.
     #[serde(default)]
     pub onboarded: bool,
+    /// The person has seen Ask introduced (the setup assistant's Ask step, or Home's one-time card for those who
+    /// finished setup before Ask existed).
+    #[serde(default)]
+    pub ask_intro_seen: bool,
     /// Soft start and stop sounds.
     #[serde(default = "yes")]
     pub sounds: bool,
@@ -259,6 +263,7 @@ impl Default for Settings {
             mcp_bind: default_mcp(),
             mcp_enabled: true,
             onboarded: false,
+            ask_intro_seen: false,
             sounds: true,
             granted: Granted::default(),
             keep_audio: true,

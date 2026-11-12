@@ -3,9 +3,10 @@ import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share } from "lucide-react";
-import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
+import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField, askPress } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
+import { BrandTile } from "@/components/Brands";
 import {
   HOTKEY_FIELD,
   agentConnect,
@@ -65,7 +66,7 @@ import { computerView, micStatus } from "@/lib/hardware";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
-import { recentRows, type RecentRow } from "@/lib/home";
+import { askNews, recentRows, type RecentRow } from "@/lib/home";
 import { RECENT_SESSIONS, sessionRows, type SessionRow } from "@/lib/sessions";
 import {
   CODEX_SIGN_OUT,
@@ -256,7 +257,7 @@ export function Settings() {
             </div>
           ) : null}
           {!cfg ? null : pane === "home" ? (
-            <Home cfg={cfg} go={setPane} />
+            <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
             <Ai />
           ) : pane === "general" ? (
@@ -546,7 +547,9 @@ const RANGES = [
 /** The first pane, the hub: the two features side by side, each with its keys and where it is set up (dictation with
  * mark-up; Ask with the AI that answers), then what was dictated (four numbers for the week or for all time, then when
  * in the week) and the last few recordings. Read once, as the pane opens. */
-function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
+function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: Patch }) {
+  // "New: Ask about your screen", once, for someone who finished setup before Ask existed; Got it remembers it.
+  const [news, setNews] = useState(() => askNews(cfg));
   const [counts, setCounts] = useState<Counts | null>(null);
   const [recent, setRecent] = useState<RecentRow[]>([]);
   const [range, setRange] = useState<Range>("week");
@@ -599,6 +602,34 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   };
   return (
     <div className="home">
+      {news && cfg.hotkeys.ask ? (
+        <section className="home-news" aria-labelledby="hub-news">
+          <MessageCircleQuestion size={20} strokeWidth={1.5} aria-hidden="true" />
+          <div className="grow">
+            <div className="t" id="hub-news">
+              New: Ask about your screen
+            </div>
+            <div className="s">
+              Press <Keycaps label={cfg.hotkeys.ask.label} /> and ask your AI out loud about what you see.
+            </div>
+          </div>
+          {ai === "" ? (
+            <button type="button" className="btn" onClick={() => go("ai")}>
+              Choose an AI
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn plain"
+            onClick={() => {
+              setNews(false);
+              patch({ ask_intro_seen: true }).catch(() => undefined);
+            }}
+          >
+            Got it
+          </button>
+        </section>
+      ) : null}
       <div className="home-hub">
         <section className="feature" aria-labelledby="hub-dictate">
           <h2 id="hub-dictate">Dictate and mark up</h2>
@@ -1310,9 +1341,11 @@ function ConsentSheet({ route, allow, cancel }: { route: Route; allow: () => voi
 }
 
 function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: (c: Config) => void }) {
-  const custom = ACTIONS.some((a) => cfg.hotkeys[a.id].label !== cfg.hotkeys[a.id].default);
+  const all = [...ACTIONS, ASK_ACTION].filter((a) => cfg.hotkeys[a.id]);
+  const custom = all.some((a) => cfg.hotkeys[a.id].label !== cfg.hotkeys[a.id].default);
   return (
     <>
+      <h2 className="group-title">Dictate and mark up</h2>
       <div className="group">
         {ACTIONS.map((a) => (
           <Row key={a.id} label={a.name} sub={a.sub}>
@@ -1320,6 +1353,18 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
           </Row>
         ))}
       </div>
+      {cfg.hotkeys.ask ? (
+        <>
+          <h2 className="group-title" style={{ marginTop: 20 }}>
+            {ASK_ACTION.name}
+          </h2>
+          <div className="group">
+            <Row label="Ask" sub={`${ASK_ACTION.sub} ${askPress(cfg.talk_mode)}`}>
+              <ShortcutField action={ASK_ACTION.id} cfg={cfg} patch={patch} setCfg={setCfg} />
+            </Row>
+          </div>
+        </>
+      ) : null}
       <p className="group-note">Click a shortcut, then press the new keys. Esc cancels. Shortcuts work in every app.</p>
       <div className="group" style={{ marginTop: 20 }}>
         <Row

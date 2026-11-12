@@ -9,6 +9,16 @@ export const ACTIONS: { id: Action; name: string; sub: string }[] = [
   { id: "zoom", name: "Capture around the pointer", sub: "A close-up of whatever is under your cursor." },
 ];
 
+/** Ask, in a group of its own: the key that asks your AI about the screen. */
+export const ASK_ACTION: { id: Action; name: string; sub: string } = {
+  id: "ask",
+  name: "Ask about your screen",
+  sub: "Ask your AI out loud about what you see. The answer opens beside your work.",
+};
+
+/** Tap or hold for Ask, which follows "Start or stop by". */
+export const askPress = (mode: string) => (mode === "hold" ? "Hold the keys while you ask; let go to send." : "Press once to start asking, again to send.");
+
 export function Keycaps({ label, size }: { label: string; size?: "lg" }) {
   return (
     <span className="keys">
