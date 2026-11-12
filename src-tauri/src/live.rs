@@ -9,9 +9,10 @@
 //! earlier turns through the conversation that is still open, or as `assist::replay` when it had to be opened anew.
 
 use crate::assist::{self, Chat, Event, Failure, Kind, Part, Provider, Role, Turn};
-use crate::capture::{Asked, Look};
+use crate::capture::{self, Asked, Look};
+use crate::element::ElementMark;
 use crate::keyframes::{self, Thumb};
-use crate::prompt::{self, Item};
+use crate::prompt::{self, Item, Label};
 use crate::session::{Phase, Purpose, Said};
 use crate::voice::stt;
 use crate::sessions::{self, Again, Answer, Question, Sent, Sessions, Times, Used, Wire};
@@ -40,13 +41,16 @@ pub const NOTHING_TYPED: &str = "Type a question first.";
 pub const UNDER_WAY: &str = "A question is already under way.";
 pub const NO_SESSION: &str = "No session is open.";
 pub const NO_TURN: &str = "There is no such turn.";
+pub const NO_FRAME: &str = "There is no picture to mark up.";
+pub const MARKING: &str = "The picture is being marked up.";
+pub const NOT_MARKING: &str = "No picture is being marked up.";
 
 /// A new question joins the session the panel closed on when that was less than this long ago.
 pub const JOIN: Duration = Duration::from_secs(10 * 60);
 
 const SYSTEM: &str = "You are the study assistant in Pointcast. The person asks a question out loud about what is on \
 their screen, and a picture of it may be attached. Answer plainly and briefly, in markdown. You cannot run tools, \
-open files or see anything but the pictures you are sent.";
+open files or see anything but the pictures you are sent. When a picture has numbered marks on it, refer to them by their number.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +118,8 @@ pub struct Picture {
     pub h: u32,
     /// The window it shows, by its title (`label`); empty for a whole screen or a window that is never named.
     pub label: String,
+    /// The person marked it up: it is the picture with their marks, and no frame takes its place.
+    pub marked: bool,
 }
 
 /// Everything the panel draws from, sent whole on every change (`live://state`).
@@ -126,6 +132,8 @@ pub struct Snapshot {
     pub turn: u64,
     pub words: String,
     pub picture: Option<Picture>,
+    /// A picture marked up with no question under way: it goes with the next one, spoken or typed.
+    pub next_picture: Option<Picture>,
     pub dropped: bool,
     /// The AI being asked, as the person knows it ("ChatGPT"); empty when none is.
     pub provider: String,
@@ -188,6 +196,8 @@ pub enum Out {
     Delta { turn: u64, text: String },
     Show,
     Hide,
+    /// The mark-up overlay was open on a picture of a question that is no more: it goes away.
+    MarkOver,
 }
 
 /// The recording path, as the loop needs it.
@@ -293,12 +303,17 @@ struct Before {
 /// What was under way when the panel was cleared, to be ended once the lock is let go.
 struct Over {
     listening: bool,
+    marking: bool,
     stopper: Option<Arc<dyn Fn() + Send + Sync>>,
     chat: Option<Box<dyn Chat>>,
 }
 
 impl Over {
-    fn end(self, voice: &dyn Voice) {
+    fn end(self, deps: &Deps) {
+        if self.marking {
+            (deps.out)(Out::MarkOver);
+        }
+        let voice = &*deps.voice;
         if self.listening {
             let _ = voice.stop(true);
         }
@@ -338,6 +353,11 @@ struct Inner {
     current: Option<String>,
     /// The session the panel was on when it closed, and when (Unix ms): a question asked soon after joins it.
     last: Option<(String, u64)>,
+    /// The picture the person marked up, for the question being said or, with none under way, the next one. It goes
+    /// instead of any frame, and no frame is taken while there is one.
+    marked: Option<Marked>,
+    /// The mark-up overlay is open on a picture of that question.
+    marking: Option<Marking>,
 }
 
 pub struct Live {
@@ -371,6 +391,13 @@ pub fn name_of(id: &str) -> &'static str {
 /// One line about the picture, sent with the question: its size, the window it shows, the control pointed at when the
 /// OS names one, and how much of it is painted over.
 pub fn caption(a: &Asked) -> String {
+    caption_marked(a, &[])
+}
+
+/// The same line for a picture the person marked up: its marks follow in the words a dictation's picture names them
+/// by (`prompt::caption_marks`: the pins with their labels, the steps in order, each note), so the AI can answer by
+/// their numbers. The count of hidden areas is among those notes, the frame's own and the person's together.
+pub fn caption_marked(a: &Asked, labels: &[Label]) -> String {
     let mut c = format!("[Picture: {} x {} pixels", a.wire_w, a.wire_h);
     if let Some(t) = &a.window {
         c.push_str(&format!(", the window \"{t}\""));
@@ -379,9 +406,14 @@ pub fn caption(a: &Asked) -> String {
         c.push_str(&format!(", pointing at {} \"{}\"", e.role, e.name));
     }
     match a.hidden {
+        _ if !labels.is_empty() => {}
         0 => {}
         1 => c.push_str(", 1 area hidden"),
         n => c.push_str(&format!(", {n} areas hidden")),
+    }
+    // One line whatever a label holds: the caption ends the question, and a break in it would end it early.
+    for bit in prompt::caption_marks(labels) {
+        c.push_str(&format!(", {}", bit.split_whitespace().collect::<Vec<_>>().join(" ")));
     }
     c.push(']');
     c
@@ -412,20 +444,57 @@ struct Shot {
     thumb: Thumb,
 }
 
+/// A picture the person marked up, as it goes with a question: what is sent, the marks on it in words, and the
+/// panel's small copy.
+struct Marked {
+    asked: Asked,
+    labels: Vec<Label>,
+    small: Option<Picture>,
+}
+
+/// The mark-up overlay is open on a picture. What it commits is cut from that picture, so it shows the same window
+/// and whatever was painted over in it.
+#[derive(Default)]
+struct Marking {
+    window: Option<String>,
+    hidden: usize,
+    /// The marks already on the picture, when a marked one is marked again.
+    labels: Vec<Label>,
+    /// The question's own picture, taken to be drawn on: it goes back when the overlay is cancelled, and is let go
+    /// when the overlay commits.
+    was: Option<Shot>,
+}
+
+/// The picture the overlay opens on, and the number its marks count on from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkFrame {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub base: u32,
+}
+
+/// The picture of a question as it is kept and sent, with the marks the person put on it.
+struct Going {
+    asked: Asked,
+    labels: Vec<Label>,
+    marked: bool,
+}
+
 /// Exactly the picture that is sent, made small for the panel.
 fn thumbnail(a: &Asked) -> Option<Picture> {
-    small(&a.wire, a.wire_w, a.wire_h, label(a))
+    small(&a.wire, a.wire_w, a.wire_h, label(a), false)
 }
 
 /// The bytes of a picture as sent, made small for the panel.
-fn small(wire: &[u8], w: u32, h: u32, label: String) -> Option<Picture> {
+fn small(wire: &[u8], w: u32, h: u32, label: String, marked: bool) -> Option<Picture> {
     let small = image::load_from_memory(wire).ok()?.thumbnail(THUMB, THUMB).to_rgb8();
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
         .encode(small.as_raw(), small.width(), small.height(), image::ExtendedColorType::Rgb8)
         .ok()?;
     let src = format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpeg));
-    Some(Picture { src, w, h, label })
+    Some(Picture { src, w, h, label, marked })
 }
 
 fn data_url(mime: assist::Mime, bytes: &[u8]) -> String {
@@ -498,8 +567,9 @@ impl Live {
                 return false;
             }
         };
-        // The screen as it is now, before the panel is on it.
-        let frame = (self.deps.grab)().ok();
+        // The screen as it is now, before the panel is on it; never when the person marked a picture up for this
+        // question, or is marking one (the overlay is what the screen shows).
+        let frame = if g.marked.is_some() || g.marking.is_some() { None } else { (self.deps.grab)().ok() };
         provider.warm();
         match self.deps.voice.start() {
             Ok(true) => {}
@@ -516,6 +586,7 @@ impl Live {
         self.begin(&mut g, provider, now);
         g.snap.words.clear();
         self.step(&mut g, Step::Press);
+        g.snap.picture = g.marked.as_ref().and_then(|m| m.small.clone());
         if let Some(frame) = frame {
             self.cut(&mut g, frame, run);
         }
@@ -571,14 +642,16 @@ impl Live {
                 g.snap.words = words;
                 self.tell(&g);
             }
-            let Some(look) = look.filter(|l| !g.snap.dropped && look_moved(&g.look, l)) else { continue };
+            // A picture the person marked up, or is marking, stays the question's picture wherever they look.
+            let fixed = |g: &Inner| g.snap.dropped || g.marked.is_some() || g.marking.is_some();
+            let Some(look) = look.filter(|l| !fixed(&g) && look_moved(&g.look, l)) else { continue };
             // Not asked again for this window if the screen cannot be read now.
             g.look = look;
             drop(g);
             // Reading the screen takes a moment: never under the lock.
             let Ok(frame) = (self.deps.grab)() else { continue };
             let mut g = self.inner.lock().unwrap();
-            if g.run == run && g.snap.state == State::Listening && !g.snap.dropped {
+            if g.run == run && g.snap.state == State::Listening && !fixed(&g) {
                 self.cut(&mut g, frame, run);
             }
         }
@@ -601,11 +674,121 @@ impl Live {
     /// The picture is taken off the question being said: it is neither kept nor sent.
     pub fn drop_picture(&self) {
         let mut g = self.inner.lock().unwrap();
-        if matches!(g.snap.state, State::Listening | State::Finishing) && !g.snap.dropped {
-            g.picture = None;
+        let asking = matches!(g.snap.state, State::Listening | State::Finishing);
+        // With no question under way, the picture marked up for the next one is what there is to take off.
+        if !(asking && !g.snap.dropped || !asking && g.marked.is_some()) {
+            return;
+        }
+        let marking = g.marking.take().is_some();
+        g.picture = None;
+        g.marked = None;
+        g.snap.next_picture = None;
+        if asking {
             g.snap.picture = None;
             g.snap.dropped = true;
-            self.tell(&g);
+        }
+        self.tell(&g);
+        drop(g);
+        if marking {
+            (self.deps.out)(Out::MarkOver);
+        }
+    }
+
+    /// The mark-up overlay is open on a picture of the question being said, or of the next one.
+    pub fn marking(&self) -> bool {
+        self.inner.lock().unwrap().marking.is_some()
+    }
+
+    /// The picture to mark up: the one of the question being said (taken at the press, or as it followed the person's
+    /// look), a fresh frame when that question has none, or the one already marked up, to be marked again. With no
+    /// question under way it is a fresh frame for the next one, by the rule of an Ask: none without an AI chosen and
+    /// allowed. From here until the overlay commits or is cancelled the question's picture is not taken again.
+    pub fn mark(&self) -> Result<MarkFrame, String> {
+        let mut g = self.inner.lock().unwrap();
+        if g.marking.is_some() {
+            return Err(MARKING.into());
+        }
+        let asking = match g.snap.state {
+            State::Listening => true,
+            State::Closed | State::Shown | State::Error | State::Discarded => false,
+            State::Finishing | State::Sending | State::Answering => return Err(UNDER_WAY.into()),
+        };
+        if let Some(m) = &g.marked {
+            let frame = MarkFrame { png: m.asked.png.clone(), width: m.asked.width, height: m.asked.height, base: m.labels.iter().map(|l| l.n).max().unwrap_or(0) };
+            // Its hidden areas are already counted among its marks.
+            g.marking = Some(Marking { window: m.asked.window.clone(), hidden: 0, labels: m.labels.clone(), was: None });
+            return Ok(frame);
+        }
+        if !asking {
+            if let Err(why) = (self.deps.provider)() {
+                self.refuse(g, why.clone());
+                return Err(why);
+            }
+        }
+        let run = g.run;
+        let waiting = if asking && !g.snap.dropped { g.picture.take() } else { None };
+        g.marking = Some(Marking::default());
+        drop(g);
+        // Cutting a frame, or reading the screen for one, takes a moment: never under the lock.
+        let was = waiting.and_then(|rx| rx.recv().ok().flatten());
+        let own = was.is_some();
+        let shot = was.or_else(|| (self.deps.grab)().ok().and_then(shot_of));
+        let mut g = self.inner.lock().unwrap();
+        // Discarded or closed meanwhile: there is no question to mark a picture for.
+        if g.run != run || g.marking.is_none() {
+            return Err(NO_FRAME.into());
+        }
+        let Some(shot) = shot else {
+            g.marking = None;
+            return Err(NO_FRAME.into());
+        };
+        let frame = MarkFrame { png: shot.asked.png.clone(), width: shot.asked.width, height: shot.asked.height, base: 0 };
+        g.marking = Some(Marking { window: shot.asked.window.clone(), hidden: shot.asked.hidden, labels: vec![], was: own.then_some(shot) });
+        Ok(frame)
+    }
+
+    /// The overlay committed `png`, the picture with the person's marks burnt in, already cropped: it is the
+    /// question's picture from here, in the panel and in what is sent, and the frame it was drawn on is let go, so
+    /// what a redaction covers is kept nowhere. With no question under way it waits for the next one. Returns its
+    /// size and its marks.
+    pub fn mark_commit(&self, png: Vec<u8>, labels: Vec<Label>, element: Option<ElementMark>) -> Result<(u32, u32, Vec<Label>), String> {
+        let (buf, width, height) = crate::image_ops::decode_rgba(&png)?;
+        let (wire, wire_w, wire_h, mime) = capture::wire(buf, width, height, capture::ASK_EDGE)?;
+        let mut g = self.inner.lock().unwrap();
+        let asking = matches!(g.snap.state, State::Listening | State::Finishing);
+        // A region committed while a question is said is its picture too, whatever opened the overlay.
+        if g.marking.is_none() && g.snap.state != State::Listening {
+            return Err(NOT_MARKING.into());
+        }
+        let m = g.marking.take().unwrap_or_default();
+        let mut all = m.labels;
+        all.extend(labels);
+        prompt::note_hidden(&mut all, m.hidden as u32);
+        let asked = Asked { png, width, height, wire, wire_w, wire_h, mime, window: m.window, element, hidden: prompt::hidden_count(&all) as usize };
+        let small = small(&asked.wire, wire_w, wire_h, label(&asked), true);
+        // A frame still being cut never reaches the panel now.
+        g.shot += 1;
+        g.picture = None;
+        if asking {
+            g.snap.picture = small.clone();
+            g.snap.dropped = false;
+        } else {
+            g.snap.next_picture = small.clone();
+        }
+        g.marked = Some(Marked { asked, labels: all.clone(), small });
+        self.tell(&g);
+        Ok((width, height, all))
+    }
+
+    /// The overlay closed without a commit: the question's picture is what it was.
+    pub fn mark_cancel(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let Some(m) = g.marking.take() else { return };
+        let asking = matches!(g.snap.state, State::Listening | State::Finishing);
+        if let Some(shot) = m.was.filter(|_| asking && !g.snap.dropped && g.picture.is_none() && g.marked.is_none()) {
+            let (tx, rx) = mpsc::channel();
+            let _ = tx.send(Some(shot));
+            g.picture = Some(rx);
         }
     }
 
@@ -618,9 +801,12 @@ impl Live {
                 // The worker finishing the words, if there is one, finds its question discarded.
                 g.run += 1;
                 g.picture = None;
+                g.marked = None;
+                let marking = g.marking.take().is_some();
                 // Nothing of the discarded question is left for the panel to show as sent: no words, no picture, and no
                 // AI being asked. The turn count is of kept questions, so this one never moved it.
                 g.snap.picture = None;
+                g.snap.next_picture = None;
                 g.snap.words.clear();
                 g.snap.dropped = false;
                 g.snap.provider.clear();
@@ -629,6 +815,9 @@ impl Live {
                 self.step(&mut g, Step::Discard);
                 self.tell(&g);
                 drop(g);
+                if marking {
+                    (self.deps.out)(Out::MarkOver);
+                }
                 if listening {
                     let _ = self.deps.voice.stop(true);
                 }
@@ -655,7 +844,7 @@ impl Live {
         self.tell(&g);
         drop(g);
         (self.deps.out)(Out::Hide);
-        over.end(&*self.deps.voice);
+        over.end(&self.deps);
     }
 
     /// Whatever is under way stops and the panel's own fields are emptied; the session it is on is the caller's to
@@ -669,8 +858,10 @@ impl Live {
         g.kept = None;
         g.current = None;
         g.halt = false;
+        g.marked = None;
+        let marking = g.marking.take().is_some();
         g.snap = Snapshot::default();
-        Over { listening, stopper, chat }
+        Over { listening, marking, stopper, chat }
     }
 
     /// A question begins, spoken or typed: the turn the panel showed joins the turns before it, the session is the one
@@ -685,6 +876,7 @@ impl Live {
         g.provider = Some(provider);
         g.snap.error = None;
         g.snap.picture = None;
+        g.snap.next_picture = None;
         g.snap.dropped = false;
         g.snap.thinking = false;
         g.picture = None;
@@ -732,7 +924,7 @@ impl Live {
             let a = k.answer.as_ref()?;
             let picture = a.sent.pictures.first().and_then(|p| {
                 let (_, bytes) = self.sessions.sent_picture(session, &k.meta.id, p.n).ok()?;
-                small(&bytes, p.w, p.h, p.label.clone())
+                small(&bytes, p.w, p.h, p.label.clone(), p.marked)
             });
             let question = sessions::question(&a.sent.text).to_owned();
             Some(Past { n: i as u32 + 1, question, answer: a.text.clone(), picture, stopped: a.stopped, error: a.error.clone(), at_ms: a.times.press_ms, id: k.meta.id.clone() })
@@ -765,7 +957,7 @@ impl Live {
         self.tell(&g);
         drop(g);
         (self.deps.out)(Out::Show);
-        over.end(&*self.deps.voice);
+        over.end(&self.deps);
         Ok(())
     }
 
@@ -781,7 +973,7 @@ impl Live {
         }
         self.tell(&g);
         drop(g);
-        over.end(&*self.deps.voice);
+        over.end(&self.deps);
     }
 
     /// The kept sessions, for the list and the commands on them.
@@ -849,6 +1041,10 @@ impl Live {
         if !matches!(g.snap.state, State::Closed | State::Shown | State::Error | State::Discarded) {
             return Err(UNDER_WAY.into());
         }
+        // Nor while its picture is being marked up: the marks are committed or cancelled first.
+        if g.marking.is_some() {
+            return Err(MARKING.into());
+        }
         let provider = match (self.deps.provider)() {
             Ok(p) => p,
             Err(why) => {
@@ -856,8 +1052,10 @@ impl Live {
                 return Err(why);
             }
         };
-        // The same frame an Ask takes, with the panel painted out of it.
-        let frame = if picture { (self.deps.grab)().ok() } else { None };
+        // A picture marked up for this question goes with it, whatever `picture` says; else the same frame an Ask
+        // takes, with the panel painted out of it.
+        let marked = g.marked.take();
+        let frame = if picture && marked.is_none() { (self.deps.grab)().ok() } else { None };
         g.run += 1;
         let run = g.run;
         let now = (self.deps.now)();
@@ -865,6 +1063,7 @@ impl Live {
         g.release_ms = now;
         self.begin(&mut g, provider, now);
         g.snap.words = text.clone();
+        g.snap.picture = marked.as_ref().and_then(|m| m.small.clone());
         self.step(&mut g, Step::Send);
         self.tell(&g);
         drop(g);
@@ -882,8 +1081,12 @@ impl Live {
                     me.tell(&g);
                 }
             }
+            let going = match marked {
+                Some(m) => Some(Going { asked: m.asked, labels: m.labels, marked: true }),
+                None => shot.map(|s| Going { asked: s.asked, labels: vec![], marked: false }),
+            };
             let said = Said { items: vec![Item::Speech { t_ms: 0, end_ms: 0, text: text.clone() }], created_ms: now, duration_ms: 0, audio: None };
-            me.put(run, said, text, shot.map(|s| s.asked), now);
+            me.put(run, said, text, going, now);
         });
         Ok(())
     }
@@ -927,10 +1130,14 @@ impl Live {
     /// From the release to the end of the answer, off the key's thread.
     fn answer(&self, run: u64) {
         let now = || (self.deps.now)();
-        // The screen at the release is read while the last words are finished, unless the picture was taken off.
-        let dropped = self.inner.lock().unwrap().snap.dropped;
+        // The screen at the release is read while the last words are finished, unless the picture was taken off, or
+        // the person marked one up or is marking it: a marked picture is never taken again.
+        let fixed = {
+            let g = self.inner.lock().unwrap();
+            g.snap.dropped || g.marked.is_some() || g.marking.is_some()
+        };
         let (said, later) = std::thread::scope(|s| {
-            let later = (!dropped).then(|| s.spawn(|| (self.deps.grab)().ok()));
+            let later = (!fixed).then(|| s.spawn(|| (self.deps.grab)().ok()));
             let said = self.deps.voice.stop(false).map(|mut said| {
                 said.items = unstrayed(said.items);
                 said
@@ -939,43 +1146,59 @@ impl Live {
         });
         let words_ms = now();
         let text = said.as_ref().map(|s| prompt::compose_with(&s.items, (self.deps.tidy)()).0).unwrap_or_default().trim().to_string();
-        let picture = {
+        {
             let mut g = self.inner.lock().unwrap();
             // Discarded or closed while the words were finished: nothing is kept.
             if g.run != run || g.snap.state != State::Finishing {
                 return;
             }
-            let picture = g.picture.take();
             if text.is_empty() {
-                // Nothing was said: the frame goes, nothing is kept or sent, and the panel is simply open.
+                // Nothing was said: the frame goes, nothing is kept or sent, and the panel is simply open. A picture
+                // the person marked up waits for the next question.
+                g.picture = None;
                 g.snap.picture = None;
+                g.snap.next_picture = g.marked.as_ref().and_then(|m| m.small.clone());
                 g.snap.words.clear();
                 self.step(&mut g, Step::Settle);
                 return self.tell(&g);
             }
             g.snap.words = text.clone();
             self.tell(&g);
-            picture
-        };
+        }
         let Some(said) = said else { return };
-        let shot = self.pick(run, picture.and_then(|rx| rx.recv().ok().flatten()), later);
-        let asked = {
+        // The overlay is still open on the picture: the question waits for the marks, or for the overlay to be cancelled.
+        let (picture, marked) = loop {
+            let mut g = self.inner.lock().unwrap();
+            if g.run != run || g.snap.state != State::Finishing {
+                return;
+            }
+            if g.marking.is_none() {
+                break (g.picture.take(), g.marked.take());
+            }
+            drop(g);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let going = match marked {
+            Some(m) => Some(Going { asked: m.asked, labels: m.labels, marked: true }),
+            None => self.pick(run, picture.and_then(|rx| rx.recv().ok().flatten()), later).map(|s| Going { asked: s.asked, labels: vec![], marked: false }),
+        };
+        let going = {
             let mut g = self.inner.lock().unwrap();
             if g.run != run || g.snap.state != State::Finishing {
                 return;
             }
             // From here the picture can no longer be dropped: it is what is kept and sent, or it is neither.
-            let asked = shot.map(|s| s.asked).filter(|_| !g.snap.dropped);
+            let going = going.filter(|_| !g.snap.dropped);
             self.step(&mut g, Step::Send);
             self.tell(&g);
-            asked
+            going
         };
-        self.put(run, said, text, asked, words_ms);
+        self.put(run, said, text, going, words_ms);
     }
 
     /// Keep the question `text` (what was said or typed, as `said` holds it) with its picture as the next turn of the
     /// session, then send it and follow its answer to the end.
-    fn put(&self, run: u64, said: Said, text: String, asked: Option<Asked>, words_ms: u64) {
+    fn put(&self, run: u64, said: Said, text: String, going: Option<Going>, words_ms: u64) {
         let now = || (self.deps.now)();
         let (provider, session, fresh, press_ms, release_ms) = {
             let g = self.inner.lock().unwrap();
@@ -985,17 +1208,19 @@ impl Live {
             (g.provider.clone(), g.session.clone(), g.chat.is_none(), g.press_ms, g.release_ms)
         };
         let Some(provider) = provider else { return };
-        let sent_text = match asked.as_ref().map(caption) {
+        let sent_text = match going.as_ref().map(|g| if g.marked { caption_marked(&g.asked, &g.labels) } else { caption(&g.asked) }) {
             Some(c) => format!("{text}\n\n{c}"),
             None => text,
         };
+        let marked = going.as_ref().is_some_and(|g| g.marked);
+        let asked = going.map(|g| g.asked);
         // A conversation opened on a session that already has turns starts from them.
         let before = match (&session, fresh) {
             (Some(id), true) => self.earlier(id, None),
             _ => Before::default(),
         };
         let labels: Vec<String> = asked.iter().map(label).collect();
-        let wires: Vec<Wire> = asked.iter().zip(&labels).map(|(a, label)| Wire { bytes: &a.wire, w: a.wire_w, h: a.wire_h, mime: a.mime, label }).collect();
+        let wires: Vec<Wire> = asked.iter().zip(&labels).map(|(a, label)| Wire { bytes: &a.wire, w: a.wire_w, h: a.wire_h, mime: a.mime, label, marked }).collect();
         let first = Answer {
             provider: provider.id().into(),
             times: Times { press_ms, release_ms, words_ms, ..Times::default() },
@@ -1276,7 +1501,7 @@ impl Live {
 mod tests {
     use super::*;
     use crate::assist::{Caps, Health, Mime, Scripted, TurnId};
-    use crate::prompt::Item;
+    use crate::prompt::{Item, LabelKind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc::Sender;
@@ -1993,6 +2218,237 @@ mod tests {
         let told: Vec<String> = r.outs.lock().unwrap().iter().filter_map(|o| if let Out::State(s) = o { Some(s.provider.clone()) } else { None }).collect();
         assert!(told.len() >= 5 && told.iter().all(String::is_empty), "{told:?}");
         assert_eq!(r.kept()[0].1[0].answer.clone().unwrap().provider, script.id);
+        r.end();
+    }
+
+    /// A picture as the overlay commits it: another size and shade than any frame of the screen here.
+    fn marked_png(shade: u8) -> Vec<u8> {
+        crate::image_ops::encode_png(&[shade; 4 * 6 * 3], 6, 3).unwrap()
+    }
+
+    /// The committed picture as it is sent: fitted for the wire as every picture of a question is.
+    fn fitted(png: &[u8]) -> Vec<u8> {
+        let (buf, w, h) = crate::image_ops::decode_rgba(png).unwrap();
+        capture::wire(buf, w, h, capture::ASK_EDGE).unwrap().0
+    }
+
+    fn mark(n: u32, text: &str, kind: LabelKind) -> Label {
+        Label { n, text: text.into(), kind }
+    }
+
+    /// How many files under `dir` hold `bytes` anywhere in them.
+    fn holding(dir: &std::path::Path, bytes: &[u8]) -> usize {
+        let mut n = 0;
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            if e.path().is_dir() {
+                n += holding(&e.path(), bytes);
+            } else if std::fs::read(e.path()).unwrap().windows(bytes.len()).any(|w| w == bytes) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn sent_picture(script: &Scripted, turn: usize) -> Vec<u8> {
+        let asked = script.asked.lock().unwrap();
+        let Part::Picture { path, .. } = &asked[turn].parts[1] else { panic!("no picture sent: {:?}", asked[turn]) };
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn a_picture_the_person_marked_up_takes_the_place_of_the_automatic_one_in_the_panel_and_in_what_is_sent() {
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("marked", provider, FIRST_WAIT);
+        assert!(r.live.press());
+        r.wait("the press picture", || r.live.snapshot().picture.is_some());
+        assert_eq!(r.live.snapshot().picture.map(|p| p.marked), Some(false));
+        // The overlay opens on the frame taken at the press: nothing is grabbed for it.
+        let frame = r.live.mark().unwrap();
+        assert_eq!(frame, MarkFrame { png: shot().png, width: 4, height: 2, base: 0 });
+        assert_eq!((r.grabs.load(Ordering::SeqCst), r.live.marking(), r.live.mark()), (1, true, Err(MARKING.into())));
+        // As the overlay commits them: two pins, a walk of two steps, and two areas blacked out.
+        let mut labels = vec![mark(1, "too far left", LabelKind::Pin), mark(2, "open the\nmenu", LabelKind::Step), mark(3, "", LabelKind::Step), mark(4, "", LabelKind::Pin)];
+        prompt::note_hidden(&mut labels, 2);
+        let (w, h, all) = r.live.mark_commit(marked_png(90), labels, None).unwrap();
+        assert_eq!((w, h, all.len(), r.live.marking()), (6, 3, 5, false));
+        let snap = r.live.snapshot();
+        let p = snap.picture.clone().unwrap();
+        assert_eq!((p.marked, p.w, p.h, p.label.as_str(), snap.state, snap.dropped), (true, 6, 3, "Notes", State::Listening, false));
+        assert_eq!(serde_json::to_value(&snap).unwrap()["picture"]["marked"], true);
+        // The person looks elsewhere and the screen changes: a marked picture is taken again neither while the question
+        // is said nor at the release.
+        let moved = Screen { look: Look { front: Some(2), under: Some(1) }, window: "Lecture 4.pdf", shade: 30 };
+        *r.screen.lock().unwrap() = moved.clone();
+        std::thread::sleep(Duration::from_millis(700));
+        *r.voice.say.lock().unwrap() = "what is at pin 4".into();
+        r.live.release();
+        r.until(State::Shown);
+        assert_eq!(r.grabs.load(Ordering::SeqCst), 1, "only the frame at the press");
+        // What is sent is the committed picture, fitted for the wire, byte for byte; its caption names the pins, the
+        // steps in order, and every hidden area (the frame's one and the person's two), on one line.
+        let want = fitted(&marked_png(90));
+        let text = "what is at pin 4\n\n[Picture: 6 x 3 pixels, the window \"Notes\", pins: 1=too far left; 4, steps: 2=open the menu, 3, 3 areas hidden]";
+        let got = script.asked.lock().unwrap().clone();
+        assert_eq!((got[0].parts.len(), &got[0].parts[0]), (2, &Part::Text(text.into())));
+        assert!(matches!(&got[0].parts[1], Part::Picture { w: 6, h: 3, mime: Mime::Png, .. }), "{got:?}");
+        assert_eq!(sent_picture(&script, 0), want);
+        assert_eq!(sessions::question(text), "what is at pin 4");
+        assert!(script.opened.lock().unwrap()[0].0.contains("refer to them by their number"), "the AI is told how to name a mark");
+        let sent = r.live.sent(1).unwrap();
+        assert_eq!((sent.text.as_str(), sent.pictures.len(), sent.pictures[0].src.as_str()), (text, 1, data_url(Mime::Png, &want).as_str()));
+        assert_eq!(r.live.snapshot().picture.map(|p| p.marked), Some(true));
+        // The frame it was drawn on is kept nowhere: the session's folder holds the marked picture and no other.
+        assert_eq!((holding(&r.dir, &want), holding(&r.dir, &shot().wire), holding(&r.dir, &shot_on(&moved).wire)), (1, 0, 0));
+        assert!(r.live.inner.lock().unwrap().marked.is_none(), "and it went with this question only");
+        // Read back from what was kept, it is still a marked picture.
+        let id = r.live.snapshot().session.id;
+        assert!(r.kept()[0].1[0].answer.as_ref().unwrap().sent.pictures[0].marked);
+        r.live.close();
+        r.live.open(&id).unwrap();
+        assert_eq!(r.live.snapshot().turns[0].picture.as_ref().map(|p| (p.marked, p.w, p.h)), Some((true, 6, 3)));
+        r.end();
+    }
+
+    #[test]
+    fn cancelling_the_mark_up_leaves_the_automatic_picture_and_a_release_waits_for_the_overlay() {
+        // Cancelled while the question is said: the picture is the one it was, in the panel and in what is sent.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("mark-cancel", provider, FIRST_WAIT);
+        assert!(r.live.press());
+        r.wait("the press picture", || r.live.snapshot().picture.is_some());
+        let before = r.live.snapshot().picture;
+        r.live.mark().unwrap();
+        r.live.mark_cancel();
+        r.live.mark_cancel();
+        assert_eq!((r.live.marking(), r.live.snapshot().picture), (false, before));
+        *r.voice.say.lock().unwrap() = "what is this".into();
+        r.live.release();
+        r.until(State::Shown);
+        assert_eq!(sent_picture(&script, 0), shot().wire);
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text(format!("what is this\n\n{}", caption(&shot()))));
+        assert_eq!(r.live.snapshot().picture.map(|p| p.marked), Some(false));
+        assert!(!r.kept()[0].1[0].answer.as_ref().unwrap().sent.pictures[0].marked);
+        assert_eq!(holding(&r.dir, &shot().wire), 1, "the scan finds a picture that was sent");
+
+        // The key comes up while the overlay is open: the question waits, and what is committed goes.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r2 = rig("mark-late", provider, FIRST_WAIT);
+        assert!(r2.live.press());
+        r2.wait("the press picture", || r2.live.snapshot().picture.is_some());
+        r2.live.mark().unwrap();
+        *r2.voice.say.lock().unwrap() = "and this".into();
+        r2.live.release();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!((r2.live.snapshot().state, r2.live.snapshot().words.as_str()), (State::Finishing, "and this"));
+        assert!(r2.kept().is_empty() && script.asked.lock().unwrap().is_empty(), "nothing goes before the marks are in");
+        r2.live.mark_commit(marked_png(90), vec![], None).unwrap();
+        r2.until(State::Shown);
+        assert_eq!((sent_picture(&script, 0), r2.grabs.load(Ordering::SeqCst)), (fitted(&marked_png(90)), 1));
+        // With no mark of the person's own, the frame's hidden area is still said.
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text("and this\n\n[Picture: 6 x 3 pixels, the window \"Notes\", 1 area hidden]".into()));
+
+        // The same, and the overlay is cancelled: the automatic picture goes.
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r3 = rig("mark-late-cancel", provider, FIRST_WAIT);
+        assert!(r3.live.press());
+        r3.wait("the press picture", || r3.live.snapshot().picture.is_some());
+        r3.live.mark().unwrap();
+        *r3.voice.say.lock().unwrap() = "and this".into();
+        r3.live.release();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(script.asked.lock().unwrap().is_empty());
+        r3.live.mark_cancel();
+        r3.until(State::Shown);
+        assert_eq!(sent_picture(&script, 0), shot().wire);
+
+        // The question is discarded while the overlay is open: the overlay is told to go, and a commit after it is no
+        // question's picture.
+        let (script, provider) = scripted(&[(0, "never")]);
+        let r4 = rig("mark-discard", provider, FIRST_WAIT);
+        assert!(r4.live.press());
+        r4.wait("the press picture", || r4.live.snapshot().picture.is_some());
+        r4.live.mark().unwrap();
+        r4.live.stop();
+        assert!(r4.outs.lock().unwrap().contains(&Out::MarkOver) && !r4.live.marking());
+        assert_eq!(r4.live.mark_commit(marked_png(90), vec![], None), Err(NOT_MARKING.into()));
+        let snap = r4.live.snapshot();
+        assert_eq!((snap.state, snap.picture, snap.next_picture), (State::Discarded, None, None));
+        assert!(r4.kept().is_empty() && script.asked.lock().unwrap().is_empty());
+        for rig in [r, r2, r3, r4] {
+            rig.end();
+        }
+    }
+
+    #[test]
+    fn a_picture_marked_up_before_a_question_goes_with_the_next_one_typed_or_spoken() {
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("mark-next", provider, FIRST_WAIT);
+        // With no question under way the overlay opens on a fresh frame.
+        let frame = r.live.mark().unwrap();
+        assert_eq!((frame.png, frame.base, r.grabs.load(Ordering::SeqCst)), (shot().png, 0, 1));
+        assert_eq!(r.live.ask_typed("what is this", true), Err(MARKING.into()), "the marks are committed or cancelled first");
+        r.live.mark_commit(marked_png(90), vec![mark(1, "here", LabelKind::Pin)], None).unwrap();
+        let snap = r.live.snapshot();
+        assert_eq!((snap.state, snap.picture, snap.next_picture.map(|p| (p.marked, p.w, p.h))), (State::Closed, None, Some((true, 6, 3))));
+        // Typed: the marked picture goes, whatever is said about taking one, and no frame is taken.
+        assert_eq!(r.live.ask_typed("what is this", false), Ok(()));
+        r.until(State::Shown);
+        assert_eq!((sent_picture(&script, 0), r.grabs.load(Ordering::SeqCst)), (fitted(&marked_png(90)), 1));
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text("what is this\n\n[Picture: 6 x 3 pixels, the window \"Notes\", pins: 1=here, 1 area hidden]".into()));
+        let snap = r.live.snapshot();
+        assert_eq!((snap.next_picture, snap.picture.map(|p| p.marked)), (None, Some(true)));
+
+        // Spoken: marked with the panel open, then asked. No frame is taken at the press or at the release, and
+        // marking it again while the question is said opens on the marked picture and counts on from its marks.
+        r.live.mark().unwrap();
+        r.live.mark_commit(marked_png(90), vec![mark(2, "this row", LabelKind::Pin)], None).unwrap();
+        // Said some seconds after the typed one, as a real question is: a turn is named by its second.
+        r.voice.nth.store(5, Ordering::SeqCst);
+        assert!(r.live.press());
+        let snap = r.live.snapshot();
+        assert_eq!((snap.next_picture, snap.picture.map(|p| p.marked), r.grabs.load(Ordering::SeqCst)), (None, Some(true), 2));
+        let again = r.live.mark().unwrap();
+        assert_eq!(again, MarkFrame { png: marked_png(90), width: 6, height: 3, base: 2 });
+        r.live.mark_commit(marked_png(120), vec![mark(3, "and this one", LabelKind::Pin)], None).unwrap();
+        *r.voice.say.lock().unwrap() = "and these".into();
+        r.live.release();
+        r.until(State::Shown);
+        assert_eq!((sent_picture(&script, 1), r.grabs.load(Ordering::SeqCst)), (fitted(&marked_png(120)), 2));
+        assert_eq!(script.asked.lock().unwrap()[1].parts[0], Part::Text("and these\n\n[Picture: 6 x 3 pixels, the window \"Notes\", pins: 2=this row; 3=and this one, 1 area hidden]".into()));
+        assert_eq!(holding(&r.dir, &fitted(&marked_png(90))), 1, "the picture it was marked again from was sent once, with the first question");
+
+        // Taken off before a question: nothing waits, and the next question has no picture.
+        r.live.mark().unwrap();
+        r.live.mark_commit(marked_png(150), vec![], None).unwrap();
+        assert!(r.live.snapshot().next_picture.is_some());
+        r.live.drop_picture();
+        assert_eq!(r.live.snapshot().next_picture, None);
+        assert_eq!(r.live.ask_typed("plainly", false), Ok(()));
+        r.until(State::Shown);
+        assert_eq!(script.asked.lock().unwrap()[2].parts, [Part::Text("plainly".into())]);
+        assert_eq!(holding(&r.dir, &fitted(&marked_png(150))), 0);
+        r.end();
+
+        // By the rule of an Ask, nothing is grabbed to be marked without an AI chosen and allowed.
+        let none = rig("mark-none", None, FIRST_WAIT);
+        assert_eq!(none.live.mark(), Err(NO_PROVIDER.into()));
+        assert_eq!((none.grabs.load(Ordering::SeqCst), none.live.marking(), none.live.snapshot().error.as_deref()), (0, false, Some(NO_PROVIDER)));
+        none.end();
+    }
+
+    #[test]
+    fn a_dictations_region_is_never_taken_for_a_questions_picture() {
+        let (script, provider) = scripted(&[(0, "never")]);
+        let r = rig("mark-dictating", provider, FIRST_WAIT);
+        // A dictation records, and its overlay commits a region: no question's picture was being marked.
+        r.voice.on.store(true, Ordering::SeqCst);
+        assert!(!r.live.press());
+        assert!(!r.live.marking());
+        assert_eq!(r.live.mark_commit(marked_png(90), vec![mark(1, "here", LabelKind::Pin)], None), Err(NOT_MARKING.into()));
+        r.live.mark_cancel();
+        assert_eq!(r.live.snapshot(), Snapshot::default());
+        assert!(r.outs.lock().unwrap().is_empty() && r.grabs.load(Ordering::SeqCst) == 0, "the panel heard nothing");
+        assert!(r.voice.busy() && r.kept().is_empty() && script.opened.lock().unwrap().is_empty());
         r.end();
     }
 

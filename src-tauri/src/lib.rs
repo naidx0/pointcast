@@ -333,12 +333,48 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
                 }
                 live::Out::Show => platform::show_panel(&handle),
                 live::Out::Hide => hide_window(&handle, platform::PANEL),
+                live::Out::MarkOver => close_overlay(&handle),
             }),
             now: Box::new(now_ms),
             tidy: Box::new(move || tidy.settings.lock().unwrap().tidy),
         },
         &settings::data_dir(),
     )
+}
+
+/// Summarize as the app runs it: the AI an Ask would go to now, and the panel for where the summary stands.
+fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<summary::Maker> {
+    let (handle, chooser) = (app.clone(), svc.clone());
+    summary::Maker::new(
+        summary::Deps {
+            chosen: Box::new(move || {
+                let s = chooser.settings.lock().unwrap().clone();
+                held.provider(&s).map(|p| (p, s.assist_model.clone()))
+            }),
+            out: Box::new(move |state| {
+                let _ = handle.emit("summary://state", &state);
+            }),
+        },
+        &settings::data_dir(),
+    )
+}
+
+/// Start a summary of session `id` with the chosen AI; `summary://state` says where it stands.
+#[tauri::command]
+async fn summary_make(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<(), String> {
+    maker.make(&id)
+}
+
+#[tauri::command]
+async fn summary_stop(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<(), String> {
+    maker.stop(&id);
+    Ok(())
+}
+
+/// The summary kept for session `id`, or none.
+#[tauri::command]
+async fn summary_get(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<Option<summary::Summary>, String> {
+    maker.get(&id)
 }
 
 #[tauri::command]
@@ -453,6 +489,28 @@ async fn live_retry(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), Strin
 #[tauri::command]
 async fn live_ask_typed(live: tauri::State<'_, Arc<live::Live>>, text: String, picture: bool) -> Result<(), String> {
     live.ask_typed(&text, picture)
+}
+
+/// Open the mark-up overlay on the picture of the question being said, or, with none under way, on a fresh frame
+/// for the next one. What the overlay commits (`region_commit`) takes the place of the question's own picture;
+/// cancelling it leaves that picture as it was. Async: a frame may have to be cut or the screen read first.
+#[tauri::command]
+async fn live_mark(app: AppHandle, live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    let frame = live.mark()?;
+    EDIT.cancel();
+    // The picture already carries the ring and the outline an Ask draws, so the overlay is given neither to place.
+    let payload = json!({
+        "png_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &frame.png),
+        "width": frame.width,
+        "height": frame.height,
+        "pointer": null,
+        "element": null,
+        "ask": true,
+        // New pins are numbered on from the marks already on a picture that is marked again.
+        "base": frame.base,
+    });
+    show_frame(&app, &payload);
+    Ok(())
 }
 
 /// Exactly what was sent for turn `turn` of the open session, read back from what was kept.
@@ -611,6 +669,10 @@ fn history_open(app: AppHandle, id: Option<String>) {
 /// Every way the overlay goes away (save, cancel, stop, discard, Alt+F4): hide it, give focus
 /// back to the app it was over, and forget its frame and any History edit.
 fn close_overlay(app: &AppHandle) {
+    // An overlay that was open on a question's picture and committed nothing leaves that picture as it was.
+    if let Some(live) = app.try_state::<Arc<live::Live>>() {
+        live.mark_cancel();
+    }
     EDIT.cancel();
     hide_window(app, "overlay");
     platform::refocus_front();
@@ -699,6 +761,13 @@ fn overlay_open(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// The overlay is about to show a picture that is not a question's: one it was marking is left as it was.
+fn unmark_ask(app: &AppHandle) {
+    if let Some(live) = app.try_state::<Arc<live::Live>>() {
+        live.mark_cancel();
+    }
+}
+
 /// Show a frame in the overlay, remembering the app in front unless the overlay already is.
 fn show_frame(app: &AppHandle, payload: &Value) {
     if !overlay_open(app) {
@@ -711,6 +780,7 @@ fn show_frame(app: &AppHandle, payload: &Value) {
 
 fn open_region(app: &AppHandle, svc: &Arc<App>) -> Result<Value, String> {
     let shot = svc.begin_region()?;
+    unmark_ask(app);
     EDIT.cancel();
     let mark = svc.settings.lock().unwrap().mark_point;
     let payload = frame_payload(&shot, mark);
@@ -771,6 +841,7 @@ impl Editing {
 #[tauri::command]
 async fn history_edit(app: AppHandle, svc: tauri::State<'_, Arc<App>>, id: String, n: usize) -> Result<(), String> {
     let payload = EDIT.begin(&svc.history, &id, n)?;
+    unmark_ask(&app);
     show_frame(&app, &payload);
     Ok(())
 }
@@ -1137,6 +1208,12 @@ async fn region_begin(app: AppHandle, svc: tauri::State<'_, Arc<App>>) -> Result
     open_region(&app, &svc)
 }
 
+/// Whether what the overlay commits is a question's picture: it was opened on one (`live_mark`), or a question is
+/// being said. A dictation's region, with neither, goes into its recording as it always did.
+fn commit_is_asks(marking: bool, asking: bool) -> bool {
+    marking || asking
+}
+
 #[derive(Deserialize)]
 struct RegionCommit {
     png_b64: String,
@@ -1154,6 +1231,7 @@ struct RegionCommit {
 fn region_commit(
     app: AppHandle,
     svc: tauri::State<'_, Arc<App>>,
+    live: tauri::State<'_, Arc<live::Live>>,
     body: RegionCommit,
 ) -> Result<Value, String> {
     use base64::Engine;
@@ -1167,6 +1245,13 @@ fn region_commit(
         Some(r) => {
             let (id, cap) = r?;
             (cap, Some(id))
+        }
+        // A question's picture: what was marked takes its place in the panel and in what is sent. It is never an
+        // item of the recording, and nothing of it reaches History.
+        None if commit_is_asks(live.marking(), asking(&svc)) => {
+            let (width, height, labels) = live.mark_commit(png, labels, body.element)?;
+            close_overlay(&app);
+            return Ok(json!({"kind": prompt::CaptureKind::Region, "width": width, "height": height, "labels": labels, "ask": true}));
         }
         None => (svc.commit_region(png, labels, body.element)?, None),
     };
@@ -2166,6 +2251,7 @@ pub fn run() {
             live_retry,
             live_ask_typed,
             live_sent,
+            live_mark,
             sessions_list,
             sessions_open,
             sessions_new,
@@ -2173,6 +2259,9 @@ pub fn run() {
             sessions_delete,
             sessions_search,
             sessions_export,
+            summary_make,
+            summary_stop,
+            summary_get,
             assist_providers,
             assist_models,
             assist_choose,
@@ -2191,6 +2280,7 @@ pub fn run() {
             tray::setup(&handle, &svc)?;
             let held = Arc::new(assist::catalog::Held::new(assist_home()));
             app.manage(held.clone());
+            app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
@@ -2848,6 +2938,13 @@ mod tests {
         assert_eq!([Session, Full, Region, Zoom].map(|a| routed(a, true, true, false)), [None; 4]);
         // Onboarding's key test only hears the Ask key.
         assert_eq!(routed(Ask, false, false, true), None);
+    }
+
+    #[test]
+    fn what_the_overlay_commits_is_a_questions_picture_only_when_it_was_opened_on_one_or_a_question_is_said() {
+        // A dictation's region, as before: neither marking a question's picture nor asking.
+        assert!(!commit_is_asks(false, false));
+        assert!(commit_is_asks(true, false) && commit_is_asks(false, true) && commit_is_asks(true, true));
     }
 
     #[test]

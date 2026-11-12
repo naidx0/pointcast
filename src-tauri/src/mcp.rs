@@ -1072,20 +1072,25 @@ fn sessions_result(latest: &Latest, args: &Value) -> Result<Value, String> {
 
 /// One session as markdown, cut at the text budget of a result, its pictures as links to the files Pointcast keeps:
 /// no picture is inlined, so the result stays far inside the image and byte budgets however long the session is.
+/// Its summary, when one is kept, follows as a section of its own.
 fn session_result(latest: &Latest, args: &Value) -> Result<Value, String> {
     let id = args.get("id").and_then(Value::as_str).ok_or("pointcast_session needs an id; pointcast_sessions names them.")?;
     let store = crate::sessions::Sessions::new(&latest.library().data_dir);
     let id = if id == "latest" { store.list().first().map(|s| s.id.clone()).ok_or("Pointcast keeps no sessions.")? } else { id.to_string() };
     let (session, md, pictures) = store.markdown(&id).map_err(|_| format!("No Pointcast session with id {id:?}; pointcast_sessions names them."))?;
-    let text = if md.len() <= TEXT_MAX {
+    // The session's summary, when it has one, is its last section, whole: a long session is cut to leave it room.
+    let summary = crate::summary::newest(&store, &id).map(|(s, told)| crate::summary::to_section(&s, &told)).unwrap_or_default();
+    let room = TEXT_MAX.saturating_sub(summary.len());
+    let text = if md.len() <= room {
         md
     } else {
-        let mut end = TEXT_MAX;
+        let mut end = room;
         while !md.is_char_boundary(end) {
             end -= 1;
         }
         format!("{} [... cut here; the rest of the session is in Pointcast]", &md[..end])
     };
+    let text = if summary.is_empty() { text } else { format!("{text}\n{summary}") };
     let files: Vec<Value> = pictures.iter().map(|p| json!({ "n": p.n, "turn": p.turn, "file": slashes(&p.file), "width": p.w, "height": p.h })).collect();
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
@@ -1265,7 +1270,7 @@ mod tests {
         for i in 0..turns {
             let asked = format!("question {} about the nucleus", i + 1);
             let items = [words(0, 900, &asked)];
-            let wires = [Wire { bytes: &picture, w: 8, h: 6, mime: crate::assist::Mime::Png, label: "Cells.pdf" }];
+            let wires = [Wire { bytes: &picture, w: 8, h: 6, mime: crate::assist::Mime::Png, label: "Cells.pdf", marked: false }];
             let a = Answer { text: answer.into(), sent: Sent { text: asked.clone(), ..Sent::default() }, ..Answer::default() };
             let q = Question { items: &items, created_ms: CREATED + i * 1000, duration_ms: 900, audio: None, pictures: &wires };
             id = Some(store.save_turn(id.as_deref(), q, a, "", CREATED + i * 1000).unwrap().session.id);
@@ -1316,6 +1321,50 @@ mod tests {
         assert!(r.to_string().len() < INLINE_BYTES, "far inside the byte budget");
         assert_eq!(call(&latest, "pointcast_sessions", json!({ "limit": 0 }))["isError"], true);
         assert_eq!(call(&latest, "pointcast_session", json!({ "id": "../x" }))["isError"], true);
+    }
+
+    #[test]
+    fn a_session_with_a_summary_gives_it_whole_as_its_last_section() {
+        use crate::summary::{save, told, From, Point, Summary};
+        let summarise = |lab: &Lab, id: &str| {
+            let told = told(&crate::sessions::Sessions::new(&lab.lib.data_dir), id).unwrap();
+            let point = Point { text: "The nucleus holds the DNA.".into(), turn: 2, from: From::Answer, quote: "holds the cell's DNA".into() };
+            save(&told, &Summary { title: "The nucleus".into(), key_points: vec![point], kept: 1, dropped: 2, ..Summary::default() }).unwrap();
+        };
+        let short = lab("session-summary");
+        let latest = Latest::default().with_library(short.lib.clone());
+        let id = conversation(&short, 2, "It holds the cell's DNA.");
+        let before = texts(&call(&latest, "pointcast_session", json!({ "id": id })))[0].clone();
+        assert!(!before.contains("Summary"), "{before}");
+        summarise(&short, &id);
+        let md = texts(&call(&latest, "pointcast_session", json!({ "id": id })))[0].clone();
+        let after = md.strip_prefix(before.as_str()).unwrap_or_else(|| panic!("the session reads as it did, then the summary: {md}"));
+        assert_eq!(
+            after.lines().collect::<Vec<_>>(),
+            [
+                "",
+                "",
+                "## Summary",
+                "",
+                "The nucleus. A summary of 2 turns. 1 kept, 2 dropped: no source.",
+                "",
+                "### Key points",
+                "",
+                "- The nucleus holds the DNA. ([T2](#t2), the AI's explanation)",
+                "  > holds the cell's DNA",
+            ]
+        );
+        assert!(before.contains(r#"<a id="t2"></a>"#), "the turn it cites is an anchor above it");
+
+        // A long session is cut to leave the summary room: it is still there whole, inside the budget.
+        let long = lab("session-summary-long");
+        let latest = Latest::default().with_library(long.lib.clone());
+        let id = conversation(&long, 40, &"word ".repeat(400));
+        summarise(&long, &id);
+        let text = texts(&call(&latest, "pointcast_session", json!({ "id": id })))[0].clone();
+        let points = &after[after.find("### Key points").unwrap()..];
+        assert!(text.ends_with(points) && text.contains("the rest of the session is in Pointcast]\n\n## Summary\n\nThe nucleus. A summary of 40 turns."), "{}", &text[text.len() - 400..]);
+        assert!(text.len() <= TEXT_MAX + 80, "{} bytes", text.len());
     }
 
     fn call(latest: &Latest, name: &str, args: Value) -> Value {

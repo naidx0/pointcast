@@ -38,6 +38,7 @@ import {
   liveReduce,
   liveView,
   openNumber,
+  pictureCaption,
   sentLine,
   type LiveDelta,
   type LivePicture,
@@ -348,7 +349,7 @@ export function Live() {
     for (const c of Array.from(r.querySelectorAll(".live > *, .live-inner"))) ro.observe(c);
     fit();
     return () => ro.disconnect();
-  }, [v.phase, v.compact, big, !!v.thumb, sheet, showField, sumOpen, v.empty]);
+  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty]);
 
   if (v.phase === "closed") return <div className="live closed" ref={root} />;
 
@@ -358,11 +359,13 @@ export function Live() {
     </div>
   );
   const bigPic = big && v.thumb ? <BigPicture pic={v.thumb} close={() => setBig(false)} /> : null;
+  // While listening, what the picture is of sits on its own quiet line under the row, centred.
+  const cap = v.compact && v.thumb && v.phase !== "discarded" ? pictureCaption(v.label) : "";
 
   if (v.compact)
     return (
       <div className={`live compact phase-${v.phase}`} ref={root} aria-label="Ask about the screen">
-        <div className="live-row">
+        <div className={`live-row${cap ? " capped" : ""}`}>
           {v.phase === "discarded" ? (
             <p className="live-ended live-in">{v.note}</p>
           ) : (
@@ -371,10 +374,16 @@ export function Live() {
               <div className="live-row-line">
                 {v.line === "voice" ? <Line mode="listen" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
               </div>
-              {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : null}
+              {/* Without a picture the same width stays empty on the right, so the line keeps its centre. */}
+              {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : <span className="live-row-end" aria-hidden="true" />}
             </>
           )}
         </div>
+        {cap ? (
+          <p className="live-cap live-in" title={cap}>
+            {cap}
+          </p>
+        ) : null}
         {bigPic}
         {sr}
       </div>
@@ -1065,7 +1074,7 @@ function Picture({
           </PressButton>
         ) : null}
       </div>
-      {label.trim() ? (
+      {label.trim() && !under ? (
         <figcaption className="live-label" title={label}>
           {label.trim()}
         </figcaption>
