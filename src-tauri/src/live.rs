@@ -11,7 +11,7 @@
 use crate::assist::{self, Chat, Event, Failure, Kind, Part, Provider, Role, Turn};
 use crate::capture::{self, Asked, Look};
 use crate::element::ElementMark;
-use crate::keyframes::{self, Thumb};
+use crate::keyframes::Thumb;
 use crate::prompt::{self, Item, Label};
 use crate::session::{Phase, Purpose, Said};
 use crate::voice::stt;
@@ -433,25 +433,20 @@ pub fn look_moved(was: &Look, now: &Look) -> bool {
     was != now
 }
 
-/// At the release, the frame taken then goes instead of the picture so far when the person looks at another window, or
-/// the screen changed by more than `keyframes::CHANGE` on its 64 px thumbnail (another page in the same window).
-pub fn moved_on(was: &Look, now: &Look, change: f32) -> bool {
-    look_moved(was, now) || change > keyframes::CHANGE
-}
-
-/// A frame cut and encoded: what is kept and sent, the panel's small copy, and the thumbnail its change is measured on.
+/// A frame cut and encoded: what is kept and sent, and the panel's small copy. The picture a spoken question sends is
+/// the one the panel showed when the key came up: no frame taken at the release takes its place (owner, 2026-11-12).
 struct Shot {
     asked: Asked,
     small: Option<Picture>,
-    thumb: Thumb,
 }
 
-/// A picture the person marked up, as it goes with a question: what is sent, the marks on it in words, and the
-/// panel's small copy.
+/// A picture waiting for a question, as it goes with one: what is sent, the marks on it in words, the panel's small
+/// copy, and whether the person marked it up (else it was taken when the field's picture switch went on).
 struct Marked {
     asked: Asked,
     labels: Vec<Label>,
     small: Option<Picture>,
+    marked: bool,
 }
 
 /// The mark-up overlay is open on a picture. What it commits is cut from that picture, so it shows the same window
@@ -504,13 +499,8 @@ fn data_url(mime: assist::Mime, bytes: &[u8]) -> String {
     format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-fn shot_from(asked: Asked, thumb: Thumb) -> Shot {
-    Shot { small: thumbnail(&asked), asked, thumb }
-}
-
 fn shot_of(taken: Box<dyn Taken>) -> Option<Shot> {
-    let thumb = taken.thumb();
-    taken.cut().ok().map(|a| shot_from(a, thumb))
+    taken.cut().ok().map(|asked| Shot { small: thumbnail(&asked), asked })
 }
 
 impl Live {
@@ -701,6 +691,42 @@ impl Live {
         }
     }
 
+    /// The field's picture switch went on: one frame of the screen as it is now waits for the next question
+    /// (`next_picture`, unmarked), shown above the field, and goes with it; `drop_picture` takes it off. A picture
+    /// already waiting stays. Refused while a question is under way or a picture is being marked up, and, by the rule
+    /// of an Ask, nothing is grabbed without an AI chosen and allowed.
+    pub fn take_picture(&self) -> Result<(), String> {
+        let g = self.inner.lock().unwrap();
+        if !matches!(g.snap.state, State::Closed | State::Shown | State::Error | State::Discarded) {
+            return Err(UNDER_WAY.into());
+        }
+        if g.marking.is_some() {
+            return Err(MARKING.into());
+        }
+        if g.marked.is_some() {
+            return Ok(());
+        }
+        if let Err(why) = (self.deps.provider)() {
+            self.refuse(g, why.clone());
+            return Err(why);
+        }
+        let run = g.run;
+        drop(g);
+        // Reading the screen and cutting the frame take a moment: never under the lock.
+        let shot = (self.deps.grab)().ok().and_then(shot_of).ok_or(NO_FRAME)?;
+        let mut g = self.inner.lock().unwrap();
+        // A question began meanwhile: this picture is no one's.
+        if g.run != run {
+            return Err(UNDER_WAY.into());
+        }
+        if g.marked.is_none() {
+            g.snap.next_picture = shot.small.clone();
+            g.marked = Some(Marked { asked: shot.asked, labels: vec![], small: shot.small, marked: false });
+            self.tell(&g);
+        }
+        Ok(())
+    }
+
     /// The mark-up overlay is open on a picture of the question being said, or of the next one.
     pub fn marking(&self) -> bool {
         self.inner.lock().unwrap().marking.is_some()
@@ -722,8 +748,9 @@ impl Live {
         };
         if let Some(m) = &g.marked {
             let frame = MarkFrame { png: m.asked.png.clone(), width: m.asked.width, height: m.asked.height, base: m.labels.iter().map(|l| l.n).max().unwrap_or(0) };
-            // Its hidden areas are already counted among its marks.
-            g.marking = Some(Marking { window: m.asked.window.clone(), hidden: 0, labels: m.labels.clone(), was: None });
+            // A marked one's hidden areas are already counted among its marks; a taken one's are the frame's own.
+            let hidden = if m.marked { 0 } else { m.asked.hidden };
+            g.marking = Some(Marking { window: m.asked.window.clone(), hidden, labels: m.labels.clone(), was: None });
             return Ok(frame);
         }
         if !asking {
@@ -781,7 +808,7 @@ impl Live {
         } else {
             g.snap.next_picture = small.clone();
         }
-        g.marked = Some(Marked { asked, labels: all.clone(), small });
+        g.marked = Some(Marked { asked, labels: all.clone(), small, marked: true });
         self.tell(&g);
         Ok((width, height, all))
     }
@@ -1048,10 +1075,12 @@ impl Live {
         })
     }
 
-    /// A typed question: asked in the session the panel is on (or would join), with a picture of the screen as it is
-    /// now when `picture`, and none otherwise. Everything a spoken question must have holds for it (an AI chosen and
-    /// allowed); only what belongs to speech does not apply.
-    pub fn ask_typed(self: &Arc<Self>, text: &str, picture: bool) -> Result<(), String> {
+    /// A typed question: asked in the session the panel is on (or would join), with the picture waiting above the field
+    /// (taken when the field's picture switch went on, `take_picture`, or marked up) and none otherwise. Nothing is
+    /// grabbed as it is sent, whatever `_picture` says: a picture goes only once the person has seen it (owner,
+    /// 2026-11-12). Everything a spoken question must have holds for it (an AI chosen and allowed); only what belongs
+    /// to speech does not apply.
+    pub fn ask_typed(self: &Arc<Self>, text: &str, _picture: bool) -> Result<(), String> {
         let text = text.trim().to_owned();
         if text.is_empty() {
             return Err(NOTHING_TYPED.into());
@@ -1072,10 +1101,7 @@ impl Live {
                 return Err(why);
             }
         };
-        // A picture marked up for this question goes with it, whatever `picture` says; else the same frame an Ask
-        // takes, with the panel painted out of it.
         let marked = g.marked.take();
-        let frame = if picture && marked.is_none() { (self.deps.grab)().ok() } else { None };
         g.run += 1;
         let run = g.run;
         let now = (self.deps.now)();
@@ -1090,21 +1116,7 @@ impl Live {
         (self.deps.out)(Out::Show);
         let me = self.clone();
         std::thread::spawn(move || {
-            let shot = frame.and_then(shot_of);
-            {
-                let mut g = me.inner.lock().unwrap();
-                if g.run != run {
-                    return;
-                }
-                if let Some(s) = &shot {
-                    g.snap.picture = s.small.clone();
-                    me.tell(&g);
-                }
-            }
-            let going = match marked {
-                Some(m) => Some(Going { asked: m.asked, labels: m.labels, marked: true }),
-                None => shot.map(|s| Going { asked: s.asked, labels: vec![], marked: false }),
-            };
+            let going = marked.map(|m| Going { asked: m.asked, labels: m.labels, marked: m.marked });
             let said = Said { items: vec![Item::Speech { t_ms: 0, end_ms: 0, text: text.clone() }], created_ms: now, duration_ms: 0, audio: None };
             me.put(run, said, text, going, now);
         });
@@ -1150,19 +1162,10 @@ impl Live {
     /// From the release to the end of the answer, off the key's thread.
     fn answer(&self, run: u64) {
         let now = || (self.deps.now)();
-        // The screen at the release is read while the last words are finished, unless the picture was taken off, or
-        // the person marked one up or is marking it: a marked picture is never taken again.
-        let fixed = {
-            let g = self.inner.lock().unwrap();
-            g.snap.dropped || g.marked.is_some() || g.marking.is_some()
-        };
-        let (said, later) = std::thread::scope(|s| {
-            let later = (!fixed).then(|| s.spawn(|| (self.deps.grab)().ok()));
-            let said = self.deps.voice.stop(false).map(|mut said| {
-                said.items = unstrayed(said.items);
-                said
-            });
-            (said, later.and_then(|l| l.join().ok().flatten()))
+        // No frame is taken at the release: the picture that goes is the one the panel showed then (owner, 2026-11-12).
+        let said = self.deps.voice.stop(false).map(|mut said| {
+            said.items = unstrayed(said.items);
+            said
         });
         let words_ms = now();
         let text = said.as_ref().map(|s| prompt::compose_with(&s.items, (self.deps.tidy)()).0).unwrap_or_default().trim().to_string();
@@ -1199,8 +1202,8 @@ impl Live {
             std::thread::sleep(Duration::from_millis(20));
         };
         let going = match marked {
-            Some(m) => Some(Going { asked: m.asked, labels: m.labels, marked: true }),
-            None => self.pick(run, picture.and_then(|rx| rx.recv().ok().flatten()), later).map(|s| Going { asked: s.asked, labels: vec![], marked: false }),
+            Some(m) => Some(Going { asked: m.asked, labels: m.labels, marked: m.marked }),
+            None => picture.and_then(|rx| rx.recv().ok().flatten()).map(|s| Going { asked: s.asked, labels: vec![], marked: false }),
         };
         let going = {
             let mut g = self.inner.lock().unwrap();
@@ -1275,28 +1278,6 @@ impl Live {
             (g.snap.turn, g.chat.take())
         };
         self.send(run, &provider, kept, turn_no, chat, before);
-    }
-
-    /// The one picture that goes with the question: the one so far (`was`), or the frame taken at the release (`later`)
-    /// when the person moved on since to another window or another page. The panel is shown the one that goes.
-    fn pick(&self, run: u64, was: Option<Shot>, later: Option<Box<dyn Taken>>) -> Option<Shot> {
-        let Some(later) = later else { return was };
-        let thumb = later.thumb();
-        let change = was.as_ref().map_or(1.0, |s| keyframes::change(&s.thumb, &thumb));
-        let look = later.look();
-        if !moved_on(&self.inner.lock().unwrap().look, &look, change) {
-            return was;
-        }
-        let Ok(asked) = later.cut() else { return was };
-        let shot = shot_from(asked, thumb);
-        let mut g = self.inner.lock().unwrap();
-        if g.run == run && g.snap.state == State::Finishing && !g.snap.dropped {
-            g.shot += 1;
-            g.look = look;
-            g.snap.picture = shot.small.clone();
-            self.tell(&g);
-        }
-        Some(shot)
     }
 
     /// Ask the question that failed again, as it was kept: the same words and the same picture bytes, in the same
@@ -1557,6 +1538,7 @@ impl Live {
 mod tests {
     use super::*;
     use crate::assist::{Caps, Health, Mime, Scripted, TurnId};
+    use crate::keyframes;
     use crate::prompt::{Item, LabelKind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -1813,9 +1795,9 @@ mod tests {
         let script = Scripted { id: assist::codex::ID, ..Scripted::new(&[(5, "Hel"), (5, "lo")]) };
         let r = rig("asked", Some(Arc::new(script.clone())), FIRST_WAIT);
         r.ask("what is this", State::Shown);
-        // A frame at the press and one at the release, to see whether the screen moved on; it did not, so the press frame
-        // went (rule changed: the release frame is new).
-        assert_eq!(r.grabs.load(Ordering::SeqCst), 2, "a frame at the press and one at the release");
+        // Rule changed (owner, 2026-11-12): only the frame at the press; none is taken at the release, so what the panel
+        // showed is what goes.
+        assert_eq!(r.grabs.load(Ordering::SeqCst), 1, "a frame at the press only");
         assert_eq!(r.outs.lock().unwrap().iter().filter(|o| **o == Out::Show).count(), 1);
         assert_eq!(r.states(), [State::Listening, State::Finishing, State::Sending, State::Answering, State::Shown]);
         assert_eq!(r.deltas().iter().map(|d| d.1.as_str()).collect::<String>(), "Hello");
@@ -1936,11 +1918,9 @@ mod tests {
     #[test]
     fn the_picture_follows_the_window_the_person_looks_at_and_the_one_the_panel_shows_is_the_one_sent() {
         let (a, b) = (Look { front: Some(1), under: Some(1) }, Look { front: Some(2), under: Some(1) });
-        // The decision, alone: another window in front or under the pointer takes the picture again; at the release a
-        // screen that changed on its thumbnail (another page in the same window) does too, and a small change does not.
+        // The decision, alone: another window in front or under the pointer takes the picture again while the question
+        // is said.
         assert!(!look_moved(&a, &a) && look_moved(&a, &b) && look_moved(&a, &Look { under: Some(3), ..a }));
-        assert!(moved_on(&a, &b, 0.0) && moved_on(&a, &a, keyframes::CHANGE + 0.01));
-        assert!(!moved_on(&a, &a, 0.0) && !moved_on(&a, &a, keyframes::CHANGE));
         // The panel's picture is named by the window it shows; a whole screen or an unnamed window is not.
         assert_eq!((label(&shot()), label(&Asked { window: None, ..shot() })), ("Notes".to_string(), String::new()));
 
@@ -1961,18 +1941,21 @@ mod tests {
         assert_eq!(sent.parts[0], Part::Text("what is this\n\n[Picture: 4 x 2 pixels, the window \"Lecture 4.pdf\", 1 area hidden]".into()));
         assert_eq!(r.live.snapshot().picture.map(|p| p.label), Some("Lecture 4.pdf".into()));
 
-        // Another page in the same window between the last look and the release: the release frame goes, and the panel
-        // shows it before it is sent.
+        // Another page in the same window between the last look and the release. Rule changed (owner, 2026-11-12): a
+        // frame taken at the release no longer takes the place of the picture the panel showed; that one goes, byte for
+        // byte, and no frame is taken at the release.
         let (script, provider) = scripted(&[(0, "ok")]);
         let r2 = rig("moved-on", provider, FIRST_WAIT);
         assert!(r2.live.press());
         r2.wait("the press picture", || r2.live.snapshot().picture.is_some());
+        let shown = r2.live.snapshot().picture;
         *r2.screen.lock().unwrap() = Screen { window: "Notes, page 2", shade: 30, ..Screen::default() };
         *r2.voice.say.lock().unwrap() = "and this".into();
         r2.live.release();
         r2.until(State::Shown);
-        assert!(matches!(&script.asked.lock().unwrap()[0].parts[0], Part::Text(t) if t.contains("Notes, page 2")));
-        assert_eq!(r2.live.snapshot().picture.map(|p| p.label), Some("Notes, page 2".into()));
+        assert_eq!(sent_picture(&script, 0), shot().wire, "the shown picture, not the screen at the release");
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text(format!("and this\n\n{}", caption(&shot()))));
+        assert_eq!((r2.live.snapshot().picture, r2.grabs.load(Ordering::SeqCst)), (shown, 1));
         // A picture taken off before the release is not taken again.
         let (script, provider) = scripted(&[(0, "ok")]);
         let r3 = rig("dropped-stays", provider, FIRST_WAIT);
@@ -2615,10 +2598,12 @@ mod tests {
         assert!(r.outs.lock().unwrap().is_empty() && r.grabs.load(Ordering::SeqCst) == 0, "nothing shown, nothing grabbed");
         assert!(r.kept().is_empty() && script.opened.lock().unwrap().is_empty());
 
-        // With a picture: one frame through the Ask path, kept and sent as a spoken question's is.
+        // With a picture: one frame through the Ask path, kept and sent as a spoken question's is. Rule changed (owner,
+        // 2026-11-12): it is taken when the field's switch goes on and waits, shown, until the question is sent.
+        assert_eq!(r.live.take_picture(), Ok(()));
         assert_eq!(r.live.ask_typed("  what is two plus two ", true), Ok(()));
         r.until(State::Shown);
-        assert_eq!(r.states(), [State::Sending, State::Answering, State::Shown]);
+        assert_eq!(r.states(), [State::Closed, State::Sending, State::Answering, State::Shown]);
         assert_eq!(r.outs.lock().unwrap().iter().filter(|o| **o == Out::Show).count(), 1);
         assert_eq!(r.grabs.load(Ordering::SeqCst), 1);
         assert!(r.voice.stops.lock().unwrap().is_empty() && !r.voice.busy(), "the microphone never opened");
@@ -3096,5 +3081,63 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(spawns.load(Ordering::SeqCst), 2);
         r.end();
+    }
+
+    #[test]
+    fn a_typed_question_never_takes_a_picture_as_it_is_sent() {
+        let (script, provider) = scripted(&[(1, "ok")]);
+        let r = rig("typed-no-grab", provider, FIRST_WAIT);
+        // Nothing waits above the field: no picture goes, whatever the flag says, and the screen is not read.
+        assert_eq!(r.live.ask_typed("what is this", true), Ok(()));
+        r.until(State::Shown);
+        assert_eq!((script.asked.lock().unwrap()[0].parts.clone(), r.grabs.load(Ordering::SeqCst)), (vec![Part::Text("what is this".into())], 0));
+        assert_eq!(r.live.snapshot().picture, None);
+        r.end();
+    }
+
+    #[test]
+    fn the_picture_a_typed_question_sends_is_the_one_taken_when_the_switch_went_on() {
+        let (script, provider) = scripted(&[(1, "ok")]);
+        let r = rig("typed-take", provider, FIRST_WAIT);
+        let answered = |n: usize| r.wait("the answer", || r.live.snapshot().state == State::Shown && script.asked.lock().unwrap().len() == n);
+        // Switched on: one frame now, shown waiting above the field, not marked up.
+        assert_eq!(r.live.take_picture(), Ok(()));
+        let snap = r.live.snapshot();
+        assert_eq!((snap.next_picture.as_ref().map(|p| (p.marked, p.label.as_str(), p.w, p.h)), r.grabs.load(Ordering::SeqCst)), (Some((false, "Notes", 4, 2)), 1));
+        // Taken again while one waits: it stays, and the screen is not read again.
+        assert_eq!((r.live.take_picture(), r.grabs.load(Ordering::SeqCst)), (Ok(()), 1));
+        // The screen changes before the question is sent: the taken picture goes, byte for byte, not the screen now.
+        *r.screen.lock().unwrap() = Screen { look: Look { front: Some(2), under: Some(2) }, window: "Lecture 4.pdf", shade: 30 };
+        assert_eq!(r.live.ask_typed("what is this", true), Ok(()));
+        answered(1);
+        assert_eq!((sent_picture(&script, 0), r.grabs.load(Ordering::SeqCst)), (shot().wire, 1));
+        assert_eq!(script.asked.lock().unwrap()[0].parts[0], Part::Text(format!("what is this\n\n{}", caption(&shot()))));
+        let snap = r.live.snapshot();
+        assert_eq!((snap.next_picture, snap.picture.map(|p| (p.marked, p.label))), (None, Some((false, "Notes".to_owned()))));
+        assert!(!r.kept()[0].1[0].answer.as_ref().unwrap().sent.pictures[0].marked);
+        // Taken, then switched off: nothing waits, and the next question has no picture.
+        assert_eq!(r.live.take_picture(), Ok(()));
+        assert!(r.live.snapshot().next_picture.is_some());
+        r.live.drop_picture();
+        assert_eq!(r.live.snapshot().next_picture, None);
+        assert_eq!(r.live.ask_typed("and this", true), Ok(()));
+        answered(2);
+        assert_eq!(script.asked.lock().unwrap()[1].parts, [Part::Text("and this".into())]);
+        // Refused while a question is said, and nothing is grabbed for it.
+        assert!(r.live.press());
+        let grabs = r.grabs.load(Ordering::SeqCst);
+        assert_eq!((r.live.take_picture(), r.grabs.load(Ordering::SeqCst)), (Err(UNDER_WAY.to_owned()), grabs));
+        r.live.stop();
+        // A new session starts with nothing waiting.
+        assert_eq!(r.live.take_picture(), Ok(()));
+        r.live.fresh();
+        assert_eq!(r.live.snapshot().next_picture, None);
+        r.end();
+
+        // By the rule of an Ask, nothing is grabbed without an AI chosen and allowed.
+        let none = rig("take-none", None, FIRST_WAIT);
+        assert_eq!(none.live.take_picture(), Err(NO_PROVIDER.into()));
+        assert_eq!((none.grabs.load(Ordering::SeqCst), none.live.snapshot().next_picture), (0, None));
+        none.end();
     }
 }

@@ -10,6 +10,7 @@ import {
   liveOpenSettings,
   liveRetry,
   liveSent,
+  liveTakePicture,
   liveState,
   liveStop,
   onListAsk,
@@ -217,8 +218,11 @@ export function Live() {
     setSheet(false);
     setSumOpen((o) => !o);
   };
-  // A new session's field starts with a picture of the screen going along: its question is about the screen.
-  useEffect(() => setFieldPic(v.empty), [v.empty]);
+  // The switch starts off, in a new session too: a picture goes only when the person took one and saw it waiting. It
+  // is off again once nothing waits (sent with a question, or taken off).
+  useEffect(() => {
+    if (!v.next) setFieldPic(false);
+  }, [v.empty, !!v.next]);
 
   // Not sent: said for a moment, then the panel hides.
   useEffect(() => {
@@ -911,11 +915,12 @@ function ThisSession({
 
 /** The typed question: one slim field at the foot, shown once an answer is, in a new session for its first question,
  * and after a question failed. Enter sends, Shift+Enter is a new line, Esc lets go. The cursor is put here only by a
- * click or Ctrl+K (Cmd+K); after sending the field lets go and the engine gives focus back to the app it came from. A
- * fresh picture goes along only when asked for (in a new session, from the start) and can be marked up first; a
- * picture marked with no question under way (`next`) waits above the field and goes with the question whatever the
- * switch says, until it is taken off. Refused (a question is already under way, the picture is being marked up), the
- * words stay and one quiet line says why. */
+ * click or Ctrl+K (Cmd+K); after sending the field lets go and the engine gives focus back to the app it came from. The
+ * picture switch starts off; turning it on takes a picture of the screen at that moment, which waits above the field
+ * (`next`), shown, and can be marked up first; turning it off, or taking the picture off, sends none. A picture marked
+ * with no question under way waits there the same way. Only a waiting picture goes with the question: none is taken as
+ * it is sent (owner, 2026-11-12). Refused (a question is already under way, the picture is being marked up), the words
+ * stay and one quiet line says why. */
 function FollowUp({
   field,
   first,
@@ -947,7 +952,7 @@ function FollowUp({
     setBusy(true);
     setNote("");
     field.current?.blur();
-    liveAskTyped(t, pic || !!next)
+    liveAskTyped(t, !!next)
       .then(() => {
         setText("");
         setPic(() => false);
@@ -1010,8 +1015,17 @@ function FollowUp({
               className="live-pic-toggle"
               aria-pressed={pic}
               aria-label="Include a new picture of the screen"
-              title={pic ? "A new picture of the screen goes with it" : "Words only. Press to include a new picture of the screen"}
-              act={() => setPic((p) => !p)}
+              title={pic ? "A new picture of the screen goes with it" : "Words only. Press to take a picture of the screen now"}
+              act={() => {
+                setNote("");
+                if (pic) {
+                  setPic(() => false);
+                  void liveDropPicture().catch(noop);
+                } else
+                  liveTakePicture()
+                    .then(() => setPic(() => true))
+                    .catch((e) => setNote(plain(e)));
+              }}
             >
               <ImagePlus size={16} strokeWidth={1.5} />
             </PressButton>

@@ -484,11 +484,18 @@ async fn live_retry(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), Strin
     live.retry()
 }
 
-/// Ask a typed question in the session the panel is on, with a fresh picture of the screen when `picture`.
-/// Async: the screen is read and the AI is asked off the event loop.
+/// Ask a typed question in the session the panel is on, with the picture waiting above the field if there is one
+/// (`live_take_picture`); nothing is grabbed as it is sent. Async: the AI is asked off the event loop.
 #[tauri::command]
 async fn live_ask_typed(live: tauri::State<'_, Arc<live::Live>>, text: String, picture: bool) -> Result<(), String> {
     live.ask_typed(&text, picture)
+}
+
+/// The follow-up field's picture switch went on: a picture of the screen taken now waits above the field for the next
+/// question. Async: the screen is read off the event loop.
+#[tauri::command]
+async fn live_take_picture(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
+    live.take_picture()
 }
 
 /// Open the mark-up overlay on the picture of the question being said, or, with none under way, on a fresh frame
@@ -2254,6 +2261,7 @@ pub fn run() {
             live_close,
             live_retry,
             live_ask_typed,
+            live_take_picture,
             live_sent,
             live_mark,
             sessions_list,
