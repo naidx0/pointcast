@@ -734,10 +734,9 @@ impl Live {
         let own = was.is_some();
         let shot = was.or_else(|| (self.deps.grab)().ok().and_then(shot_of));
         let mut g = self.inner.lock().unwrap();
-        // Discarded or closed meanwhile: there is no question to mark a picture for.
-        if g.run != run || g.marking.is_none() {
-            return Err(NO_FRAME.into());
-        }
+        // Discarded, closed or pressed meanwhile: there is no question to mark this picture for, or no picture. The
+        // overlay never opens, so nothing is left marking: a release would wait for it forever.
+        let shot = shot.filter(|_| g.run == run && g.marking.is_some());
         let Some(shot) = shot else {
             g.marking = None;
             return Err(NO_FRAME.into());
@@ -2986,6 +2985,25 @@ mod tests {
         old.send(Event { turn: TurnId(1), kind: Kind::Done }).unwrap();
         std::thread::sleep(Duration::from_millis(250));
         assert_eq!(r.deltas(), [(1, "first".to_owned()), (1, "first".to_owned())], "nothing of the old answer after it was closed");
+        r.end();
+    }
+
+    #[test]
+    fn a_press_while_a_frame_is_taken_to_mark_up_leaves_nothing_marking_and_the_question_goes() {
+        let (script, provider) = scripted(&[(1, "ok")]);
+        let r = rig("mark-press", provider, FIRST_WAIT);
+        let slow = r.gate.lock().unwrap();
+        let live = r.live.clone();
+        let marking = std::thread::spawn(move || live.mark());
+        r.wait("the frame to mark up being taken", || r.grabs.load(Ordering::SeqCst) == 1 && r.live.marking());
+        assert!(r.live.press());
+        drop(slow);
+        assert_eq!(marking.join().unwrap(), Err(NO_FRAME.into()));
+        assert!(!r.live.marking() && r.live.inner.lock().unwrap().marking.is_none());
+        *r.voice.say.lock().unwrap() = "what is this".into();
+        r.live.release();
+        r.until(State::Shown);
+        assert_eq!(script.asked.lock().unwrap().len(), 1);
         r.end();
     }
 }
