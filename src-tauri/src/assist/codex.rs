@@ -951,15 +951,17 @@ impl Provider for Codex {
     /// The models of the last greeting, none before one.
     fn models(&self) -> Vec<super::catalog::Model> {
         let models = self.models.lock().unwrap();
-        models
-            .iter()
-            .filter_map(|m| {
-                let id = m["id"].as_str().or(m["model"].as_str())?.to_owned();
-                let name = m["displayName"].as_str().filter(|n| !n.is_empty()).map_or_else(|| id.clone(), str::to_owned);
-                Some(super::catalog::Model { id, name, images: takes_pictures(m) })
-            })
-            .collect()
+        models.iter().filter_map(model_of).collect()
     }
+}
+
+/// One entry of Codex's `model/list` as the AI page shows it: its name, whether it sees pictures, the efforts it
+/// offers and whether Codex starts with it.
+fn model_of(m: &Value) -> Option<super::catalog::Model> {
+    let id = m["id"].as_str().or(m["model"].as_str())?.to_owned();
+    let name = m["displayName"].as_str().filter(|n| !n.is_empty()).map_or_else(|| id.clone(), str::to_owned);
+    let efforts = m["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["reasoningEffort"].as_str().map(str::to_owned)).collect();
+    Some(super::catalog::Model { id, name, images: takes_pictures(m), efforts, default: m["isDefault"].as_bool() == Some(true) })
 }
 
 #[cfg(test)]
@@ -1441,6 +1443,24 @@ pub mod tests {
         assert_eq!(said, Err("The sign-in did not finish: denied.".into()));
         let (said, _, opened) = signing_in("login-never", Duration::from_millis(300));
         assert_eq!((said, opened.len()), (Err("The sign-in was not finished in time. Try again.".into()), 1));
+    }
+
+    #[test]
+    fn each_model_carries_the_efforts_codex_lists_for_it_and_its_default_mark() {
+        // As Codex 0.167 lists them for a ChatGPT sign-in: one model offers a level the others do not.
+        let luna = json!({ "id": "gpt-6-luna", "displayName": "GPT-6-Luna", "isDefault": true, "inputModalities": ["text", "image"],
+            "supportedReasoningEfforts": (["low", "medium", "high", "xhigh", "max"].map(|e| json!({ "reasoningEffort": e }))) });
+        let terra = json!({ "id": "gpt-5.6-terra", "displayName": "GPT-5.6-Terra", "isDefault": false, "inputModalities": ["text", "image"],
+            "supportedReasoningEfforts": (["low", "medium", "high", "xhigh", "max", "ultra"].map(|e| json!({ "reasoningEffort": e }))) });
+        let (l, t) = (model_of(&luna).unwrap(), model_of(&terra).unwrap());
+        assert_eq!((l.name.as_str(), l.default, l.efforts.len()), ("GPT-6-Luna", true, 5));
+        assert_eq!((t.default, t.efforts.last().map(String::as_str)), (false, Some("ultra")));
+        for e in l.efforts.iter().chain(&t.efforts) {
+            assert!(crate::assist::catalog::CODEX_EFFORTS.contains(&e.as_str()), "{e} can be chosen");
+        }
+        let bare = model_of(&json!({ "id": "m" })).unwrap();
+        assert!(bare.efforts.is_empty() && !bare.default);
+        assert_eq!(serde_json::to_value(&bare).unwrap(), json!({ "id": "m", "name": "m", "images": true }), "nothing said for what is not known");
     }
 
     #[test]

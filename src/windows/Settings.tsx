@@ -548,7 +548,7 @@ const RANGES = [
  * mark-up; Ask with the AI that answers), then what was dictated (four numbers for the week or for all time, then when
  * in the week) and the last few recordings. Read once, as the pane opens. */
 function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: Patch }) {
-  // "New: Ask about your screen", once, for someone who finished setup before Ask existed; Got it remembers it.
+  // "New: Prompt with your screen", once, for someone who finished setup before Ask existed; Got it remembers it.
   const [news, setNews] = useState(() => askNews(cfg));
   const [counts, setCounts] = useState<Counts | null>(null);
   const [recent, setRecent] = useState<RecentRow[]>([]);
@@ -607,10 +607,10 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
           <MessageCircleQuestion size={20} strokeWidth={1.5} aria-hidden="true" />
           <div className="grow">
             <div className="t" id="hub-news">
-              New: Ask about your screen
+              New: Prompt with your screen
             </div>
             <div className="s">
-              Press <Keycaps label={cfg.hotkeys.ask.label} /> and ask your AI out loud about what you see.
+              Press <Keycaps label={cfg.hotkeys.ask.label} /> and say what you want about what is on your screen.
             </div>
           </div>
           {ai === "" ? (
@@ -652,8 +652,8 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
           </div>
         </section>
         <section className="feature" aria-labelledby="hub-ask">
-          <h2 id="hub-ask">Ask about your screen</h2>
-          <p>Ask out loud about what you see. The answer opens beside your work.</p>
+          <h2 id="hub-ask">Prompt with your screen</h2>
+          <p>Say what you want about what is on your screen. Your AI answers beside your work.</p>
           <div className="feature-keys">
             {cfg.hotkeys.ask ? (
               <>
@@ -915,7 +915,7 @@ function Ai() {
   const model = chosen ? (a.model ?? defaultModel(chosen)) : null;
   const named = chosen ? modelName({ model }, { models: list }) : null;
   const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: named ?? model, images: true }, ...list] : list;
-  const effort = effortView(a, chosen);
+  const effort = effortView(a, chosen, models.find((m) => m.id === model));
   return (
     <>
       <div className="group">
@@ -951,7 +951,7 @@ function Ai() {
           </Row>
         ) : null}
         {effort ? (
-          <Row label="Thinking" sub="Low answers soonest. High thinks longer before it answers.">
+          <Row label="Thinking" sub="Low answers soonest. Higher levels think longer before they answer.">
             <Seg label="Thinking" value={effort.value} options={effort.options} set={(v) => run("effort", () => assistEffort(v))} />
           </Row>
         ) : null}

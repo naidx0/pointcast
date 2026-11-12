@@ -92,6 +92,19 @@ pub struct Model {
     pub id: String,
     pub name: String,
     pub images: bool,
+    /// The thinking efforts this model offers, as its vendor lists them, lowest first; empty when it says none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    /// The vendor marks it as the one it starts with.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
+impl Model {
+    /// A model known only by its id, offering no effort choice.
+    pub fn plain(id: String, images: bool) -> Model {
+        Model { name: id.clone(), id, images, efforts: Vec::new(), default: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -425,7 +438,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                 Way::Key => (Status::NoKey, "No key yet.".to_owned()),
                 Way::Local => match look.local.iter().find(|f| f.base_url == r.base) {
                     Some(f) => {
-                        models = f.models.iter().map(|m| Model { id: m.clone(), name: m.clone(), images: true }).collect();
+                        models = f.models.iter().map(|m| Model::plain(m.clone(), true)).collect();
                         let line = if models.len() == 1 { "Running, 1 model.".to_owned() } else { format!("Running, {} models.", models.len()) };
                         (Status::Ready, line)
                     }
@@ -444,8 +457,9 @@ pub fn providers(s: &Settings, look: &Look) -> List {
     List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows }
 }
 
-/// The efforts Codex lets a question be asked with, lowest first; the first is what it starts with.
-pub const CODEX_EFFORTS: &[&str] = &["low", "medium", "high"];
+/// Every effort Codex names, lowest first; the first is what Pointcast starts with. Each model offers some of them
+/// (its `supportedReasoningEfforts`); one the chosen model does not offer is not sent, and the model's own applies.
+pub const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// The thinking efforts route `id` offers; none for a route that offers no choice.
 pub fn efforts_of(id: &str) -> &'static [&'static str] {

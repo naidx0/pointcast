@@ -237,7 +237,7 @@ impl Provider for OpenAi {
 
     /// What the service's list said; a model whose pictures it did not mention is taken to read them, as `caps` does.
     fn models(&self) -> Vec<super::catalog::Model> {
-        let mut v: Vec<_> = self.known.lock().unwrap().iter().map(|(id, p)| super::catalog::Model { id: id.clone(), name: id.clone(), images: p.unwrap_or(true) }).collect();
+        let mut v: Vec<_> = self.known.lock().unwrap().iter().map(|(id, p)| super::catalog::Model::plain(id.clone(), p.unwrap_or(true))).collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
     }

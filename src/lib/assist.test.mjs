@@ -16,6 +16,7 @@ import {
   consentText,
   customCheck,
   effortView,
+  normalizeModels,
   defaultModel,
   goesLine,
   groups,
@@ -421,7 +422,8 @@ test("Only on this computer flips at once and says what it did in one quiet line
 test("the effort control shows only for a route that offers one, starting where the route starts", () => {
   let a = previewAssist("codex-ready");
   const codex = byId(a, "codex");
-  assert.deepEqual(effortView(a, codex), { value: "low", options: [["low", "Low"], ["medium", "Medium"], ["high", "High"]] });
+  assert.deepEqual(effortView(a, codex).options.map(([v]) => v), ["low", "medium", "high", "xhigh", "max", "ultra"], "no model named: the route's own list");
+  assert.equal(effortView(a, codex).value, "low");
   a = previewApply(a, { cmd: "effort", effort: "high" });
   assert.equal(effortView(a, codex).value, "high");
   assert.equal(typeof previewApply(a, { cmd: "effort", effort: "extreme" }), "string");
@@ -429,4 +431,17 @@ test("the effort control shows only for a route that offers one, starting where 
   assert.equal(effortView(key, chosenRoute(key)), null, "a key route offers no effort: no control");
   assert.equal(effortView(a, null), null);
   assert.deepEqual(normalizeAssist({ effort: "medium", providers: [{ id: "codex", kind: "plan", efforts: ["low", 3, "high"] }] }).providers[0].efforts, ["low", "high"]);
+});
+
+test("the Thinking menu lists what the chosen model offers, in words, and keeps a saved level only where it is offered", () => {
+  const a = previewAssist();
+  const codex = { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] };
+  const luna = { efforts: ["low", "medium", "high", "xhigh", "max"] };
+  const terra = { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] };
+  assert.deepEqual(effortView(a, codex, luna).options, [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+  assert.deepEqual(effortView({ effort: "ultra" }, codex, terra).value, "ultra");
+  assert.equal(effortView({ effort: "ultra" }, codex, luna).value, "low", "Luna has no Ultra: the menu shows where it starts");
+  assert.deepEqual(effortView({ effort: null }, codex, { efforts: [] }).options.length, 6, "a model that names none: the route's list");
+  assert.deepEqual(normalizeModels([{ id: "m", efforts: ["low", 2, "max"] }])[0].efforts, ["low", "max"]);
+  assert.equal("efforts" in normalizeModels([{ id: "m" }])[0], false);
 });

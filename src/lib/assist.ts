@@ -8,7 +8,7 @@ export type RouteKind = "plan" | "agent" | "key" | "local";
 /** `checking`: its probe has not answered yet; the pane draws at once and the route fills in when it does. */
 export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported" | "checking";
 /** `default`: the model the route itself starts with. */
-export type AssistModel = { id: string; name: string; images: boolean; default?: boolean };
+export type AssistModel = { id: string; name: string; images: boolean; default?: boolean; efforts?: string[] };
 
 /** One way to an AI, as `assist_providers` lists it. */
 export type Route = {
@@ -120,7 +120,10 @@ export function normalizeAssist(x: unknown): Assist {
 export function normalizeModels(x: unknown): AssistModel[] {
   return (Array.isArray(x) ? x : [])
     .filter((m) => m && typeof m === "object" && str(m.id))
-    .map((m) => ({ id: m.id, name: str(m.name) || m.id, images: m.images === true, ...(m.default === true ? { default: true } : {}) }));
+    .map((m) => {
+      const efforts = (Array.isArray(m.efforts) ? m.efforts : []).filter((e: unknown) => typeof e === "string" && e);
+      return { id: m.id, name: str(m.name) || m.id, images: m.images === true, ...(m.default === true ? { default: true } : {}), ...(efforts.length ? { efforts } : {}) };
+    });
 }
 
 /** The routes the list shows: only those on this computer while "Only on this computer" is on. */
@@ -312,12 +315,23 @@ export function defaultModel(p: Pick<Route, "models">): string | null {
   return (p.models.find((m) => m.default) ?? p.models.find((m) => m.images) ?? p.models[0])?.id ?? null;
 }
 
-/** The effort control for the chosen AI: its choices in words, the one in use (its first, the route's start, when
- * none is saved); null for a route that offers no choice, which then shows no control. */
-export function effortView(a: Pick<Assist, "effort">, p: Pick<Route, "efforts"> | null): { value: string; options: [string, string][] } | null {
+/** Codex's effort names as the menu says them. */
+const EFFORT_WORDS: Record<string, string> = { xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+export const effortWord = (e: string) => EFFORT_WORDS[e] ?? e.charAt(0).toUpperCase() + e.slice(1);
+
+/** The effort control for the chosen AI: the levels the chosen model offers (the route's own list when the model
+ * names none), the one in use (the saved one when this model offers it, else the first); null for a route that
+ * offers no choice, which then shows no control. */
+export function effortView(
+  a: Pick<Assist, "effort">,
+  p: Pick<Route, "efforts"> | null,
+  model?: Pick<AssistModel, "efforts"> | null,
+): { value: string; options: [string, string][] } | null {
   if (!p || !p.efforts.length) return null;
-  const options = p.efforts.map((e): [string, string] => [e, e.charAt(0).toUpperCase() + e.slice(1)]);
-  return { value: a.effort && p.efforts.includes(a.effort) ? a.effort : p.efforts[0], options };
+  const offered = model?.efforts?.length ? model.efforts.filter((e) => p.efforts.includes(e)) : p.efforts;
+  const levels = offered.length ? offered : p.efforts;
+  const options = levels.map((e): [string, string] => [e, effortWord(e)]);
+  return { value: a.effort && levels.includes(a.effort) ? a.effort : levels[0], options };
 }
 
 /** A model as the select lists it; one that cannot see pictures says so. */
@@ -401,9 +415,9 @@ export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key",
 const MODELS: Record<string, AssistModel[]> = {
   // As Codex's model/list answered for a ChatGPT Free plan.
   codex: [
-    { id: "gpt-6-luna", name: "GPT-6-Luna", images: true, default: true },
-    { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", images: true },
-    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", images: true },
+    { id: "gpt-6-luna", name: "GPT-6-Luna", images: true, default: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", images: true, efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", images: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
   ],
   openai: [
     { id: "gpt-5.5", name: "GPT-5.5", images: true },
@@ -442,7 +456,7 @@ export function previewAssist(kind: string): Assist {
     base: "",
     consented: false,
     models: state === "ready" ? MODELS[id] ?? [] : [],
-    efforts: id === "codex" ? ["low", "medium", "high"] : [],
+    efforts: id === "codex" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : [],
     plan: null,
     email: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
