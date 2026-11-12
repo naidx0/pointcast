@@ -18,6 +18,8 @@ pub struct PermissionStatus {
     pub screen: Access,
     /// Needed to paste into the focused app (macOS only).
     pub accessibility: Access,
+    /// Screen Recording is switched on in System Settings, but macOS applies it only once Pointcast reopens.
+    pub screen_pending: bool,
     /// Whether this OS gates the pane at all, so the UI can hide rows that never apply.
     pub gated: Gated,
 }
@@ -30,10 +32,12 @@ pub struct Gated {
 }
 
 pub fn probe() -> PermissionStatus {
+    let screen = screen();
     PermissionStatus {
         microphone: microphone(),
-        screen: screen(),
+        screen,
         accessibility: accessibility(),
+        screen_pending: pending(cfg!(target_os = "macos"), screen, crate::capture::sees_other_titles),
         gated: Gated {
             microphone: true,
             screen: cfg!(target_os = "macos"),
@@ -47,6 +51,11 @@ pub fn probe() -> PermissionStatus {
 pub fn may_list_microphones() -> bool {
     // Off macOS the status is never read here: on Windows reading it lists the microphones, which would ask again.
     !cfg!(target_os = "macos") || lists_microphones(true, microphone())
+}
+
+/// A Screen Recording grant macOS has not applied yet: it says no, yet other apps' window titles show.
+fn pending(mac: bool, screen: Access, sees_titles: impl FnOnce() -> bool) -> bool {
+    mac && screen != Access::Granted && sees_titles()
 }
 
 fn lists_microphones(mac: bool, mic: Access) -> bool {
@@ -387,6 +396,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn screen_recording_switched_on_but_not_applied_is_pending_until_pointcast_reopens() {
+        assert!(pending(true, Access::Denied, || true));
+        assert!(pending(true, Access::Unknown, || true));
+        assert!(!pending(true, Access::Denied, || false), "still off");
+        assert!(!pending(true, Access::Granted, || panic!("not read once granted")));
+        assert!(!pending(false, Access::Granted, || panic!("not read off macOS")));
+    }
 
     #[test]
     fn a_windows_deny_on_either_switch_blocks_the_microphone() {

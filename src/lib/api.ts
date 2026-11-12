@@ -97,7 +97,11 @@ export type DetectedTool = { id: string; name: string; path: string; kind: strin
 
 export type Access = "granted" | "unknown" | "denied";
 export type PermissionKind = "microphone" | "screen" | "accessibility";
-export type Permissions = Record<PermissionKind, Access> & { gated: Record<PermissionKind, boolean> };
+export type Permissions = Record<PermissionKind, Access> & {
+  gated: Record<PermissionKind, boolean>;
+  /** Screen Recording is switched on, but macOS applies it only once Pointcast reopens. */
+  screen_pending?: boolean;
+};
 
 export type Action = "session" | "full" | "region" | "zoom" | "ask";
 export type HotkeyView = { label: string; keys: string[]; default: string };

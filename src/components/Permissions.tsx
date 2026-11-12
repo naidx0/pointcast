@@ -13,7 +13,9 @@ import {
   type PermissionKind,
   type Permissions,
 } from "@/lib/api";
+import { rowAction, untilAnswered } from "@/lib/permissions";
 import { platform } from "@/lib/theme";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const COPY: Record<PermissionKind, { name: string; why: string; icon: typeof Mic; tile: string }> = {
   microphone: {
@@ -48,12 +50,20 @@ export function usePermissions(initial?: Permissions) {
         .catch(() => undefined);
     tick();
     const id = setInterval(tick, 1500);
-    // Back from System Settings: show a switch just turned on at once, not up to 1.5 s later.
+    // Back from System Settings: show a switch just turned on at once, not up to 1.5 s later. The window's own focus
+    // event comes from the OS; the page's may not fire when only the window regains focus.
     window.addEventListener("focus", tick);
+    const shown = () => document.visibilityState === "visible" && tick();
+    document.addEventListener("visibilitychange", shown);
+    const unfocus = getCurrentWindow()
+      .onFocusChanged(({ payload }) => payload && tick())
+      .catch(() => undefined);
     return () => {
       live = false;
       clearInterval(id);
       window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", shown);
+      void unfocus.then((off) => off?.());
     };
   }, []);
   return [p, setP] as const;
@@ -82,9 +92,11 @@ export function PermissionRows({
     // Opening the mic is what makes macOS show its prompt.
     if (kind === "microphone") await micMonitor(true).catch(() => undefined);
     const next = await permissionRequest(kind);
+    setPerms(next);
+    // macOS's prompt is still up: the row follows it, and shows the answer as it closes.
+    if (kind === "microphone" && next.microphone === "unknown") await untilAnswered(permissionsGet, setPerms, kind);
     // Without a level meter here nothing else closes the mic again.
     if (kind === "microphone" && !meter) await micMonitor(false).catch(() => undefined);
-    setPerms(next);
   }
 
   return (
@@ -92,6 +104,7 @@ export function PermissionRows({
       {kinds.map((k) => {
         const c = COPY[k];
         const s: Access = perms[k];
+        const act = rowAction({ kind: k, access: s, asked: !!asked[k], pending: !!perms.screen_pending, mac });
         const Icon = c.icon;
         return (
           <div key={k} className="card">
@@ -102,7 +115,11 @@ export function PermissionRows({
               <div className="ttl">{c.name}</div>
               <div className="sub">{c.why}</div>
               {k === "microphone" && s === "granted" && meter ? <Meter /> : null}
-              {k === "screen" && asked.screen && s !== "granted" ? (
+              {act === "reopen" ? (
+                <div className="sub" style={{ marginTop: 6 }}>
+                  Allowed. Reopen Pointcast to use it.
+                </div>
+              ) : k === "screen" && asked.screen && s !== "granted" ? (
                 <div className="sub" style={{ marginTop: 6 }}>
                   Turned it on? macOS applies it after Pointcast reopens.{" "}
                   <button type="button" className="link" onClick={() => relaunch()}>
@@ -111,12 +128,17 @@ export function PermissionRows({
                 </div>
               ) : null}
             </div>
-            {s === "granted" ? (
+            {act === "allowed" ? (
               <span className="badge ok">Allowed</span>
-            ) : s === "denied" || asked[k] ? (
+            ) : act === "reopen" ? (
+              // macOS applies a Screen Recording grant only to a fresh process.
+              <button type="button" className="btn primary" onClick={() => relaunch()}>
+                Reopen
+              </button>
+            ) : act !== "allow" ? (
               <div style={{ display: "flex", gap: 8, flex: "none" }}>
                 {/* macOS asks only once: after a No, its switch in System Settings is the only way, so it is the one button. */}
-                {s === "denied" && !mac ? (
+                {act === "allow-open" ? (
                   <button type="button" className="btn primary" onClick={() => allow(k)}>
                     Allow…
                   </button>
