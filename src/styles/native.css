@@ -488,6 +488,20 @@ textarea.field {
   resize: vertical;
   line-height: 1.45;
 }
+/* The open list is drawn by the system from the select's own colours: without these it is a white list whose options
+   inherit the dark theme's white text, unreadable until hovered. */
+select.field option {
+  /* Solid: the list is a system pop-up, a see-through colour turns white there. */
+  background-color: #ffffff;
+  color: #1a1a1a;
+}
+html[data-theme="dark"] select.field {
+  color-scheme: dark;
+}
+html[data-theme="dark"] select.field option {
+  background-color: #2c2c2c;
+  color: #ffffff;
+}
 select.field {
   padding-right: 24px;
   appearance: none;
@@ -1250,7 +1264,9 @@ html.win .home-recent button {
 }
 /* Its links are quiet, as the page's are; the one that still needs doing (Choose an AI) is in the text colour. */
 /* The chevron sits on the words' own middle: inline, `vertical-align: middle` puts its centre half an x-height above
-   the baseline, whatever the font (a flex centre put it 2 px above the letters in both skins). */
+   the baseline, whatever the font (a flex centre put it 2 px above the letters in both skins). The eye reads the
+   middle of the capitals, half a cap height up, so it is lifted by half the cap-to-x-height gap, 0.1 em (measured
+   on the owner's screen: the capitals' middle 1.5 device px above the chevron's before this). */
 .feature .link {
   display: inline-block;
   font: inherit;
@@ -1259,6 +1275,8 @@ html.win .home-recent button {
 }
 .feature .link svg {
   vertical-align: middle;
+  position: relative;
+  top: -0.1em;
   margin-left: 2px;
 }
 .feature .link:hover {
