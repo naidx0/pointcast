@@ -19,6 +19,10 @@ fail() {
 # its signature. A build signed with Pointcast's certificate names the certificate, the same in every version; a
 # build signed ad hoc names only itself.
 requirement() { { codesign -d -r- "$1" 2>/dev/null || true; } | sed -n 's/^[# ]*designated => //p'; }
+# POINTCAST_TIMING=1: say how long each step took, in seconds since the start (the update test reads these lines).
+since() { perl -MTime::HiRes=time -e 'printf "%.2f", time - $ARGV[0]' "${1:-0}"; }
+t0=$([ -z "${POINTCAST_TIMING:-}" ] || since)
+mark() { [ -z "${POINTCAST_TIMING:-}" ] || printf '  time %-9s %s\n' "$1" "$(since "$t0")"; }
 
 printf '\n  Pointcast\n'
 [ "$(uname -s)" = Darwin ] || fail "this script is for macOS. On Windows, in PowerShell: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"
@@ -101,10 +105,14 @@ else
     [ "$got" = "$want" ] || fail "the download does not match the SHA-256 GitHub lists for it. Run this again, or download the .dmg from $RELEASES."
   fi
   dmg=$tmp/Pointcast.dmg
+  mark fetched
 fi
 
 mkdir -p "$tmp/mnt"
-hdiutil attach -nobrowse -noautoopen -quiet -mountpoint "$tmp/mnt" "$dmg" || fail "the disk image would not open."
+# -noverify: hdiutil would otherwise read and check the whole image before mounting it, seconds on every new
+# download. The download was already checked against its SHA-256, and the app's signature is checked below.
+hdiutil attach -nobrowse -noautoopen -noverify -quiet -mountpoint "$tmp/mnt" "$dmg" || fail "the disk image would not open."
+mark attached
 app=$(find "$tmp/mnt" -maxdepth 1 -name '*.app' -print -quit)
 [ -n "$app" ] || fail "there is no app inside the disk image."
 
@@ -112,9 +120,19 @@ say "$([ $had = 1 ] && echo Updating || echo Installing)..."
 # Copy first, then swap, so a failed copy never leaves the Mac without Pointcast.
 new="$dest/.Pointcast.app.new"
 ditto "$app" "$new" || fail "could not copy Pointcast into $dest (is the disk full?)."
+mark copied
 # Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
 xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
-if ! codesign --verify "$new" >/dev/null 2>&1; then
+
+# macOS keeps what it was allowed when the new version meets the requirement of the one it replaces: so it is from
+# one certificate-signed version to the next, and not when the signer changed (an ad hoc build on either side).
+# Checking that also checks the whole signature, so an update between signed versions reads the app only once.
+kept=0
+was=""
+[ $had = 1 ] && was=$(requirement "$dest/Pointcast.app")
+if [ -n "$was" ] && codesign --verify -R="$was" "$new" >/dev/null 2>&1; then
+  kept=1
+elif ! codesign --verify "$new" >/dev/null 2>&1; then
   # A build signed with the certificate has to arrive whole: signing it again here would replace the certificate's
   # signature with an ad hoc one, and macOS would no longer know the app. Only an ad hoc build is signed again.
   case $(requirement "$app") in
@@ -122,61 +140,63 @@ if ! codesign --verify "$new" >/dev/null 2>&1; then
   esac
   codesign --force --deep --sign - "$new" >/dev/null 2>&1 || true
 fi
-
-# macOS keeps what it was allowed when the new version meets the requirement of the one it replaces: so it is from
-# one certificate-signed version to the next, and not when the signer changed (an ad hoc build on either side).
-kept=0
-if [ $had = 1 ]; then
-  was=$(requirement "$dest/Pointcast.app")
-  if [ -n "$was" ] && codesign --verify -R="$was" "$new" >/dev/null 2>&1; then
-    kept=1
-  fi
-fi
+mark checked
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
 # -a: pgrep and pkill leave out their own ancestors unless told otherwise, and when Pointcast updates itself it is
 # this script's ancestor. Without it the running Pointcast was never found or closed, and never became the new one.
 if pgrep -a -x pointcast >/dev/null 2>&1; then
   quit=1
-  osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
-  sleep 1
-  pkill -a -x pointcast >/dev/null 2>&1 || true
-  # Wait until it has gone: opened while the old copy is still closing, the new one would hand over to it and
-  # close too, and nothing would be left running.
-  n=0
+  # Asked to quit, Pointcast saves what it was doing and ends by itself. The timeout bounds a Pointcast too busy to
+  # answer; it is then closed below.
+  osascript -e 'with timeout of 5 seconds' -e 'quit app "Pointcast"' -e 'end timeout' >/dev/null 2>&1 || true
+  mark asked
+  # Wait until it has gone, and no longer than it takes: opened while the old copy is still closing, the new one
+  # would hand over to it and close too, and nothing would be left running. Still there after 3 s, it is closed;
+  # after 6 s, ended.
+  # Counted in seconds, not turns of the loop: on a busy Mac one pgrep alone can take a tenth of a second.
+  asked=$SECONDS
+  termed=0
   while pgrep -a -x pointcast >/dev/null 2>&1; do
-    n=$((n + 1))
-    if [ $n -ge 40 ]; then
-      pkill -9 -a -x pointcast >/dev/null 2>&1 || true
-    fi
-    if [ $n -ge 60 ]; then
+    waited=$((SECONDS - asked))
+    if [ $waited -ge 9 ]; then
       break
+    elif [ $waited -ge 6 ]; then
+      pkill -9 -a -x pointcast >/dev/null 2>&1 || true
+    elif [ $waited -ge 3 ] && [ $termed = 0 ]; then
+      termed=1
+      pkill -a -x pointcast >/dev/null 2>&1 || true
     fi
-    sleep 0.25
+    sleep 0.1
   done
+  mark closed
 fi
 rm -rf "$dest/Pointcast.app" || fail "could not replace the Pointcast in $dest (it may belong to another user)."
 mv "$new" "$dest/Pointcast.app" || fail "could not move Pointcast into $dest."
+mark swapped
 
 if [ $had = 1 ] && [ $kept = 0 ]; then
   # The signer changed, so macOS no longer matches what it allowed to this app: clear the old grants so it asks
   # cleanly instead of showing them on while they no longer apply.
   tccutil reset ScreenCapture dev.pointcast.app >/dev/null 2>&1 || true
   tccutil reset Accessibility dev.pointcast.app >/dev/null 2>&1 || true
+  # macOS will show its Screen Recording prompt again, so the note that Pointcast already asked goes too.
+  rm -f "${POINTCAST_DATA_DIR:-$HOME/Library/Application Support/dev.pointcast.app}/screen-asked"
 fi
 
 open "$dest/Pointcast.app"
+mark opened
 if [ "${quit:-0}" = 1 ]; then
   # It was running, so it has to be running again: ask once more if macOS did not start it.
-  n=0
+  opened=$SECONDS
   until pgrep -a -x pointcast >/dev/null 2>&1; do
-    n=$((n + 1))
-    if [ $n -ge 40 ]; then
+    if [ $((SECONDS - opened)) -ge 10 ]; then
       open -n "$dest/Pointcast.app" >/dev/null 2>&1 || true
       break
     fi
-    sleep 0.25
+    sleep 0.1
   done
+  mark running
 fi
 now=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$dest/Pointcast.app/Contents/Info.plist" 2>/dev/null) || now=""
 if [ $had = 1 ] && [ $kept = 1 ]; then
