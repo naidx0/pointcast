@@ -1359,6 +1359,26 @@ impl Live {
                 return self.fail(run, line(&f));
             }
         };
+        // Stopped or closed while the conversation opened: nothing is sent, and the question is kept as stopped.
+        {
+            let mut g = self.inner.lock().unwrap();
+            if g.halt || g.run != run {
+                let ours = g.run == run;
+                if ours {
+                    g.halt = false;
+                    g.kept = None;
+                    g.snap.thinking = false;
+                    g.used = Some(Instant::now());
+                    self.step(&mut g, Step::Settle);
+                    self.tell(&g);
+                }
+                drop(g);
+                chat.close();
+                answer.stopped = true;
+                keep(&answer);
+                return;
+            }
+        }
         // What the AI's own app adds to the question goes along too, and is kept as sent.
         answer.sent.adds = chat.adds();
         let stopper = chat.stopper();
@@ -2834,5 +2854,59 @@ mod tests {
         let kept = r.kept();
         assert_eq!((kept.len(), kept[0].1.len(), kept[0].0.id == old), (1, 1, false));
         r.end();
+    }
+
+    /// Opens its conversation only once the test lets go of `gate`: a helper that is slow to start (Codex, cold).
+    struct SlowOpen {
+        script: Scripted,
+        gate: Arc<Mutex<()>>,
+        opening: Arc<AtomicBool>,
+    }
+
+    impl Provider for SlowOpen {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn caps(&self, m: Option<&str>) -> Caps {
+            self.script.caps(m)
+        }
+        fn health(&self) -> Health {
+            self.script.health()
+        }
+        fn warm(&self) {}
+        fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
+            self.opening.store(true, Ordering::SeqCst);
+            let _wait = self.gate.lock().unwrap();
+            self.script.open(system, earlier)
+        }
+    }
+
+    #[test]
+    fn stop_or_close_while_the_conversation_opens_sends_nothing_and_keeps_the_question_as_stopped() {
+        for close in [false, true] {
+            let script = Scripted::new(&[(1, "never")]);
+            let (gate, opening) = (Arc::new(Mutex::new(())), Arc::new(AtomicBool::new(false)));
+            let slow = SlowOpen { script: script.clone(), gate: gate.clone(), opening: opening.clone() };
+            let r = rig(if close { "open-close" } else { "open-stop" }, Some(Arc::new(slow)), FIRST_WAIT);
+            let held = gate.lock().unwrap();
+            assert_eq!(r.live.ask_typed("what is this", false), Ok(()));
+            r.wait("the conversation opening", || opening.load(Ordering::SeqCst));
+            if close {
+                r.live.close();
+            } else {
+                r.live.stop();
+            }
+            drop(held);
+            let answer = || r.kept().first().and_then(|k| k.1.first().and_then(|t| t.answer.clone()));
+            r.wait("the question kept as stopped", || answer().is_some_and(|a| a.stopped));
+            std::thread::sleep(Duration::from_millis(150));
+            assert!(script.asked.lock().unwrap().is_empty(), "nothing was asked");
+            let a = answer().unwrap();
+            assert_eq!((a.times.sent_ms, a.text.as_str(), a.error.as_deref(), a.stopped), (0, "", None, true), "nothing is said to have been sent");
+            let want = if close { State::Closed } else { State::Shown };
+            assert_eq!(r.live.snapshot().state, want);
+            assert!(r.live.inner.lock().unwrap().chat.is_none(), "the conversation opened for nothing is closed");
+            r.end();
+        }
     }
 }
