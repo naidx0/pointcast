@@ -69,7 +69,8 @@ html.vibrant .live {
   background: var(--fill);
   color: var(--live-ink);
 }
-.live-hb:hover {
+.live-hb:hover,
+.live-hb.on {
   background: var(--fill-2);
   color: var(--live-ink);
 }
@@ -116,8 +117,24 @@ html.win .live-row {
   flex: none;
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 4px;
   padding: 12px 10px 0 var(--pad);
+}
+.live-head .live-question,
+.live-title {
+  margin-right: 4px;
+}
+/* A conversation's header is its session's title, quiet: the newest question below is the one in the text colour.
+   The list opens from the button beside it. */
+.live-title {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  font: 500 var(--fs-body) / 20px var(--font);
+  color: var(--live-quiet);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .live-question {
   flex: 1;
@@ -140,9 +157,17 @@ html.win .live-row {
   user-select: text;
   -webkit-user-select: text;
 }
+/* The newest question of a conversation, under the session's title: the one question in the text colour. */
+.live-question.now {
+  display: block;
+  width: 100%;
+  min-height: 20px;
+  padding: 0;
+}
 
 /* —— Body —— */
 .live-body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -152,6 +177,113 @@ html.win .live-row {
 }
 .live-inner {
   padding: 8px var(--pad) 16px;
+}
+
+/* —— A conversation: each earlier turn one quiet line on a hairline; the newest turn open below them —— */
+.live-turns {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+}
+.live-prev {
+  position: relative;
+}
+.live-prev + .live-prev::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .live-prev + .live-prev::before {
+  border-top-width: 1px;
+}
+.live-prev-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.live-prev-q {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font: inherit;
+  text-align: left;
+}
+.live-prev-q > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-prev-q:hover,
+.live-prev.open .live-prev-q {
+  color: var(--live-ink);
+}
+.live-prev-q:hover {
+  background: var(--fill);
+}
+.live-prev.open .live-prev-q {
+  height: auto;
+  min-height: 32px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.live-prev.open .live-prev-q > span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Sent waits at the row's end, shown on hover or focus. */
+.live-prev-sent {
+  flex: none;
+  height: 24px;
+  margin-right: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font: inherit;
+  font-size: var(--fs-caption);
+  opacity: 0;
+  transition: opacity 150ms var(--ease);
+}
+.live-prev-row:hover .live-prev-sent,
+.live-prev-row:focus-within .live-prev-sent,
+.live-prev-sent[aria-expanded="true"] {
+  opacity: 1;
+}
+.live-prev-sent:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+.live-prev-a {
+  padding: 0 8px 12px;
+}
+.live-prev-a .live-answer {
+  margin-top: 4px;
+}
+.live-prev .live-sentv,
+.live-prev .live-sentv-none {
+  margin: 0 8px 12px;
+}
+.live.multi .live-now {
+  margin-top: 12px;
+  padding-top: 16px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .live.multi .live-now {
+  border-top-width: 1px;
+}
+.live.multi .live-now .live-pic {
+  margin-top: 12px;
 }
 
 /* —— The picture: big enough to know, with the app it is of —— */
@@ -455,29 +587,421 @@ html.vibrant .md-copy {
   overflow-wrap: anywhere;
 }
 
-/* —— Foot row: only when the answer is complete —— */
+/* —— Under a finished answer: what was sent (it opens to the whole of it) and Copy —— */
 .live-foot {
-  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 40px;
-  padding: 0 8px 0 var(--pad);
-  border-top: 0.5px solid var(--sep);
+  height: 24px;
+  margin: 12px -8px 0 12px;
   font-size: var(--fs-caption);
   line-height: 16px;
   color: var(--live-quiet);
 }
-html.win .live-foot {
-  border-top-width: 1px;
+.live-sent,
+.live-sent-none {
+  flex: 1;
+  min-width: 0;
 }
 .live-sent {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-sent:hover,
+.live-sent[aria-expanded="true"] {
+  color: var(--live-ink);
+}
+.live-sent:hover {
+  background: var(--fill);
+}
+
+/* —— Sent: exactly what left the computer, as label and value on hairlines —— */
+.live-sentv {
+  margin: 8px 0 0 20px;
+  padding: 0;
+  font-size: var(--fs-caption);
+  line-height: 18px;
+}
+.live-sentv.wait {
+  min-height: 36px;
+}
+.live-sentv > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+}
+.live-sentv > div + div {
+  border-top: 0.5px solid var(--sep);
+}
+html.win .live-sentv > div + div {
+  border-top-width: 1px;
+}
+.live-sentv dt {
+  color: var(--live-quiet);
+}
+.live-sentv dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--live-ink);
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.live-sentv dd.words {
+  white-space: pre-wrap;
+}
+.live-sentv .quiet {
+  color: var(--live-quiet);
+}
+.live-sentv .pic dd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.live-sentv .pic img {
+  display: block;
+  max-width: 100%;
+  max-height: 120px;
+  border: 0.5px solid var(--sep);
+  border-radius: 4px;
+}
+html.win .live-sentv .pic img {
+  border-width: 1px;
+}
+.live-sentv ul {
+  margin: 0;
+  padding-left: 14px;
+}
+.live-sentv li::marker {
+  color: var(--live-quiet);
+}
+.live-sentv-none {
+  margin: 8px 0 0 20px;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+
+/* —— The session list, in place of the conversation —— */
+.live-sheet {
+  padding-top: 4px;
+}
+.live-this {
+  margin: 0 -8px 16px;
+}
+.live-this-title {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-ink);
+  font: 500 var(--fs-body) / 20px var(--font);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.live-this-title:hover {
+  background: var(--fill);
+}
+.live-rename {
+  display: block;
+  width: 100%;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--live-faint);
+  border-radius: var(--r-control);
+  background: var(--fill);
+  color: var(--live-ink);
+  font: 500 var(--fs-body) / 20px var(--font);
+  outline: none;
+}
+.live-this-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding-left: 8px;
+  font-size: var(--fs-caption);
+  color: var(--live-quiet);
+}
+.live-this-meta > span {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.live-text {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font: inherit;
+}
+.live-text:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+.live-text.danger {
+  color: var(--red-ink);
+}
+.live-saved {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  margin-top: 4px;
+  padding-left: 8px;
+  font-size: var(--fs-caption);
+  color: var(--live-quiet);
+}
+.live-saved .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.live-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+}
+.live-icon:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+.live-sheet-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-search {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 12px;
+  border: 0.5px solid var(--sep);
+  border-radius: 16px;
+  background: var(--fill);
+  color: var(--live-ink);
+  font: inherit;
+  outline: none;
+}
+html.win .live-search {
+  border-width: 1px;
+  border-radius: var(--r-box);
+}
+/* The placeholder is the instruction: the secondary grey, which meets AA on the field in both themes. */
+.live-search::placeholder,
+.live-field textarea::placeholder {
+  color: var(--live-quiet);
+  opacity: 1;
+}
+.live-search:focus,
+.live-field:focus-within {
+  border-color: var(--live-faint);
+}
+.live-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+.live-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 12px 0 10px;
+  border: 0.5px solid var(--sep);
+  border-radius: 16px;
+  background: transparent;
+  color: var(--live-ink);
+  font: 500 var(--fs-caption) / 1 var(--font);
+}
+html.win .live-pill {
+  border-width: 1px;
+  border-radius: var(--r-box);
+}
+.live-pill:hover {
+  background: var(--fill);
+}
+.live-sessions {
+  list-style: none;
+  margin: 12px -8px 0;
+  padding: 0;
+}
+.live-sessions li {
+  position: relative;
+}
+.live-sessions li + li::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .live-sessions li + li::before {
+  border-top-width: 1px;
+}
+.live-session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-ink);
+  font: inherit;
+  text-align: left;
+}
+.live-session:hover {
+  background: var(--fill);
+}
+.live-session .t {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.live-session .title,
+.live-session .hit {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-session .hit,
+.live-session .meta {
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-session .meta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.live-session[aria-current="true"] .title {
+  font-weight: 500;
+}
+.live-empty {
+  margin: 16px 0 4px;
+  color: var(--live-quiet);
+}
+
+/* —— The typed follow-up: one slim field at the foot, a soft surface with one hairline —— */
+.live-follow {
+  flex: none;
+  padding: 8px 10px 10px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .live-follow {
+  border-top-width: 1px;
+  padding: 8px 12px 12px;
+}
+.live-field {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-height: 36px;
+  padding: 4px 4px 4px 12px;
+  border: 0.5px solid var(--sep);
+  border-radius: 18px;
+  background: var(--fill);
+}
+html.win .live-field {
+  border-width: 1px;
+  border-radius: var(--r-box);
+}
+.live-field textarea {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  max-height: 112px;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--live-ink);
+  font: inherit;
+  line-height: 20px;
+  overflow-y: auto;
+}
+.live-pic-toggle,
+.live-send {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--live-quiet);
+}
+html.win .live-pic-toggle,
+html.win .live-send {
+  border-radius: var(--r-control);
+}
+.live-pic-toggle:hover {
+  color: var(--live-ink);
+}
+.live-pic-toggle[aria-pressed="true"] {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+/* Send is the one accent, and only when there is something to send; until then it waits in the field's grey. */
+.live-send {
+  background: var(--accent);
+  color: var(--on-accent);
+  transition:
+    background-color 150ms var(--ease),
+    color 150ms var(--ease);
+}
+.live-send:disabled {
+  background: var(--fill-2);
+  color: var(--live-faint);
+  pointer-events: none;
+}
+.live-follow-err {
+  margin: 6px 4px 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+
 .live-copy {
   display: inline-flex;
   align-items: center;

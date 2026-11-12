@@ -29,6 +29,9 @@ import {
   loginSet,
   mcpCopySetup,
   onPaneAsk,
+  openSessionList,
+  sessionsList,
+  sessionsOpen,
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
@@ -59,6 +62,7 @@ import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
 import { recentRows, type RecentRow } from "@/lib/home";
+import { RECENT_SESSIONS, sessionRows, type SessionRow } from "@/lib/sessions";
 import {
   CUSTOM,
   askReady,
@@ -540,7 +544,12 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   const [sure, setSure] = useState(false);
   // The AI that answers Ask, by its short name; "" when none is chosen, null until the engine says.
   const [ai, setAi] = useState<string | null>(null);
+  // Ask's newest sessions, which open the panel on themselves.
+  const [asks, setAsks] = useState<SessionRow[]>([]);
   useEffect(() => {
+    sessionsList()
+      .then((l) => setAsks(sessionRows(l, new Date(), { n: RECENT_SESSIONS })))
+      .catch(() => undefined);
     assistProviders()
       .then((a) => {
         const r = askReady(a) ? chosenRoute(a) : null;
@@ -599,6 +608,28 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
               </button>
             )}
           </div>
+          {asks.length ? (
+            <div className="feature-recent">
+              <div className="feature-recent-head">
+                <h3 id="hub-asked">Recent questions</h3>
+                <button type="button" className="link" onClick={() => openSessionList(asks[0].id).catch(() => undefined)}>
+                  All sessions
+                </button>
+              </div>
+              <ul aria-labelledby="hub-asked">
+                {asks.map((r) => (
+                  <li key={r.id}>
+                    <button type="button" aria-label={`${r.label}. Open it`} onClick={() => sessionsOpen(r.id).catch(() => undefined)}>
+                      <span className="t">{r.title}</span>
+                      <span className="m">
+                        {r.turns} · {r.day}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <div className="feature-foot">
             {ai == null ? null : (
               <button type="button" className={`link${ai ? "" : " strong"}`} onClick={() => go("ai")} aria-label={ai ? `AI: ${ai}. Change it` : undefined}>

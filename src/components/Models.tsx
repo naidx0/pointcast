@@ -20,6 +20,7 @@ import {
   type SpeechModel,
   type SpeechProgress,
 } from "@/lib/api";
+import { primaryDownload } from "@/lib/setup";
 
 /** How each model is offered: plain names, what it is best at, and what it costs. */
 const OFFER: Record<string, { name: string; tag: string; blurb: string; order: number }> = {
@@ -235,6 +236,11 @@ export function ModelPicker({
   const faster = models.find((m) => m.id === (active === "moonshine-base-en" ? "moonshine-tiny-en" : "moonshine-base-en"));
   // A model is on disk but the engine did not load or run it: say so instead of "Ready".
   const failed = speechReady(cfg) && cfg.speech_check && !cfg.speech_check.ok ? (cfg.speech_check.error ?? "") : "";
+  // At most one blue Download: the recommended model's, while nothing can run yet.
+  const primary = primaryDownload(
+    models.map((m) => ({ id: m.id, ready: runnable(m, engine) })),
+    recommended,
+  );
 
   return (
     <div className="cards">
@@ -423,7 +429,7 @@ export function ModelPicker({
             ) : (
               <button
                 type="button"
-                className="btn primary"
+                className={`btn ${m.id === primary ? "primary" : "plain"}`}
                 disabled={!!job}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -431,7 +437,7 @@ export function ModelPicker({
                   start(m.id, cfg, patch);
                 }}
               >
-                {err ? "Try Again" : "Download"}
+                {err ? "Try again" : "Download"}
               </button>
             )}
           </div>

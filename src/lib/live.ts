@@ -9,10 +9,26 @@ export type LivePicture = { src: string; w: number; h: number; label?: string };
 /** The engine's error: a message, or a code with an optional message. `no_provider` asks for Settings. */
 export type LiveErrorPayload = string | { code?: string; message?: string } | null;
 
+/** A finished turn of the open session (`turns` on the snapshot, oldest first): what was asked, what came back, the
+ * picture that went with it, and whether it was stopped or failed. */
+export type LiveTurn = {
+  n: number;
+  question: string;
+  answer: string;
+  picture: LivePicture | null;
+  stopped: boolean;
+  /** Why it was not answered, as one line; null when it was. */
+  error: string | null;
+  at_ms: number;
+};
+
 /** The payload of `live://state` and the reply of `live_state`. */
 export type LiveSnapshot = {
   state: LiveStateName;
-  session: { id: string; title: string };
+  /** `turns`: how many turns the session has kept. */
+  session: { id: string; title: string; turns: number };
+  /** The session's finished turns, oldest first. The turn under way stays in the fields below. */
+  turns: LiveTurn[];
   turn: number;
   /** The person's words: as they are heard while listening, then the question. */
   words: string;
@@ -46,7 +62,8 @@ export type LiveAction = { type: "snapshot"; snap: LiveSnapshot; now: number } |
 
 export const CLOSED: LiveSnapshot = {
   state: "closed",
-  session: { id: "", title: "" },
+  session: { id: "", title: "", turns: 0 },
+  turns: [],
   turn: 0,
   words: "",
   picture: null,
@@ -59,23 +76,61 @@ export const initialLive = (): LiveModel => ({ snap: CLOSED, text: "", sent: fal
 
 const STATES: LiveStateName[] = ["closed", "listening", "finishing", "sending", "answering", "shown", "error", "discarded"];
 
+/** A picture with every field in its type, or null when it has no address. */
+function pictureOf(p: unknown): LivePicture | null {
+  const v = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+  if (typeof v.src !== "string") return null;
+  return { src: v.src, w: Number(v.w) || 0, h: Number(v.h) || 0, label: typeof v.label === "string" ? v.label.trim() : "" };
+}
+
+/** An engine error as one line: its message, else a plain sentence when only a code came; null for none. */
+function errorLine(e: unknown): string | null {
+  if (typeof e === "string") return e.trim() || null;
+  if (e && typeof e === "object") {
+    const o = e as { message?: unknown; code?: unknown };
+    const m = typeof o.message === "string" ? o.message.trim() : "";
+    return m || (o.code ? "Not answered" : null);
+  }
+  return null;
+}
+
+/** The session's finished turns, oldest first, one per number (the last word wins), whatever arrived. */
+export function normalizeTurns(raw: unknown): LiveTurn[] {
+  if (!Array.isArray(raw)) return [];
+  const by = new Map<number, LiveTurn>();
+  raw.forEach((t, i) => {
+    if (!t || typeof t !== "object") return;
+    const u = t as Record<string, unknown>;
+    const n = typeof u.n === "number" && Number.isFinite(u.n) ? u.n : i + 1;
+    by.set(n, {
+      n,
+      question: typeof u.question === "string" ? u.question : "",
+      answer: typeof u.answer === "string" ? u.answer : "",
+      picture: pictureOf(u.picture),
+      stopped: u.stopped === true,
+      error: errorLine(u.error),
+      at_ms: typeof u.at_ms === "number" && Number.isFinite(u.at_ms) ? u.at_ms : 0,
+    });
+  });
+  return [...by.values()].sort((a, b) => a.n - b.n);
+}
+
 /** A snapshot with every field in its type, whatever arrived. */
 export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): LiveSnapshot {
   const v = s ?? {};
+  const turns = normalizeTurns((v as { turns?: unknown }).turns);
+  const kept = Number((v.session as { turns?: unknown } | undefined)?.turns);
   return {
     state: STATES.includes(v.state as LiveStateName) ? (v.state as LiveStateName) : "closed",
-    session: { id: String(v.session?.id ?? ""), title: String(v.session?.title ?? "") },
+    session: {
+      id: String(v.session?.id ?? ""),
+      title: String(v.session?.title ?? ""),
+      turns: Number.isFinite(kept) && kept >= 0 ? kept : turns.length,
+    },
+    turns,
     turn: Number.isFinite(v.turn) ? Number(v.turn) : 0,
     words: typeof v.words === "string" ? v.words : "",
-    picture:
-      v.picture && typeof v.picture.src === "string"
-        ? {
-            src: v.picture.src,
-            w: Number(v.picture.w) || 0,
-            h: Number(v.picture.h) || 0,
-            label: typeof v.picture.label === "string" ? v.picture.label.trim() : "",
-          }
-        : null,
+    picture: pictureOf(v.picture),
     dropped: !!v.dropped,
     provider: v.provider ?? null,
     error: v.error ?? null,
@@ -98,6 +153,8 @@ export function liveReduce(m: LiveModel, a: LiveAction): LiveModel {
   const fresh = !sameTurn || s.state === "listening";
   let text = fresh ? "" : m.text;
   if (s.answer !== undefined) text = s.answer;
+  // A session opened finished: its open turn's answer is the one kept with it.
+  if (!text && s.state === "shown") text = currentTurn(s)?.answer ?? "";
   const sent = (!fresh && m.sent) || s.state === "sending" || s.state === "answering" || text !== "";
   const waitFrom =
     s.state === "sending"
@@ -206,10 +263,27 @@ export function firstWords(words: string, n = 6): string {
   return w.length > n ? w.slice(0, n).join(" ") + "…" : w.join(" ");
 }
 
+/** The turn the panel shows open: the snapshot's own when the session kept it, or, for a session opened finished with
+ * nothing in the top-level fields, its newest kept turn. Null when the turn under way is not kept yet. */
+export function currentTurn(s: LiveSnapshot): LiveTurn | null {
+  const own = s.turns.find((t) => t.n === s.turn);
+  if (own) return own;
+  if (s.state === "shown" && !s.words.trim() && s.answer === undefined && s.turns.length) return s.turns[s.turns.length - 1];
+  return null;
+}
+
+/** The kept turns before the open one, oldest first. */
+export function earlierTurns(s: LiveSnapshot): LiveTurn[] {
+  const n = currentTurn(s)?.n ?? s.turn;
+  return s.turns.filter((t) => t.n !== n);
+}
+
 export function liveView(m: LiveModel, now: number): LiveView {
   const s = m.snap;
   const provider = providerName(s.provider);
-  const thumb = s.dropped ? null : safePicture(s.picture);
+  // A finished turn shows what was kept with it when the top-level fields are empty (a session opened from the list).
+  const kept = s.state === "shown" ? currentTurn(s) : null;
+  const thumb = s.dropped ? null : safePicture(s.picture ?? kept?.picture ?? null);
   const base: LiveView = {
     phase: "closed",
     line: "none",
@@ -219,7 +293,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     provider,
     title: s.session.title || firstWords(s.words),
     compact: false,
-    question: s.words.trim(),
+    question: s.words.trim() || (kept?.question.trim() ?? ""),
     thumb,
     label: thumb?.label ?? "",
     canDrop: false,
@@ -263,6 +337,9 @@ export function liveView(m: LiveModel, now: number): LiveView {
       if (s.thinking && !m.text) return thinkingView(base, name, null);
       return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
     case "shown":
+      // A follow-up stopped before any answer: the conversation stays, the turn says so.
+      if (!m.text && earlierTurns(s).length)
+        return { ...base, phase: "shown", line: "none", tone: "quiet", complete: true, note: m.sent ? "Stopped" : "Not sent", announce: "Stopped" };
       // Stopped before any answer came: nothing is ready, and nothing is said to have been sent unless it was.
       if (!m.text) return endedView(base, m.sent);
       return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, announce: "Answer ready" };
@@ -350,12 +427,40 @@ export function previewPicture(kind: "slide" | "code" = "slide"): LivePicture {
   return { src: "data:image/svg+xml," + encodeURIComponent(svg), w: 320, h: 180, label: "PowerPoint" };
 }
 
-/** The preview's snapshot for a state named in the address. */
+/** A session of three questions about one slide, the newest still open: two short exchanges, then the long answer. */
+export function previewTurns(now = Date.now()): LiveTurn[] {
+  return [
+    {
+      n: 1,
+      question: "What does the line over the B mean?",
+      answer: "It means **not B**: every case where B does not happen. Some courses write it as ¬B or Bᶜ.",
+      picture: previewPicture(),
+      stopped: false,
+      error: null,
+      at_ms: now - 6 * 60_000,
+    },
+    {
+      n: 2,
+      question: "Is P(B|A) the same thing as P(A|B)?",
+      answer:
+        "No. **P(B|A)** is how often B happens among the cases where A does; **P(A|B)** is the reverse. Bayes' rule is how you turn one into the other.",
+      picture: null,
+      stopped: false,
+      error: null,
+      at_ms: now - 4 * 60_000,
+    },
+    { n: 3, question: PREVIEW_WORDS, answer: PREVIEW_ANSWER, picture: previewPicture(), stopped: false, error: null, at_ms: now - 60_000 },
+  ];
+}
+
+/** The preview's snapshot for a state named in the address. `conversation` is a session of three turns, the third shown. */
 export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
-  const session = { id: "preview", title: "Why do we divide by P(B)" };
+  const session = { id: "preview", title: "Why do we divide by P(B)", turns: 1 };
   const common = { ...CLOSED, session, turn: 1, picture: previewPicture(), provider, words: PREVIEW_WORDS };
   switch (kind) {
+    case "conversation":
+      return { ...common, state: "shown", answer: PREVIEW_ANSWER, turn: 3, session: { id: "preview", title: "Bayes' rule on the slide", turns: 3 }, turns: previewTurns() };
     case "listening":
       return { ...common, state: "listening", session: { ...session, title: "" }, words: "" };
     case "finishing":

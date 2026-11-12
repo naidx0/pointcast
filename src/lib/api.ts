@@ -3,7 +3,21 @@ import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import { LEVEL_FIELDS, PREVIEW_ANSWER, levelOf, previewChunks, previewLevel, previewPicture, previewSnapshot, type LiveDelta, type LiveSnapshot } from "./live";
+import {
+  LEVEL_FIELDS,
+  PREVIEW_ANSWER,
+  levelOf,
+  previewChunks,
+  previewLevel,
+  previewPicture,
+  previewSnapshot,
+  providerName,
+  type LiveDelta,
+  type LiveSnapshot,
+  type LiveTurn,
+} from "./live";
+import { previewSent } from "./conversation";
+import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
 import { CUSTOM, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -508,8 +522,29 @@ export const LIVE = {
   /** The level's fields on UiState, first found wins: an engine-smoothed level if the engine sends one, else the raw
    * meter level (0 to 1 over 50 dB). */
   levelFields: LEVEL_FIELDS,
+  /** command { text, picture: boolean }: a typed follow-up in the open session, with a fresh picture when asked */
+  askTyped: "live_ask_typed",
+  /** command { turn } → { text, pictures: [{ n, w, h, bytes, mime, src }], earlier: number[], provider, model, adds } */
+  sent: "live_sent",
 } as const;
 
+/** Ask's kept sessions: the one adapter. Every engine name the session list and Home use is here. */
+export const SESSIONS = {
+  /** command → [{ id, title, updated_ms, turns, pictures, provider, size_bytes }] */
+  list: "sessions_list",
+  /** command { id }: the panel opens on that session */
+  open: "sessions_open",
+  /** command: a new, empty session */
+  new: "sessions_new",
+  /** command { id, title } */
+  rename: "sessions_rename",
+  /** command { id } */
+  delete: "sessions_delete",
+  /** command { q } → the list's shape, each with `hit` */
+  search: "sessions_search",
+  /** command { id } → the folder it was saved to */
+  export: "sessions_export",
+} as const;
 
 
 type Sink<T> = (p: T) => void;
@@ -540,6 +575,59 @@ export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvComm
 export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
 export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
 export const liveRetry = () => (inTauri ? invoke<void>(LIVE.retry) : pvCommand("retry"));
+/** A typed follow-up; `picture`: take a fresh picture of the screen to go with it. */
+export const liveAskTyped = (text: string, picture: boolean) =>
+  inTauri ? invoke<void>(LIVE.askTyped, { text, picture }) : pvAskTyped(text, picture);
+/** Exactly what left the computer for a turn, as the engine kept it (read with sentView in conversation.ts). */
+export const liveSent = (turn: number): Promise<unknown> => (inTauri ? invoke<unknown>(LIVE.sent, { turn }) : pvLater(160, () => pvSent(turn)));
+
+export const sessionsList = (): Promise<SessionMeta[]> => (inTauri ? invoke<unknown>(SESSIONS.list) : Promise.resolve(pvSessions())).then(normalizeSessions);
+export const sessionsSearch = (q: string): Promise<SessionMeta[]> =>
+  (inTauri ? invoke<unknown>(SESSIONS.search, { q }) : Promise.resolve(previewSearch(pvSessions(), q))).then(normalizeSessions);
+export const sessionsOpen = (id: string) => (inTauri ? invoke<void>(SESSIONS.open, { id }) : pvOpen(id));
+export const sessionsNew = () => (inTauri ? invoke<void>(SESSIONS.new) : pvNew());
+export const sessionsRename = (id: string, title: string) => (inTauri ? invoke<void>(SESSIONS.rename, { id, title }) : pvRename(id, title));
+export const sessionsDelete = (id: string) => (inTauri ? invoke<void>(SESSIONS.delete, { id }) : pvDelete(id));
+export const sessionsExport = (id: string): Promise<string> =>
+  inTauri
+    ? invoke<string>(SESSIONS.export, { id })
+    : Promise.resolve(
+        `${location.search.includes("skin=mac") || location.search.includes("os=mac") ? "/Users/you" : "C:/Users/you"}/Documents/Pointcast/Ask/${pvSessions().find((s) => s.id === id)?.title ?? id}`,
+      );
+
+// —— Home's "All sessions" opens the panel on its session list. The panel may not be built yet, so the ask goes through
+// storage, as Settings' pane does: read once as the panel opens, or as a storage event when it is open. ——
+
+const LIST_KEY = "pointcast.asklist";
+
+/** Open the panel on `newest` with its session list showing. */
+export function openSessionList(newest: string): Promise<void> {
+  try {
+    localStorage.setItem(LIST_KEY, String(Date.now()));
+  } catch {
+    /* private mode: the panel opens on the session */
+  }
+  return sessionsOpen(newest);
+}
+
+/** The panel, as it opens or when asked: whether Home asked for the list just now, once. */
+export function takeListAsk(): boolean {
+  try {
+    const at = Number(localStorage.getItem(LIST_KEY));
+    localStorage.removeItem(LIST_KEY);
+    return Number.isFinite(at) && at > 0 && Date.now() - at < PANE_FRESH_MS;
+  } catch {
+    return false;
+  }
+}
+
+export function onListAsk(fn: () => void): () => void {
+  const f = (e: StorageEvent) => {
+    if (e.key === LIST_KEY && e.newValue && takeListAsk()) fn();
+  };
+  window.addEventListener("storage", f);
+  return () => window.removeEventListener("storage", f);
+}
 /** Every error that asks for Settings is about the AI: Settings opens on that pane. */
 export const liveOpenSettings = () => settingsOpenOn("ai");
 /** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
@@ -567,17 +655,127 @@ function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
   return Promise.resolve();
 }
 
-/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error|discarded
- * [&error=provider][&pic=switch] plays the fixtures in src/lib/live.ts: a synthetic microphone for listening (with
- * pic=switch the person moves to another app after 2 s, so the picture changes), the scripted stream for answering
- * (which ends in shown); thinking shows its 8 s and 20 s lines when left that long. */
+// —— The preview's sessions and follow-ups: the fixtures in sessions.ts and live.ts, played as the engine would. ——
+
+const sessionsPv = { list: null as SessionMeta[] | null };
+const pvSessions = () => (sessionsPv.list ??= location.search.includes("sessions=empty") ? [] : previewSessions(Date.now()));
+
+/** A follow-up answered in a few short pieces, so the preview shows a typed question's whole round. */
+const FOLLOW_ANSWER = "Yes. Without the bottom, the top is a count of cases, not a share of them: dividing by **P(B)** is what makes the shares add up to 1.";
+
+function pvSent(turn: number) {
+  const s = livePv.snap;
+  const t: Pick<LiveTurn, "n" | "question" | "picture"> | null =
+    s?.turns.find((x) => x.n === turn) ?? (s && s.turn === turn ? { n: turn, question: s.words, picture: s.dropped ? null : s.picture } : null);
+  return previewSent(t, providerName(s?.provider ?? null));
+}
+
+/** The open turn, kept: what the engine adds to `turns` once a turn is finished. */
+function keptTurns(s: LiveSnapshot): LiveTurn[] {
+  if (!s.turn || s.turns.some((t) => t.n === s.turn)) return s.turns;
+  return [...s.turns, { n: s.turn, question: s.words, answer: s.answer ?? PREVIEW_ANSWER, picture: s.dropped ? null : s.picture, stopped: false, error: null, at_ms: Date.now() }];
+}
+
+function pvAskTyped(text: string, picture: boolean): Promise<void> {
+  const s = livePv.snap;
+  if (!s) return Promise.resolve();
+  livePv.timers.forEach(clearTimeout);
+  livePv.timers = [];
+  const turns = keptTurns(s);
+  const n = Math.max(s.turn, ...turns.map((t) => t.n)) + 1;
+  const next: LiveSnapshot = {
+    ...s,
+    state: "sending",
+    turn: n,
+    words: text,
+    answer: undefined,
+    thinking: false,
+    error: null,
+    dropped: false,
+    picture: picture ? previewPicture("code") : null,
+    turns,
+    session: { ...s.session, turns: n },
+  };
+  pvEmit(next);
+  pvStream(FOLLOW_ANSWER, 900);
+  return Promise.resolve();
+}
+
+function pvOpen(id: string): Promise<void> {
+  livePv.timers.forEach(clearTimeout);
+  livePv.timers = [];
+  const meta = pvSessions().find((s) => s.id === id);
+  if (!meta) return Promise.reject("That session is gone");
+  if (id === "preview") {
+    pvEmit(previewSnapshot("conversation", { provider: meta.provider }));
+    return Promise.resolve();
+  }
+  // Opened finished, with nothing in the top-level fields: the panel shows the newest kept turn.
+  const turns: LiveTurn[] = Array.from({ length: Math.max(1, meta.turns) }, (_, i) => ({
+    n: i + 1,
+    question: i === 0 ? `${meta.title}?` : `And what about part ${i + 1}?`,
+    answer: i === 0 ? "Here is what the picture shows, in short." : `Part ${i + 1} works the same way.`,
+    picture: i === 0 ? previewPicture("code") : null,
+    stopped: false,
+    error: null,
+    at_ms: meta.updated_ms,
+  }));
+  pvEmit({ ...previewSnapshot("shown", { provider: meta.provider }), session: { id, title: meta.title, turns: turns.length }, turn: 0, words: "", answer: undefined, picture: null, turns });
+  return Promise.resolve();
+}
+
+function pvNew(): Promise<void> {
+  startLivePreview("listening");
+  return Promise.resolve();
+}
+
+function pvRename(id: string, title: string): Promise<void> {
+  sessionsPv.list = pvSessions().map((s) => (s.id === id ? { ...s, title } : s));
+  const s = livePv.snap;
+  if (s && s.session.id === id) pvEmit({ ...s, session: { ...s.session, title } });
+  return Promise.resolve();
+}
+
+function pvDelete(id: string): Promise<void> {
+  sessionsPv.list = pvSessions().filter((s) => s.id !== id);
+  const s = livePv.snap;
+  if (s && s.session.id === id) {
+    livePv.timers.forEach(clearTimeout);
+    pvEmit({ ...s, state: "closed" });
+  }
+  return Promise.resolve();
+}
+
+/** The scripted stream for the open turn, ending in shown with the answer kept. */
+function pvStream(text: string, delay: number) {
+  const q = new URLSearchParams(location.search);
+  const chunks = previewChunks(text);
+  const turn = livePv.snap?.turn ?? 0;
+  let i = 0;
+  const tick = () => {
+    const s = livePv.snap;
+    if (!s || s.turn !== turn || (s.state !== "answering" && s.state !== "sending")) return;
+    if (s.state === "sending") pvEmit({ ...s, state: "answering" });
+    if (i >= chunks.length) return pvEmit({ ...livePv.snap!, state: "shown", answer: text });
+    livePv.delta.forEach((f) => f({ turn, text: chunks[i] }));
+    i++;
+    livePv.timers.push(setTimeout(tick, Number(q.get("speed")) || 32));
+  };
+  livePv.timers.push(setTimeout(tick, delay));
+}
+
+/** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error|discarded|conversation
+ * [&error=provider][&pic=switch][&provider=Codex] plays the fixtures in src/lib/live.ts: a synthetic microphone for
+ * listening (with pic=switch the person moves to another app after 2 s, so the picture changes), the scripted stream
+ * for answering (which ends in shown); thinking shows its 8 s and 20 s lines when left that long. `conversation` is a
+ * session of three turns, the third open; a typed follow-up there is answered by the script too. */
 export function startLivePreview(kind?: string) {
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
   const q = new URLSearchParams(location.search);
   const state = kind ?? q.get("state") ?? "thinking";
   const later = (ms: number, f: () => void) => livePv.timers.push(setTimeout(f, ms));
-  const snap = previewSnapshot(state, { error: q.get("error") });
+  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined });
   pvEmit(snap);
   if (state === "listening") {
     let i = 0;
