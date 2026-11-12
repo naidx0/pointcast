@@ -21,6 +21,7 @@ mod session;
 mod sessions;
 mod settings;
 mod stats;
+mod summary;
 mod tools;
 mod tray;
 mod update;
