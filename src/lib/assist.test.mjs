@@ -464,3 +464,12 @@ test("Ready to use lists only what is known to work; an installed agent that can
   assert.equal(groupOf({ ...gemini, sure: true }), "ready");
   assert.equal(normalizeAssist({ providers: [{ id: "x", kind: "agent", state: "ready" }] }).providers[0].sure, false, "not said: not sure");
 });
+
+test("Claude says who is signed in and on which plan, as ChatGPT does", () => {
+  const claude = { id: "claude-code", name: "Claude", kind: "agent", state: "ready", line: "Claude Code 2.1.295 is installed. You are signed in.", plan: "pro", email: "a@b.c", available: true, models: [], efforts: [], adds: [], goes_to: "Anthropic", offline: false, consented: true };
+  const v = routeView(claude, none);
+  assert.deepEqual([v.line, v.account], ["Signed in as a@b.c", { who: "a@b.c", plan: "Pro" }]);
+  const out = routeView({ ...claude, plan: undefined, email: undefined }, none);
+  assert.equal(out.account, null, "nothing said, nothing shown");
+  assert.equal(normalizeAssist({ providers: [], checking: true }).checking, true, "a round of checks is shown while it is out");
+});

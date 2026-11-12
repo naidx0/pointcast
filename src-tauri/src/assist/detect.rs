@@ -175,7 +175,11 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
 
 /// What `exe --version` prints.
 pub fn version_of(exe: &Path) -> Result<String, String> {
-    said_by(exe, &["--version"]).map(|(_, said)| said)
+    // A program that is found but does not start (an npm app without its Node) is not ready, whatever it printed.
+    match said_by(exe, &["--version"])? {
+        (true, said) => Ok(said),
+        (false, _) => Err("it did not start".to_owned()),
+    }
 }
 
 /// Whether Codex says it is signed in: `codex login status` reads its own sign-in, and Pointcast reads only whether it
@@ -327,4 +331,12 @@ mod tests {
         let l = Found { exe: "codex".into(), version: OLDEST }.launch();
         assert_eq!((l.args, l.env), (vec!["app-server".to_owned()], Vec::new()));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_does_not_start_has_no_version() {
+        assert!(version_of(std::path::Path::new("/usr/bin/false")).is_err(), "a failed --version is not a version");
+        assert!(version_of(std::path::Path::new("/bin/echo")).is_ok());
+    }
+
 }

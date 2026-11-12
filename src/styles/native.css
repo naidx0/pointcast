@@ -2943,3 +2943,30 @@ html.win .undo-btn {
   vertical-align: middle;
   margin: 0 2px;
 }
+
+/* A small turning ring beside the words of a button while its work runs: the words say what, the ring says it is
+   still going. Still for people who ask for less motion. */
+.spin {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+.ai-refresh,
+.ai-route .btn,
+.onb-ai-row .btn {
+  display: inline-flex;
+  align-items: center;
+}
