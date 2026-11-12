@@ -29,6 +29,10 @@ pub const CONFIG_MODEL: &str = "config-only-model";
 /// The file Codex itself adds to every conversation.
 pub const INSTRUCTIONS: &str = "/home/someone/.codex/AGENTS.md";
 pub const SIGN_IN_PAGE: &str = "https://auth.example.test/start";
+/// The MCP servers the person's own Codex is set up with, in the `servers` modes.
+pub const SERVERS: [&str; 2] = ["notes", "code.repl 2"];
+/// What one of those servers is given in its environment: never Pointcast's to keep or send.
+pub const SERVER_SECRET: &str = "planted-server-secret";
 
 static THREADS: AtomicU64 = AtomicU64::new(0);
 
@@ -132,6 +136,16 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                 let data = if mode == "no-models" { json!([]) } else { json!([model]) };
                 reply(json!({ "data": data, "nextCursor": null }));
             }
+            // The person's own config, as `config/read` says it: in the `servers` modes two MCP servers of theirs, one
+            // with a name no dotted key could carry and one given a secret in its environment.
+            "config/read" if mode != "old" => {
+                let servers = if mode.starts_with("servers") {
+                    json!({ (SERVERS[0]): { "command": "notes-mcp", "env": { "NOTES_KEY": SERVER_SECRET } }, (SERVERS[1]): { "command": "python", "args": ["-m", "repl"] } })
+                } else {
+                    json!({})
+                };
+                reply(json!({ "config": { "model": CONFIG_MODEL, "mcp_servers": servers }, "origins": {} }));
+            }
             "account/rateLimits/read" => reply(json!({ "rateLimits": limits(if mode == "limit" { 100 } else { 12 }) })),
             "thread/start" => {
                 let provider = if mode == "foreign" { "elsewhere" } else { "openai" };
@@ -162,6 +176,14 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                 }
                 reply(started);
                 note(&say, "turn/started", json!({ "threadId": thread, "turn": { "id": turn } }));
+                if mode == "servers-start" {
+                    // A Codex that starts the person's servers although the thread switched them off: one is seen
+                    // starting and then ready, one fails to start.
+                    let status = |name: &str, status: &str| note(&say, "mcpServer/startupStatus/updated", json!({ "name": name, "status": status, "threadId": thread, "error": null }));
+                    status(SERVERS[1], "starting");
+                    status(SERVERS[0], "failed");
+                    status(SERVERS[1], "ready");
+                }
                 match mode {
                     "limit" => ended(&say, &thread, &turn, "failed", json!({ "message": "You have hit your usage limit", "codexErrorInfo": "usageLimitExceeded" })),
                     "approval" => {
