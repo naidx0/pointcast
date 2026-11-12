@@ -1347,6 +1347,11 @@ html.win .feature-recent li + li::before {
   color: var(--label-2);
   font-variant-numeric: tabular-nums;
 }
+/* A session with a summary: a small mark before its count, as in the panel's list. */
+.feature-recent .m .hasum {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
 .home-foot {
   display: flex;
   align-items: center;

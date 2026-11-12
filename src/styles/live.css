@@ -274,12 +274,13 @@ html.win .live-prev + .live-prev::before {
 .live-prev .live-sentv-none {
   margin: 0 8px 12px;
 }
-.live.multi .live-now {
+/* The hairline above the open turn only once there are rows above it (joining a closed session, they arrive later). */
+.live-turns + .live-now {
   margin-top: 12px;
   padding-top: 16px;
   border-top: 0.5px solid var(--sep);
 }
-html.win .live.multi .live-now {
+html.win .live-turns + .live-now {
   border-top-width: 1px;
 }
 .live.multi .live-now .live-pic {
@@ -1025,6 +1026,332 @@ html.win .live-send {
   color: var(--live-ink);
 }
 
+/* —— Under the last answer of a session of two or more turns: Summarize, its words where the receipt's begin —— */
+.live-next {
+  display: flex;
+  margin: 4px 0 0 12px;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+}
+
+/* —— The header's way to a session's summary: a quiet word, pressed while the summary shows —— */
+.live-sumbtn {
+  flex: none;
+  height: 24px;
+  margin-right: 2px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--live-quiet);
+  font: 500 var(--fs-caption) / 1 var(--font);
+}
+html.win .live-sumbtn {
+  border-radius: var(--r-control);
+}
+.live-sumbtn:hover,
+.live-sumbtn.on {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+
+/* —— A marked picture: a small pen in a dot at the thumbnail's lower left; its label says it in words —— */
+.live-pic {
+  position: relative;
+}
+.live-marked {
+  position: absolute;
+  left: 4px;
+  top: 25px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  /* As the thumbnail's Drop: a dark dot reads on any picture, light or dark. */
+  background: rgba(0, 0, 0, 0.66);
+  color: #fff;
+  pointer-events: none;
+}
+/* Mark up: a small text button. In the field it sits before the picture toggle it belongs to. */
+.live-markup {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--live-quiet);
+  font: 500 var(--fs-caption) / 1 var(--font);
+  white-space: nowrap;
+}
+html.win .live-markup {
+  border-radius: var(--r-control);
+}
+.live-markup:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+.live-markup.marked {
+  color: var(--live-ink);
+}
+.live-markup.in-field {
+  align-self: center;
+  height: 28px;
+}
+
+/* —— A picture marked with no question under way waits above the field: small, its app, Marked up (again), take it
+   off —— */
+.live-nextpic {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0 0 8px;
+  padding: 0 0 0 4px;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-nextpic .thumb {
+  position: relative;
+  flex: none;
+  width: 48px;
+  height: 27px;
+  overflow: hidden;
+  border: 0.5px solid var(--sep);
+  border-radius: 4px;
+  background: var(--fill);
+}
+html.win .live-nextpic .thumb {
+  border-width: 1px;
+}
+.live-nextpic .thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.live-nextpic .live-marked {
+  left: 2px;
+  top: auto;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+}
+.live-nextpic .l {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* —— Sent: the earlier turns sent again, across the whole row: a line that opens to their words, then their pictures,
+   small —— */
+.live-sentv > div.again {
+  grid-template-columns: minmax(0, 1fr);
+}
+.live-again {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: calc(100% + 8px);
+  height: 24px;
+  margin: -3px -4px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font: inherit;
+  text-align: left;
+}
+.live-again:hover {
+  background: var(--fill);
+  color: var(--live-ink);
+}
+.live-again .chev {
+  flex: none;
+  transition: transform 150ms var(--ease);
+}
+.live-again[aria-expanded="true"] .chev {
+  transform: rotate(90deg);
+}
+.live-again .t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-again .quiet {
+  flex: none;
+}
+.live-replay {
+  max-height: 160px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--fill);
+  color: var(--live-ink);
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+html.win .live-replay {
+  border-radius: 4px;
+}
+.live-again-pics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.live-again-pics li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--live-quiet);
+}
+.live-again-pics img {
+  display: block;
+  width: 64px;
+  height: 36px;
+  object-fit: cover;
+  border: 0.5px solid var(--sep);
+  border-radius: 4px;
+}
+html.win .live-again-pics img {
+  border-width: 1px;
+}
+
+/* —— A session with a summary: a small mark before its count —— */
+.live-hasum {
+  flex: none;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
+/* —— A new session, open on nothing: one quiet line with the Ask key —— */
+.live-blank {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  margin: 4px 0 4px;
+  color: var(--live-quiet);
+}
+
+/* —— The summary, in place of the conversation: the title, then the groups set apart by space, each point a line with
+   its turn at the end and the words it rests on beneath it —— */
+.live-sum {
+  padding-top: 4px;
+}
+.live-sum .live-think {
+  margin-top: 4px;
+}
+/* Stop's words end where the actions' do, at the column's edge. */
+.live-sum-work .live-text {
+  margin: 0 -8px 0 auto;
+}
+.live-sum-title {
+  margin: 0;
+  font: 600 var(--fs-body) / 20px var(--font);
+  color: var(--live-ink);
+  overflow-wrap: anywhere;
+}
+.live-sum-group {
+  margin-top: 20px;
+}
+.live-sum-group h3 {
+  margin: 0 0 8px;
+  font: 500 var(--fs-caption) / 16px var(--font);
+  color: var(--live-quiet);
+}
+.live-sum-group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.live-point {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: start;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.live-point + .live-point {
+  margin-top: 12px;
+}
+.live-point .t {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.live-point .q {
+  grid-column: 1 / -1;
+  min-width: 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+  overflow-wrap: anywhere;
+}
+.live-point .by {
+  margin-right: 6px;
+  font-weight: 600;
+}
+/* A 24 px target whose words sit on the point's first line. */
+.live-ref {
+  height: 24px;
+  min-width: 28px;
+  margin: -2px -4px -2px 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--live-quiet);
+  font: 500 var(--fs-caption) / 24px var(--font);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+button.live-ref:hover {
+  background: var(--fill-2);
+  color: var(--live-ink);
+}
+.live-sum-foot {
+  margin: 20px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+  font-variant-numeric: tabular-nums;
+}
+.live-sum-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 12px -8px 0;
+}
+.live-sum-acts .back {
+  margin-left: auto;
+}
+.live-sum .live-empty {
+  margin-top: 4px;
+}
+
 .live-sr {
   position: absolute;
   width: 1px;
@@ -1055,6 +1382,9 @@ html.live-hidden .live * {
   }
   .live .live-answer .caret {
     animation: none !important;
+  }
+  .live .live-again .chev {
+    transition: none;
   }
 }
 
