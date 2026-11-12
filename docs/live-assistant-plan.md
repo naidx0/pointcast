@@ -121,6 +121,20 @@ Each slice is one branch off the program branch, gated on its own, merged back w
 | 12 | Home, and the capsule | A Home section, first in the main window, in the existing native style: the usage numbers and the when-you-dictate grid (moved from the Usage pane), recent sessions as a plain list, and the three ways in with their shortcuts. The dictation capsule keeps its current design; only two things change: the line replaces the spinner while finishing, and there is no "Pasted" line since the pasted text is its own confirmation | `Settings.tsx` (Home), `Indicator.tsx`, `lib/capsule.ts`, `native.css` | `node --test` on `capsule`: no line for pasted, one for each other outcome. Home and each capsule state screenshotted, both skins, light and dark, and with reduced motion |
 | M | Mac updates in place (ships ahead of 0.5, off `main`) | One self-signed certificate for every release build, so macOS keeps Screen Recording and Accessibility across updates; the installer resets them only when the signer changed; the app quits, swaps and reopens by itself; the update check reads a static `latest.json` from the release first, so it works on a network that has used up GitHub's API allowance, and a failed check never reads as up to date | `install.sh`, `update.rs`, `release.yml`, `update-test.yml`, `scripts/`, `docs/SIGNING.md` | On a macOS runner with a throwaway certificate: build N+1 satisfies build N's requirement, an ad-hoc copy does not; the real script over N leaves N+1 running with no permission reset; `cargo test --lib update::`. Switching the real certificate on is the owner's yes |
 
+## Built, and what the real app has not shown yet (2026-11-11, head `201cb94`)
+
+Merged on `program/live-assistant` and green on Windows, Linux and macOS (593 Rust tests, 200 front-end tests): slices
+0 to 4, 6, 8, 10 and 12, the marked-up question of slice 7 (a picture marked before it is sent; marks placed by the
+answer are not built), and slice 9 built on a stand-in and switched off. Beyond the table: more AI routes (ACP agents,
+more key providers, a custom address), the line in the dictation capsule, and a question typed from the start (Home
+and the tray open the panel on a new question).
+
+Seen in the real app on Windows: the listening row, Stop and Not sent, the capsule, Home, Settings › AI reading a real
+Codex sign-in. Run once on the real Codex outside the app: the handshake, one answered question with a picture, the
+fence. Not yet seen in the real app: an answer streaming in the panel, a typed question and a follow-up, Sent, the
+session list, Summarize against a real AI, a marked-up question, the line with a real voice. Nothing has run on a Mac
+beyond CI's build and tests.
+
 ## Order
 
 0 and 1 start in the same session as this plan (0 is the first shippable slice); they share one line of `lib.rs`.
