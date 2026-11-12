@@ -123,3 +123,25 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod on_this_computer {
+    /// Under a Dock-like PATH, after `widen`, an npm-installed AI app starts. Run by hand: `env -i HOME=$HOME
+    /// PATH=/usr/bin:/bin SHELL=$SHELL cargo test --lib dock_started -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dock_started_apps_run_after_widening() {
+        let before = std::env::var("PATH").unwrap_or_default();
+        super::widen();
+        let after = std::env::var("PATH").unwrap_or_default();
+        println!("before: {before}\nafter has node: {}", after.split(':').any(|d| std::path::Path::new(d).join("node").exists()));
+        for name in ["gemini", "copilot", "claude", "codex"] {
+            let exe = crate::assist::detect::on_path(name);
+            let v = exe.as_deref().map(crate::assist::detect::version_of);
+            println!("{name}: {v:?}");
+            if let Some(v) = v {
+                assert!(v.is_ok(), "{name} did not start: {v:?}");
+            }
+        }
+    }
+}
