@@ -499,7 +499,7 @@ pub fn health(a: &Agent) -> Health {
         Some(exe) => match detect::version_of(&exe) {
             Ok(said) => {
                 let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();
-                (State::Ready, format!("{}{v} is installed. Sign in with the {} CLI first.", a.cli, a.name))
+                (State::Ready, format!("{}{v} is installed. If it asks you to sign in, choose Sign in.", a.cli))
             }
             Err(why) => (State::Unknown, format!("{} is installed, but Pointcast could not read its version: {why}.", a.cli)),
         },

@@ -845,6 +845,11 @@ html.win .prefs-side {
   color: #fff;
   flex: none;
 }
+/* The glyph is a block, so no text baseline or line height moves it inside its tile. */
+.side-item .ico svg,
+.row .ico svg {
+  display: block;
+}
 .side-item:hover {
   background: var(--fill);
 }

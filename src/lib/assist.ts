@@ -45,7 +45,9 @@ export type Route = {
 export type Assist = { chosen: string | null; model: string | null; effort: string | null; offline_only: boolean; providers: Route[] };
 
 /** The one action a route offers in its state. */
-export type RouteAction = "use" | "sign_in" | "add_key" | "get" | "check" | null;
+/** `install` and `update` are done by Pointcast itself (the vendor's own package); `get` only shows where to get an app
+ * Pointcast cannot install (Ollama, LM Studio). */
+export type RouteAction = "use" | "sign_in" | "add_key" | "get" | "install" | "update" | "check" | null;
 
 export type RouteView = {
   id: string;
@@ -63,6 +65,8 @@ export type RouteView = {
   account: { who: string | null; plan: string | null } | null;
   /** The route is being checked: its line says so and it offers nothing yet. */
   checking: boolean;
+  /** An installed agent that cannot say whether it is signed in: a quiet Sign in link sits under its line. */
+  signIn?: boolean;
 };
 /** How to get a missing app: a sentence, the vendor's own install line (Copy), its official page, and how to set up
  * the account through the vendor's own sign-in; then Refresh. Pointcast runs none of it. */
@@ -205,8 +209,11 @@ export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">):
   if (p.kind === "agent") {
     const v = stateView(p, base, use);
     const line = p.line || v.line;
-    if (p.state === "not_installed" && AGENT_INSTALL[p.id]) return { ...base, line, action: "get", label: "Install", help: installHelp(p) };
-    return p.state === "ready" || p.state === "unsupported" ? { ...v, line } : { ...base, line, action: "check", label: "Check again" };
+    if (p.state === "not_installed" && AGENT_INSTALL[p.id]) return { ...base, line, action: "install", label: "Install", help: installHelp(p) };
+    if (p.state === "signed_out") return { ...base, line, action: "sign_in", label: "Sign in", help: installHelp(p) };
+    if (p.state === "too_old") return { ...base, line, action: "update", label: "Update", help: installHelp(p, true) };
+    if (p.state === "ready") return { ...v, line, signIn: p.id !== "claude-code" && !!AGENT_INSTALL[p.id] };
+    return p.state === "unsupported" ? { ...v, line } : { ...base, line, action: "check", label: "Check again" };
   }
   if (p.id === CUSTOM && p.state !== "unsupported") {
     if (!p.base) return { ...base, line: "No address yet", action: "add_key", label: "Set up" };
@@ -234,9 +241,9 @@ function stateView(p: Route, base: Omit<RouteView, "line" | "action" | "label">,
         label: "Check again",
       };
     case "not_installed":
-      return { ...base, line: `${app(p)} is not on this computer`, action: "get", label: "Install", help: installHelp(p) };
+      return { ...base, line: `${app(p)} is not on this computer`, action: p.id === "codex" ? "install" : "get", label: "Install", help: installHelp(p) };
     case "too_old":
-      return { ...base, line: p.line || `This ${app(p)} is too old`, action: "get", label: "How to update", help: installHelp(p, true) };
+      return { ...base, line: p.line || `This ${app(p)} is too old`, action: p.id === "codex" ? "update" : "get", label: "Update", help: installHelp(p, true) };
     case "unsupported":
       return { ...base, line: p.line || "Not available on this computer", action: null, label: null };
     case "checking":
@@ -481,7 +488,7 @@ export function previewAssist(kind: string): Assist {
     offline_only: false,
     providers: [
       r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
-      r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first."),
+      r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in."),
       r("copilot", "GitHub Copilot", "agent", "not_installed", "GitHub, through your Copilot plan", missing("GitHub Copilot CLI")),
       r("opencode", "OpenCode", "agent", "not_installed", "the AI you set up in OpenCode", missing("OpenCode")),
       r("claude-code", "Claude", "agent", "ready", "Anthropic, through your Claude plan", "Signed in to Claude Code."),

@@ -935,7 +935,7 @@ mod tests {
         let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
         let look = Look {
             agents: vec![
-                ("gemini-cli", h(State::Ready, "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.")),
+                ("gemini-cli", h(State::Ready, "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in.")),
                 (CLAUDE_CODE, h(State::Ready, &format!("Claude Code 2.1.322 is installed. {}", claude::SIGNED_IN))),
             ],
             ..Look::default()
@@ -945,14 +945,14 @@ mod tests {
         assert_eq!(sure("gemini-cli"), (Status::Ready, false), "installed, sign-in unknown: usable, not sure");
         assert_eq!(sure(CLAUDE_CODE), (Status::Ready, true));
         assert!(!sure("openai").1, "no key saved: not sure");
-        let signed_out = Look { agents: vec![(CLAUDE_CODE, h(State::SignedOut, "Run claude in a terminal once and sign in, then Check again."))], ..Look::default() };
+        let signed_out = Look { agents: vec![(CLAUDE_CODE, h(State::SignedOut, "Claude Code is installed, but not signed in. Choose Sign in."))], ..Look::default() };
         assert_eq!(providers(&Settings::default(), &signed_out).providers.iter().find(|r| r.id == CLAUDE_CODE).map(|r| (r.state, r.sure)), Some((Status::SignedOut, false)));
     }
 
     #[test]
     fn an_agent_is_a_subscription_that_needs_no_model_and_says_how_it_was_found() {
         let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
-        let ready = "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.";
+        let ready = "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in.";
         let look = Look { agents: vec![("gemini-cli", h(State::Ready, ready)), ("copilot", h(State::Unknown, "said"))], ..Look::default() };
         let mut s = Settings::default();
         let list = providers(&s, &look);
