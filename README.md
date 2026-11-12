@@ -1,4 +1,4 @@
-<p align="center"><img src="src-tauri/icons/128x128@2x.png" width="112" height="112" alt="Pointcast icon: a cursor landing in an orange click spark"></p>
+<p align="center"><img src="src-tauri/icons/128x128@2x.png" width="112" height="112" alt="Pointcast icon: Pip, a white P with two eyes whose stem is a speech-bubble tail, on a blue tile"></p>
 
 <h1 align="center">Pointcast</h1>
 
