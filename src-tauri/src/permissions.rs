@@ -204,15 +204,26 @@ mod mac {
     }
 
     pub fn request_screen() -> Access {
-        if unsafe { CGPreflightScreenCaptureAccess() } {
-            return Access::Granted;
-        }
-        let _ = std::fs::create_dir_all(crate::settings::data_dir());
-        let _ = std::fs::write(asked(), env!("CARGO_PKG_VERSION"));
-        if unsafe { CGRequestScreenCaptureAccess() } {
-            Access::Granted
-        } else {
-            Access::Unknown
+        let marker = std::fs::read_to_string(asked()).ok();
+        let asked_before = super::asked_by(marker.as_deref(), env!("CARGO_PKG_VERSION"));
+        match super::screen_step(unsafe { CGPreflightScreenCaptureAccess() }, asked_before) {
+            super::Step::Done => Access::Granted,
+            super::Step::Settings => {
+                // macOS has answered once and will not show its prompt again: the switch is the only way.
+                if let Some(url) = super::settings_url("screen") {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+                Access::Denied
+            }
+            super::Step::Prompt => {
+                let _ = std::fs::create_dir_all(crate::settings::data_dir());
+                let _ = std::fs::write(asked(), env!("CARGO_PKG_VERSION"));
+                if unsafe { CGRequestScreenCaptureAccess() } {
+                    Access::Granted
+                } else {
+                    Access::Unknown
+                }
+            }
         }
     }
 
@@ -292,11 +303,51 @@ fn screen_access(allowed: bool, asked: bool) -> Access {
     }
 }
 
-/// Whether this version has asked for Screen Recording (`marker` names the version that asked). An update clears the
-/// grant with `tccutil reset`, which also lets macOS prompt again, so an earlier version's asking does not count.
+/// What asking for Screen Recording does.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Already allowed.
+    Done,
+    /// Never asked: macOS shows its prompt.
+    Prompt,
+    /// Asked before: macOS shows nothing a second time, so Allow opens the switch in System Settings instead of
+    /// doing nothing.
+    Settings,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn screen_step(allowed: bool, asked: bool) -> Step {
+    match (allowed, asked) {
+        (true, _) => Step::Done,
+        (false, false) => Step::Prompt,
+        (false, true) => Step::Settings,
+    }
+}
+
+/// The first release signed with Pointcast's certificate (docs/SIGNING.md). From it on an update keeps what macOS
+/// was allowed and what it was asked: install.sh resets the grants only when the signer changes, and then it deletes
+/// the marker too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const FIRST_SIGNED: (u64, u64, u64) = (0, 4, 8);
+
+/// Whether Pointcast has asked for Screen Recording since macOS last forgot it (`marker` names the version that
+/// asked). A version signed ad hoc, before the certificate, was a stranger to macOS after every update, so its
+/// asking does not count; one signed with the certificate kept the answer, so a quiet update does not make the
+/// assistant offer a prompt that macOS will not show again.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn asked_by(marker: Option<&str>, version: &str) -> bool {
-    marker.is_some_and(|m| m.trim() == version)
+    let Some(m) = marker.map(str::trim).filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    m == version || numbers(m).is_some_and(|v| v >= FIRST_SIGNED)
+}
+
+/// "1.2.3" as numbers.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn numbers(v: &str) -> Option<(u64, u64, u64)> {
+    let mut n = v.trim_start_matches('v').split(['-', '+']).next()?.split('.').map(|p| p.parse::<u64>().ok());
+    Some((n.next()??, n.next().unwrap_or(Some(0))?, n.next().unwrap_or(Some(0))?))
 }
 
 /// What `read` gave, read again only once `ttl` has passed since the read kept in `last`.
@@ -368,14 +419,46 @@ mod tests {
     }
 
     #[test]
-    fn after_an_update_screen_recording_is_asked_for_again() {
+    fn after_an_update_from_an_ad_hoc_build_screen_recording_is_asked_for_again() {
         assert!(asked_by(Some("0.4.0"), "0.4.0"));
         assert!(!asked_by(None, "0.4.0"), "never asked");
-        assert!(!asked_by(Some(""), "0.4.0"), "the empty marker an earlier version left");
+        assert!(!asked_by(Some(""), "0.4.9"), "the empty marker an earlier version left");
         assert!(!asked_by(Some("0.3.9"), "0.4.0"));
+        assert!(!asked_by(Some("0.4.7"), "0.4.9"), "the last ad hoc build: moving to the certificate reset the grant");
         // Updated and reset by tccutil: the assistant offers the prompt again, not only System Settings.
         assert_eq!(screen_access(false, asked_by(Some("0.3.9"), "0.4.0")), Access::Unknown);
         assert_eq!(screen_access(false, asked_by(Some("0.4.0"), "0.4.0")), Access::Denied);
+    }
+
+    #[test]
+    fn allow_after_macos_has_answered_opens_the_switch_instead_of_doing_nothing() {
+        assert_eq!(screen_step(true, false), Step::Done);
+        assert_eq!(screen_step(true, true), Step::Done);
+        assert_eq!(screen_step(false, false), Step::Prompt, "the first time macOS shows its prompt");
+        assert_eq!(screen_step(false, true), Step::Settings, "after that it shows nothing");
+        // The row reads the same as the step: a Denied row's Allow goes to System Settings.
+        for allowed in [true, false] {
+            for asked in [true, false] {
+                let row = screen_access(allowed, asked);
+                let step = screen_step(allowed, asked);
+                assert_eq!(row == Access::Granted, step == Step::Done);
+                assert_eq!(row == Access::Denied, step == Step::Settings);
+            }
+        }
+    }
+
+    #[test]
+    fn a_quiet_update_keeps_what_was_asked() {
+        // Both signed with the certificate: macOS kept the answer and will not show its prompt again, so the
+        // assistant must not offer one that does nothing.
+        for asked in ["0.4.8", " 0.4.8 ", "0.5.0", "1.0"] {
+            assert!(asked_by(Some(asked), "0.5.1"), "{asked:?}");
+            assert_eq!(screen_access(false, asked_by(Some(asked), "0.5.1")), Access::Denied, "{asked:?}");
+        }
+        assert!(!asked_by(Some("nonsense"), "0.5.1"));
+        assert_eq!(numbers("v0.4.8-beta.1"), Some((0, 4, 8)));
+        assert_eq!(numbers("1"), Some((1, 0, 0)));
+        assert_eq!(numbers("x.1"), None);
     }
 
     #[test]
