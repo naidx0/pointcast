@@ -47,23 +47,23 @@ function smooth(p: Pt[], lo: number, hi: number): string {
  * room above for tall strokes and a little below for the odd descender). */
 export const VOICE_BASELINE = 0.62;
 
-/** The level rises toward the voice in about this long (a syllable lifts the pen at once)… */
-export const ATTACK_MS = 60;
+/** The drawn level rises toward the voice in about this long: within one frame to the eye (the engine's `loudness`
+ * already rises at once, so this only takes the edge off a single sample)… */
+export const ATTACK_MS = 24;
 /** …and falls back in about this long (the end of a word lets it down gently). */
-export const RELEASE_MS = 200;
-/** One stroke of the pen every this many ms, each this many px wide: broad, slow strokes, handwriting and not a
- * seismograph. The paper moves under the pen at VOICE_DX / VOICE_STEP_MS px per ms. */
-export const VOICE_STEP_MS = 200;
+export const RELEASE_MS = 160;
+/** The voice wave: one stroke (half a wave, up or down) is this many px wide, written in VOICE_STROKE_STEPS samples of
+ * the level, one every VOICE_STEP_MS. The paper moves under the pen at VOICE_DX / (VOICE_STEP_MS * VOICE_STROKE_STEPS)
+ * px per ms, as broad and slow as handwriting; the samples are small, so the pen follows the voice at once. */
 export const VOICE_DX = 13;
+export const VOICE_STROKE_STEPS = 4;
+export const VOICE_STEP_MS = 50;
 
-/** The meter's level (0 to 1 over 50 dB) above the room's floor that still counts as quiet: below it, a flat line. */
-const GATE = 0.06;
-/** Above the gate, this much more (20 dB) draws the tallest strokes. */
-const SPAN = 0.4;
 /** The room's floor follows the level up slowly (a fan that starts is room, not voice) and down fast. */
-const FLOOR_UP_MS = 6000;
+const FLOOR_UP_MS = 10000;
 const FLOOR_DOWN_MS = 150;
-/** Where the floor starts, about -50 dBFS on the meter: a quiet room. */
+/** Where the floor starts, above most rooms (about -42 dBFS): it falls to the room within a moment of quiet, so a room
+ * is never drawn as a voice while the floor finds it. */
 export const FLOOR_START = 0.2;
 
 const unit = (v: number) => (Number.isFinite(v) ? clamp(v, 0, 1) : 0);
@@ -87,96 +87,82 @@ export function trackFloor(floor: number, raw: number, dt: number): number {
   return f + (r - f) * (1 - Math.exp(-dt / (r > f ? FLOOR_UP_MS : FLOOR_DOWN_MS)));
 }
 
-/** How far the pen lifts (0 to 1) for the meter's level over the room's floor. Perceptual: a square-root curve, and a
- * floor of a quarter of the height reached within 1 dB of the gate, so quiet speech is plainly visible and loud speech
- * does not dwarf it. At or below the gate it is 0: silence is a flat line. */
-export function voiceLevel(raw: number, floor = 0): number {
-  const v = (unit(raw) - unit(floor) - GATE) / SPAN;
-  if (!(v > 0)) return 0;
-  return clamp(Math.max(Math.sqrt(Math.min(1, v)), Math.min(0.25, v * 8)), 0, 1);
-}
+/** The meter reads the level over the room's floor, on one fixed scale (the engine's `loudness` is 0 to 1 over 40 dB,
+ * so 0.025 is 1 dB): a quiet voice is plainly visible, a loud one never slams to the top, and nothing adapts to the
+ * loudest word (an adaptive top made every voice look the same height, and a cough squashed the words after it). */
+export type Meter = { floor: number };
+/** Just over the room (1 dB): the room's own flutter stays flat. */
+const METER_GATE = 0.025;
+/** Where the lift is half way to VOICE_TOP, over the gate (4 dB): steep for a quiet voice, flat toward the top. */
+const METER_KNEE = 0.1;
+/** The highest the voice lifts the pen, as a share of the room above the baseline: a shout stays under the top. */
+export const VOICE_TOP = 0.9;
 
-/** The meter adapts to the voice it hears: the room's floor below, the loudest recent speech above, and the level is
- * read inside that window. A soft voice on a weak microphone still swings the line most of its height. */
-export type Meter = { floor: number; peak: number };
-/** Just over the room that still counts as the room (2 dB): below it, a flat line. */
-const METER_GATE = 0.04;
-/** The narrowest window between the gate and the loudest speech (6 dB), so the room's own flutter never fills it. */
-const METER_MIN_SPAN = 0.12;
-/** The loudest recent speech lets go over about this long, so a cough does not squash the words after it. */
-const PEAK_MS = 2000;
+export const meterStart = (): Meter => ({ floor: FLOOR_START });
 
-export const meterStart = (): Meter => ({ floor: FLOOR_START, peak: FLOOR_START + METER_GATE + METER_MIN_SPAN });
-
-/** The meter after `dt` ms with the level at `raw`: the floor as trackFloor follows it; the peak jumps to any louder
- * level and decays toward the narrowest window above the floor. */
+/** The meter after `dt` ms with the level at `raw`: its floor as trackFloor follows the room. */
 export function meterStep(m: Meter, raw: number, dt: number): Meter {
-  const r = unit(raw);
-  const floor = trackFloor(m.floor, r, dt);
-  const rest = floor + METER_GATE + METER_MIN_SPAN;
-  const held = Math.max(unit(m.peak), rest);
-  const peak = dt > 0 ? rest + (held - rest) * Math.exp(-dt / PEAK_MS) : held;
-  return { floor, peak: Math.max(peak, r) };
+  return { floor: trackFloor(m.floor, unit(raw), dt) };
 }
 
-/** How far the line lifts (0 to 1) for `raw` inside the meter's window, on a square-root curve. At or under the gate: 0. */
+/** How far the voice lifts the pen (0 to VOICE_TOP) for `raw` over the meter's floor: 0 within the gate, then a soft
+ * saturating curve, steep for a quiet voice and flat near the top. Never decreases as the voice gets louder. */
 export function meterLevel(m: Meter, raw: number): number {
-  const span = Math.max(METER_MIN_SPAN, unit(m.peak) - unit(m.floor) - METER_GATE);
-  const v = (unit(raw) - unit(m.floor) - METER_GATE) / span;
-  return v > 0 ? Math.sqrt(Math.min(1, v)) : 0;
+  const v = unit(raw) - unit(m.floor) - METER_GATE;
+  return v > 0 ? (VOICE_TOP * v) / (v + METER_KNEE) : 0;
 }
 
-/** Listening: the drawn levels (0 to 1, from meterLevel and smoothLevel, oldest first, one per VOICE_STEP_MS) as a line
- * of handwriting. The pen stays at the right end, where the red dot is, and the paper moves left under it. The strokes
- * take turns: one lifts the pen from the baseline as high as the voice was loud, the next brings it back to the line.
- * Heights vary a little like a hand's, but are fixed per stroke, so the trace does not shimmer as it moves.
- * `first` is the running index of levels[0]; `shift` (0 to 1) is how far the paper has moved since the newest stroke;
- * `live` is the level now, which the pen is moving toward. Silence is a flat line, because a flat line is the honest
- * picture of no sound. */
+/** The older fixed mapping, kept for callers that read the level without a meter: the same curve over `floor`. */
+export function voiceLevel(raw: number, floor = 0): number {
+  return meterLevel({ floor }, raw);
+}
+
+/** Where the voice wave stands at running sample index `t` (fractional) for the drawn level `a` (0 to 1): its height
+ * above the baseline as a share of the room above it. A wave between a tenth of the level and all of it, one stroke up
+ * and one down per wavelength, so the pen is off the line the moment there is voice (never at a crossing) and flat at
+ * silence. */
+export function waveLift(t: number, a: number): number {
+  const v = unit(a);
+  if (v === 0) return 0;
+  return v * (0.55 + 0.45 * Math.sin((Math.PI * t) / VOICE_STROKE_STEPS));
+}
+
+/** Listening: the drawn levels (0 to 1, from meterLevel and smoothLevel, oldest first, one per VOICE_STEP_MS) as one
+ * flowing wave, its height following the voice. The pen stays at the right end, where the red dot is, and the paper
+ * moves left under it. `first` is the running index of levels[0]; `shift` (0 to 1) is how far the paper has moved
+ * since the newest sample; `live` is the level now, which the pen itself shows at once. `dx` is one stroke's width.
+ * Silence is a flat line, because a flat line is the honest picture of no sound. */
 export function voicePath(
   levels: number[],
   box: Box,
   o: { first?: number; shift?: number; live?: number; dx?: number; pad?: number } = {},
 ): { d: string; tip: Pt } {
   const pad = o.pad ?? 4;
-  const dx = Math.max(2, o.dx ?? VOICE_DX);
+  const step = Math.max(0.5, Math.max(2, o.dx ?? VOICE_DX) / VOICE_STROKE_STEPS);
   const first = o.first ?? 0;
   const shift = clamp(Number.isFinite(o.shift) ? (o.shift as number) : 0, 0, 1);
   const base = Math.round(box.h * VOICE_BASELINE);
   const up = Math.max(0, base - pad);
-  const down = Math.max(0, box.h - pad - base);
   const sx = 0.75;
   // The pen: short of the right edge by the dot's radius.
   const tipX = box.w - pad;
-  const strokeY = (k: number, a: number) => {
-    const v = unit(a);
-    if (v === 0) return base;
-    // A lift reaches most of the height, now and then all of it; a return comes back to the line, at most a little below.
-    return k % 2 === 1 ? base - up * v * (0.58 + 0.42 * noise(k * 5 + 1)) : base + down * v * 0.35 * noise(k * 5 + 3);
-  };
+  const y = (t: number, a: number) => base - up * waveLift(t, a);
   const n = levels.length;
   const pts: Pt[] = [];
   for (let j = 0; j < n; j++) {
-    const back = n - 1 - j + shift;
-    // Strokes are a little uneven in width, like a hand's; the newest settles into its place as it leaves the pen.
-    const x = tipX - back * dx + (noise((first + j) * 5 + 4) - 0.5) * 0.36 * dx * Math.min(1, back);
+    const x = tipX - (n - 1 - j + shift) * step;
     if (x < sx) continue;
-    pts.push({ x, y: strokeY(first + j, levels[j]) });
+    pts.push({ x, y: y(first + j, levels[j]) });
   }
-  // Before the first stroke the line is flat from the left edge.
+  // Before the first sample the line is flat from the left edge; a history that runs off the edge continues to it.
   if (!pts.length) pts.push({ x: sx, y: base });
-  else if (pts[0].x > sx + 0.5) {
-    const lead = pts[0].x - dx;
-    pts.unshift(...(lead > sx + 0.5 ? [{ x: sx, y: base }, { x: lead, y: base }] : [{ x: sx, y: base }]));
-  }
-  // The pen itself, on its way from the newest stroke to the next.
-  const from = n ? strokeY(first + n - 1, levels[n - 1]) : base;
+  else if (pts[0].x > sx + 0.5) pts.unshift({ x: sx, y: n > pts.length ? pts[0].y : base });
+  // The pen itself: the level now, where the wave is now.
   const live = o.live ?? (n ? levels[n - 1] : 0);
-  const tip = { x: tipX, y: from + (strokeY(first + n, live) - from) * shift };
-  if (shift > 0.02 || !n) pts.push(tip);
-  else pts[pts.length - 1] = { x: tipX, y: from };
-  const end = pts[pts.length - 1];
-  return { d: smooth(pts, pad, box.h - pad), tip: { x: Math.round(end.x * 10) / 10, y: Math.round(end.y * 10) / 10 } };
+  const tip = { x: tipX, y: y(first + n - 1 + shift, live) };
+  if (n && shift < 0.02) pts[pts.length - 1] = tip;
+  else pts.push(tip);
+  return { d: smooth(pts, pad, box.h - pad), tip: { x: Math.round(tip.x * 10) / 10, y: Math.round(tip.y * 10) / 10 } };
 }
 
 export type LoopsOpts = {

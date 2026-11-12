@@ -6,6 +6,9 @@ import {
   RELEASE_MS,
   VOICE_BASELINE,
   VOICE_DX,
+  VOICE_STEP_MS,
+  VOICE_STROKE_STEPS,
+  VOICE_TOP,
   loopsPath,
   marginPath,
   meterLevel,
@@ -18,6 +21,7 @@ import {
   trackFloor,
   voiceLevel,
   voicePath,
+  waveLift,
 } from "./line.ts";
 
 const box = { w: 240, h: 36 };
@@ -43,7 +47,7 @@ test("speech lifts the trace off the line, and louder speech lifts it further", 
     const ys = pathPoints(voicePath(lv, box).d).map((p) => p.y);
     return Math.max(...ys) - Math.min(...ys);
   };
-  assert.ok(spread(speech) > 14, "the tallest strokes use most of the box");
+  assert.ok(spread(speech) > 12, "a voice uses most of the room above the line: " + spread(speech));
   assert.ok(spread(speech.map((v) => v * 0.3)) < spread(speech));
 });
 
@@ -56,35 +60,58 @@ test("the voice trace stays inside its box at any loudness and any shift, even a
     }
 });
 
-test("broad strokes, not a seismograph: at most one lift per two strokes' width", () => {
-  const loud = Array(60).fill(0.9);
-  const ys = pathPoints(voicePath(loud, box).d).map((p) => p.y);
+test("a steady voice is one smooth wave: no jump between neighbouring points, one crest per two strokes", () => {
+  const steady = Array(160).fill(0.7);
+  const up = base - 4;
+  for (const shift of [0, 0.5]) {
+    const pts = pathPoints(voicePath(steady, box, { first: 11, shift, live: 0.7 }).d);
+    for (let i = 1; i < pts.length; i++)
+      assert.ok(Math.abs(pts[i].y - pts[i - 1].y) <= 0.4 * up, `jump of ${pts[i].y - pts[i - 1].y} at ${pts[i].x}`);
+  }
+  const ys = [];
+  for (let t = 0; t < 400; t += 0.25) ys.push(waveLift(t, 0.7));
   let peaks = 0;
-  for (let i = 1; i < ys.length - 1; i++) if (ys[i] < ys[i - 1] && ys[i] <= ys[i + 1]) peaks++;
-  assert.ok(peaks <= Math.ceil(box.w / (2 * VOICE_DX)) + 1, `${peaks} lifts across ${box.w} px`);
-  assert.ok(peaks >= 4, "and it does write");
+  for (let i = 1; i < ys.length - 1; i++) if (ys[i] > ys[i - 1] && ys[i] >= ys[i + 1]) peaks++;
+  assert.equal(peaks, 400 / (2 * VOICE_STROKE_STEPS), "one crest every two strokes, no ripples");
+  // Strokes as wide as before, the paper as slow: one stroke of VOICE_DX px every 200 ms.
+  assert.equal(VOICE_STEP_MS * VOICE_STROKE_STEPS, 200);
+  assert.equal(VOICE_DX, 13);
 });
 
-test("the paper moves continuously: just before a stroke lands the line is where it is just after", () => {
+test("no randomness in the voice: the same level writes the same height in every stroke", () => {
+  const crests = [];
+  for (let k = 0; k < 20; k++) crests.push(waveLift(k * 2 * VOICE_STROKE_STEPS + VOICE_STROKE_STEPS / 2, 0.6));
+  assert.ok(Math.max(...crests) - Math.min(...crests) < 1e-9, crests.join(" "));
+});
+
+test("the paper moves continuously: just before a sample lands the line is where it is just after", () => {
   const a = 0.8;
   const before = voicePath(speech, box, { first: 3, shift: 0.999, live: a });
   const after = voicePath([...speech, a], box, { first: 3, shift: 0, live: a });
   assert.ok(Math.abs(before.tip.x - after.tip.x) < 0.2 && Math.abs(before.tip.y - after.tip.y) < 0.2, JSON.stringify([before.tip, after.tip]));
-  // A stroke keeps its height as the paper moves: the newest stroke, half a step later, is half a stroke to the left.
-  const p = pathPoints(voicePath(speech.slice(0, 30), box, { first: 0 }).d);
-  const q = pathPoints(voicePath(speech.slice(0, 30), box, { first: 0, shift: 0.5 }).d);
-  const newest = p[p.length - 1];
-  const moved = q[q.length - 4];
-  assert.equal(moved.y, newest.y);
-  // Half a stroke, give or take the hand's unevenness (at most 18 % of a stroke either way).
-  assert.ok(Math.abs(newest.x - moved.x - VOICE_DX / 2) <= 0.18 * VOICE_DX + 0.11);
 });
 
-test("the drawn level rises in about 60 ms, falls in about 200 ms, and never overshoots", () => {
-  const up = smoothLevel(0, 1, ATTACK_MS);
-  assert.ok(up > 0.6 && up < 0.65, String(up));
-  const down = smoothLevel(1, 0, ATTACK_MS);
-  assert.ok(down > 0.7, "falling is slower than rising: " + down);
+test("the pen answers the voice within one frame: a step in the level moves the newest point at once", () => {
+  const quiet = Array(40).fill(0);
+  const frame = 16;
+  // One frame after the voice starts, from silence: the drawn level is already about half way up…
+  const target = meterLevel(meterStart(), 0.5);
+  const env = smoothLevel(0, target, frame);
+  assert.ok(env > 0.45 * target, `one frame: ${env} of ${target}`);
+  // …and the pen, wherever the wave is, has lifted off the line by a visible amount.
+  const up = base - 4;
+  for (const shift of [0, 0.25, 0.5, 0.75]) {
+    const was = voicePath(quiet, box, { first: 9, shift, live: 0 }).tip;
+    const now = voicePath(quiet, box, { first: 9, shift, live: env }).tip;
+    assert.ok(was.y - now.y >= 0.1 * env * up - 0.1 && was.y - now.y > 0.5, `shift ${shift}: ${was.y} to ${now.y}`);
+  }
+  // Within one sample's time it is all but there, and it falls over a few samples, not at once.
+  assert.ok(smoothLevel(0, 1, VOICE_STEP_MS) > 0.85);
+  assert.ok(smoothLevel(1, 0, VOICE_STEP_MS) > 0.6);
+});
+
+test("the drawn level eases and never overshoots", () => {
+  assert.ok(Math.abs(smoothLevel(0, 1, ATTACK_MS) - (1 - Math.exp(-1))) < 0.01);
   assert.ok(Math.abs(smoothLevel(1, 0, RELEASE_MS) - Math.exp(-1)) < 0.01);
   let v = 0;
   for (let t = 0; t < 1000; t += 16) {
@@ -96,20 +123,27 @@ test("the drawn level rises in about 60 ms, falls in about 200 ms, and never ove
   assert.equal(smoothLevel(0.3, 1, 0), 0.3, "no time, no change");
 });
 
-test("quiet speech is plainly visible, silence is flat, and the mapping only grows with the voice", () => {
-  const floor = 0.2;
-  assert.equal(voiceLevel(floor, floor), 0, "the room is silence");
-  assert.equal(voiceLevel(floor + 0.05, floor), 0, "a little over the room is still silence");
-  assert.equal(voiceLevel(0, floor), 0);
-  assert.ok(voiceLevel(floor + 0.1, floor) >= 0.25, "quiet speech lifts the pen a quarter of the way at least");
-  assert.ok(voiceLevel(floor + 0.3, floor) > 0.6);
-  assert.equal(voiceLevel(1, floor), 1);
+test("honest to the voice: a quiet one moves the line a fifth of its room, a loud one stays under the top, the mapping only grows", () => {
+  const m = { floor: 0.02 };
+  const up = base - 4;
+  const lift = (raw) => {
+    const lv = Array(40).fill(meterLevel(m, raw));
+    const ys = pathPoints(voicePath(lv, box, { live: lv[0] }).d).map((p) => p.y);
+    return (base - Math.min(...ys)) / up;
+  };
+  assert.ok(lift(0.08) >= 0.2, "quiet: " + lift(0.08));
+  assert.ok(lift(1) < 0.95 && meterLevel(m, 1) <= VOICE_TOP, "loud: " + lift(1));
+  // Normal speech, 8 to 16 dB over the room (0.2 to 0.4 on the engine's scale), uses roughly 30 to 80 % of the room.
+  assert.ok(meterLevel(m, 0.22) >= 0.3 && meterLevel(m, 0.42) <= 0.82, `${meterLevel(m, 0.22)} ${meterLevel(m, 0.42)}`);
+  assert.equal(meterLevel(m, 0.02), 0, "the room is silence");
+  assert.equal(meterLevel(m, 0.045), 0, "a dB over the room is still silence");
   let last = 0;
   for (let r = 0; r <= 1.0001; r += 0.01) {
-    const v = voiceLevel(r, floor);
-    assert.ok(v >= last - 1e-9 && v <= 1, `${r}: ${v}`);
+    const v = meterLevel(m, r);
+    assert.ok(v >= last - 1e-9 && v <= VOICE_TOP, `${r}: ${v}`);
     last = v;
   }
+  assert.equal(voiceLevel(0.3, 0.02), meterLevel(m, 0.3));
 });
 
 test("the room's floor follows the level down fast and up slowly", () => {
@@ -148,7 +182,7 @@ test("the resting stroke is short and level", () => {
   assert.ok(pts[1].x - pts[0].x <= 16.1);
 });
 
-// The adaptive meter: 50 ms frames, the room at 0.2 (about -42 dBFS), a soft voice 5 to 7 dB over it.
+// The meter over a room: 50 ms frames, the room at 0.1 (about -46 dBFS) with its own flutter, a voice over it.
 const run = (m, levels) => {
   const out = [];
   for (const r of levels) {
@@ -157,25 +191,20 @@ const run = (m, levels) => {
   }
   return { m, out };
 };
-const soft = (n) => Array.from({ length: n }, (_, i) => (i % 6 < 4 ? 0.3 + (i % 3) * 0.02 : 0.21));
-const room = (n) => Array.from({ length: n }, (_, i) => 0.2 + ((i * 7) % 5) * 0.004);
+const room = (n) => Array.from({ length: n }, (_, i) => 0.1 + ((i * 7) % 5) * 0.004);
+const talk = (n, loud) => Array.from({ length: n }, (_, i) => (i % 6 < 4 ? 0.1 + loud + (i % 3) * 0.02 : 0.11));
 
-test("a soft voice on a weak microphone swings the line more than half its height", () => {
-  const { out } = run(meterStart(), soft(60));
-  assert.ok(Math.max(...out) > 0.75, `peak lift ${Math.max(...out)}`);
-  const spoken = out.filter((v, i) => i % 6 < 4);
-  assert.ok(spoken.reduce((a, v) => a + v, 0) / spoken.length > 0.5, "most syllables lift it past half");
+test("silence is flat: the room's flutter never lifts the pen, before speech or after it", () => {
+  const { m, out } = run(meterStart(), room(80));
+  assert.deepEqual(out.slice(10), out.slice(10).map(() => 0));
+  const after = run(run(m, talk(60, 0.3)).m, room(40)).out;
+  assert.deepEqual(after.slice(4), after.slice(4).map(() => 0));
 });
 
-test("silence after speech is a flat line", () => {
-  const { m } = run(meterStart(), soft(60));
-  const { out } = run(m, room(40));
-  assert.deepEqual(out.slice(4), out.slice(4).map(() => 0));
-});
-
-test("a loud burst does not squash the soft words after it", () => {
-  const { m } = run(meterStart(), [...soft(12), 0.9, 0.9, 0.9, 0.9]);
-  const { out } = run(m, soft(80));
-  const late = out.slice(-20).filter((v, i) => i % 6 < 4);
-  assert.ok(Math.max(...late) > 0.55, `late lift ${Math.max(...late)}`);
+test("a loud word does not squash the quiet words after it, and quiet words stay smaller than loud ones", () => {
+  const { m } = run(run(meterStart(), room(40)).m, [0.9, 0.9, 0.9, 0.9]);
+  const soft = run(m, talk(60, 0.1)).out.filter((v, i) => i % 6 < 4);
+  assert.ok(Math.min(...soft) > 0.3, `soft after loud ${Math.min(...soft)}`);
+  const loud = run(m, talk(60, 0.4)).out.filter((v, i) => i % 6 < 4);
+  assert.ok(Math.max(...soft) < Math.min(...loud), "a quiet voice draws lower than a loud one");
 });
