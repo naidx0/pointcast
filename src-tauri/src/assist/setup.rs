@@ -384,3 +384,14 @@ mod on_this_computer {
         }
     }
 }
+
+#[cfg(test)]
+mod really {
+    /// Runs the Update button's own path for `POINTCAST_SETUP_ID`. Changes this computer; run by hand only.
+    #[test]
+    #[ignore]
+    fn update_for_real() {
+        let id = std::env::var("POINTCAST_SETUP_ID").expect("POINTCAST_SETUP_ID");
+        println!("result: {:?}", super::setup(&id, super::Job::Update));
+    }
+}

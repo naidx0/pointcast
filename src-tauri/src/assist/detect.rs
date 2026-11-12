@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(judge((0, 200, 1)), Ok(()));
         assert_eq!(judge((1, 0, 0)), Ok(()));
         let why = judge((0, 163, 9)).unwrap_err();
-        assert!(why.contains("0.164.0") && why.contains("0.163.9") && why.contains("Update Codex"), "{why}");
+        assert!(why.contains("0.164.0") && why.contains("0.163.9") && why.ends_with("Choose Update."), "the line points at the one-click Update: {why}");
     }
 
     #[test]
