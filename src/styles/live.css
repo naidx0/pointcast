@@ -90,7 +90,7 @@ html.win .live-hb:not(.stop) {
   padding: 16px;
 }
 .live-row.capped {
-  padding-bottom: 10px;
+  padding-bottom: 6px;
 }
 .live-row .live-hb {
   width: 28px;
@@ -132,16 +132,33 @@ html.win .live-hb:not(.stop) {
   color: var(--live-quiet);
 }
 .live-cap {
-  margin: 0;
-  padding: 0 16px 14px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 24px;
+  margin: 0 0 10px;
+  padding: 0 16px;
   font-size: var(--fs-caption);
   line-height: 16px;
   letter-spacing: 0.01em;
   color: var(--live-quiet);
+}
+.live-cap-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Mark up, while the picture can still change: the one thing on the line that is pressed, so it takes the ink. */
+.live-cap .live-markup {
+  color: var(--live-ink);
+}
+.live-cap .live-markup::before {
+  content: "·";
+  margin-right: 6px;
+  margin-left: -4px;
+  color: var(--live-faint);
 }
 
 /* —— The question as asked, once asked: one line, the rest on hover or a click —— */

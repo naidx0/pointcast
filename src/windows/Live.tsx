@@ -380,8 +380,12 @@ export function Live() {
           )}
         </div>
         {cap ? (
-          <p className="live-cap live-in" title={cap}>
-            {cap}
+          <p className="live-cap live-in">
+            <span className="live-cap-text" title={cap}>
+              {cap}
+            </span>
+            {/* Only while the picture has not left the computer; a refusal has nowhere to be said in one row. */}
+            {v.canDrop ? <MarkUpControl marked={!!v.thumb?.marked} /> : null}
           </p>
         ) : null}
         {bigPic}
