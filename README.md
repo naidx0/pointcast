@@ -1,6 +1,9 @@
-<p align="center"><img src="src-tauri/icons/128x128@2x.png" width="112" height="112" alt="Pointcast icon: Pip, a white P with two eyes whose stem is a speech-bubble tail, on a blue tile"></p>
-
-<h1 align="center">Pointcast</h1>
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/pointcast-lockup-dark.png">
+    <img src="docs/brand/pointcast-lockup-light.png" width="300" alt="Pointcast">
+  </picture>
+</h1>
 
 <p align="center"><b>Talk, point, paste.</b><br>Show an AI what you mean instead of describing it.</p>
 
