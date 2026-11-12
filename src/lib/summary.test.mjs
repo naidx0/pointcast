@@ -49,7 +49,7 @@ test("the counts line says what was kept and what was dropped for want of a sour
   const s = normalizeSummary(raw);
   assert.deepEqual([s.kept, s.dropped, s.model], [3, 1, ""], "a model the engine leaves null is none");
   assert.equal(summaryView(s, "9 kept, 1 dropped: no source", []).foot, "9 kept, 1 dropped: no source · ChatGPT", "the engine's line wins");
-  assert.equal(summaryView(s, "", []).foot, "3 kept, 1 dropped: no source · ChatGPT", "else the same words from the summary's counts");
+  assert.equal(summaryView(s, "", []).foot, "3 points, every quote found in the session; 1 left out, its quote was not · ChatGPT", "else the same words from the summary's counts");
 });
 
 test("Copy as text is the title, each group's points with their turn and whose words, and the foot", () => {
@@ -62,7 +62,7 @@ test("Copy as text is the title, each group's points with their turn and whose w
   assert.equal(lines[4], "  AI: “It means not B: every case where B does not happen.”");
   assert.ok(text.includes(nl + nl + "Still open" + nl + "- Whether multiplying"));
   assert.ok(text.includes("  You: “and not just multiply the two?”"));
-  assert.ok(text.endsWith("5 kept, 1 dropped: no source · ChatGPT"));
+  assert.ok(text.endsWith("5 points, every quote found in the session; 1 left out, its quote was not · ChatGPT"));
 });
 
 test("the summary state follows its session's events only; working keeps the one before until done replaces it", () => {
