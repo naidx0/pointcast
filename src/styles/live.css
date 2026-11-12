@@ -3,6 +3,10 @@
    warn is a wait that ran long or a failure. One animation per state; a change of state is a 180 ms fade. */
 
 .live {
+  /* The panel reads in Geist, as the concepts did; the system font stands in until it loads and wherever it lacks a
+     glyph. Settings, Home and the dictation capsule stay in the system font. */
+  --font: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
   --pad: 18px;
   --live-ink: var(--label);
   --live-quiet: var(--label-2);
@@ -1467,7 +1471,7 @@ html.live-preview #root {
   padding: 12px;
 }
 html.live-preview .live {
-  width: 452px;
+  width: 500px;
   height: auto;
   max-height: 60vh;
   border-radius: 12px;
@@ -1496,7 +1500,7 @@ html.live-preview .live.closed {
 }
 /* As the window asks for once an answer shows (panelHeight in live.ts). */
 html.live-preview .live.answered {
-  min-height: min(320px, 60vh);
+  min-height: min(400px, 60vh);
 }
 /* &wall=light|dark: a busy desktop behind a panel with its material (acrylic's blur, then the tint), to check the text
    keeps its contrast on any wallpaper. */

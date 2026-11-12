@@ -90,7 +90,7 @@
         "label": "live",
         "title": "Pointcast",
         "url": "live.html",
-        "width": 452,
+        "width": 500,
         "height": 120,
         "visible": false,
         "decorations": false,

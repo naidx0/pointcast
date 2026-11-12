@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import { Live } from "./windows/Live";
 import { preview, startLivePreview } from "./lib/api";
 import { startPlatform, startTheme } from "./lib/theme";
+// Geist (OFL), bundled: the Ask panel's one typeface, 32 KB for Latin, loaded from the app and never the network.
+import "@fontsource-variable/geist/wght.css";
 import "./styles.css";
 import "./styles/live.css";
 
