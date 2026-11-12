@@ -15,10 +15,12 @@ import {
   chosenRoute,
   consentText,
   customCheck,
+  effortView,
   defaultModel,
   goesLine,
   groups,
   hostOf,
+  installHelp,
   isHere,
   modelLabel,
   needsConsent,
@@ -46,6 +48,7 @@ const route = (o = {}) => ({
   base: "",
   consented: false,
   models: [],
+  efforts: [],
   plan: null,
   email: null,
   adds: [],
@@ -73,7 +76,7 @@ test("each state offers the action that fits it", () => {
   assert.deepEqual(act({ state: "ready" }), ["use", "Use"]);
   assert.deepEqual(act({ state: "signed_out" }), ["sign_in", "Sign in"]);
   assert.deepEqual(act({ kind: "key", id: "openai", state: "no_key" }), ["add_key", "Add key"]);
-  assert.deepEqual(act({ state: "not_installed" }), ["get", "How to get it"]);
+  assert.deepEqual(act({ state: "not_installed" }), ["get", "Install"]);
   assert.deepEqual(act({ state: "too_old" }), ["get", "How to update"]);
   assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_running" }), ["check", "Check again"]);
   assert.deepEqual(act({ state: "unsupported" }), [null, null]);
@@ -114,6 +117,7 @@ test("Codex's help is OpenAI's own one-line install; the others say where to get
   assert.equal(ollama.help.command, null);
   assert.match(ollama.help.text, /ollama\.com/);
   assert.equal(routeView(route({ state: "ready" }), none).help, null);
+  assert.match(get.account, /Sign in/, "then the account, through Codex's own sign-in");
 });
 
 test("forget is offered only when there is something to forget", () => {
@@ -145,12 +149,13 @@ test("an agent shows the engine's line as is, offers Use when installed, Check a
   const gemini = routeView(byId(a, "gemini-cli"), a);
   assert.deepEqual([gemini.name, gemini.line, gemini.action, gemini.label], ["Gemini", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.", "use", "Use"]);
   const copilot = routeView(byId(a, "copilot"), a);
-  assert.deepEqual([copilot.line, copilot.action, copilot.label, copilot.help], [
-    "GitHub Copilot CLI is not installed on this computer. Install it first.",
-    "check",
-    "Check again",
-    null,
-  ]);
+  assert.deepEqual([copilot.line, copilot.action, copilot.label], ["GitHub Copilot CLI is not installed on this computer. Install it first.", "get", "Install"]);
+  assert.deepEqual([copilot.help.command, copilot.help.page], ["npm install -g @github/copilot", "https://github.com/github/copilot-cli"]);
+  assert.match(copilot.help.account, /sign in/);
+  for (const id of ["gemini-cli", "copilot", "opencode", "claude-code"]) {
+    const h = installHelp({ id, name: id });
+    assert.ok(h.command.startsWith("npm install -g ") && h.page.startsWith("https://") && h.account, id);
+  }
   assert.equal(routeView(route({ kind: "agent", id: "opencode", name: "OpenCode", state: "unsupported", line: "OpenCode is installed, but…" }), none).action, null);
   assert.equal(defaultModel(byId(a, "gemini-cli")), null, "an agent picks its own model");
   // Chosen, it says where the words go, with the destination the engine names.
@@ -321,7 +326,7 @@ test("a route starts on a model that can see pictures, and one that cannot is ma
 });
 
 test("a reply of any shape reads as a whole one", () => {
-  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, offline_only: false, providers: [] });
+  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, effort: null, offline_only: false, providers: [] });
   const a = normalizeAssist({
     chosen: "gone",
     providers: [{ id: "x", kind: "local", state: "weird" }, { id: "", kind: "key" }, { id: "y", kind: "nope" }, { id: "z", kind: "key", models: [{ id: "m" }, null] }],
@@ -411,4 +416,17 @@ test("Only on this computer flips at once and says what it did in one quiet line
   assert.equal(withOffline(on, false).providers.length, visibleRoutes(withOffline(on, false)).length);
   assert.equal(offlineSaid(true), "On. Only AIs on this computer are shown and asked.");
   assert.equal(offlineSaid(false), "Off. Every AI is shown again.");
+});
+
+test("the effort control shows only for a route that offers one, starting where the route starts", () => {
+  let a = previewAssist("codex-ready");
+  const codex = byId(a, "codex");
+  assert.deepEqual(effortView(a, codex), { value: "low", options: [["low", "Low"], ["medium", "Medium"], ["high", "High"]] });
+  a = previewApply(a, { cmd: "effort", effort: "high" });
+  assert.equal(effortView(a, codex).value, "high");
+  assert.equal(typeof previewApply(a, { cmd: "effort", effort: "extreme" }), "string");
+  const key = previewAssist("key");
+  assert.equal(effortView(key, chosenRoute(key)), null, "a key route offers no effort: no control");
+  assert.equal(effortView(a, null), null);
+  assert.deepEqual(normalizeAssist({ effort: "medium", providers: [{ id: "codex", kind: "plan", efforts: ["low", 3, "high"] }] }).providers[0].efforts, ["low", "high"]);
 });

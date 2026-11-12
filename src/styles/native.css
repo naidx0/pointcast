@@ -2818,3 +2818,73 @@ html.win .undo-btn {
   font-weight: 500;
   color: rgba(255, 255, 255, 0.6);
 }
+
+/* —— Settings › AI: each route's own mark in a small rounded tile, the chosen AI and its model at the top. —— */
+.brand-tile {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--sep);
+  color: var(--label);
+}
+.brand-tile.mono span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-2);
+}
+.ai-route .brand-tile,
+.ai-now .brand-tile {
+  margin-right: 12px;
+}
+.ai-route.checking .brand-tile {
+  opacity: 0.55;
+}
+.ai-now .lbl {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.ai-now-model {
+  font-weight: 600;
+  color: var(--label);
+}
+.ai-now-model::before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--label-3);
+  font-weight: 400;
+}
+.ai-plan {
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--label-2);
+  box-shadow: inset 0 0 0 0.5px var(--label-3);
+}
+.ai-account {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+}
+.ai-account .link {
+  font: inherit;
+  font-size: 12px;
+  color: var(--label-2);
+}
+.ai-account .link:hover {
+  color: var(--label);
+}
+.ai-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.ai-group-title h2 {
+  margin: 0;
+  font: inherit;
+}

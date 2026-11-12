@@ -489,6 +489,12 @@ async fn assist_sign_in(app: AppHandle, id: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The thinking effort for the chosen AI, where it offers one (Codex: low, medium, high).
+#[tauri::command]
+fn assist_effort(svc: tauri::State<'_, Arc<App>>, effort: String) -> Result<(), String> {
+    assist_change(&svc, |s| assist::catalog::set_effort(s, &effort))
+}
+
 #[tauri::command]
 fn assist_offline_only(svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
     assist_change(&svc, |s| {
@@ -2301,6 +2307,7 @@ pub fn run() {
             assist_key_delete,
             assist_sign_in,
             assist_offline_only,
+            assist_effort,
             platform_info,
         ])
         .setup(move |app| {
@@ -2311,7 +2318,17 @@ pub fn run() {
             tray::setup(&handle, &svc)?;
             let held = Arc::new(assist::catalog::Held::new(assist_home()));
             app.manage(held.clone());
-            app.manage(Arc::new(assist::catalog::Survey::default()));
+            // Which AIs this computer has is looked at once, at launch; Refresh in Settings › AI looks again.
+            let survey = Arc::new(assist::catalog::Survey::default());
+            app.manage(survey.clone());
+            {
+                let (h, s2, v2, hd) = (handle.clone(), svc.clone(), survey.clone(), held.clone());
+                let told = Arc::new(move || {
+                    let s = s2.settings.lock().unwrap().clone();
+                    let _ = h.emit(ASSIST_PROVIDERS, v2.now(&s, assist::vault::has, hd.held()));
+                });
+                survey.refresh(assist::catalog::probes(held.clone(), assist_home()), false, told);
+            }
             app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);

@@ -13,6 +13,7 @@ import {
   agentRemove,
   agentsStatus,
   assistChoose,
+  assistEffort,
   assistForget,
   assistKeySet,
   assistModels,
@@ -67,16 +68,19 @@ import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage 
 import { recentRows, type RecentRow } from "@/lib/home";
 import { RECENT_SESSIONS, sessionRows, type SessionRow } from "@/lib/sessions";
 import {
+  CODEX_SIGN_OUT,
   CUSTOM,
   askReady,
   chosenRoute,
   consentText,
   customCheck,
   defaultModel,
+  effortView,
   groups,
   hostOf,
   isHere,
   modelLabel,
+  modelName,
   needsConsent,
   needsConsentAt,
   nowView,
@@ -878,12 +882,24 @@ function Ai() {
   const quick = chosen?.models ?? [];
   const list = found && found.id === chosen?.id && found.list.length ? found.list : quick;
   const model = chosen ? (a.model ?? defaultModel(chosen)) : null;
-  const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: model, images: true }, ...list] : list;
+  const named = chosen ? modelName({ model }, { models: list }) : null;
+  const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: named ?? model, images: true }, ...list] : list;
+  const effort = effortView(a, chosen);
   return (
     <>
       <div className="group">
-        <Row label={now.title} sub={now.line}>
-          {chosen && chosen.kind !== "agent" ? (
+        <div className="row ai-now">
+          {chosen ? <BrandTile id={chosen.id} name={chosen.name} size={24} /> : null}
+          <div className="grow">
+            <div className="lbl">
+              {now.title}
+              {named ? <span className="ai-now-model">{named}</span> : null}
+            </div>
+            <div className="sub">{now.line}</div>
+          </div>
+        </div>
+        {chosen && chosen.kind !== "agent" ? (
+          <Row label="Model" sub="The models your plan or key offers. Words only means it cannot see your pictures.">
             <select
               className="field ai-model"
               aria-label="Model"
@@ -901,8 +917,13 @@ function Ai() {
                 <option value="">{finding ? "Finding models…" : "No models found"}</option>
               )}
             </select>
-          ) : null}
-        </Row>
+          </Row>
+        ) : null}
+        {effort ? (
+          <Row label="Thinking" sub="Low answers soonest. High thinks longer before it answers.">
+            <Seg label="Thinking" value={effort.value} options={effort.options} set={(v) => run("effort", () => assistEffort(v))} />
+          </Row>
+        ) : null}
         <Row
           label="Only on this computer"
           sub={
@@ -916,9 +937,16 @@ function Ai() {
           <Toggle label="Only on this computer" on={a.offline_only} set={offline} />
         </Row>
       </div>
-      {groups(a).map((g) => (
+      {groups(a).map((g, i) => (
         <Fragment key={g.kind}>
-          <h2 className="group-title">{g.title}</h2>
+          <div className="group-title ai-group-title">
+            <h2>{g.title}</h2>
+            {i === 0 ? (
+              <button type="button" className="btn plain" disabled={busy === "refresh"} onClick={() => run("refresh", () => Promise.resolve(), true)} title="Look again for the AIs on this computer">
+                {busy === "refresh" ? "Looking…" : "Refresh"}
+              </button>
+            ) : null}
+          </div>
           <div className="group routes">
             {g.routes.map((v) => {
               const p = a.providers.find((x) => x.id === v.id)!;
@@ -954,6 +982,7 @@ function Ai() {
                   more={open}
                   form={form}
                   act={() => act(v, p)}
+                  switchAccount={() => run(p.id, () => assistSignIn(p.id), true)}
                   check={() => run(p.id, () => Promise.resolve(), true)}
                   forget={() => run(p.id, () => assistForget(p.id))}
                 />
@@ -989,8 +1018,10 @@ function RouteRow(props: {
   act: () => void;
   check: () => void;
   forget: () => void;
+  switchAccount: () => void;
 }) {
   const { v, busy, err, more } = props;
+  const [out, setOut] = useState(false);
   const [sure, setSure] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -1007,10 +1038,24 @@ function RouteRow(props: {
   );
   const cmd = v.help?.command;
   return (
-    <div className="row ai-route">
+    <div className={`row ai-route${v.checking ? " checking" : ""}`}>
+      <BrandTile id={v.id} name={v.name} />
       <div className="grow">
-        <div className="lbl">{v.name}</div>
+        <div className="lbl">
+          {v.name}
+          {v.account?.plan ? <span className="ai-plan">{v.account.plan}</span> : null}
+        </div>
         <div className="sub">{line}</div>
+        {v.account && !err ? (
+          <div className="ai-account">
+            <button type="button" className="link" disabled={busy} onClick={props.switchAccount}>
+              {busy ? "Finish in your browser" : "Use another account"}
+            </button>
+            <button type="button" className="link" aria-expanded={out} onClick={() => setOut((o) => !o)}>
+              Sign out
+            </button>
+          </div>
+        ) : null}
       </div>
       {v.chosen ? (
         <span className="ai-inuse">
@@ -1045,9 +1090,20 @@ function RouteRow(props: {
         </button>
       ) : null}
       {more === "key" ? props.form : null}
+      {out && v.account ? (
+        <div className="ai-more">
+          <p className="ai-help">Sign out in Codex itself: run this in a terminal, then Refresh. Pointcast never touches your sign-in.</p>
+          <div className="ai-help-row">
+            <div className="ai-cmd">
+              <code>{CODEX_SIGN_OUT}</code>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {more === "help" && v.help ? (
         <div className="ai-more">
           <p className="ai-help">{v.help.text}</p>
+          {v.help.account ? <p className="ai-help">{v.help.account}</p> : null}
           <div className="ai-help-row">
             {cmd ? (
               <div className="ai-cmd">
@@ -1066,6 +1122,11 @@ function RouteRow(props: {
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
+            ) : null}
+            {v.help.page ? (
+              <button type="button" className="btn plain" onClick={() => (inTauri ? openUrl(v.help!.page!) : window.open(v.help!.page!, "_blank")) && undefined}>
+                Official page
+              </button>
             ) : null}
             <button type="button" className="btn" disabled={busy} onClick={props.check}>
               {busy ? "Checking…" : "Check again"}
@@ -1285,7 +1346,7 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
           type="button"
           className="btn"
           disabled={!custom}
-          onClick={() => patch(Object.fromEntries(ACTIONS.map((a) => [HOTKEY_FIELD[a.id], null])))}
+          onClick={() => patch(Object.fromEntries(all.map((a) => [HOTKEY_FIELD[a.id], null])))}
         >
           Restore Defaults
         </button>

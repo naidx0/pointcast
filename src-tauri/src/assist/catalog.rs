@@ -109,6 +109,8 @@ pub struct Row {
     pub base: Option<String>,
     pub consented: bool,
     pub models: Vec<Model>,
+    /// The thinking efforts the route offers to choose from, lowest first; none where it offers no choice.
+    pub efforts: Vec<&'static str>,
     /// Files the AI's own app sends along with every question (Codex: the person's own instructions file).
     pub adds: Vec<String>,
     /// The plan Codex says the person is signed in with ("plus"), and the address its `account/read` names: shown
@@ -121,6 +123,7 @@ pub struct Row {
 pub struct List {
     pub chosen: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub offline_only: bool,
     pub providers: Vec<Row>,
 }
@@ -201,9 +204,6 @@ pub struct Probe {
     pub run: Box<dyn FnOnce() -> Patch + Send>,
 }
 
-/// A round of probes is asked again only after this long, or when the person asks (Check again, a sign-in).
-pub const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// The routes as last seen, kept for the session: the pane draws from it at once and every probe fills in its own
 /// routes as it answers. Before the first answer a route says it is being checked; a key is read from the store each
 /// time, which is quick.
@@ -243,13 +243,13 @@ impl Survey {
         self.out.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
-    /// Start `probes`, each on its own thread, unless a round is out or the last one began less than `FRESH_FOR` ago
-    /// (`force` asks anyway). `told` is called after each probe's answer is in. Returns whether a round started.
+    /// Start `probes`, each on its own thread: once per run of the app (at launch), and again only when the person
+    /// asks (Refresh, Check again, a sign-in: `force`); never on a timer and never because the pane opened. `told` is
+    /// called after each probe's answer is in. Returns whether a round started.
     pub fn refresh(self: &Arc<Self>, probes: Vec<Probe>, force: bool, told: Arc<dyn Fn() + Send + Sync>) -> bool {
         {
             let mut began = self.began.lock().unwrap();
-            let fresh = began.is_some_and(|t| t.elapsed() < FRESH_FOR);
-            if self.busy() || (fresh && !force) {
+            if self.busy() || (began.is_some() && !force) {
                 return false;
             }
             *began = Some(std::time::Instant::now());
@@ -438,10 +438,38 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                 _ => (r.goes_to.to_owned(), None),
             };
             let available = !(r.id == CLAUDE_CODE && !s.assist_claude_code_ok);
-            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, adds, plan, email }
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email }
         })
         .collect();
-    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), offline_only: s.assist_offline_only, providers: rows }
+    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows }
+}
+
+/// The efforts Codex lets a question be asked with, lowest first; the first is what it starts with.
+pub const CODEX_EFFORTS: &[&str] = &["low", "medium", "high"];
+
+/// The thinking efforts route `id` offers; none for a route that offers no choice.
+pub fn efforts_of(id: &str) -> &'static [&'static str] {
+    if id == codex::ID {
+        CODEX_EFFORTS
+    } else {
+        &[]
+    }
+}
+
+/// The effort saved for the chosen route, if that route offers it.
+pub fn effort_of(s: &Settings) -> Option<String> {
+    let offered = efforts_of(s.assist_provider.as_deref().unwrap_or_default());
+    s.assist_effort.clone().filter(|e| offered.contains(&e.as_str()))
+}
+
+/// Save the thinking effort for the chosen route; refused when it offers no such choice.
+pub fn set_effort(s: &mut Settings, effort: &str) -> Result<(), String> {
+    let id = s.assist_provider.as_deref().unwrap_or_default();
+    if !efforts_of(id).contains(&effort) {
+        return Err(format!("{} offers no \"{effort}\" effort.", route(id).map_or("That AI", |r| r.name)));
+    }
+    s.assist_effort = Some(effort.to_owned());
+    Ok(())
 }
 
 /// Choose the AI `id` and its `model`. Refused unless the person agrees now (`consent`) or agreed before to this
@@ -548,6 +576,8 @@ pub struct Picked {
     pub offline_only: bool,
     /// The address agreed to, for the other service.
     pub base: Option<String>,
+    /// The thinking effort chosen, where the route offers one.
+    pub effort: Option<String>,
 }
 
 /// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
@@ -566,7 +596,7 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
         return Err(OFFLINE_ONLY.into());
     }
     let base = if r.id == CUSTOM { custom_base(s) } else { None };
-    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base })
+    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base, effort: effort_of(s) })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -574,11 +604,7 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
     let r = route(p.id).ok_or(UNKNOWN)?;
     let model = p.model.as_deref().unwrap_or_default();
     match r.way {
-        Way::Plan => {
-            let mut c = Codex::new(home.join("codex"));
-            c.model = p.model.clone();
-            Ok(Arc::new(c))
-        }
+        Way::Plan => Ok(Arc::new(codex_for(p, home))),
         Way::Agent => match acp::agent(r.id) {
             Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)))),
             // Claude through Claude Code. A `Picked` that names it exists only with the owner's OK: `picked` refuses
@@ -589,6 +615,16 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
         Way::Key => Ok(Arc::new(keyed(r, p.base.as_deref(), model)?.provider(p.offline_only)?)),
         Way::Local => Ok(Arc::new(openai::local(r.id, r.base, model).provider(p.offline_only)?)),
     }
+}
+
+/// Codex for `p`: its model, and the effort chosen (low, Codex's start here, when none is).
+pub fn codex_for(p: &Picked, home: &Path) -> Codex {
+    let mut c = Codex::new(home.join("codex"));
+    c.model = p.model.clone();
+    if let Some(e) = &p.effort {
+        c.effort = Some(e.clone());
+    }
+    c
 }
 
 /// The service behind a key route: Anthropic's own API, the address typed for the other service (with a key only if
@@ -728,7 +764,7 @@ mod tests {
         // Remembered: the next choice of it needs no new yes, and Codex takes its own default model.
         assert_eq!(choose(&mut s, "openai", Some("gpt-y".into()), false, 9), Ok(()));
         assert_eq!(s.assist_consent.len(), 1);
-        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None }));
+        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None, effort: None }));
         assert_eq!(choose(&mut s, "codex", None, true, 10), Ok(()));
         assert_eq!(s.assist_model, None);
         assert_eq!(choose(&mut s, "nope", None, true, 1), Err(UNKNOWN.into()));
@@ -760,7 +796,7 @@ mod tests {
         assert_eq!(choose(&mut s, "ollama", Some("llava".into()), true, 2), Ok(()));
         assert!(held.provider(&s).is_ok());
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None };
+        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None, effort: None };
         assert_eq!(build(&remote, Path::new("unused")).err(), Some(OFFLINE_ONLY.into()));
     }
 
@@ -895,7 +931,7 @@ mod tests {
         assert_eq!(build(&p, Path::new("unused")).map(|b| b.id()), Ok("gemini-cli"));
         let held = Held::with(Box::new(|_| Err("unused".into())));
         assert_eq!(models_of("opencode", &s, &held, Path::new("unused")), Ok(Vec::new()));
-        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None };
+        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None, effort: None };
         assert_eq!(build(&claude_api, Path::new("unused")).map(|b| b.id()), Ok("anthropic"));
         s.assist_offline_only = true;
         assert_eq!(choose(&mut s, "copilot", None, true, 2), Err(OFFLINE_ONLY.into()));
@@ -1021,8 +1057,25 @@ mod tests {
         }
         assert_eq!(state(&survey.now(&s, |_| false, None), "codex"), Status::Ready);
         // Kept for the session: a new round only when asked or once it is stale.
-        assert!(!survey.refresh(Vec::new(), false, Arc::new(|| ())));
+        assert!(!survey.refresh(Vec::new(), false, Arc::new(|| ())), "once per run: opening the pane asks nothing");
         assert!(survey.refresh(Vec::new(), true, Arc::new(|| ())));
+    }
+
+    #[test]
+    fn only_codex_offers_an_effort_and_the_choice_is_kept_for_it_alone() {
+        let mut s = Settings::default();
+        choose(&mut s, "codex", None, true, 1).unwrap();
+        assert_eq!(picked(&s).unwrap().effort, None);
+        assert_eq!(set_effort(&mut s, "high"), Ok(()));
+        assert_eq!((picked(&s).unwrap().effort.as_deref(), providers(&s, &Look::default()).effort.as_deref()), (Some("high"), Some("high")));
+        assert!(set_effort(&mut s, "extreme").is_err());
+        let list = providers(&s, &Look::default());
+        for r in &list.providers {
+            assert_eq!(r.efforts.is_empty(), r.id != codex::ID, "{}", r.id);
+        }
+        choose(&mut s, "ollama", Some("m".into()), true, 2).unwrap();
+        assert_eq!((picked(&s).unwrap().effort, providers(&s, &Look::default()).effort), (None, None), "a route without the choice sends none");
+        assert!(set_effort(&mut s, "low").is_err());
     }
 
     #[test]

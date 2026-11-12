@@ -190,6 +190,10 @@ pub struct Settings {
     pub assist_provider: Option<String>,
     #[serde(default)]
     pub assist_model: Option<String>,
+    /// How hard the chosen AI thinks before it answers, where it offers a choice (Codex: low, medium, high); none is
+    /// the route's own start, low for Codex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assist_effort: Option<String>,
     /// "Only on this computer": no question goes to another one.
     #[serde(default)]
     pub assist_offline_only: bool,
@@ -268,6 +272,7 @@ impl Default for Settings {
             ask_target: AskTarget::default(),
             assist_provider: None,
             assist_model: None,
+            assist_effort: None,
             assist_offline_only: false,
             assist_consent: Vec::new(),
             assist_claude_code_ok: false,

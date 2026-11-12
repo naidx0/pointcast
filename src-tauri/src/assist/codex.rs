@@ -1444,6 +1444,21 @@ pub mod tests {
     }
 
     #[test]
+    fn the_effort_the_person_chose_reaches_the_turn_and_one_the_model_does_not_offer_is_not_sent() {
+        for (asked, sent_effort) in [("medium", json!("medium")), ("high", Value::Null)] {
+            let (chat, seen) = link("normal");
+            let mut chat = chat.ok().unwrap();
+            chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: None, effort: Some(asked) }).unwrap();
+            answer(&mut chat, said("anything"));
+            assert_eq!(sent(&seen, "turn/start")[0]["effort"], sent_effort, "{asked}");
+        }
+        let p = crate::assist::catalog::Picked { id: ID, model: None, offline_only: false, base: None, effort: Some("medium".into()) };
+        assert_eq!(crate::assist::catalog::codex_for(&p, Path::new("unused")).effort.as_deref(), Some("medium"));
+        let none = crate::assist::catalog::Picked { effort: None, ..p };
+        assert_eq!(crate::assist::catalog::codex_for(&none, Path::new("unused")).effort.as_deref(), Some("low"), "low when none is chosen");
+    }
+
+    #[test]
     fn the_address_of_the_account_is_shown_to_the_person_and_never_in_a_log_line() {
         let (chat, _) = wire("normal");
         assert_eq!(chat.account, Account { plan: Some("plus".into()), api_key: false, email: Some(fake::PLANTED.into()) });

@@ -999,6 +999,8 @@ export const ASSIST = {
   signIn: "assist_sign_in",
   /** command { on } */
   offlineOnly: "assist_offline_only",
+  /** command { effort }: the thinking effort for the chosen AI, where it offers one */
+  effort: "assist_effort",
   /** event → Assist: the whole list again, each time one route's probe answers */
   event: "assist-providers",
 } as const;
@@ -1050,6 +1052,7 @@ export const assistKeySet = (id: string, key: string) =>
   inTauri ? invoke<void>(ASSIST.keySet, { id, key }) : pvDo({ cmd: "key_set", id });
 export const assistKeyDelete = (id: string) => (inTauri ? invoke<void>(ASSIST.keyDelete, { id }) : pvDo({ cmd: "key_delete", id }));
 export const assistSignIn = (id: string) => (inTauri ? invoke<void>(ASSIST.signIn, { id }) : pvLater(1800, () => pvDo({ cmd: "signed_in", id })));
+export const assistEffort = (effort: string) => (inTauri ? invoke<void>(ASSIST.effort, { effort }) : pvDo({ cmd: "effort", effort }));
 export const assistOfflineOnly = (on: boolean) => (inTauri ? invoke<void>(ASSIST.offlineOnly, { on }) : pvDo({ cmd: "offline", on }));
 
 export function stamp(ms: number): string {
