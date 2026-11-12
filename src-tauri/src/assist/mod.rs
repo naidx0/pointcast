@@ -12,6 +12,7 @@ pub mod acp;
 pub mod anthropic;
 pub mod catalog;
 pub mod child;
+pub mod claude;
 pub mod codex;
 pub mod detect;
 #[cfg(test)]
@@ -607,8 +608,8 @@ pub mod tests {
 
         let mut files = Vec::new();
         sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("assist"), &mut files);
-        assert!(files.len() >= 11, "the scan read the folder it meant to: {files:?}");
-        assert!(files.iter().any(|f| f.ends_with("acp.rs")) && files.iter().any(|f| f.ends_with("anthropic.rs")), "and the newest files in it");
+        assert!(files.len() >= 12, "the scan read the folder it meant to: {files:?}");
+        assert!(["acp.rs", "anthropic.rs", "claude.rs"].iter().all(|n| files.iter().any(|f| f.ends_with(n))), "and the newest files in it");
         for f in files {
             let found = hits(&std::fs::read_to_string(&f).unwrap(), &needles);
             assert!(found.is_empty(), "{} names {found:?}", f.display());

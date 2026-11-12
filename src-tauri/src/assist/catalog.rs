@@ -422,8 +422,9 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
         }
         Way::Agent => match acp::agent(r.id) {
             Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)))),
-            // Claude through Claude Code: its adapter arrives with the owner's OK.
-            None => Err(CLAUDE_CODE_NOT_OK.into()),
+            // Claude through Claude Code. A `Picked` that names it exists only with the owner's OK: `picked` refuses
+            // it before, and so nothing is made.
+            None => Ok(Arc::new(super::claude::Claude::new(home.join(CLAUDE_CODE)))),
         },
         _ if model.is_empty() => Err(format!("Choose a model for {} in Settings first.", r.name)),
         Way::Key => Ok(Arc::new(keyed(r, p.base.as_deref(), model)?.provider(p.offline_only)?)),
@@ -708,8 +709,11 @@ mod tests {
         s.assist_provider = Some(CLAUDE_CODE.into());
         s.assist_consent.push(Consent { provider: CLAUDE_CODE.into(), goes_to: CLAUDE_CLI.goes_to.into(), at_ms: 1 });
         assert_eq!(picked(&s), Err(CLAUDE_CODE_NOT_OK.into()));
+        let made = |s: &Settings| picked(s).and_then(|p| build(&p, Path::new("unused"))).map(|b| b.id());
+        assert_eq!(made(&s), Err(CLAUDE_CODE_NOT_OK.into()));
         s.assist_claude_code_ok = true;
         assert_eq!(choose(&mut s, CLAUDE_CODE, None, false, 2), Ok(()));
+        assert_eq!(made(&s), Ok(CLAUDE_CODE));
         assert!(providers(&s, &Look::default()).providers.iter().all(|r| r.available));
     }
 
