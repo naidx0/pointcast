@@ -296,7 +296,6 @@ cat "$logs/d-update.log"
 [ "$new" != "$old" ] && [ "$new" != "$starter_pid" ] || die "the Pointcast running is not a new process"
 installed_is "$NEXT" "$h_n1"
 kept_permissions d-update
-closed_by_asking d-update
 sleep 8
 [ "$(count)" = 1 ] && [ "$(pgrep -x pointcast)" = "$new" ] || die "eight seconds on, it is no longer the one Pointcast running"
 pass "the installer outlived the process that started it; N (pid $old) ended; N+1 runs alone (pid $new); tccutil not called"

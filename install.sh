@@ -154,14 +154,19 @@ if pgrep -a -x pointcast >/dev/null 2>&1; then
   # Wait until it has gone, and no longer than it takes: opened while the old copy is still closing, the new one
   # would hand over to it and close too, and nothing would be left running. Still there after 3 s, it is closed;
   # after 6 s, ended.
-  n=0
+  # Counted in seconds, not turns of the loop: on a busy Mac one pgrep alone can take a tenth of a second.
+  asked=$SECONDS
+  termed=0
   while pgrep -a -x pointcast >/dev/null 2>&1; do
-    n=$((n + 1))
-    case $n in
-    30) pkill -a -x pointcast >/dev/null 2>&1 || true ;;
-    60) pkill -9 -a -x pointcast >/dev/null 2>&1 || true ;;
-    90) break ;;
-    esac
+    waited=$((SECONDS - asked))
+    if [ $waited -ge 9 ]; then
+      break
+    elif [ $waited -ge 6 ]; then
+      pkill -9 -a -x pointcast >/dev/null 2>&1 || true
+    elif [ $waited -ge 3 ] && [ $termed = 0 ]; then
+      termed=1
+      pkill -a -x pointcast >/dev/null 2>&1 || true
+    fi
     sleep 0.1
   done
   mark closed
@@ -183,10 +188,9 @@ open "$dest/Pointcast.app"
 mark opened
 if [ "${quit:-0}" = 1 ]; then
   # It was running, so it has to be running again: ask once more if macOS did not start it.
-  n=0
+  opened=$SECONDS
   until pgrep -a -x pointcast >/dev/null 2>&1; do
-    n=$((n + 1))
-    if [ $n -ge 100 ]; then
+    if [ $((SECONDS - opened)) -ge 10 ]; then
       open -n "$dest/Pointcast.app" >/dev/null 2>&1 || true
       break
     fi
