@@ -109,7 +109,9 @@ else
 fi
 
 mkdir -p "$tmp/mnt"
-hdiutil attach -nobrowse -noautoopen -quiet -mountpoint "$tmp/mnt" "$dmg" || fail "the disk image would not open."
+# -noverify: hdiutil would otherwise read and check the whole image before mounting it, seconds on every new
+# download. The download was already checked against its SHA-256, and the app's signature is checked below.
+hdiutil attach -nobrowse -noautoopen -noverify -quiet -mountpoint "$tmp/mnt" "$dmg" || fail "the disk image would not open."
 mark attached
 app=$(find "$tmp/mnt" -maxdepth 1 -name '*.app' -print -quit)
 [ -n "$app" ] || fail "there is no app inside the disk image."
@@ -121,23 +123,22 @@ ditto "$app" "$new" || fail "could not copy Pointcast into $dest (is the disk fu
 mark copied
 # Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
 xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
-if ! codesign --verify "$new" >/dev/null 2>&1; then
+
+# macOS keeps what it was allowed when the new version meets the requirement of the one it replaces: so it is from
+# one certificate-signed version to the next, and not when the signer changed (an ad hoc build on either side).
+# Checking that also checks the whole signature, so an update between signed versions reads the app only once.
+kept=0
+was=""
+[ $had = 1 ] && was=$(requirement "$dest/Pointcast.app")
+if [ -n "$was" ] && codesign --verify -R="$was" "$new" >/dev/null 2>&1; then
+  kept=1
+elif ! codesign --verify "$new" >/dev/null 2>&1; then
   # A build signed with the certificate has to arrive whole: signing it again here would replace the certificate's
   # signature with an ad hoc one, and macOS would no longer know the app. Only an ad hoc build is signed again.
   case $(requirement "$app") in
   *certificate* | *anchor*) fail "the new version's signature did not survive the copy. The Pointcast you had is still there." ;;
   esac
   codesign --force --deep --sign - "$new" >/dev/null 2>&1 || true
-fi
-
-# macOS keeps what it was allowed when the new version meets the requirement of the one it replaces: so it is from
-# one certificate-signed version to the next, and not when the signer changed (an ad hoc build on either side).
-kept=0
-if [ $had = 1 ]; then
-  was=$(requirement "$dest/Pointcast.app")
-  if [ -n "$was" ] && codesign --verify -R="$was" "$new" >/dev/null 2>&1; then
-    kept=1
-  fi
 fi
 mark checked
 
@@ -146,24 +147,22 @@ mark checked
 # this script's ancestor. Without it the running Pointcast was never found or closed, and never became the new one.
 if pgrep -a -x pointcast >/dev/null 2>&1; then
   quit=1
-  osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
+  # Asked to quit, Pointcast saves what it was doing and ends by itself. The timeout bounds a Pointcast too busy to
+  # answer; it is then closed below.
+  osascript -e 'with timeout of 5 seconds' -e 'quit app "Pointcast"' -e 'end timeout' >/dev/null 2>&1 || true
   mark asked
-  pgrep -a -x pointcast >/dev/null 2>&1 || mark quit
-  sleep 1
-  pkill -a -x pointcast >/dev/null 2>&1 || true
-  mark termed
-  # Wait until it has gone: opened while the old copy is still closing, the new one would hand over to it and
-  # close too, and nothing would be left running.
+  # Wait until it has gone, and no longer than it takes: opened while the old copy is still closing, the new one
+  # would hand over to it and close too, and nothing would be left running. Still there after 3 s, it is closed;
+  # after 6 s, ended.
   n=0
   while pgrep -a -x pointcast >/dev/null 2>&1; do
     n=$((n + 1))
-    if [ $n -ge 40 ]; then
-      pkill -9 -a -x pointcast >/dev/null 2>&1 || true
-    fi
-    if [ $n -ge 60 ]; then
-      break
-    fi
-    sleep 0.25
+    case $n in
+    30) pkill -a -x pointcast >/dev/null 2>&1 || true ;;
+    60) pkill -9 -a -x pointcast >/dev/null 2>&1 || true ;;
+    90) break ;;
+    esac
+    sleep 0.1
   done
   mark closed
 fi
@@ -176,6 +175,8 @@ if [ $had = 1 ] && [ $kept = 0 ]; then
   # cleanly instead of showing them on while they no longer apply.
   tccutil reset ScreenCapture dev.pointcast.app >/dev/null 2>&1 || true
   tccutil reset Accessibility dev.pointcast.app >/dev/null 2>&1 || true
+  # macOS will show its Screen Recording prompt again, so the note that Pointcast already asked goes too.
+  rm -f "${POINTCAST_DATA_DIR:-$HOME/Library/Application Support/dev.pointcast.app}/screen-asked"
 fi
 
 open "$dest/Pointcast.app"
@@ -185,11 +186,11 @@ if [ "${quit:-0}" = 1 ]; then
   n=0
   until pgrep -a -x pointcast >/dev/null 2>&1; do
     n=$((n + 1))
-    if [ $n -ge 40 ]; then
+    if [ $n -ge 100 ]; then
       open -n "$dest/Pointcast.app" >/dev/null 2>&1 || true
       break
     fi
-    sleep 0.25
+    sleep 0.1
   done
   mark running
 fi

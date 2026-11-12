@@ -35,6 +35,9 @@ dest=/Applications
 [ -w "$dest" ] || dest="$HOME/Applications"
 mkdir -p "$logs" "$work/bin" "$work/n" "$work/n1" "$work/adhoc-n" "$work/adhoc-n1"
 export TCCUTIL_CALLS="$work/tccutil.calls"
+# Where install.sh looks for the app's note that it asked for Screen Recording; never the runner's own.
+export POINTCAST_DATA_DIR="$work/data"
+mkdir -p "$POINTCAST_DATA_DIR"
 
 pass() { printf 'PASS  %s\n' "$*"; }
 die() {
@@ -78,6 +81,7 @@ one_running() {
 # The real install.sh on a dmg, its output kept as <name>.log; tccutil is the stand-in.
 install() {
   : >"$TCCUTIL_CALLS"
+  echo 0.4.8 >"$POINTCAST_DATA_DIR/screen-asked"
   if ! PATH="$work/bin:$PATH" POINTCAST_TIMING=1 POINTCAST_DMG="$1" bash "$root/install.sh" >"$logs/$2.log" 2>&1; then
     cat "$logs/$2.log"
     die "install.sh stopped on $1"
@@ -92,12 +96,22 @@ installed_is() {
 kept_permissions() {
   [ ! -s "$TCCUTIL_CALLS" ] || die "tccutil was called: $(tr '\n' ';' <"$TCCUTIL_CALLS")"
   ! grep -q "may ask again" "$logs/$1.log" || die "the installer said macOS may ask again"
+  [ -f "$POINTCAST_DATA_DIR/screen-asked" ] || die "a quiet update deleted the note that Screen Recording was asked for"
   grep -q "Updated to $NEXT[.]$" "$logs/$1.log" || die "the installer did not end on: Updated to $NEXT."
+}
+# Asked to quit, the running Pointcast ended by itself, before install.sh would have had to close it (3 s).
+closed_by_asking() {
+  local took
+  took=$(awk '$1 == "time" && $2 == "asked" { a = $3 } $1 == "time" && $2 == "closed" { c = $3 } END { if (a != "" && c != "") printf "%.2f", c - a }' "$logs/$1.log")
+  [ -n "$took" ] || die "$1: the installer did not say when it asked Pointcast to quit and when it had gone"
+  awk -v t="$took" 'BEGIN { exit !(t < 3) }' || die "$1: Pointcast was still running $took s after it was asked to quit"
+  echo "$1: gone $took s after it was asked to quit"
 }
 reset_permissions() {
   grep -q "^reset ScreenCapture dev.pointcast.app$" "$TCCUTIL_CALLS" || die "Screen Recording was not reset"
   grep -q "^reset Accessibility dev.pointcast.app$" "$TCCUTIL_CALLS" || die "Accessibility was not reset"
   grep -q "may ask again" "$logs/$1.log" || die "the installer did not say macOS may ask again"
+  [ ! -e "$POINTCAST_DATA_DIR/screen-asked" ] || die "the grants were reset but the note that Screen Recording was asked for stayed"
 }
 
 cat >"$work/bin/tccutil" <<'EOF'
@@ -187,6 +201,7 @@ installed_is "$NEXT" "$h_n1"
 new=$(one_running) || die "N+1 is not the one Pointcast running"
 [ "$new" != "$old" ] || die "the Pointcast running is still the old process"
 kept_permissions c1-update
+closed_by_asking c1-update
 pass "N+1 installed and running (pid $new, was $old); tccutil not called; no 'may ask again'"
 
 echo "== q: how a running Pointcast closes, asked as install.sh asks"
@@ -281,6 +296,7 @@ cat "$logs/d-update.log"
 [ "$new" != "$old" ] && [ "$new" != "$starter_pid" ] || die "the Pointcast running is not a new process"
 installed_is "$NEXT" "$h_n1"
 kept_permissions d-update
+closed_by_asking d-update
 sleep 8
 [ "$(count)" = 1 ] && [ "$(pgrep -x pointcast)" = "$new" ] || die "eight seconds on, it is no longer the one Pointcast running"
 pass "the installer outlived the process that started it; N (pid $old) ended; N+1 runs alone (pid $new); tccutil not called"

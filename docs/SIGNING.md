@@ -19,6 +19,11 @@ macOS remembers a permission against the app's *designated requirement*, a rule 
 (`codesign --verify -R`). When the new version meets it, nothing is reset and the update ends on `Updated to <version>.`
 When it does not (the signer changed), it resets the two permissions with `tccutil` and says macOS may ask again.
 
+When it resets them it also deletes the app's note that it already asked for Screen Recording
+(`screen-asked` in the data folder), so the setup assistant offers macOS's prompt again. After a quiet update the
+note stays: macOS kept its answer and will not show the prompt a second time, so **Allow** opens the Screen
+Recording pane of System Settings instead.
+
 An in-app update runs the `install.sh` built into the version that is *already installed*. So the first release
 signed with the certificate is the last one that asks: it replaces an ad hoc build. Every update after it is quiet.
 

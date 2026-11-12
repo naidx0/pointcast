@@ -111,6 +111,10 @@ jobs:
           BIN=$(jq -rs 'map(select(.reason == "compiler-artifact" and .profile.test and .executable != null)) | last | .executable' "$RUNNER_TEMP/cargo.json")
           test -x "$BIN"
           echo "TEST_BINARY=$BIN" >> "$GITHUB_ENV"
+      # The update's and the permissions' own tests, on the system whose code they are about.
+      - name: The update and permission tests on macOS
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- update:: permissions::
       - name: Update N to N+1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
