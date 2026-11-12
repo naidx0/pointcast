@@ -19,6 +19,10 @@ fail() {
 # its signature. A build signed with Pointcast's certificate names the certificate, the same in every version; a
 # build signed ad hoc names only itself.
 requirement() { { codesign -d -r- "$1" 2>/dev/null || true; } | sed -n 's/^[# ]*designated => //p'; }
+# POINTCAST_TIMING=1: say how long each step took, in seconds since the start (the update test reads these lines).
+since() { perl -MTime::HiRes=time -e 'printf "%.2f", time - $ARGV[0]' "${1:-0}"; }
+t0=$([ -z "${POINTCAST_TIMING:-}" ] || since)
+mark() { [ -z "${POINTCAST_TIMING:-}" ] || printf '  time %-9s %s\n' "$1" "$(since "$t0")"; }
 
 printf '\n  Pointcast\n'
 [ "$(uname -s)" = Darwin ] || fail "this script is for macOS. On Windows, in PowerShell: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex"
@@ -101,10 +105,12 @@ else
     [ "$got" = "$want" ] || fail "the download does not match the SHA-256 GitHub lists for it. Run this again, or download the .dmg from $RELEASES."
   fi
   dmg=$tmp/Pointcast.dmg
+  mark fetched
 fi
 
 mkdir -p "$tmp/mnt"
 hdiutil attach -nobrowse -noautoopen -quiet -mountpoint "$tmp/mnt" "$dmg" || fail "the disk image would not open."
+mark attached
 app=$(find "$tmp/mnt" -maxdepth 1 -name '*.app' -print -quit)
 [ -n "$app" ] || fail "there is no app inside the disk image."
 
@@ -112,6 +118,7 @@ say "$([ $had = 1 ] && echo Updating || echo Installing)..."
 # Copy first, then swap, so a failed copy never leaves the Mac without Pointcast.
 new="$dest/.Pointcast.app.new"
 ditto "$app" "$new" || fail "could not copy Pointcast into $dest (is the disk full?)."
+mark copied
 # Downloaded with curl, so macOS has not quarantined it; clear the flag anyway for a copied image.
 xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
 if ! codesign --verify "$new" >/dev/null 2>&1; then
@@ -132,6 +139,7 @@ if [ $had = 1 ]; then
     kept=1
   fi
 fi
+mark checked
 
 # An update replaces the running app; Pointcast keeps what you were recording for its next start.
 # -a: pgrep and pkill leave out their own ancestors unless told otherwise, and when Pointcast updates itself it is
@@ -139,8 +147,11 @@ fi
 if pgrep -a -x pointcast >/dev/null 2>&1; then
   quit=1
   osascript -e 'quit app "Pointcast"' >/dev/null 2>&1 || true
+  mark asked
+  pgrep -a -x pointcast >/dev/null 2>&1 || mark quit
   sleep 1
   pkill -a -x pointcast >/dev/null 2>&1 || true
+  mark termed
   # Wait until it has gone: opened while the old copy is still closing, the new one would hand over to it and
   # close too, and nothing would be left running.
   n=0
@@ -154,9 +165,11 @@ if pgrep -a -x pointcast >/dev/null 2>&1; then
     fi
     sleep 0.25
   done
+  mark closed
 fi
 rm -rf "$dest/Pointcast.app" || fail "could not replace the Pointcast in $dest (it may belong to another user)."
 mv "$new" "$dest/Pointcast.app" || fail "could not move Pointcast into $dest."
+mark swapped
 
 if [ $had = 1 ] && [ $kept = 0 ]; then
   # The signer changed, so macOS no longer matches what it allowed to this app: clear the old grants so it asks
@@ -166,6 +179,7 @@ if [ $had = 1 ] && [ $kept = 0 ]; then
 fi
 
 open "$dest/Pointcast.app"
+mark opened
 if [ "${quit:-0}" = 1 ]; then
   # It was running, so it has to be running again: ask once more if macOS did not start it.
   n=0
@@ -177,6 +191,7 @@ if [ "${quit:-0}" = 1 ]; then
     fi
     sleep 0.25
   done
+  mark running
 fi
 now=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$dest/Pointcast.app/Contents/Info.plist" 2>/dev/null) || now=""
 if [ $had = 1 ] && [ $kept = 1 ]; then

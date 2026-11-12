@@ -78,7 +78,7 @@ one_running() {
 # The real install.sh on a dmg, its output kept as <name>.log; tccutil is the stand-in.
 install() {
   : >"$TCCUTIL_CALLS"
-  if ! PATH="$work/bin:$PATH" POINTCAST_DMG="$1" bash "$root/install.sh" >"$logs/$2.log" 2>&1; then
+  if ! PATH="$work/bin:$PATH" POINTCAST_TIMING=1 POINTCAST_DMG="$1" bash "$root/install.sh" >"$logs/$2.log" 2>&1; then
     cat "$logs/$2.log"
     die "install.sh stopped on $1"
   fi
@@ -184,6 +184,32 @@ new=$(one_running) || die "N+1 is not the one Pointcast running"
 kept_permissions c1-update
 pass "N+1 installed and running (pid $new, was $old); tccutil not called; no 'may ask again'"
 
+echo "== q: how a running Pointcast closes, asked as install.sh asks"
+since() { perl -MTime::HiRes=time -e 'printf "%.2f", time - $ARGV[0]' "${1:-0}"; }
+gone_after() {
+  local t
+  t=$(since)
+  for _ in $(seq 1 100); do
+    [ "$(count)" = 0 ] && { since "$t"; return 0; }
+    sleep 0.1
+  done
+  echo "still running after 10 s"
+}
+pid=$(one_running) || die "N+1 is not running before q"
+t=$(since)
+osascript -e 'quit app "Pointcast"' >"$logs/q-osascript.txt" 2>&1 && said=0 || said=$?
+echo "TIMING q osascript-quit returned $said in $(since "$t") s: $(paste -sd ' ' "$logs/q-osascript.txt")"
+echo "TIMING q after the quit event, gone in: $(gone_after)"
+close_all
+open "$dest/Pointcast.app"
+t=$(since)
+one_running >/dev/null || die "Pointcast did not open again for q"
+echo "TIMING q open to one process: $(since "$t") s"
+sleep 2
+pkill -x pointcast || true
+echo "TIMING q after SIGTERM, gone in: $(gone_after)"
+close_all
+
 echo "== c2 (control): install.sh, ad hoc N to ad hoc N+1"
 fresh
 install "$work/adhoc-n.dmg" c2-install
@@ -225,7 +251,7 @@ old=$(one_running) || die "N did not start"
 # update.rs `run`, in a process named as Pointcast is and beside the binary's own files.
 starter="$(dirname "$parent")/pointcast"
 cp "$parent" "$starter"
-PATH="$work/bin:$PATH" POINTCAST_TEST_DMG="$work/n1.dmg" POINTCAST_TEST_LOG="$logs/d-update.log" \
+PATH="$work/bin:$PATH" POINTCAST_TIMING=1 POINTCAST_TEST_DMG="$work/n1.dmg" POINTCAST_TEST_LOG="$logs/d-update.log" \
   "$starter" --ignored --exact "$LIVE" --nocapture >"$logs/d-starter.log" 2>&1 &
 starter_pid=$!
 status=0
@@ -306,4 +332,6 @@ else
 fi
 
 close_all
+echo "== Timings (seconds since each installer started)"
+grep -H "^  time " "$logs"/*.log || true
 echo "ALL PASS"
