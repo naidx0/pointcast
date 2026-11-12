@@ -1264,6 +1264,89 @@ html.win .home-recent button {
   text-decoration-color: var(--label-3);
   text-underline-offset: 2px;
 }
+/* Ask's recent questions inside its block: a quiet label with All sessions at its end, then plain rows on hairlines.
+   A row's highlight reaches 8 px past the column, its words do not. */
+.feature-recent {
+  margin-top: 20px;
+}
+.feature-recent-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+  font-size: var(--fs-small);
+  line-height: 16px;
+}
+.feature-recent h3 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 500;
+  color: var(--label-2);
+}
+.feature-recent-head .link {
+  font: inherit;
+  color: var(--label-2);
+}
+.feature-recent-head .link:hover {
+  color: var(--label);
+  text-decoration: none;
+}
+.feature-recent ul {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+}
+.feature-recent li {
+  position: relative;
+}
+.feature-recent li + li::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  border-top: 0.5px solid var(--sep);
+}
+html.win .feature-recent li + li::before {
+  border-top-width: 1px;
+}
+.feature-recent li:hover::before,
+.feature-recent li:hover + li::before {
+  opacity: 0;
+}
+/* Two lines a row: the title, then its questions and day; a half-width block has no room for both on one. */
+.feature-recent li > button {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--label);
+  font: inherit;
+  line-height: 20px;
+  text-align: left;
+  cursor: default;
+}
+.feature-recent li > button:hover {
+  background: var(--fill);
+}
+.feature-recent .t,
+.feature-recent .m {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.feature-recent .m {
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--label-2);
+  font-variant-numeric: tabular-nums;
+}
 .home-foot {
   display: flex;
   align-items: center;
