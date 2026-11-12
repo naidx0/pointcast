@@ -40,7 +40,10 @@ import {
   liveView,
   openNumber,
   pictureCaption,
+  revealSlice,
+  revealStep,
   sentLine,
+  settledSplit,
   type LiveDelta,
   type LivePicture,
   type LiveView,
@@ -1138,15 +1141,23 @@ function ErrorLine({ err }: { err: NonNullable<LiveView["error"]> }) {
 
 /** Answering: the markdown, with the line down its margin turning under the line being written; its end is the caret.
  * Shown: the caret fades and the line rests as a short quiet stroke. An earlier turn opens shown, at rest. */
-function Answer({ text, phase, tone }: { text: string; phase: Phase; tone: Tone }) {
+function Answer({ text: arrived, phase, tone }: { text: string; phase: Phase; tone: Tone }) {
   const streaming = phase === "answering";
-  const blocks = useMemo(() => parseMarkdown(streaming ? settleTail(text) : text), [text, streaming]);
+  // What arrived is the truth; what shows follows it evenly, a little behind, and is all of it once the answer is done.
+  const text = useReveal(arrived, streaming);
+  // The blocks before the last settled break are parsed and drawn once; only the tail being written is read each frame.
+  const k = streaming ? settledSplit(text) : 0;
+  const head = text.slice(0, k);
+  const headNodes = useMemo(() => (head ? renderMarkdown(parseMarkdown(head), h, { code: (b, key) => <Code key={key} b={b} tail={null} /> }) : []), [head]);
+  const rest = text.slice(k);
+  const blocks = useMemo(() => parseMarkdown(streaming ? settleTail(rest) : rest), [rest, streaming]);
   const box = useRef<HTMLDivElement>(null);
   const end = useRef<HTMLSpanElement>(null);
   const margin = useRef<SVGPathElement>(null);
   const caret = useRef<SVGCircleElement>(null);
   const tail = <span className="md-end" ref={end} key="md-end" />;
-  const nodes = renderMarkdown(blocks, h, { tail, code: (b, key, t) => <Code key={key} b={b} tail={t} /> });
+  const tailNodes = renderMarkdown(blocks, h, { tail, code: (b, key, t) => <Code key={key} b={b} tail={t} /> });
+  const nodes = headNodes.length ? [<Fragment key="settled">{headNodes}</Fragment>, <Fragment key="tail">{tailNodes}</Fragment>] : tailNodes;
 
   useLayoutEffect(() => {
     const place = () => {
@@ -1193,9 +1204,51 @@ function Answer({ text, phase, tone }: { text: string; phase: Phase; tone: Tone 
         <path className="margin" ref={margin} />
         <circle className="caret" ref={caret} r={2.5} />
       </svg>
-      {nodes.length ? nodes : <p>{tail}</p>}
+      {headNodes.length || tailNodes.length ? nodes : <p>{tail}</p>}
     </div>
   );
+}
+
+/** The streamed text as it shows: whatever is there when the answer first appears shows at once; what arrives after is
+ * revealed a few characters a frame (revealStep), so the AI's uneven chunks read as an even flow. Done, or with less
+ * motion asked for, it is the whole text as it comes. */
+function useReveal(text: string, streaming: boolean): string {
+  const reduced = useMemo(() => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches, []);
+  const shown = useRef(text.length);
+  // When each length of the text arrived, for how long the oldest character not yet shown has waited.
+  const arrivals = useRef<{ len: number; at: number }[]>([]);
+  const lastLen = useRef(text.length);
+  const [, paint] = useState(0);
+  useEffect(() => {
+    if (text.length < lastLen.current) {
+      shown.current = Math.min(shown.current, text.length);
+      arrivals.current = [];
+    } else if (text.length > lastLen.current) arrivals.current.push({ len: text.length, at: performance.now() });
+    lastLen.current = text.length;
+    if (!streaming || reduced) {
+      shown.current = text.length;
+      arrivals.current = [];
+      paint((x) => x + 1);
+      return;
+    }
+    if (shown.current >= text.length) return;
+    let raf = 0;
+    let last = performance.now();
+    const frame = (t: number) => {
+      const dt = Math.max(0, t - last);
+      last = t;
+      const at = Math.floor(shown.current);
+      const q = arrivals.current;
+      while (q.length && q[0].len <= at) q.shift();
+      const was = at;
+      shown.current = revealStep({ shown: shown.current, total: text.length, dt, lag: q.length ? t - q[0].at : 0 });
+      if (Math.floor(shown.current) !== was) paint((x) => x + 1);
+      if (shown.current < text.length) raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [text, streaming, reduced]);
+  return streaming && !reduced ? revealSlice(text, shown.current) : text;
 }
 
 function useCopied(): [boolean, (text: string) => void] {

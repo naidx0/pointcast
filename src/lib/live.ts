@@ -419,6 +419,71 @@ export function isPinned(scrollTop: number, scrollHeight: number, clientHeight: 
   return scrollHeight - scrollTop - clientHeight <= slack;
 }
 
+// —— The answer as it streams: what arrived is the truth; what shows follows it smoothly ——
+
+/** The text shown catches up with what arrived at this share of the backlog per ms: everything waiting is shown in
+ * about this long, so the reveal runs a little behind the AI and its uneven chunks become an even flow. */
+export const REVEAL_CATCH_MS = 250;
+/** The slowest the text is revealed, in characters a second, so a short tail never crawls. */
+export const REVEAL_MIN_CPS = 45;
+/** Text that has waited this long is shown at once (a hidden window, a stalled frame). */
+export const REVEAL_MAX_LAG_MS = 1500;
+
+/** How much of the answer shows (a count of characters, fractional between frames) after `dt` ms. `total`: how much
+ * has arrived. `lag`: how long the oldest character not yet shown has waited. `done`: the answer is complete (or the
+ * person asked for less motion): everything shows. Never more than arrived, never less than was shown, and it lands
+ * exactly on `total`. */
+export function revealStep(p: { shown: number; total: number; dt: number; lag?: number; done?: boolean }): number {
+  const total = Math.max(0, p.total);
+  const shown = Number.isFinite(p.shown) ? Math.max(0, p.shown) : 0;
+  if (p.done || shown >= total || (p.lag ?? 0) >= REVEAL_MAX_LAG_MS) return total;
+  if (!(p.dt > 0)) return shown;
+  const backlog = total - shown;
+  const add = Math.max(REVEAL_MIN_CPS / 1000, backlog / REVEAL_CATCH_MS) * p.dt;
+  return add >= backlog ? total : shown + add;
+}
+
+/** The first `n` characters of `s`, never ending inside a surrogate pair. */
+export function revealSlice(s: string, n: number): string {
+  let k = Math.max(0, Math.min(s.length, Math.floor(n)));
+  const c = s.charCodeAt(k - 1);
+  if (k > 0 && k < s.length && c >= 0xd800 && c <= 0xdbff) k++;
+  return s.slice(0, k);
+}
+
+const NL = String.fromCharCode(10);
+const LIST_OR_INDENT = /^(\s|[-*+]\s|\d+[.)]\s|>)/;
+const FENCE = /^ {0,3}(```|~~~)/;
+
+/** Where the streamed answer splits into blocks that are settled (rendered once) and the tail still being written:
+ * just after the last blank line outside a code fence or a math block that starts a new block of its own (not a list
+ * item, an indented line or a quote, which could belong to the block above). The settled part parses the same alone
+ * as it does in the whole. 0 while there is no such line. */
+export function settledSplit(src: string): number {
+  const lines = src.split(NL);
+  let fence = "";
+  let math = false;
+  let at = 0;
+  let split = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const t = l.trim();
+    const f = FENCE.exec(l);
+    if (fence) {
+      if (f && f[1] === fence && t.replace(/[`~]/g, "") === "") fence = "";
+    } else if (math) {
+      if (t.endsWith("$$")) math = false;
+    } else if (f) fence = f[1];
+    else if (t.startsWith("$$") && !(t.length > 4 && t.endsWith("$$"))) math = true;
+    else if (t === "" && i > 0 && i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (next.trim() && !LIST_OR_INDENT.test(next)) split = at + l.length + 1;
+    }
+    at += l.length + 1;
+  }
+  return split;
+}
+
 /** How long "Not sent" stays before the panel hides. */
 export const ENDED_MS = 1100;
 
