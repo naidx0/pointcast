@@ -9,6 +9,7 @@ import {
   hudHold,
   inTauri,
   onState,
+  permissionOpen,
   permissionRequest,
   preview,
   regionBegin,
@@ -346,7 +347,12 @@ function Done({ s }: { s: UiState }) {
   };
   const act = () => {
     if (!inTauri) return;
-    if (v.action === "permission") permissionRequest("accessibility").catch(() => undefined);
+    // Asking puts Pointcast in the Accessibility list, so its switch is there when the pane opens.
+    if (v.action === "permission")
+      permissionRequest("accessibility")
+        .catch(() => undefined)
+        .then(() => permissionOpen("accessibility"))
+        .catch(() => undefined);
     else if (v.action === "transcribe" && entry)
       historyOpen(entry)
         .then(() => historyRetranscribe(entry))

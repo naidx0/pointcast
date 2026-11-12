@@ -527,6 +527,17 @@ fn listed() -> Vec<Listed> {
         .collect()
 }
 
+/// Whether other apps' window titles can be read. macOS withholds them without Screen Recording, and reads the switch
+/// as it is now, while CGPreflightScreenCaptureAccess keeps its answer until Pointcast reopens: a title showing while
+/// that says no is a grant waiting for the reopen.
+pub fn sees_other_titles() -> bool {
+    titled_by_others(&listed(), std::process::id())
+}
+
+fn titled_by_others(seen: &[Listed], me: u32) -> bool {
+    seen.iter().any(|w| w.pid != Some(me) && !shell(&w.app) && !w.title.trim().is_empty())
+}
+
 /// The menu bar and the Dock are windows over everything on macOS, never what "the window" means.
 fn shell(app: &str) -> bool {
     cfg!(target_os = "macos") && matches!(app, "Window Server" | "Dock")
@@ -746,6 +757,18 @@ pub fn crop_png(png: &[u8], x: i32, y: i32, w: i32, h: i32) -> Result<Shot, Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_title_of_another_apps_window_says_the_screen_can_be_seen() {
+        let r = Rect { x: 0, y: 0, w: 10, h: 10 };
+        let w = |app: &str, title: Option<&str>, pid: u32| Listed::seen(Some(app.into()), title.map(Into::into), r, Some(false), Some(pid));
+        assert!(super::titled_by_others(&[w("Notes", Some("Shopping"), 7)], 1));
+        assert!(!super::titled_by_others(&[w("Notes", None, 7), w("Notes", Some("  "), 7)], 1), "withheld titles");
+        assert!(!super::titled_by_others(&[w("Pointcast", Some("Ask"), 1)], 1), "its own windows are always titled");
+        if cfg!(target_os = "macos") {
+            assert!(!super::titled_by_others(&[w("Window Server", Some("Menubar"), 7), w("Dock", Some("Dock"), 8)], 1));
+        }
+    }
+
     use super::*;
 
     #[test]

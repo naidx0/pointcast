@@ -8,6 +8,7 @@ import {
   liveFit,
   liveMark,
   liveOpenSettings,
+  permissionOpen,
   liveRetry,
   liveSent,
   liveTakePicture,
@@ -48,6 +49,7 @@ import {
   type LiveDelta,
   type LivePicture,
   type LiveView,
+  type NoPictureView,
   type Phase,
   type Tone,
 } from "@/lib/live";
@@ -397,6 +399,8 @@ export function Live() {
             {/* Only while the picture has not left the computer; a refusal has nowhere to be said in one row. */}
             {v.canDrop ? <MarkUpControl marked={!!v.thumb?.marked} /> : null}
           </p>
+        ) : v.noPicture && v.phase !== "discarded" ? (
+          <NoPictureLine n={v.noPicture} />
         ) : null}
         {bigPic}
         {sr}
@@ -439,6 +443,8 @@ export function Live() {
             <Picture pic={v.thumb} label={markedLabel(v.label, !!v.thumb.marked)} big={big} setBig={setBig} canDrop={v.canDrop} />
             {v.thumb.marked ? <MarkedBadge /> : null}
           </div>
+        ) : v.noPicture ? (
+          <NoPictureLine n={v.noPicture} />
         ) : null}
         {bigPic}
         {v.line === "loops" ? (
@@ -529,12 +535,31 @@ export function Live() {
               <span className="live-cap-text">{pictureCaption(v.label)}</span>
               {v.canDrop ? <MarkUpControl marked={!!v.thumb.marked} /> : null}
             </p>
+          ) : v.noPicture ? (
+            <NoPictureLine n={v.noPicture} />
           ) : null}
           {bigPic}
         </footer>
       ) : null}
       {sr}
     </div>
+  );
+}
+
+/** The question goes without a picture of the screen: one quiet line that says why, and Allow when Pointcast only
+ * needs the permission (it opens the Screen Recording pane of System Settings). */
+function NoPictureLine({ n }: { n: NoPictureView }) {
+  return (
+    <p className="live-cap live-in" role="status">
+      <span className="live-cap-text" title={n.text}>
+        {n.text}
+      </span>
+      {n.allow ? (
+        <PressButton className="live-markup" title="Open Screen Recording in System Settings" act={() => void permissionOpen("screen").catch(noop)}>
+          Allow
+        </PressButton>
+      ) : null}
+    </p>
   );
 }
 

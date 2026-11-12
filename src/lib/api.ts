@@ -97,7 +97,11 @@ export type DetectedTool = { id: string; name: string; path: string; kind: strin
 
 export type Access = "granted" | "unknown" | "denied";
 export type PermissionKind = "microphone" | "screen" | "accessibility";
-export type Permissions = Record<PermissionKind, Access> & { gated: Record<PermissionKind, boolean> };
+export type Permissions = Record<PermissionKind, Access> & {
+  gated: Record<PermissionKind, boolean>;
+  /** Screen Recording is switched on, but macOS applies it only once Pointcast reopens. */
+  screen_pending?: boolean;
+};
 
 export type Action = "session" | "full" | "region" | "zoom" | "ask";
 export type HotkeyView = { label: string; keys: string[]; default: string };
@@ -901,7 +905,7 @@ export function startLivePreview(kind?: string) {
     void pvOpen(other).catch(() => undefined);
     return;
   }
-  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1" });
+  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1", blind: q.get("blind") === "1" });
   pvEmit(snap);
   if (state === "listening" || state === "follow") {
     let i = 0;

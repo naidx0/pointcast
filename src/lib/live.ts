@@ -41,6 +41,9 @@ export type LiveSnapshot = {
   picture: LivePicture | null;
   /** The person took the picture out: nothing but the words is sent. */
   dropped: boolean;
+  /** Why the question has no picture of the screen: Pointcast is not allowed to see it (macOS Screen Recording), or
+   * reading it failed. Null when it has one, or when none was taken. */
+  no_picture?: NoPicture | null;
   /** A picture marked up with no question under way: it goes with the next question, spoken or typed, whatever the
    * field's picture switch says; `live_drop_picture` takes it off. */
   next_picture: LivePicture | null;
@@ -51,6 +54,8 @@ export type LiveSnapshot = {
   /** The answer so far, if the engine sends it with the snapshot (a window opened mid-answer). Optional. */
   answer?: string;
 };
+
+export type NoPicture = "not_allowed" | "failed";
 
 /** The payload of `live://delta`: text to append to the answer of `turn`. */
 export type LiveDelta = { turn: number; text: string };
@@ -147,6 +152,7 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     words: typeof v.words === "string" ? v.words : "",
     picture: pictureOf(v.picture),
     dropped: !!v.dropped,
+    no_picture: v.no_picture === "not_allowed" || v.no_picture === "failed" ? v.no_picture : null,
     next_picture: pictureOf((v as { next_picture?: unknown }).next_picture),
     provider: v.provider ?? null,
     error: v.error ?? null,
@@ -249,7 +255,19 @@ export type LiveView = {
   empty: boolean;
   /** The marked picture waiting for the next question (shown by the field), or null. */
   next: LivePicture | null;
+  /** The question goes without a picture of the screen, and why: one quiet line, with Allow when only a permission
+   * is missing. Null when it has a picture or the person took it out. */
+  noPicture: NoPictureView | null;
 };
+
+export type NoPictureView = { text: string; allow: boolean };
+
+/** What the panel says when the screen could not be seen. The question still goes with its words. */
+export function noPictureView(why: NoPicture | null | undefined): NoPictureView | null {
+  if (why === "not_allowed") return { text: "No picture: Pointcast isn't allowed to see your screen.", allow: true };
+  if (why === "failed") return { text: "No picture: the screen could not be read.", allow: false };
+  return null;
+}
 
 export function providerName(p: LiveSnapshot["provider"]): string {
   if (!p) return "";
@@ -351,6 +369,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     announce: "",
     empty: false,
     next: safePicture(s.next_picture),
+    noPicture: thumb || s.dropped ? null : noPictureView(s.no_picture),
   };
   // A brand-new question is heard in one quiet row. A spoken follow-up (the session already has a turn: the engine
   // lists the one just answered in `turns` as soon as the press listens) keeps the conversation in view, its title and
@@ -360,7 +379,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
   const name = provider || "the AI";
   switch (s.state) {
     case "closed":
-      return { ...base, thumb: null };
+      return { ...base, thumb: null, noPicture: null };
     case "listening":
       return { ...base, ...hearing, phase: "listening", line: "voice", mic: true, canDrop: !!thumb, stop: true, announce: "Listening" };
     case "finishing":
@@ -410,7 +429,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
 
 function endedView(base: LiveView, sent: boolean): LiveView {
   const note = sent ? "Stopped" : "Not sent";
-  return { ...base, phase: "discarded", compact: true, title: "", question: "", thumb: null, label: "", sent, note, hide: true, announce: note };
+  return { ...base, phase: "discarded", compact: true, title: "", question: "", thumb: null, label: "", sent, note, hide: true, announce: note, noPicture: null };
 }
 
 function thinkingView(base: LiveView, name: string, note: string | null): LiveView {
@@ -596,12 +615,13 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
  * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
  * session; `follow` is a spoken follow-up being heard in that session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
  * next one. */
-export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean } = {}): LiveSnapshot {
+export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean; blind?: boolean } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
   const session = { id: "preview", title: "Why do we divide by P(B)", turns: 1 };
-  const picture = o.marked ? { ...previewPicture(), marked: true } : previewPicture();
+  const picture = o.blind ? null : o.marked ? { ...previewPicture(), marked: true } : previewPicture();
   const next_picture = o.next ? { ...previewPicture("code"), marked: true } : null;
-  const common = { ...CLOSED, session, turn: 1, picture, provider, words: PREVIEW_WORDS, next_picture };
+  const no_picture = o.blind ? ("not_allowed" as const) : null;
+  const common = { ...CLOSED, session, turn: 1, picture, no_picture, provider, words: PREVIEW_WORDS, next_picture };
   const three = { id: "preview", title: "Bayes' rule on the slide", turns: 3 };
   switch (kind) {
     case "conversation":
