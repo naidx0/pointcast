@@ -13,6 +13,7 @@ import {
   LEVEL_FIELDS,
   liveReduce,
   liveView,
+  noPictureView,
   previewChunks,
   previewLevel,
   previewPicture,
@@ -401,4 +402,21 @@ test("a spoken follow-up is heard inside the conversation; only a brand-new ques
   const snap = { ...previewSnapshot("follow"), state: "finishing" };
   const fin = liveView(liveReduce(initialLive(), { type: "snapshot", snap, now: 0 }), 0);
   assert.deepEqual([fin.phase, fin.compact, fin.line], ["finishing", false, "loops"]);
+});
+
+test("a question with no picture of the screen says so, with Allow only when a permission is missing", () => {
+  const blind = (state, why, over = {}) => liveView(at(snap({ state, picture: null, no_picture: why, ...over })), 0);
+  for (const state of ["listening", "finishing", "sending", "answering", "shown", "error"]) {
+    assert.deepEqual(blind(state, "not_allowed").noPicture, { text: "No picture: Pointcast isn't allowed to see your screen.", allow: true }, state);
+  }
+  assert.deepEqual(blind("shown", "failed").noPicture, { text: "No picture: the screen could not be read.", allow: false });
+  // The receipt still says only the words went.
+  assert.equal(sentLine(liveView(at(snap({ state: "shown", picture: null, no_picture: "not_allowed", answer: "No." })), 0)), "Sent your words to ChatGPT");
+  assert.equal(blind("listening", null).noPicture, null);
+  assert.equal(blind("listening", "nonsense").noPicture, null, "an unknown reason is not shown");
+  assert.equal(blind("listening", "not_allowed", { picture: pic }).noPicture, null, "a picture came after all");
+  assert.equal(blind("listening", "not_allowed", { dropped: true }).noPicture, null, "the person took it out");
+  assert.equal(blind("closed", "not_allowed").noPicture, null);
+  assert.equal(blind("discarded", "not_allowed").noPicture, null);
+  assert.equal(noPictureView(undefined), null);
 });

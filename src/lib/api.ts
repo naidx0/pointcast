@@ -901,7 +901,7 @@ export function startLivePreview(kind?: string) {
     void pvOpen(other).catch(() => undefined);
     return;
   }
-  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1" });
+  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1", blind: q.get("blind") === "1" });
   pvEmit(snap);
   if (state === "listening" || state === "follow") {
     let i = 0;

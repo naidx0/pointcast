@@ -135,6 +135,9 @@ pub struct Snapshot {
     /// A picture marked up with no question under way: it goes with the next one, spoken or typed.
     pub next_picture: Option<Picture>,
     pub dropped: bool,
+    /// Why the question being said has no picture of the screen, so the panel can say so; None when it has one, or
+    /// when none was taken (a marked-up picture, or a typed question).
+    pub no_picture: Option<NoPicture>,
     /// The AI being asked, as the person knows it ("ChatGPT"); empty when none is.
     pub provider: String,
     pub error: Option<String>,
@@ -142,6 +145,26 @@ pub struct Snapshot {
     pub thinking: bool,
     /// The turns of the session before the one in the fields above, oldest first.
     pub turns: Vec<Past>,
+}
+
+/// Why a question went without a picture of the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoPicture {
+    /// The OS does not let Pointcast see the screen (Screen Recording on macOS).
+    NotAllowed,
+    /// The screen could not be read, or its picture not made.
+    Failed,
+}
+
+impl NoPicture {
+    fn of(why: &str) -> NoPicture {
+        if why == capture::SCREEN_OFF {
+            NoPicture::NotAllowed
+        } else {
+            NoPicture::Failed
+        }
+    }
 }
 
 /// A finished turn of the open session.
@@ -561,7 +584,7 @@ impl Live {
         };
         // The screen as it is now, before the panel is on it; never when the person marked a picture up for this
         // question, or is marking one (the overlay is what the screen shows).
-        let frame = if g.marked.is_some() || g.marking.is_some() { None } else { (self.deps.grab)().ok() };
+        let frame = if g.marked.is_some() || g.marking.is_some() { None } else { Some((self.deps.grab)()) };
         match self.deps.voice.start() {
             Ok(true) => {}
             Ok(false) => return false,
@@ -584,8 +607,11 @@ impl Live {
         g.snap.words.clear();
         self.step(&mut g, Step::Press);
         g.snap.picture = g.marked.as_ref().and_then(|m| m.small.clone());
-        if let Some(frame) = frame {
-            self.cut(&mut g, frame, run);
+        match frame {
+            Some(Ok(frame)) => self.cut(&mut g, frame, run),
+            // The question still goes, with its words only; the panel says why there is no picture.
+            Some(Err(why)) => g.snap.no_picture = Some(NoPicture::of(&why)),
+            None => {}
         }
         self.tell(&g);
         drop(g);
@@ -611,6 +637,7 @@ impl Live {
                 let waiting = matches!(g.snap.state, State::Listening | State::Finishing);
                 if g.run == run && g.shot == shot && waiting && !g.snap.dropped {
                     g.snap.picture = made.as_ref().and_then(|s| s.small.clone());
+                    g.snap.no_picture = if made.is_some() { None } else { Some(NoPicture::Failed) };
                     me.tell(&g);
                 }
             }
@@ -805,6 +832,7 @@ impl Live {
         if asking {
             g.snap.picture = small.clone();
             g.snap.dropped = false;
+            g.snap.no_picture = None;
         } else {
             g.snap.next_picture = small.clone();
         }
@@ -842,6 +870,7 @@ impl Live {
                 g.snap.next_picture = None;
                 g.snap.words.clear();
                 g.snap.dropped = false;
+                g.snap.no_picture = None;
                 g.snap.provider.clear();
                 g.snap.error = None;
                 g.snap.thinking = false;
@@ -911,6 +940,7 @@ impl Live {
         g.snap.picture = None;
         g.snap.next_picture = None;
         g.snap.dropped = false;
+        g.snap.no_picture = None;
         g.snap.thinking = false;
         g.picture = None;
     }
@@ -1651,11 +1681,13 @@ mod tests {
         look: Look,
         window: &'static str,
         shade: u8,
+        /// Reading the screen fails with this.
+        refused: Option<&'static str>,
     }
 
     impl Default for Screen {
         fn default() -> Self {
-            Screen { look: Look { front: Some(1), under: Some(1) }, window: "Notes", shade: 200 }
+            Screen { look: Look { front: Some(1), under: Some(1) }, window: "Notes", shade: 200, refused: None }
         }
     }
 
@@ -1702,7 +1734,11 @@ mod tests {
             voice: voice.clone(),
             grab: Box::new(move || {
                 g.fetch_add(1, Ordering::SeqCst);
-                let frame: Box<dyn Taken> = Box::new(FakeFrame(on.lock().unwrap().clone(), held.clone()));
+                let screen = on.lock().unwrap().clone();
+                if let Some(why) = screen.refused {
+                    return Err(why.into());
+                }
+                let frame: Box<dyn Taken> = Box::new(FakeFrame(screen, held.clone()));
                 Ok(frame)
             }),
             look: Box::new(move || looked.lock().unwrap().look),
@@ -1929,7 +1965,7 @@ mod tests {
         let r = rig("follows", provider, FIRST_WAIT);
         assert!(r.live.press());
         r.wait("the press picture", || r.live.snapshot().picture.is_some_and(|p| p.label == "Notes"));
-        *r.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30 };
+        *r.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30, refused: None };
         r.wait("the picture following the window in front", || r.live.snapshot().picture.is_some_and(|p| p.label == "Lecture 4.pdf"));
         *r.voice.say.lock().unwrap() = "what is this".into();
         r.live.release();
@@ -1961,7 +1997,7 @@ mod tests {
         let r3 = rig("dropped-stays", provider, FIRST_WAIT);
         assert!(r3.live.press());
         r3.live.drop_picture();
-        *r3.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30 };
+        *r3.screen.lock().unwrap() = Screen { look: b, window: "Lecture 4.pdf", shade: 30, refused: None };
         std::thread::sleep(Duration::from_millis(700));
         *r3.voice.say.lock().unwrap() = "what is this".into();
         r3.live.release();
@@ -1985,6 +2021,37 @@ mod tests {
         assert!(r.outs.lock().unwrap().contains(&Out::Show), "the panel opened");
         assert!(r.kept().is_empty() && script.asked.lock().unwrap().is_empty() && script.opened.lock().unwrap().is_empty());
         assert!(r.live.inner.lock().unwrap().picture.is_none() && r.live.snapshot().picture.is_none(), "the frame is gone");
+        r.end();
+    }
+
+    #[test]
+    fn a_screen_pointcast_may_not_see_sends_the_words_and_says_why_there_is_no_picture() {
+        let (script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("no-screen", provider, FIRST_WAIT);
+        r.screen.lock().unwrap().refused = Some(capture::SCREEN_OFF);
+        assert!(r.live.press());
+        let s = r.live.snapshot();
+        assert_eq!((s.picture.is_none(), s.no_picture), (true, Some(NoPicture::NotAllowed)), "{s:?}");
+        *r.voice.say.lock().unwrap() = "can you see this".into();
+        r.live.release();
+        r.until(State::Shown);
+        assert_eq!(r.live.snapshot().no_picture, Some(NoPicture::NotAllowed), "it stays with the answer");
+        assert_eq!(script.asked.lock().unwrap()[0].parts, [Part::Text("can you see this".into())]);
+        // Allowed again: the next question has its picture, and nothing says otherwise.
+        r.screen.lock().unwrap().refused = None;
+        assert!(r.live.press());
+        r.wait("its picture", || r.live.snapshot().picture.is_some());
+        assert_eq!(r.live.snapshot().no_picture, None);
+        r.end();
+    }
+
+    #[test]
+    fn a_screen_that_cannot_be_read_says_the_picture_failed() {
+        let (_script, provider) = scripted(&[(0, "ok")]);
+        let r = rig("screen-failed", provider, FIRST_WAIT);
+        r.screen.lock().unwrap().refused = Some("no monitor");
+        assert!(r.live.press());
+        assert_eq!(r.live.snapshot().no_picture, Some(NoPicture::Failed));
         r.end();
     }
 
@@ -2319,7 +2386,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&snap).unwrap()["picture"]["marked"], true);
         // The person looks elsewhere and the screen changes: a marked picture is taken again neither while the question
         // is said nor at the release.
-        let moved = Screen { look: Look { front: Some(2), under: Some(1) }, window: "Lecture 4.pdf", shade: 30 };
+        let moved = Screen { look: Look { front: Some(2), under: Some(1) }, window: "Lecture 4.pdf", shade: 30, refused: None };
         *r.screen.lock().unwrap() = moved.clone();
         std::thread::sleep(Duration::from_millis(700));
         *r.voice.say.lock().unwrap() = "what is at pin 4".into();
@@ -3133,7 +3200,7 @@ mod tests {
         // Taken again while one waits: it stays, and the screen is not read again.
         assert_eq!((r.live.take_picture(), r.grabs.load(Ordering::SeqCst)), (Ok(()), 1));
         // The screen changes before the question is sent: the taken picture goes, byte for byte, not the screen now.
-        *r.screen.lock().unwrap() = Screen { look: Look { front: Some(2), under: Some(2) }, window: "Lecture 4.pdf", shade: 30 };
+        *r.screen.lock().unwrap() = Screen { look: Look { front: Some(2), under: Some(2) }, window: "Lecture 4.pdf", shade: 30, refused: None };
         assert_eq!(r.live.ask_typed("what is this", true), Ok(()));
         answered(1);
         assert_eq!((sent_picture(&script, 0), r.grabs.load(Ordering::SeqCst)), (shot().wire, 1));
