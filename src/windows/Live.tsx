@@ -39,6 +39,7 @@ import {
   liveReduce,
   liveView,
   openNumber,
+  panelHeight,
   pictureCaption,
   revealSlice,
   revealStep,
@@ -332,8 +333,9 @@ export function Live() {
     setGoto(n);
   };
 
-  // The window's height follows the content, from one row up to 60 % of the screen (Tauri only; the preview lays out
-  // by CSS). The scrolling body counts at its content's height.
+  // The window's height follows the content, from one row up to 60 % of the screen, and opens to a reading surface
+  // once an answer shows (Tauri only; the preview lays out by CSS). The scrolling body counts at its content's height.
+  const answered = !v.compact && (v.phase === "answering" || v.phase === "shown") && !v.empty;
   const root = useRef<HTMLDivElement>(null);
   const lastFit = useRef(0);
   useEffect(() => {
@@ -345,7 +347,7 @@ export function Live() {
         if (c.classList.contains("live-sr")) continue;
         want += c.classList.contains("live-body") ? ((c.firstElementChild as HTMLElement | null)?.offsetHeight ?? 0) : c.offsetHeight;
       }
-      want = Math.min(Math.round(screen.availHeight * 0.6), want);
+      want = panelHeight(want, screen.availHeight, answered);
       if (want > 0 && want !== lastFit.current) {
         lastFit.current = want;
         liveFit(want).catch(noop);
@@ -356,7 +358,7 @@ export function Live() {
     for (const c of Array.from(r.querySelectorAll(".live > *, .live-inner"))) ro.observe(c);
     fit();
     return () => ro.disconnect();
-  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty]);
+  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty, answered]);
 
   if (v.phase === "closed") return <div className="live closed" ref={root} />;
 
@@ -458,7 +460,7 @@ export function Live() {
     </>
   );
   return (
-    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}`} ref={root} aria-label="Ask about the screen">
+    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Ask about the screen">
       <header className="live-head">
         {sheet ? (
           <span className="live-title">Sessions</span>

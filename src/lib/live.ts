@@ -484,6 +484,22 @@ export function settledSplit(src: string): number {
   return split;
 }
 
+/** The panel's width in logical pixels: as platform.rs PANEL_WIDTH docks it (owner, 2026-11-12: "it should open up
+ * bigger"). */
+export const PANEL_W = 452;
+/** Once an answer shows, the panel is at least this tall, so a short answer opens as a reading surface, not a strip. */
+export const ANSWER_MIN_H = 320;
+/** The most of the screen's height the panel takes. */
+export const PANEL_MAX_SHARE = 0.6;
+
+/** The height the panel asks for: its content's, at least ANSWER_MIN_H while an answer shows, and never more than
+ * PANEL_MAX_SHARE of the screen. */
+export function panelHeight(content: number, screenH: number, answer: boolean): number {
+  const most = Math.round(Math.max(0, screenH) * PANEL_MAX_SHARE);
+  const want = Math.max(0, Number.isFinite(content) ? content : 0);
+  return Math.min(most, answer ? Math.max(want, ANSWER_MIN_H) : want);
+}
+
 /** How long "Not sent" stays before the panel hides. */
 export const ENDED_MS = 1100;
 

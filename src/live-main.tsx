@@ -18,6 +18,12 @@ if (preview) {
     html.classList.add(skin);
   }
   html.classList.add("live-preview");
+  // &wall=light|dark: a busy desktop behind the panel, seen through its material as on Windows 11 and macOS.
+  const wall = new URLSearchParams(location.search).get("wall");
+  if (wall === "light" || wall === "dark") {
+    html.dataset.wall = wall;
+    html.classList.add("vibrant");
+  }
   startLivePreview();
 }
 

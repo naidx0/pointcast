@@ -3,7 +3,7 @@
    warn is a wait that ran long or a failure. One animation per state; a change of state is a 180 ms fade. */
 
 .live {
-  --pad: 14px;
+  --pad: 18px;
   --live-ink: var(--label);
   --live-quiet: var(--label-2);
   --live-faint: var(--label-3);
@@ -24,7 +24,7 @@
   overflow: hidden;
 }
 html.win .live {
-  --pad: 16px;
+  --pad: 20px;
 }
 /* The 12 px provider name meets AA on the light macOS panel only in the pressed blue. */
 html:not(.win):not([data-theme="dark"]) .live {
@@ -34,8 +34,19 @@ html.win[data-theme="dark"] .live {
   --live-accent: var(--link);
   --live-accent-text: var(--link);
 }
+/* A real material is behind the panel (macOS popover vibrancy, Windows 11 acrylic; tauri.conf.json): a tint of the
+   panel's own colour over it keeps the text at AA on any desktop and lets a little of it through. */
 html.vibrant .live {
-  --live-bg: transparent;
+  --live-bg: rgba(246, 246, 246, 0.8);
+}
+html.vibrant[data-theme="dark"] .live {
+  --live-bg: rgba(30, 30, 30, 0.86);
+}
+html.vibrant.win .live {
+  --live-bg: rgba(249, 249, 249, 0.8);
+}
+html.vibrant.win[data-theme="dark"] .live {
+  --live-bg: rgba(36, 36, 36, 0.8);
 }
 .live.closed {
   background: transparent;
@@ -167,7 +178,7 @@ html.win .live-hb:not(.stop) {
   display: flex;
   align-items: flex-start;
   gap: 4px;
-  padding: 12px 10px 0 var(--pad);
+  padding: 14px 12px 0 var(--pad);
 }
 .live-head .live-question,
 .live-title {
@@ -225,7 +236,7 @@ html.win .live-hb:not(.stop) {
   overflow-anchor: none;
 }
 .live-inner {
-  padding: 8px var(--pad) 16px;
+  padding: 10px var(--pad) 20px;
 }
 
 /* —— A conversation: each earlier turn one quiet line on a hairline; the newest turn open below them —— */
@@ -488,9 +499,14 @@ html.win .live-big {
   min-height: 20px;
   margin-top: 16px;
   padding-left: 20px;
+  /* Reading leading: a little more air than the controls' 20 px. */
+  line-height: 21px;
   user-select: text;
   -webkit-user-select: text;
   cursor: text;
+}
+html.win .live-answer {
+  line-height: 22px;
 }
 .live-answer > .ln {
   position: absolute;
@@ -546,7 +562,7 @@ html.win .live-big {
   padding-left: 18px;
 }
 .md li + li {
-  margin-top: 2px;
+  margin-top: 4px;
 }
 .md li::marker {
   color: var(--live-quiet);
@@ -962,21 +978,21 @@ html.win .live-sessions li + li::before {
 /* —— The typed follow-up: one slim field at the foot, a soft surface with one hairline —— */
 .live-follow {
   flex: none;
-  padding: 8px 10px 10px;
+  /* The question is the panel's flow, not a recorder's footnote: the field gets real room around it. */
+  padding: 14px var(--pad) 16px;
   border-top: 0.5px solid var(--sep);
 }
 html.win .live-follow {
   border-top-width: 1px;
-  padding: 8px 12px 12px;
 }
 .live-field {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  min-height: 36px;
-  padding: 4px 4px 4px 12px;
+  gap: 4px;
+  min-height: 44px;
+  padding: 7px 8px 7px 16px;
   border: 0.5px solid var(--sep);
-  border-radius: 18px;
+  border-radius: 22px;
   background: var(--fill);
 }
 html.win .live-field {
@@ -1444,7 +1460,7 @@ html.live-preview #root {
   padding: 12px;
 }
 html.live-preview .live {
-  width: 380px;
+  width: 452px;
   height: auto;
   max-height: 60vh;
   border-radius: 12px;
@@ -1470,4 +1486,27 @@ html.live-preview.win[data-theme="dark"] .live {
 }
 html.live-preview .live.closed {
   box-shadow: none;
+}
+/* As the window asks for once an answer shows (panelHeight in live.ts). */
+html.live-preview .live.answered {
+  min-height: min(320px, 60vh);
+}
+/* &wall=light|dark: a busy desktop behind a panel with its material (acrylic's blur, then the tint), to check the text
+   keeps its contrast on any wallpaper. */
+html.live-preview[data-wall] body {
+  background:
+    radial-gradient(circle at 78% 18%, #ffd400 0 60px, transparent 61px),
+    radial-gradient(circle at 92% 46%, #e2001a 0 70px, transparent 71px),
+    linear-gradient(90deg, transparent 0 70%, #111 70% 74%, transparent 74%),
+    repeating-linear-gradient(0deg, #2a7de1 0 18px, #ffffff 18px 36px);
+}
+html.live-preview[data-wall="dark"] body {
+  background:
+    radial-gradient(circle at 80% 20%, #ffffff 0 70px, transparent 71px),
+    radial-gradient(circle at 90% 50%, #4cc2ff 0 60px, transparent 61px),
+    repeating-linear-gradient(0deg, #0b0b0f 0 18px, #3a3f4a 18px 36px);
+}
+html.live-preview.vibrant .live {
+  -webkit-backdrop-filter: blur(30px) saturate(1.3);
+  backdrop-filter: blur(30px) saturate(1.3);
 }

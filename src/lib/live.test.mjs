@@ -376,3 +376,16 @@ test("only the tail is re-read: the settled blocks parse the same alone as in th
   const list = ["1. one", "", "2. two"].join(String.fromCharCode(10));
   assert.equal(settledSplit(list), 0, "never between items of one list");
 });
+
+import { ANSWER_MIN_H, PANEL_MAX_SHARE, PANEL_W, panelHeight } from "./live.ts";
+
+test("the panel opens bigger: 452 wide, a reading surface once an answer shows, never past 60 % of the screen", () => {
+  assert.equal(PANEL_W, 452, "as platform.rs PANEL_WIDTH docks it");
+  assert.equal(panelHeight(96, 1040, false), 96, "listening: one row, nothing empty below");
+  assert.equal(panelHeight(180, 1040, true), ANSWER_MIN_H, "a short answer still opens tall");
+  assert.ok(ANSWER_MIN_H >= 300);
+  assert.equal(panelHeight(500, 1040, true), 500, "a longer one grows with its content");
+  assert.equal(panelHeight(2000, 1040, true), Math.round(1040 * PANEL_MAX_SHARE), "up to 60 % of the screen");
+  assert.equal(panelHeight(180, 400, true), 240, "a short screen wins over the minimum");
+  assert.equal(panelHeight(NaN, 1040, false), 0);
+});

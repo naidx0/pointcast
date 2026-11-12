@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import {
   LEVEL_FIELDS,
+  PANEL_W,
   PREVIEW_ANSWER,
   currentTurn,
   firstWords,
@@ -675,7 +676,7 @@ export function onListAsk(fn: () => void): () => void {
 export const liveOpenSettings = () => settingsOpenOn("ai");
 /** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
 export const liveFit = (height: number) =>
-  inTauri ? getCurrentWindow().setSize(new LogicalSize(380, Math.round(height))) : Promise.resolve();
+  inTauri ? getCurrentWindow().setSize(new LogicalSize(PANEL_W, Math.round(height))) : Promise.resolve();
 
 function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
   const s = livePv.snap;
