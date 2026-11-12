@@ -21,6 +21,7 @@ import {
   assistOfflineOnly,
   assistProviders,
   assistSignIn,
+  assistSetup,
   onAssistProviders,
   gpuRetry,
   historyClear,
@@ -237,7 +238,8 @@ export function Settings() {
             onClick={() => setPane(p.id)}
           >
             <span className={`ico ${p.tile}`}>
-              <p.icon size={mac ? 13 : 16} strokeWidth={mac ? 2.2 : 1.6} />
+              {/* Even sizes only: an odd glyph in the 20px tile leaves half a pixel, which WebKit rounds to one side. */}
+              <p.icon size={mac ? 14 : 16} strokeWidth={mac ? 2 : 1.6} />
             </span>
             {p.name}
           </button>
@@ -823,6 +825,10 @@ function Ai() {
   const [failed, setFailed] = useState(false);
   // What the last flip of "Only on this computer" did, in one quiet line.
   const [said, setSaid] = useState("");
+  // The agent whose sign-in window is open, watched until it says it is signed in.
+  const [waiting, setWaiting] = useState("");
+  const watchTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(watchTimer.current), []);
   // The engine answers at once from what it knows; each route's probe fills in through onAssistProviders. `refresh`
   // asks every route again (Check again, after a sign-in).
   const load = (refresh = false) =>
@@ -901,9 +907,33 @@ function Ai() {
     if (needsConsentAt(p, f.base)) return setConsent({ route: { ...p, goes_to: hostOf(f.base), offline: isHere(f.base) }, model: f.model, base: f.base });
     return choose(p, false, f.model, f.base);
   };
+  // An agent's sign-in runs in a terminal window of its own: the list is asked again every few seconds until the app
+  // says it is signed in, for up to five minutes, and Pointcast is told on focus too.
+  const watch = (id: string) => {
+    setWaiting(id);
+    const started = Date.now();
+    const tick = () =>
+      assistProviders(true)
+        .then((x) => {
+          setA(x);
+          const r = x.providers.find((q) => q.id === id);
+          if (r && r.state !== "signed_out" && r.state !== "checking") return setWaiting((w) => (w === id ? "" : w));
+          if (Date.now() - started < 300_000) watchTimer.current = window.setTimeout(tick, 3000);
+          else setWaiting((w) => (w === id ? "" : w));
+        })
+        .catch(() => setWaiting((w) => (w === id ? "" : w)));
+    window.clearTimeout(watchTimer.current);
+    watchTimer.current = window.setTimeout(tick, 3000);
+  };
+  // Install and update are done here; when one fails, its error shows and the command to run by hand opens under it.
+  const setup = (p: Route, job: "install" | "update") =>
+    run(p.id, () => assistSetup(p.id, job), true).then((ok) => ok || setMore({ id: p.id, what: "help" }));
+  const signIn = (p: Route) =>
+    p.id === "codex" ? run(p.id, () => assistSignIn(p.id), true) : run(p.id, () => assistSetup(p.id, "sign_in")).then((ok) => ok && watch(p.id));
   const act = (v: RouteView, p: Route) => {
     if (v.action === "use") return needsConsent(p) ? setConsent({ route: p }) : choose(p, false);
-    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id), true);
+    if (v.action === "sign_in") return signIn(p);
+    if (v.action === "install" || v.action === "update") return setup(p, v.action);
     if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
     if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
     if (v.action === "check") return run(p.id, () => Promise.resolve(), true);
@@ -1009,6 +1039,8 @@ function Ai() {
                   key={v.id}
                   v={v}
                   busy={busy === v.id}
+                  waiting={waiting === v.id}
+                  signIn={() => signIn(p)}
                   err={errs[v.id] ?? ""}
                   more={open}
                   form={form}
@@ -1036,13 +1068,16 @@ function Ai() {
   );
 }
 
-const BUSY: Partial<Record<NonNullable<RouteView["action"]>, string>> = { sign_in: "Signing in…", check: "Checking…" };
+const BUSY: Partial<Record<NonNullable<RouteView["action"]>, string>> = { sign_in: "Signing in…", check: "Checking…", install: "Installing…", update: "Updating…" };
 
 /** One way to an AI: its name, its state in plain words, and the one action that fits; its key form (`form`) or the
  * install help opens under it. */
 function RouteRow(props: {
   v: RouteView;
   busy: boolean;
+  /** Its sign-in window is open and Pointcast is watching for it to finish. */
+  waiting: boolean;
+  signIn: () => void;
   err: string;
   more: "key" | "help" | null;
   form: ReactNode;
@@ -1062,8 +1097,12 @@ function RouteRow(props: {
   }, [copied]);
   const line = err ? (
     <span style={{ color: "var(--red-ink)" }}>{err}</span>
+  ) : props.waiting ? (
+    "Finish signing in in the Terminal window that opened. This updates by itself."
   ) : busy && v.action === "sign_in" ? (
     "Finish signing in in your browser"
+  ) : busy && (v.action === "install" || v.action === "update") ? (
+    `${v.action === "install" ? "Installing" : "Updating"} ${v.name}. This can take a minute.`
   ) : (
     v.line
   );
@@ -1077,6 +1116,13 @@ function RouteRow(props: {
           {v.account?.plan ? <span className="ai-plan">{v.account.plan}</span> : null}
         </div>
         <div className="sub">{line}</div>
+        {v.signIn && !err && !props.waiting ? (
+          <div className="ai-account">
+            <button type="button" className="link" disabled={busy} onClick={props.signIn}>
+              Sign in
+            </button>
+          </div>
+        ) : null}
         {v.account && !err ? (
           <div className="ai-account">
             <button type="button" className="link" disabled={busy} onClick={props.switchAccount}>
@@ -1113,11 +1159,11 @@ function RouteRow(props: {
         <button
           type="button"
           className="btn"
-          disabled={busy}
+          disabled={busy || (props.waiting && v.action === "sign_in")}
           aria-expanded={v.action === "get" ? more === "help" : undefined}
           onClick={props.act}
         >
-          {(busy && BUSY[v.action]) || v.label}
+          {props.waiting && v.action === "sign_in" ? "Waiting…" : (busy && BUSY[v.action]) || v.label}
         </button>
       ) : null}
       {more === "key" ? props.form : null}

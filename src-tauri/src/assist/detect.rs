@@ -56,7 +56,7 @@ pub fn judge(v: (u32, u32, u32)) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "Pointcast needs Codex {}.{}.{} or newer, and this computer has {}.{}.{}. Update Codex, then try again.",
+        "Pointcast needs Codex {}.{}.{} or newer, and this computer has {}.{}.{}. Choose Update.",
         OLDEST.0, OLDEST.1, OLDEST.2, v.0, v.1, v.2
     ))
 }

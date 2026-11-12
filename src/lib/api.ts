@@ -1001,6 +1001,9 @@ export const ASSIST = {
   keyDelete: "assist_key_delete",
   /** command { id }: opens the browser and resolves when signed in (up to 5 minutes) */
   signIn: "assist_sign_in",
+  /** command { id, job: "install" | "update" | "sign_in" }: install and update resolve when the package manager is done;
+   * sign_in opens the vendor's own sign-in in a terminal window and resolves at once */
+  setup: "assist_setup",
   /** command { on } */
   offlineOnly: "assist_offline_only",
   /** command { effort }: the thinking effort for the chosen AI, where it offers one */
@@ -1056,6 +1059,8 @@ export const assistKeySet = (id: string, key: string) =>
   inTauri ? invoke<void>(ASSIST.keySet, { id, key }) : pvDo({ cmd: "key_set", id });
 export const assistKeyDelete = (id: string) => (inTauri ? invoke<void>(ASSIST.keyDelete, { id }) : pvDo({ cmd: "key_delete", id }));
 export const assistSignIn = (id: string) => (inTauri ? invoke<void>(ASSIST.signIn, { id }) : pvLater(1800, () => pvDo({ cmd: "signed_in", id })));
+export const assistSetup = (id: string, job: "install" | "update" | "sign_in") =>
+  inTauri ? invoke<void>(ASSIST.setup, { id, job }) : pvLater(job === "sign_in" ? 600 : 1800, () => pvDo({ cmd: "signed_in", id }));
 export const assistEffort = (effort: string) => (inTauri ? invoke<void>(ASSIST.effort, { effort }) : pvDo({ cmd: "effort", effort }));
 export const assistOfflineOnly = (on: boolean) => (inTauri ? invoke<void>(ASSIST.offlineOnly, { on }) : pvDo({ cmd: "offline", on }));
 

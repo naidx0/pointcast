@@ -531,7 +531,7 @@ fn health_of(found: Option<(Result<String, String>, Option<bool>)>) -> Health {
             let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();
             match signed {
                 Some(true) => (State::Ready, format!("Claude Code{v} is installed. {SIGNED_IN}")),
-                Some(false) => (State::SignedOut, format!("Claude Code{v} is installed. Run claude in a terminal once and sign in, then Check again.")),
+                Some(false) => (State::SignedOut, format!("Claude Code{v} is installed, but not signed in. Choose Sign in.")),
                 None => (State::Ready, format!("Claude Code{v} is installed. Whether you are signed in is checked when you ask.")),
             }
         }
@@ -913,7 +913,7 @@ pub mod tests {
         assert_eq!((signed_in_of(r#"{"loggedIn":false}"#), signed_in_of("Not logged in"), signed_in_of("{}")), (Some(false), None, None));
         let found = |signed| health_of(Some((Ok("2.1.322 (Claude Code)".into()), signed)));
         // Signed out is not ready: it is listed with its next step, never under Ready to use.
-        assert_eq!((found(Some(false)).state, found(Some(false)).line.as_str()), (State::SignedOut, "Claude Code 2.1.322 is installed. Run claude in a terminal once and sign in, then Check again."));
+        assert_eq!((found(Some(false)).state, found(Some(false)).line.as_str()), (State::SignedOut, "Claude Code 2.1.322 is installed, but not signed in. Choose Sign in."));
         assert_eq!((found(Some(true)).state, found(Some(true)).line.as_str()), (State::Ready, "Claude Code 2.1.322 is installed. You are signed in."));
         assert_eq!((found(None).state, found(None).goes_to), (State::Ready, GOES_TO));
         assert_eq!(health_of(None).state, State::NotInstalled);

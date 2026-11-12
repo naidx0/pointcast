@@ -20,6 +20,7 @@ pub mod fake;
 pub mod http;
 pub mod jsonl;
 pub mod openai;
+pub mod setup;
 pub mod vault;
 
 use std::path::PathBuf;

@@ -490,6 +490,14 @@ async fn assist_sign_in(app: AppHandle, id: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Install, update or sign in to an AI's own app for the person (`job`: install, update, sign_in). Install and update
+/// wait for the package manager; sign-in opens the vendor's own sign-in in a terminal window and returns at once.
+#[tauri::command]
+async fn assist_setup(id: String, job: String) -> Result<(), String> {
+    let job = assist::setup::Job::parse(&job).ok_or_else(|| format!("Unknown setup step: {job}"))?;
+    tauri::async_runtime::spawn_blocking(move || assist::setup::setup(&id, job)).await.map_err(|e| e.to_string())?
+}
+
 /// The thinking effort for the chosen AI, where it offers one (Codex: low, medium, high).
 #[tauri::command]
 fn assist_effort(svc: tauri::State<'_, Arc<App>>, effort: String) -> Result<(), String> {
@@ -2307,6 +2315,7 @@ pub fn run() {
             assist_key_set,
             assist_key_delete,
             assist_sign_in,
+            assist_setup,
             assist_offline_only,
             assist_effort,
             platform_info,
