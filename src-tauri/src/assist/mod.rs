@@ -141,6 +141,8 @@ pub struct Caps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Ready,
+    /// Installed, and its own CLI says nobody is signed in.
+    SignedOut,
     NotInstalled,
     TooOld,
     Unknown,

@@ -74,12 +74,21 @@ export const AGENT_INSTALL: Record<string, { command: string; page: string; acco
   "claude-code": { command: "npm install -g @anthropic-ai/claude-code", page: "https://docs.claude.com/en/docs/claude-code/setup", account: "Then run claude in a terminal once and sign in." },
 };
 
-export const GROUPS: readonly (readonly [RouteKind, string])[] = [
-  ["plan", "Your plan"],
-  ["agent", "Your subscriptions"],
-  ["key", "A key"],
-  ["local", "This computer"],
+/** The page's groups. What is ready on this computer comes first; every other route sits under the way it is set up,
+ * with its one next step (install, sign in, add a key, start it). No group names an account: a fresh computer has no
+ * "plan", only subscriptions the person may bring. */
+export type GroupId = "ready" | "subscription" | "key" | "local";
+export const GROUPS: readonly (readonly [GroupId, string])[] = [
+  ["ready", "Ready to use"],
+  ["subscription", "Your subscriptions"],
+  ["key", "With a key"],
+  ["local", "On this computer"],
 ];
+
+/** The group a route is drawn in: ready ones together, the rest by how they are set up (a ChatGPT plan through Codex
+ * is a subscription like Claude's or Gemini's). */
+export const groupOf = (p: Pick<Route, "kind" | "state" | "available">): GroupId =>
+  p.available && p.state === "ready" ? "ready" : p.kind === "plan" || p.kind === "agent" ? "subscription" : p.kind;
 
 /** OpenAI's own install line for its Codex CLI (the same line updates it). */
 export const CODEX_INSTALL = "npm i -g @openai/codex";
@@ -148,9 +157,9 @@ export const offlineSaid = (on: boolean) => (on ? "On. Only AIs on this computer
 export const askReady = (a: Assist) => chosenRoute(a) != null;
 
 /** The list as it is drawn: the non-empty groups in order, each route with its line and its one action. */
-export function groups(a: Assist): { kind: RouteKind; title: string; routes: RouteView[] }[] {
+export function groups(a: Assist): { kind: GroupId; title: string; routes: RouteView[] }[] {
   const shown = visibleRoutes(a);
-  return GROUPS.map(([kind, title]) => ({ kind, title, routes: shown.filter((p) => p.kind === kind).map((p) => routeView(p, a)) })).filter(
+  return GROUPS.map(([kind, title]) => ({ kind, title, routes: shown.filter((p) => groupOf(p) === kind).map((p) => routeView(p, a)) })).filter(
     (g) => g.routes.length,
   );
 }
@@ -437,11 +446,9 @@ const MODELS: Record<string, AssistModel[]> = {
   lmstudio: [],
 };
 
-/** The engine's line for Claude through Claude Code until the owner's OK (catalog::CLAUDE_CODE_NOT_OK). */
-export const CLAUDE_CODE_NOT_OK = "Needs your OK first: Anthropic's terms for using Claude Code inside another app";
 
 /** The routes on a fresh computer, in the engine's order: Codex not installed; the Gemini CLI installed (the engine
- * cannot tell whether it is signed in), Copilot and OpenCode not installed, Claude Code waiting for the owner's OK; no
+ * cannot tell whether it is signed in), Copilot and OpenCode not installed, Claude Code signed in; no
  * keys and no address; Ollama installed but stopped, no LM Studio. */
 export function previewAssist(kind: string): Assist {
   const r = (id: string, name: string, k: RouteKind, state: RouteState, goes_to: string, line = ""): Route => ({
@@ -472,7 +479,7 @@ export function previewAssist(kind: string): Assist {
       r("gemini-cli", "Gemini", "agent", "ready", "Google, through your Gemini CLI sign-in", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first."),
       r("copilot", "GitHub Copilot", "agent", "not_installed", "GitHub, through your Copilot plan", missing("GitHub Copilot CLI")),
       r("opencode", "OpenCode", "agent", "not_installed", "the AI you set up in OpenCode", missing("OpenCode")),
-      { ...r("claude-code", "Claude", "agent", "unsupported", "Anthropic, through your Claude plan", CLAUDE_CODE_NOT_OK), available: false },
+      r("claude-code", "Claude", "agent", "ready", "Anthropic, through your Claude plan", "Signed in to Claude Code."),
       r("openai", "OpenAI API", "key", "no_key", "api.openai.com"),
       r("anthropic", "Claude API", "key", "no_key", "api.anthropic.com"),
       r("xai", "Grok (xAI API)", "key", "no_key", "api.x.ai"),

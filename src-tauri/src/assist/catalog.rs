@@ -21,7 +21,6 @@ const KEYS_NOT_HERE: &str = "Keys are not supported on Linux yet. A model on thi
 /// The route whose address the person types.
 pub const CUSTOM: &str = "custom";
 pub const CLAUDE_CODE: &str = "claude-code";
-pub const CLAUDE_CODE_NOT_OK: &str = "Needs your OK first: Anthropic's terms for using Claude Code inside another app";
 const NO_ADDRESS: &str = "Type the address of the service first.";
 
 /// How a route is paid for: the person's plan through Codex, another subscription through its vendor's own agent, a
@@ -398,7 +397,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
         .map(|r| {
             let (mut models, mut adds) = (Vec::new(), Vec::new());
             let (mut plan, mut email) = (None, None);
-            let checking = look.pending.contains(&r.id) && !(r.id == CLAUDE_CODE && !s.assist_claude_code_ok);
+            let checking = look.pending.contains(&r.id);
             let (state, line) = match r.way {
                 _ if checking => (Status::Checking, "Checking…".to_owned()),
                 Way::Plan => match &look.codex {
@@ -406,7 +405,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                         (State::NotInstalled, _) => (Status::NotInstalled, h.line.clone()),
                         (State::TooOld, _) => (Status::TooOld, h.line.clone()),
                         (State::Unknown, _) => (Status::Unsupported, h.line.clone()),
-                        (State::Ready, Some(false)) => (Status::SignedOut, "Codex is installed. Sign in with your ChatGPT account.".to_owned()),
+                        (State::Ready, Some(false)) | (State::SignedOut, _) => (Status::SignedOut, "Codex is installed. Sign in with your ChatGPT account.".to_owned()),
                         (State::Ready, signed) => {
                             (models, adds) = (look.codex_models.clone(), look.adds.clone());
                             if let Some(a) = &look.account {
@@ -422,13 +421,13 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                     },
                     None => (Status::NotInstalled, "Codex is not installed on this computer.".to_owned()),
                 },
-                Way::Agent if r.id == CLAUDE_CODE && !s.assist_claude_code_ok => (Status::Unsupported, CLAUDE_CODE_NOT_OK.to_owned()),
                 Way::Agent => match look.agents.iter().find(|(id, _)| *id == r.id).map(|(_, h)| h) {
                     Some(h) => match h.state {
                         State::Ready => (Status::Ready, h.line.clone()),
                         State::NotInstalled => (Status::NotInstalled, h.line.clone()),
                         State::TooOld => (Status::TooOld, h.line.clone()),
                         State::Unknown => (Status::Unsupported, h.line.clone()),
+                        State::SignedOut => (Status::SignedOut, h.line.clone()),
                     },
                     None => (Status::NotInstalled, format!("{} is not installed on this computer.", r.name)),
                 },
@@ -450,7 +449,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                 (CUSTOM, None) => ("the address you type".to_owned(), None),
                 _ => (r.goes_to.to_owned(), None),
             };
-            let available = !(r.id == CLAUDE_CODE && !s.assist_claude_code_ok);
+            let available = true;
             Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email }
         })
         .collect();
@@ -493,12 +492,9 @@ pub fn choose(s: &mut Settings, id: &str, model: Option<String>, consent: bool, 
 }
 
 /// `choose`, with the address the person typed for the other service (`CUSTOM`); none keeps the one agreed to. A new
-/// address is a new destination and needs a new yes. Claude through Claude Code is refused until the owner's OK.
+/// address is a new destination and needs a new yes.
 pub fn choose_at(s: &mut Settings, id: &str, base: Option<&str>, model: Option<String>, consent: bool, now_ms: u64) -> Result<(), String> {
     let r = route(id).ok_or(UNKNOWN)?;
-    if r.id == CLAUDE_CODE && !s.assist_claude_code_ok {
-        return Err(CLAUDE_CODE_NOT_OK.into());
-    }
     let goes_to = match (r.id, base) {
         (CUSTOM, Some(b)) => base_of(b)?,
         (CUSTOM, None) => custom_base(s).ok_or(NO_ADDRESS)?,
@@ -600,9 +596,6 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
     let Some(r) = s.assist_provider.as_deref().and_then(route) else {
         return Err(NONE_CHOSEN.into());
     };
-    if r.id == CLAUDE_CODE && !s.assist_claude_code_ok {
-        return Err(CLAUDE_CODE_NOT_OK.into());
-    }
     if !consented(s, r) {
         return Err(format!("Allow {} in Settings first", r.name));
     }
@@ -908,20 +901,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_through_claude_code_cannot_be_chosen_or_asked_until_the_owner_s_ok() {
+    fn claude_through_claude_code_is_chosen_like_any_subscription_with_the_person_s_yes() {
+        // The owner's OK, 2026-11-12: Claude through the person's own signed-in Claude Code, as T3 Code does it.
         let mut s = Settings::default();
-        assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 1), Err(CLAUDE_CODE_NOT_OK.into()));
-        assert!(s.assist_provider.is_none() && s.assist_consent.is_empty());
         let row = providers(&s, &Look::default()).providers.into_iter().find(|r| r.id == CLAUDE_CODE).unwrap();
-        assert_eq!((row.available, row.kind, row.state, row.line.as_str()), (false, Way::Agent, Status::Unsupported, CLAUDE_CODE_NOT_OK));
-        // Chosen by hand in the settings file, it is still refused at the Ask, and nothing is made.
-        s.assist_provider = Some(CLAUDE_CODE.into());
-        s.assist_consent.push(Consent { provider: CLAUDE_CODE.into(), goes_to: CLAUDE_CLI.goes_to.into(), at_ms: 1 });
-        assert_eq!(picked(&s), Err(CLAUDE_CODE_NOT_OK.into()));
+        assert!(row.available && row.kind == Way::Agent);
+        // No yes yet: not chosen, and nothing can be asked.
+        assert!(choose(&mut s, CLAUDE_CODE, None, false, 1).is_err());
+        assert!(s.assist_provider.is_none());
         let made = |s: &Settings| picked(s).and_then(|p| build(&p, Path::new("unused"))).map(|b| b.id());
-        assert_eq!(made(&s), Err(CLAUDE_CODE_NOT_OK.into()));
-        s.assist_claude_code_ok = true;
-        assert_eq!(choose(&mut s, CLAUDE_CODE, None, false, 2), Ok(()));
+        assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 2), Ok(()));
+        assert_eq!(s.assist_consent.last().map(|c| c.goes_to.as_str()), Some(CLAUDE_CLI.goes_to));
+        assert_eq!(made(&s), Ok(CLAUDE_CODE));
+        // A settings file from before the OK, with the old switch off, changes nothing.
+        s.assist_claude_code_ok = false;
         assert_eq!(made(&s), Ok(CLAUDE_CODE));
         assert!(providers(&s, &Look::default()).providers.iter().all(|r| r.available));
     }
@@ -1056,7 +1049,7 @@ mod tests {
         let state = |l: &List, id: &str| l.providers.iter().find(|r| r.id == id).unwrap().state;
         assert_eq!((state(&first, "codex"), state(&first, "gemini-cli"), state(&first, "lmstudio")), (Status::Checking, Status::Checking, Status::Checking));
         assert_ne!(state(&first, "openai"), Status::Checking, "a key is read at once");
-        assert_eq!(state(&first, CLAUDE_CODE), Status::Unsupported, "waiting for the owner's OK is known at once");
+        assert_eq!(state(&first, CLAUDE_CODE), Status::Checking, "Claude Code is probed like every other subscription");
         // "Only on this computer" changes the list at once, while the slow probe is still out.
         s.assist_offline_only = true;
         let t = Instant::now();

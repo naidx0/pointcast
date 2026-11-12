@@ -5,7 +5,7 @@
 //! writes, no skills or slash commands, no saved session, an empty folder of Pointcast's own, instructions of
 //! Pointcast's own, and a turn that reaches for a tool anyway ends the helper and fails as refused.
 //!
-//! The route stays off until the owner's OK (`catalog::CLAUDE_CODE_NOT_OK`). Every flag was read in the `--help` of
+//! The route is on since the owner's OK (2026-11-12), chosen like any subscription with the person's yes. Every flag was read in the `--help` of
 //! Claude Code 2.1.322. UNCONFIRMED, since that help does not give them and no real `claude` has been asked: the
 //! shape of the lines in both directions, and the words of its errors.
 
@@ -526,12 +526,11 @@ fn health_of(found: Option<(Result<String, String>, Option<bool>)>) -> Health {
         Some((Err(why), _)) => (State::Unknown, format!("Claude Code is installed, but Pointcast could not read its version: {why}.")),
         Some((Ok(said), signed)) => {
             let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();
-            let rest = match signed {
-                Some(true) => "You are signed in.",
-                Some(false) => "Sign in with Claude Code first.",
-                None => "Whether you are signed in is checked when you ask.",
-            };
-            (State::Ready, format!("Claude Code{v} is installed. {rest}"))
+            match signed {
+                Some(true) => (State::Ready, format!("Claude Code{v} is installed. You are signed in.")),
+                Some(false) => (State::SignedOut, format!("Claude Code{v} is installed. Run claude in a terminal once and sign in, then Check again.")),
+                None => (State::Ready, format!("Claude Code{v} is installed. Whether you are signed in is checked when you ask.")),
+            }
         }
     };
     Health { state, line, goes_to: GOES_TO }
@@ -910,8 +909,9 @@ pub mod tests {
         assert_eq!(signed_in_of(r#"{"loggedIn":true,"email":"planted-address"}"#), Some(true));
         assert_eq!((signed_in_of(r#"{"loggedIn":false}"#), signed_in_of("Not logged in"), signed_in_of("{}")), (Some(false), None, None));
         let found = |signed| health_of(Some((Ok("2.1.322 (Claude Code)".into()), signed)));
-        assert_eq!(found(Some(false)).line, "Claude Code 2.1.322 is installed. Sign in with Claude Code first.");
-        assert_eq!(found(Some(true)).line, "Claude Code 2.1.322 is installed. You are signed in.");
+        // Signed out is not ready: it is listed with its next step, never under Ready to use.
+        assert_eq!((found(Some(false)).state, found(Some(false)).line.as_str()), (State::SignedOut, "Claude Code 2.1.322 is installed. Run claude in a terminal once and sign in, then Check again."));
+        assert_eq!((found(Some(true)).state, found(Some(true)).line.as_str()), (State::Ready, "Claude Code 2.1.322 is installed. You are signed in."));
         assert_eq!((found(None).state, found(None).goes_to), (State::Ready, GOES_TO));
         assert_eq!(health_of(None).state, State::NotInstalled);
         assert_eq!(health_of(Some((Err("it did not answer".into()), None))).state, State::Unknown);

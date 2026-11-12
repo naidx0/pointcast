@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   BASE_ERRORS,
-  CLAUDE_CODE_NOT_OK,
   CODEX_INSTALL,
   CUSTOM,
   GROUPS,
@@ -131,18 +130,20 @@ test("forget is offered only when there is something to forget", () => {
 
 test("routes are grouped plainly, in order, and empty groups are left out", () => {
   const a = previewAssist("fresh");
-  assert.deepEqual(GROUPS.map(([, t]) => t), ["Your plan", "Your subscriptions", "A key", "This computer"]);
+  assert.deepEqual(GROUPS.map(([, t]) => t), ["Ready to use", "Your subscriptions", "With a key", "On this computer"]);
   assert.deepEqual(groups(a).map((g) => [g.title, g.routes.map((r) => r.id)]), [
-    ["Your plan", ["codex"]],
-    ["Your subscriptions", ["gemini-cli", "copilot", "opencode", "claude-code"]],
-    ["A key", ["openai", "anthropic", "xai", "gemini", "groq", "mistral", "deepseek", "openrouter", "custom"]],
-    ["This computer", ["ollama", "lmstudio"]],
+    ["Ready to use", ["gemini-cli", "claude-code"]],
+    ["Your subscriptions", ["codex", "copilot", "opencode"]],
+    ["With a key", ["openai", "anthropic", "xai", "gemini", "groq", "mistral", "deepseek", "openrouter", "custom"]],
+    ["On this computer", ["ollama", "lmstudio"]],
   ]);
   const ids = groups(a).flatMap((g) => g.routes.map((r) => r.id));
   assert.equal(new Set(ids).size, a.providers.length, "every route once");
-  // The fixture lists the routes in the engine's own order (catalog::ROUTES), which is the order on screen.
-  assert.deepEqual(ids, a.providers.map((p) => p.id));
-  assert.deepEqual(groups({ ...a, providers: a.providers.filter((p) => p.kind !== "agent") }).map((g) => g.title), ["Your plan", "A key", "This computer"]);
+  // No heading names an account: a fresh computer shows ChatGPT as one subscription to set up, never as "your plan".
+  for (const g of groups(a)) assert.doesNotMatch(g.title, /plan/i);
+  assert.deepEqual(groups({ ...a, providers: a.providers.filter((p) => p.kind !== "agent") }).map((g) => g.title), ["Your subscriptions", "With a key", "On this computer"]);
+  // Signed in to ChatGPT through Codex, it moves up to Ready to use.
+  assert.deepEqual(groups(previewAssist("codex-ready"))[0].routes.map((r) => r.id).includes("codex"), true);
 });
 
 test("an agent shows the engine's line as is, offers Use when installed, Check again when not, and no model", () => {
@@ -169,18 +170,22 @@ test("an agent shows the engine's line as is, offers Use when installed, Check a
 });
 
 test("a route that cannot be chosen yet says why, offers nothing, and never answers Ask", () => {
-  const a = previewAssist("fresh");
-  const p = byId(a, "claude-code");
-  assert.deepEqual([p.available, p.kind, p.state], [false, "agent", "unsupported"]);
+  const held = "Not available here";
+  const base = previewAssist("fresh");
+  const a = { ...base, providers: base.providers.map((x) => (x.id === "opencode" ? { ...x, available: false, state: "unsupported", line: held } : x)) };
+  const p = byId(a, "opencode");
   const v = routeView(p, a);
-  assert.deepEqual([v.name, v.line, v.action, v.label, v.chosen, v.forget], ["Claude", CLAUDE_CODE_NOT_OK, null, null, false, false]);
+  assert.deepEqual([v.line, v.action, v.label, v.chosen, v.forget], [held, null, null, false, false]);
   // Chosen by hand in the settings file, it still does not answer, and the top says why.
-  const forced = { ...a, chosen: "claude-code" };
+  const forced = { ...a, chosen: "opencode" };
   assert.equal(chosenRoute(forced), null);
   assert.equal(askReady(forced), false);
   assert.equal(routeView(p, forced).chosen, false);
-  assert.deepEqual(nowView(forced), { title: "Nothing chosen", line: CLAUDE_CODE_NOT_OK });
-  assert.equal(previewApply(a, { cmd: "choose", id: "claude-code", model: null, consent: true }), CLAUDE_CODE_NOT_OK);
+  assert.deepEqual(nowView(forced), { title: "Nothing chosen", line: held });
+  assert.equal(previewApply(a, { cmd: "choose", id: "opencode", model: null, consent: true }), held);
+  // Claude through Claude Code is a subscription like the others (the owner's OK, 2026-11-12).
+  assert.equal(byId(base, "claude-code").available, true);
+  assert.equal(routeView(byId(base, "claude-code"), base).action, "use");
   assert.equal(routeView(route({ available: false }), none).line, "Not available yet", "no line from the engine: still one plain line");
 });
 
@@ -269,7 +274,7 @@ test("only on this computer hides every route that leaves it, and the remote cho
   const a = { ...previewAssist("codex-ready"), offline_only: true };
   const shown = visibleRoutes(a);
   assert.ok(shown.length > 0 && shown.every((p) => p.offline));
-  assert.deepEqual(groups(a).map((g) => g.title), ["This computer"]);
+  assert.deepEqual(groups(a).map((g) => g.title), ["On this computer"]);
   assert.equal(chosenRoute(a), null);
   assert.equal(askReady(a), false);
   assert.match(nowView(a).line, /off for now/);
