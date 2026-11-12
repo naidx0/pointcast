@@ -22,7 +22,7 @@ import {
   type Config,
   type UiState,
 } from "@/lib/api";
-import { READY_WAIT_MS, capsuleLine, discardClick, finishingLine, micCaption, noticeView, readyNote, timeStays } from "@/lib/capsule";
+import { NO_PEEK, READY_WAIT_MS, capsuleLine, discardClick, finishingLine, micCaption, noticeView, peekStep, readyNote, timeShown, type PeekEvent } from "@/lib/capsule";
 import { Line, type LevelSource } from "@/components/Line";
 import { chordText } from "@/lib/keys";
 import { LEVEL_FIELDS, levelOf, previewLevel } from "@/lib/live";
@@ -172,10 +172,31 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
   const quiet = s.phase === "recording" && live && s.quiet_mic && !problem && !ready ? s.quiet_mic : null;
   const mic = quiet ? micNotice(quiet) : null;
   const n = s.image_count;
+  // Whether the person looks at the time (peekStep): forgotten when the window hides and when a recording starts.
+  const [peek, setPeek] = useState(NO_PEEK);
+  const look = (e: PeekEvent) => setPeek((p) => peekStep(p, e));
+  useEffect(() => {
+    const vis = () => document.hidden && look("hidden");
+    document.addEventListener("visibilitychange", vis);
+    return () => document.removeEventListener("visibilitychange", vis);
+  }, []);
+  useEffect(() => {
+    if (live) look("start");
+  }, [live]);
+  const timed = timeShown({ live, durationMs: s.duration_ms, warned: !!mic, peek });
 
   return (
     <div className="hud-wrap" data-tauri-drag-region>
-      <div className={`hud ${mic ? "warned" : ""}`} data-tauri-drag-region role="toolbar" aria-label="Pointcast recording">
+      <div
+        className={`hud ${mic ? "warned" : ""}`}
+        data-tauri-drag-region
+        role="toolbar"
+        aria-label="Pointcast recording"
+        onPointerEnter={() => look("enter")}
+        onPointerLeave={() => look("leave")}
+        onFocus={(e) => e.target instanceof Element && e.target.matches(":focus-visible") && look("key-focus")}
+        onBlur={(e) => !(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) && look("blur")}
+      >
         <span className={`rec ${live ? "" : "ready"}`} data-tauri-drag-region />
         {problem ? (
           <>
@@ -194,7 +215,7 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
             {ready.lines[1] ? <span data-tauri-drag-region>{ready.lines[1]}</span> : null}
           </span>
         ) : (
-          <span className={`scribe${live && timeStays(s.duration_ms, !!mic) ? " timed" : ""}`} data-tauri-drag-region>
+          <span className={`scribe${timed ? " timed" : ""}`} data-tauri-drag-region>
             <Line mode={capsuleLine(s)} height={LINE_H} dx={LINE_DX} tip="ink" levels={hudLevels} />
             {live ? (
               <span className="time" data-tauri-drag-region>

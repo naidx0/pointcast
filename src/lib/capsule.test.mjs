@@ -129,3 +129,27 @@ test("the capsule's line reads the same level as Ask's: loudness before the raw 
   // An engine without loudness still moves the line.
   assert.equal(levelOf({ phase: "recording", mic: true, level: 0.62 }, LEVEL_FIELDS), 0.62);
 });
+
+import { NO_PEEK, TIME_STAYS_MS, peekStep, timeShown } from "./capsule.ts";
+
+test("the time shows only while someone looks, and never stays after a click, a hide or the end of a recording", () => {
+  const at = (peek, o = {}) => timeShown({ live: true, durationMs: 16_000, warned: false, peek, ...o });
+  assert.equal(at(NO_PEEK), false, "a recording under a minute shows no time by itself");
+  const over = peekStep(NO_PEEK, "enter");
+  assert.equal(at(over), true, "the pointer over the capsule shows it");
+  assert.equal(at(peekStep(over, "leave")), false, "and it goes when the pointer leaves");
+  // A click on a picture button keeps that button's focus: that is not a look, so the time does not stay.
+  assert.equal(at(peekStep(peekStep(over, "leave"), "blur")), false);
+  // The keyboard on a button shows it until the focus leaves the capsule.
+  const key = peekStep(NO_PEEK, "key-focus");
+  assert.equal(at(key), true);
+  assert.equal(at(peekStep(key, "blur")), false);
+  // Hidden with the pointer over it, no pointer-leave ever arrives: hiding, and a new recording, forget the look.
+  for (const e of ["hidden", "start"]) assert.deepEqual(peekStep({ pointer: true, keyboard: true }, e), NO_PEEK, e);
+  assert.equal(at(peekStep(over, "hidden")), false);
+  // Ended (the microphone is no longer live): no time, whatever the look or the length.
+  assert.equal(timeShown({ live: false, durationMs: TIME_STAYS_MS * 3, warned: true, peek: over }), false);
+  // From a minute on, and with the microphone warning, it stays without a look.
+  assert.equal(at(NO_PEEK, { durationMs: TIME_STAYS_MS }), true);
+  assert.equal(at(NO_PEEK, { warned: true }), true);
+});
