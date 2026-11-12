@@ -1460,12 +1460,12 @@ impl Live {
                 Err(RecvTimeoutError::Disconnected) => break Some("The answer ended before it was finished.".into()),
             }
             if !pending.is_empty() && told.elapsed() >= FRAME {
-                (self.deps.out)(Out::Delta { turn: turn_no, text: std::mem::take(&mut pending) });
+                self.say(run, turn_no, std::mem::take(&mut pending));
                 told = Instant::now();
             }
         };
         if !pending.is_empty() {
-            (self.deps.out)(Out::Delta { turn: turn_no, text: pending });
+            self.say(run, turn_no, pending);
         }
         answer.times.done_ms = now();
         // An empty line is the person's own stop: the answer is kept as far as it came, with no error.
@@ -1508,6 +1508,15 @@ impl Live {
         drop(g);
         // The idle scheduler counts five minutes from here.
         crate::wake();
+    }
+
+    /// New words of the answer reach the panel only while their question is the panel's: after a close the next
+    /// question counts from turn 1 again, so the panel could not tell an old answer's words from the new one's.
+    fn say(&self, run: u64, turn: u64, text: String) {
+        let g = self.inner.lock().unwrap();
+        if g.run == run {
+            (self.deps.out)(Out::Delta { turn, text });
+        }
     }
 
     /// When the AI's helper was last used, while the panel may still hold one.
@@ -2959,6 +2968,24 @@ mod tests {
         // A typed turn is named by the clock's second, so it is found by its words, not by its place.
         let fourth = r.kept()[0].1.iter().filter_map(|k| k.answer.clone()).find(|a| a.sent.text == "four").unwrap();
         assert_eq!((&fourth.sent.replay, fourth.sent.again.len(), fourth.sent.earlier.len()), (head, 0, 3));
+        r.end();
+    }
+
+    #[test]
+    fn a_late_word_of_an_answer_the_panel_closed_on_never_reaches_the_next_answer() {
+        let held: Arc<Mutex<Vec<Sender<Event>>>> = Arc::default();
+        let canned = Canned { events: vec![(1, Kind::Delta("first".into()))], hold: true, held: held.clone() };
+        let r = rig("late-delta", Some(Arc::new(canned)), FIRST_WAIT);
+        r.ask("one", State::Answering);
+        r.live.close();
+        // The next question is turn 1 of the panel again, as the old one was.
+        assert_eq!(r.live.ask_typed("two", false), Ok(()));
+        r.wait("the second answer", || held.lock().unwrap().len() == 2 && r.live.snapshot().state == State::Answering);
+        let old = held.lock().unwrap()[0].clone();
+        old.send(Event { turn: TurnId(1), kind: Kind::Delta(" late".into()) }).unwrap();
+        old.send(Event { turn: TurnId(1), kind: Kind::Done }).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(r.deltas(), [(1, "first".to_owned()), (1, "first".to_owned())], "nothing of the old answer after it was closed");
         r.end();
     }
 }
