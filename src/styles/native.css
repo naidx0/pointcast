@@ -2390,6 +2390,10 @@ html.win .hist-item {
   font-weight: 500;
   color: var(--orange-ink);
 }
+/* On the light grey list the warm ink is taken a step darker to keep AA (5.4:1 on the Mac's sidebar). */
+html:not([data-theme="dark"]) .hist-tag.badge {
+  color: color-mix(in srgb, var(--orange-ink) 78%, #000);
+}
 .hist-text {
   font-size: var(--fs-body);
   line-height: 20px;
@@ -2731,6 +2735,13 @@ html.win select.field {
 .result-del {
   flex: none;
   margin-left: 4px;
+}
+/* Its icon-only buttons are the colour of the text beside them, on either skin: never the link's blue. */
+.result-bar .btn.icon.plain {
+  color: var(--label-2);
+}
+.result-bar .btn.icon.plain:hover {
+  color: var(--label);
 }
 .result.has-undo .hist-list,
 .result.has-undo .result-body {

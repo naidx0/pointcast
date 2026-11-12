@@ -818,9 +818,11 @@ html.win .live-search {
   border-width: 1px;
   border-radius: var(--r-box);
 }
+/* The placeholder is the instruction: the secondary grey, which meets AA on the field in both themes. */
 .live-search::placeholder,
 .live-field textarea::placeholder {
-  color: var(--live-faint);
+  color: var(--live-quiet);
+  opacity: 1;
 }
 .live-search:focus,
 .live-field:focus-within {
@@ -967,7 +969,7 @@ html.win .live-field {
   border: 0;
   border-radius: 14px;
   background: transparent;
-  color: var(--live-faint);
+  color: var(--live-quiet);
 }
 html.win .live-pic-toggle,
 html.win .live-send {
