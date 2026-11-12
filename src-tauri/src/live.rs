@@ -976,6 +976,20 @@ impl Live {
         over.end(&self.deps);
     }
 
+    /// A new question asked for from Home or the tray: the panel opens on nothing, its field ready, and the question
+    /// typed or said there starts a session of its own. Whatever was under way is stopped, as `fresh` stops it.
+    pub fn fresh_shown(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let over = self.clear(&mut g);
+        g.session = None;
+        g.last = None;
+        self.step(&mut g, Step::Settle);
+        self.tell(&g);
+        drop(g);
+        (self.deps.out)(Out::Show);
+        over.end(&self.deps);
+    }
+
     /// The kept sessions, for the list and the commands on them.
     pub fn sessions(&self) -> &Sessions {
         &self.sessions
@@ -2526,6 +2540,22 @@ mod tests {
         assert_eq!(r.live.snapshot().state, State::Closed);
         r.ask("six", State::Shown);
         assert_eq!(sizes(), [1, 1, 2, 2]);
+        r.end();
+    }
+
+    #[test]
+    fn a_new_question_asked_for_from_home_opens_the_closed_panel_on_nothing_with_no_session() {
+        let (_script, provider) = scripted(&[(1, "One.")]);
+        let r = rig("fresh-shown", provider, FIRST_WAIT);
+        r.ask("one", State::Shown);
+        r.live.close();
+        assert_eq!(r.live.snapshot().state, State::Closed);
+        let shows = || r.outs.lock().unwrap().iter().filter(|o| **o == Out::Show).count();
+        let before = shows();
+        r.live.fresh_shown();
+        let snap = r.live.snapshot();
+        assert_eq!((snap.state, snap.session.clone(), snap.turns.len(), snap.words.as_str()), (State::Shown, SessionRef::default(), 0, ""));
+        assert_eq!(shows(), before + 1, "the panel is shown");
         r.end();
     }
 

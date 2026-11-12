@@ -620,7 +620,8 @@ export const sessionsList = (): Promise<SessionMeta[]> => (inTauri ? invoke<unkn
 export const sessionsSearch = (q: string): Promise<SessionMeta[]> =>
   (inTauri ? invoke<unknown>(SESSIONS.search, { q }) : Promise.resolve(previewSearch(pvSessions(), q))).then(normalizeSessions);
 export const sessionsOpen = (id: string) => (inTauri ? invoke<void>(SESSIONS.open, { id }) : pvOpen(id));
-export const sessionsNew = () => (inTauri ? invoke<void>(SESSIONS.new) : pvNew());
+/** The next question starts a session of its own. `show`: the panel opens on it too, its field ready (Home). */
+export const sessionsNew = (show = false) => (inTauri ? invoke<void>(SESSIONS.new, { show }) : pvNew());
 export const sessionsRename = (id: string, title: string) => (inTauri ? invoke<void>(SESSIONS.rename, { id, title }) : pvRename(id, title));
 export const sessionsDelete = (id: string) => (inTauri ? invoke<void>(SESSIONS.delete, { id }) : pvDelete(id));
 export const sessionsExport = (id: string): Promise<string> =>

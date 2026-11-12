@@ -530,10 +530,14 @@ async fn sessions_open(live: tauri::State<'_, Arc<live::Live>>, id: String) -> R
     live.open(&id)
 }
 
-/// The next question starts a session of its own.
+/// The next question starts a session of its own. `show` (Home's "Type a question"): the panel opens on it too.
 #[tauri::command]
-async fn sessions_new(live: tauri::State<'_, Arc<live::Live>>) -> Result<(), String> {
-    live.fresh();
+async fn sessions_new(live: tauri::State<'_, Arc<live::Live>>, show: Option<bool>) -> Result<(), String> {
+    if show == Some(true) {
+        live.fresh_shown();
+    } else {
+        live.fresh();
+    }
     Ok(())
 }
 

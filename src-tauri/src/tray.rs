@@ -22,7 +22,7 @@ pub struct Tray {
 }
 
 /// Where today's line goes in the menu: after History.
-const TODAY_AT: usize = 8;
+const TODAY_AT: usize = 9;
 
 fn glyph(recording: bool) -> Option<Image<'static>> {
     let bytes: &'static [u8] = match (cfg!(target_os = "macos"), recording) {
@@ -46,6 +46,7 @@ fn item(app: &AppHandle, id: &str, text: &str, accel: Option<String>) -> tauri::
 pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
     let s = svc.settings.lock().unwrap().clone();
     let record = item(app, "record", "Start Recording", Some(s.session_chord().accelerator()))?;
+    let ask = item(app, "ask", "Type a Question…", None)?;
     let full = item(app, "full", "Capture Screen", Some(s.full_chord().accelerator()))?;
     let region = item(app, "region", "Capture Region…", Some(s.region_chord().accelerator()))?;
     let zoom = item(app, "zoom", "Capture Around Pointer", Some(s.zoom_chord().accelerator()))?;
@@ -60,7 +61,7 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &record, &sep()?, &full, &region, &zoom, &sep()?, &paste, &last, &sep()?, &settings, &setup,
+            &record, &ask, &sep()?, &full, &region, &zoom, &sep()?, &paste, &last, &sep()?, &settings, &setup,
             &update, &sep()?, &quit,
         ],
     )?;
@@ -82,6 +83,12 @@ pub fn setup(app: &AppHandle, svc: &Arc<App>) -> tauri::Result<()> {
             match ev.id().as_ref() {
                 "record" => {
                     let _ = crate::toggle(app, &svc);
+                }
+                // The Ask panel opens on a new question, its field ready: asking without the microphone.
+                "ask" => {
+                    if let Some(live) = app.try_state::<Arc<crate::live::Live>>() {
+                        live.fresh_shown();
+                    }
                 }
                 "full" => crate::hotkey(app, crate::Action::Full, true),
                 "region" => crate::hotkey(app, crate::Action::Region, true),

@@ -31,6 +31,7 @@ import {
   onPaneAsk,
   openSessionList,
   sessionsList,
+  sessionsNew,
   sessionsOpen,
   onSettingsPane,
   onUpdateChecked,
@@ -632,6 +633,11 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
             </div>
           ) : null}
           <div className="feature-foot">
+            {/* Asking without the microphone: the panel opens on a new question, its field ready. */}
+            <button type="button" className="link" onClick={() => sessionsNew(true).catch(() => undefined)}>
+              Type a question
+              <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
+            </button>
             {ai == null ? null : (
               <button type="button" className={`link${ai ? "" : " strong"}`} onClick={() => go("ai")} aria-label={ai ? `AI: ${ai}. Change it` : undefined}>
                 {ai || "Choose an AI"}
