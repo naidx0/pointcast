@@ -2,10 +2,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ALREADY_MAKING,
   canSummarize,
   countsLine,
   noSummary,
-  normalizeCounts,
   normalizeSummary,
   previewSummary,
   summaryReduce,
@@ -29,7 +29,7 @@ const raw = {
 test("a summary groups its points, marks whose words each quote is by a word, and refers to its turn", () => {
   const s = normalizeSummary(raw);
   assert.equal(s.title, "Why Bayes' rule divides");
-  const v = summaryView(s, null, [1, 2, 3]);
+  const v = summaryView(s, "", [1, 2, 3]);
   assert.deepEqual(v.groups.map((g) => [g.label, g.items.length]), [["Key points", 2], ["Still open", 1]], "a point without words is dropped");
   const [a, q] = v.groups[0].items;
   assert.deepEqual([a.by, a.ref, a.go], ["AI", "T3", true]);
@@ -37,26 +37,23 @@ test("a summary groups its points, marks whose words each quote is by a word, an
   assert.match(a.label, /From question 3, the AI's words: turns that count into a share/);
   assert.match(q.label, /your words: What does the line/);
   assert.equal(v.groups[1].items[0].go, false, "a turn the session does not have is not a place to go");
-  const empty = summaryView({ ...s, open_questions: [] }, null, [1, 2, 3]);
+  const empty = summaryView({ ...s, open_questions: [] }, "", [1, 2, 3]);
   assert.deepEqual(empty.groups.map((g) => g.id), ["points"], "a group with no points is left out");
 });
 
-test("the counts line says what was kept and what was dropped and why, with the AI's name", () => {
-  assert.equal(countsLine({ kept: 9, dropped: 1, why: ["no source"] }), "9 kept, 1 dropped: no source");
-  assert.equal(countsLine({ kept: 4, dropped: 0, why: [] }), "4 kept");
-  assert.equal(countsLine({ kept: 3, dropped: 2, why: [] }), "3 kept, 2 dropped");
-  assert.equal(countsLine(null), "");
-  assert.deepEqual(normalizeCounts({ kept: 9, dropped: [{ why: "no_source" }, { reason: "no-source" }, "repeated"] }), { kept: 9, dropped: 3, why: ["no source", "repeated"] });
-  assert.deepEqual(normalizeCounts({ kept: 2, dropped: 1, reasons: { no_source: 1 } }), { kept: 2, dropped: 1, why: ["no source"] });
-  assert.equal(normalizeCounts({}), null);
+test("the counts line says what was kept and what was dropped for want of a source, with the AI's name", () => {
+  assert.equal(countsLine(9, 1), "9 kept, 1 dropped: no source");
+  assert.equal(countsLine(4, 0), "4 kept");
+  assert.equal(countsLine(0, 0), "");
   const s = normalizeSummary(raw);
-  assert.equal(summaryView(s, { kept: 9, dropped: 1, why: ["no source"] }, []).foot, "9 kept, 1 dropped: no source · ChatGPT", "the event's counts win");
-  assert.equal(summaryView(s, null, []).foot, "3 kept, 1 dropped · ChatGPT", "else the summary's own");
+  assert.deepEqual([s.kept, s.dropped, s.model], [3, 1, ""], "a model the engine leaves null is none");
+  assert.equal(summaryView(s, "9 kept, 1 dropped: no source", []).foot, "9 kept, 1 dropped: no source · ChatGPT", "the engine's line wins");
+  assert.equal(summaryView(s, "", []).foot, "3 kept, 1 dropped: no source · ChatGPT", "else the same words from the summary's counts");
 });
 
 test("Copy as text is the title, each group's points with their turn and whose words, and the foot", () => {
   const nl = String.fromCharCode(10);
-  const text = summaryText(summaryView(previewSummary(), null, [1, 2, 3]));
+  const text = summaryText(summaryView(previewSummary(), "", [1, 2, 3]));
   const lines = text.split(nl);
   assert.equal(lines[0], "Why Bayes' rule divides by P(B)");
   assert.equal(lines[2], "Key points");
@@ -79,10 +76,14 @@ test("the summary state follows its session's events only; working keeps the one
   assert.equal(summaryReduce(m, { type: "event", event: { id: "b", state: "done", summary: raw } }), m, "another session's event changes nothing");
   const stopped = summaryReduce(m, { type: "event", event: { id: "a", state: "stopped", summary: null } });
   assert.deepEqual([stopped.state, !!stopped.summary], ["stopped", true]);
-  const failed = summaryReduce(m, { type: "event", event: { id: "a", state: "error", summary: null, error: "" } });
+  const failed = summaryReduce(m, { type: "event", event: { id: "a", state: "error", summary: null, counts: "", error: null } });
   assert.deepEqual([failed.state, failed.error], ["error", "The summary could not be made"]);
-  const done = summaryReduce(m, { type: "event", event: { id: "a", state: "done", summary: { ...raw, title: "New" }, counts: { kept: 9, dropped: 1, why: "no_source" } } });
-  assert.deepEqual([done.state, done.summary.title, done.counts], ["done", "New", { kept: 9, dropped: 1, why: ["no source"] }]);
+  const done = summaryReduce(m, { type: "event", event: { id: "a", state: "done", summary: { ...raw, title: "New" }, counts: "9 kept, 1 dropped: no source", error: null } });
+  assert.deepEqual([done.state, done.summary.title, done.counts], ["done", "New", "9 kept, 1 dropped: no source"]);
+  assert.equal(summaryReduce(done, { type: "make", id: "a" }).counts, "9 kept, 1 dropped: no source", "working keeps the last line until done brings a new one");
+  assert.equal(summaryReduce(m, { type: "failed", id: "a", error: ALREADY_MAKING }).state, "working", "already being made is under way, not a failure");
+  const refused = summaryReduce(m, { type: "failed", id: "a", error: "no such session" });
+  assert.deepEqual([refused.state, refused.error], ["error", "no such session"]);
   assert.deepEqual(summaryReduce(done, { type: "session", id: "b" }), noSummary("b"), "another session starts with nothing");
   assert.equal(summaryReduce(m, { type: "event", event: { id: "a", state: "bogus" } }), m);
 });

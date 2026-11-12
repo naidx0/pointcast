@@ -1,7 +1,7 @@
 // Run: node --experimental-strip-types --test src/lib/markup.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isMarkKey, markHint, markPurpose, markWording, markedLabel } from "./markup.ts";
+import { isMarkKey, markHint, markPurpose, markWording, markedLabel, wholeFrame } from "./markup.ts";
 
 test("a marked picture's label says so in words; M alone marks up", () => {
   assert.deepEqual([markedLabel("PowerPoint", true), markedLabel(" ", true), markedLabel("PowerPoint ", false)], ["PowerPoint · Marked up", "Marked up", "PowerPoint"]);
@@ -22,8 +22,19 @@ test("opened for a question, the overlay's primary action uses the picture for i
   assert.equal(markWording("capture", false).cancelTitle, "Cancel (Esc)");
 });
 
-test("only an explicit ask is a question; an older frame without a purpose keeps today's wording", () => {
-  assert.deepEqual([markPurpose("ask"), markPurpose(undefined), markPurpose("capture"), markPurpose("ASK")], ["ask", "capture", "capture", "capture"]);
+test("only a frame that says ask is a question's; an older frame without it keeps today's wording", () => {
+  assert.deepEqual(
+    [markPurpose({ ask: true }), markPurpose({ purpose: "ask" }), markPurpose({}), markPurpose(null), markPurpose({ ask: "true" }), markPurpose({ ask: false })],
+    ["ask", "ask", "capture", "capture", "capture", "capture"],
+  );
+});
+
+test("a question's picture is marked whole from the start, its new pins numbered on from base", () => {
+  assert.deepEqual(wholeFrame({ ask: true, base: 2 }), { whole: true, base: 2 });
+  assert.deepEqual(wholeFrame({ edit: true, base: 1 }), { whole: true, base: 1 });
+  assert.deepEqual(wholeFrame({ ask: true }), { whole: true, base: 0 });
+  assert.deepEqual(wholeFrame({ base: 3 }), { whole: false, base: 0 }, "a capture selects its box and starts at 1");
+  assert.deepEqual(wholeFrame({ ask: true, base: -1 }), { whole: true, base: 0 });
 });
 
 test("the hint line speaks of the same action as the button", () => {

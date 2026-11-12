@@ -21,7 +21,7 @@ import {
 } from "./live";
 import { previewSent } from "./conversation";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
-import { normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
+import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
 import { CUSTOM, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -250,8 +250,8 @@ export const regionFrame = () =>
     /** A picture from History: its labels already drawn in, new pins numbered on from `base`. */
     edit?: boolean;
     base?: number;
-    /** "ask": opened by `live_mark` for a question to Ask. */
-    purpose?: string;
+    /** Opened by `live_mark` on a question's picture; new pins number on from `base`. */
+    ask?: boolean;
   } | null>(
     "region_frame",
   );
@@ -676,7 +676,8 @@ function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
     startLivePreview("answering");
     return Promise.resolve();
   }
-  if (c === "drop") pvEmit({ ...s, dropped: true });
+  // Drop takes off a picture waiting for the next question first, as the engine does.
+  if (c === "drop") pvEmit(s.next_picture ? { ...s, next_picture: null } : { ...s, dropped: true });
   else if (c === "close") {
     livePv.timers.forEach(clearTimeout);
     pvEmit({ ...s, state: "closed" });
@@ -736,7 +737,9 @@ function pvAskTyped(text: string, picture: boolean): Promise<void> {
     error: null,
     dropped: false,
     provider: s.provider || "ChatGPT",
-    picture: picture ? previewPicture("code") : null,
+    // A picture marked for the next question goes with it, whatever the switch says.
+    picture: s.next_picture ?? (picture ? previewPicture("code") : null),
+    next_picture: null,
     turns,
     session: { id, title, turns: n },
   };
@@ -777,11 +780,16 @@ function pvNew(): Promise<void> {
   return Promise.resolve();
 }
 
-/** The overlay is the engine's: the preview plays a mark-up that was used for the question, a moment later. */
+/** The overlay is the engine's: the preview plays a mark-up used a moment later, on the question's picture while it
+ * is heard, else on a picture of the screen that waits for the next question. Refused as the engine refuses. */
 function pvMark(): Promise<void> {
   const s = livePv.snap;
-  if (s?.picture && !s.dropped)
-    livePv.timers.push(setTimeout(() => livePv.snap?.picture && pvEmit({ ...livePv.snap, picture: { ...livePv.snap.picture, marked: true } }), 500));
+  if (!s) return Promise.resolve();
+  if (s.state === "finishing" || s.state === "sending" || s.state === "answering") return Promise.reject("A question is already under way.");
+  const later = (f: (x: LiveSnapshot) => LiveSnapshot) => livePv.timers.push(setTimeout(() => livePv.snap && pvEmit(f(livePv.snap)), 500));
+  if (s.state === "listening") {
+    if (s.picture && !s.dropped) later((x) => (x.picture ? { ...x, picture: { ...x.picture, marked: true } } : x));
+  } else later((x) => ({ ...x, next_picture: { ...previewPicture("code"), marked: true } }));
   return Promise.resolve();
 }
 
@@ -800,21 +808,21 @@ const pvSummaryEmit = (e: Record<string, unknown>) => summaryPv.sinks.forEach((f
 
 function pvSummaryMake(id: string): Promise<void> {
   clearTimeout(summaryPv.timer);
-  pvSummaryEmit({ id, state: "working", summary: summaryPv.kept.get(id) ?? null, counts: null, error: null });
+  pvSummaryEmit({ id, state: "working", summary: null, counts: "", error: null });
   if (location.search.includes("summary=working")) return Promise.resolve();
   summaryPv.timer = setTimeout(() => {
     const title = pvSessions().find((x) => x.id === id)?.title ?? "This session";
     const s = id === "preview" ? previewSummary() : previewSummaryOf(title);
     summaryPv.kept.set(id, s);
     sessionsPv.list = pvSessions().map((x) => (x.id === id ? { ...x, has_summary: true } : x));
-    pvSummaryEmit({ id, state: "done", summary: s, counts: { kept: s.kept, dropped: s.dropped, why: s.why }, error: null });
+    pvSummaryEmit({ id, state: "done", summary: s, counts: countsLine(s.kept, s.dropped), error: null });
   }, 1600);
   return Promise.resolve();
 }
 
 function pvSummaryStop(id: string): Promise<void> {
   clearTimeout(summaryPv.timer);
-  pvSummaryEmit({ id, state: "stopped", summary: summaryPv.kept.get(id) ?? null, counts: null, error: null });
+  pvSummaryEmit({ id, state: "stopped", summary: null, counts: "", error: null });
   return Promise.resolve();
 }
 
@@ -861,6 +869,7 @@ function pvStream(text: string, delay: number) {
  * there is answered by the script too. `opened` is a session opened from the list (`open=<id>` picks another one);
  * `empty` a new session. */
 export function startLivePreview(kind?: string) {
+  // `next=1`: a picture marked with no question under way waits for the next one.
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
   const q = new URLSearchParams(location.search);
@@ -871,7 +880,7 @@ export function startLivePreview(kind?: string) {
     void pvOpen(other).catch(() => undefined);
     return;
   }
-  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1" });
+  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1" });
   pvEmit(snap);
   if (state === "listening") {
     let i = 0;

@@ -1,12 +1,22 @@
 // What the mark-up overlay calls its actions, by what it was opened for. Opened by `live_mark` it serves a question
-// to Ask (its frame says `purpose: "ask"`): its primary action uses the marked picture for the question, and Cancel
-// keeps the picture taken by itself. Otherwise the wording is the capture's (or, for a picture from History, Save).
+// to Ask (its frame says `ask: true`): its primary action uses the marked picture for the question, and Cancel keeps
+// the picture taken by itself. Otherwise the wording is the capture's (or, for a picture from History, Save).
 // Pure, so node --test reads it without a window (src/lib/markup.test.mjs).
 
 export type MarkPurpose = "ask" | "capture";
 
-/** The purpose a frame says; anything else, or nothing (older engines), is a capture. */
-export const markPurpose = (raw: unknown): MarkPurpose => (raw === "ask" ? "ask" : "capture");
+/** What a frame was sent for: `ask: true` (or `purpose: "ask"`) is a question's picture; anything else, or nothing
+ * (older engines), is a capture. */
+export const markPurpose = (f: { ask?: unknown; purpose?: unknown } | null | undefined): MarkPurpose =>
+  f?.ask === true || f?.purpose === "ask" ? "ask" : "capture";
+
+/** A frame the overlay marks whole, from the start (no box to select first): a picture from History, or a question's
+ * picture. Its new pins number on from `base`, the highest mark already on it. */
+export function wholeFrame(f: { edit?: unknown; ask?: unknown; purpose?: unknown; base?: unknown }): { whole: boolean; base: number } {
+  const whole = f.edit === true || markPurpose(f) === "ask";
+  const base = typeof f.base === "number" && Number.isFinite(f.base) && f.base > 0 ? Math.floor(f.base) : 0;
+  return { whole, base: whole ? base : 0 };
+}
 
 export type MarkWording = {
   /** The primary button's words. */

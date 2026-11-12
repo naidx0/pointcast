@@ -46,14 +46,16 @@ export function rowLabel(r: TurnRow, open: boolean): string {
 /** The longest follow-up the field takes. */
 export const FOLLOW_MAX = 4000;
 
-/** The field shows once an answer is shown in full, and in a new session waiting for its first question: never while
- * a question is heard, asked or answered. */
-export function followUpShown(v: Pick<LiveView, "phase" | "complete" | "empty">): boolean {
+/** The field shows once an answer is shown in full, in a new session waiting for its first question, and after a
+ * question failed (another can be typed: the engine takes one from shown, error and closed alike). Never while a
+ * question is heard, asked or answered, and not when the failure asks for Settings first. */
+export function followUpShown(v: Pick<LiveView, "phase" | "complete" | "empty" | "error" | "inFlight">): boolean {
+  if (v.phase === "error") return !v.inFlight && v.error?.action !== "settings";
   return v.phase === "shown" && (v.complete || v.empty);
 }
 
-/** What the field asks for: the first question of a new session, or a follow-up. */
-export const fieldPlaceholder = (empty: boolean) => (empty ? "Type a question" : "Ask a follow-up");
+/** What the field asks for: a first question (nothing answered in the session yet), or a follow-up. */
+export const fieldPlaceholder = (first: boolean) => (first ? "Type a question" : "Ask a follow-up");
 
 export function canSend(text: string, busy: boolean): boolean {
   const t = text.trim();

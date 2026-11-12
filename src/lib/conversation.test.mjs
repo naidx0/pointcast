@@ -108,6 +108,25 @@ test("the follow-up field shows only once an answer is shown in full", () => {
   for (const k of ["listening", "finishing", "thinking", "answering", "error", "discarded"]) assert.equal(followUpShown(at(k)), false, k);
 });
 
+test("a first question is always typeable: after a failure the field shows, unless Settings must come first or a request is in flight", () => {
+  const at = (snapOver, now = 0) => liveView(liveReduce(initialLive(), { type: "snapshot", snap: { ...previewSnapshot("error", { error: "provider" }), ...snapOver }, now: 0 }), now);
+  assert.equal(followUpShown(at({})), true, "ChatGPT could not be reached: type another");
+  assert.equal(followUpShown(liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot("error"), now: 0 }), 0)), false, "choose an AI first");
+  const stalled = liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot("thinking"), now: 0 }), 21_000);
+  assert.deepEqual([stalled.phase, followUpShown(stalled)], ["error", false], "a request still in flight");
+});
+
+test("a picture marked with no question under way waits for the next one, shown by the field; never a web address", () => {
+  const next = { src: "data:image/png;base64,AAAA", w: 6, h: 3, label: "Notes", marked: true };
+  const v = liveView(liveReduce(initialLive(), { type: "snapshot", snap: { ...previewSnapshot("conversation"), next_picture: next }, now: 0 }), 0);
+  assert.deepEqual([v.next?.marked, v.next?.label, followUpShown(v)], [true, "Notes", true]);
+  assert.equal(normalizeSnapshot({ next_picture: { ...next, src: "https://example.com/x.png" } }).next_picture?.src, "https://example.com/x.png", "kept as sent");
+  assert.equal(liveView(liveReduce(initialLive(), { type: "snapshot", snap: { ...previewSnapshot("conversation"), next_picture: { ...next, src: "https://example.com/x.png" } }, now: 0 }), 0).next, null, "but never shown");
+  assert.equal(normalizeSnapshot({}).next_picture, null);
+  assert.equal(normalizeSnapshot({ picture: { src: "data:image/png;base64,A", marked: true } }).picture.marked, true);
+  assert.equal(normalizeSnapshot({ turns: [turn(1, { picture: { src: "data:image/png;base64,A", marked: true } })] }).turns[0].picture.marked, true);
+});
+
 test("Enter sends words, holds an empty field, Shift+Enter is a new line, Esc lets go, composing is left alone", () => {
   assert.equal(followKey({ key: "Enter" }, "why?", false), "send");
   assert.equal(followKey({ key: "Enter" }, "   ", false), "hold");

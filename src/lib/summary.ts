@@ -10,25 +10,29 @@ export type Summary = {
   title: string;
   key_points: SummaryPoint[];
   open_questions: SummaryPoint[];
-  /** How many points were kept, and how many left out with why (a point whose quote is not in the conversation is
-   * left out: "no source"). */
+  /** How many points kept their source, and how many were left out for want of one (a point whose quote is not in
+   * the turn it cites). */
   kept: number;
   dropped: number;
-  why: string[];
   made_ms: number;
+  /** The AI that made it, as the person knows it. */
   provider: string;
   model: string;
 };
-export type SummaryCounts = { kept: number; dropped: number; why: string[] };
 export type SummaryStateName = "none" | "working" | "done" | "error" | "stopped";
-/** The payload of `summary://state`. */
-export type SummaryEvent = { id: string; state: Exclude<SummaryStateName, "none">; summary: Summary | null; counts: SummaryCounts | null; error: string };
+/** The payload of `summary://state`. `summary` and `counts` (the engine's own line, "9 kept, 1 dropped: no source")
+ * come only with done. */
+export type SummaryEvent = { id: string; state: Exclude<SummaryStateName, "none">; summary: Summary | null; counts: string; error: string };
 
-/** The panel's view of one session's summary. `none`: there is none and none is being made. */
-export type SummaryModel = { id: string; state: SummaryStateName; summary: Summary | null; counts: SummaryCounts | null; error: string };
+/** The panel's view of one session's summary. `none`: there is none and none is being made. `counts`: the engine's
+ * line from the last done ("" until then). */
+export type SummaryModel = { id: string; state: SummaryStateName; summary: Summary | null; counts: string; error: string };
 
 /** A session needs this many turns before a summary is offered. */
 export const SUMMARY_MIN_TURNS = 2;
+
+/** `summary_make`'s refusal while one is already being made: the work goes on, it is not a failure. */
+export const ALREADY_MAKING = "A summary of this session is already being made.";
 
 export const canSummarize = (turns: number) => turns >= SUMMARY_MIN_TURNS;
 
@@ -46,40 +50,6 @@ function pointsOf(raw: unknown): SummaryPoint[] {
   });
 }
 
-/** A reason as a person says it: "no_source" is "no source". */
-const reason = (r: string) => fold(r.replace(/[_-]+/g, " ")).toLowerCase();
-
-/** The reasons points were left out, whatever shape they came in: a string, a list (of strings or of { why } /
- * { reason }), or a map of reason to count. Each once, in order. */
-function reasonsOf(...raws: unknown[]): string[] {
-  const out: string[] = [];
-  const add = (r: unknown) => {
-    const t = typeof r === "string" ? reason(r) : "";
-    if (t && !out.includes(t)) out.push(t);
-  };
-  for (const raw of raws) {
-    if (typeof raw === "string") add(raw);
-    else if (Array.isArray(raw))
-      raw.forEach((x) => {
-        const u = obj(x);
-        add(u ? (u.why ?? u.reason) : x);
-      });
-    else if (obj(raw)) Object.keys(raw as object).forEach(add);
-  }
-  return out;
-}
-
-/** Counts in any of the shapes above: numbers, or the dropped points themselves. Null when nothing was counted. */
-export function normalizeCounts(raw: unknown): SummaryCounts | null {
-  const u = obj(raw);
-  if (!u) return null;
-  const n = (v: unknown) => (Array.isArray(v) ? v.length : whole(v));
-  const kept = n(u.kept);
-  const dropped = n(u.dropped);
-  const why = reasonsOf(u.why, u.reasons, Array.isArray(u.dropped) ? u.dropped : null);
-  return kept || dropped ? { kept, dropped, why } : null;
-}
-
 /** A summary with every field in its type; null when it has nothing to show. */
 export function normalizeSummary(raw: unknown): Summary | null {
   const u = obj(raw);
@@ -87,9 +57,9 @@ export function normalizeSummary(raw: unknown): Summary | null {
   const key_points = pointsOf(u.key_points);
   const open_questions = pointsOf(u.open_questions);
   if (!key_points.length && !open_questions.length && !str(u.title)) return null;
-  const c = normalizeCounts(u) ?? { kept: key_points.length + open_questions.length, dropped: 0, why: [] };
+  const kept = typeof u.kept === "number" ? whole(u.kept) : key_points.length + open_questions.length;
   const provider = obj(u.provider) ? str((u.provider as { name?: unknown }).name) : str(u.provider);
-  return { title: str(u.title), key_points, open_questions, ...c, made_ms: whole(u.made_ms), provider, model: str(u.model) };
+  return { title: str(u.title), key_points, open_questions, kept, dropped: whole(u.dropped), made_ms: whole(u.made_ms), provider, model: str(u.model) };
 }
 
 const STATES = ["working", "done", "error", "stopped"] as const;
@@ -99,10 +69,10 @@ export function normalizeSummaryEvent(raw: unknown): SummaryEvent | null {
   const id = u && (typeof u.id === "string" || typeof u.id === "number") ? String(u.id) : "";
   if (!u || !id || !STATES.includes(u.state as SummaryEvent["state"])) return null;
   const err = typeof u.error === "string" ? u.error.trim() : str(obj(u.error)?.message);
-  return { id, state: u.state as SummaryEvent["state"], summary: normalizeSummary(u.summary), counts: normalizeCounts(u.counts), error: err };
+  return { id, state: u.state as SummaryEvent["state"], summary: normalizeSummary(u.summary), counts: str(u.counts), error: err };
 }
 
-export const noSummary = (id = ""): SummaryModel => ({ id, state: "none", summary: null, counts: null, error: "" });
+export const noSummary = (id = ""): SummaryModel => ({ id, state: "none", summary: null, counts: "", error: "" });
 
 export type SummaryAction =
   /** The panel is on another session (or none): nothing of the last one's summary stays. */
@@ -124,29 +94,30 @@ export function summaryReduce(m: SummaryModel, a: SummaryAction): SummaryModel {
       if (a.id !== m.id || m.state === "working") return m;
       const summary = normalizeSummary(a.summary);
       if (!summary) return m;
-      return { ...m, state: m.state === "none" || m.state === "done" ? "done" : m.state, summary, counts: null };
+      return { ...m, state: m.state === "none" || m.state === "done" ? "done" : m.state, summary, counts: "" };
     }
     case "make":
       return a.id === m.id ? { ...m, state: "working", error: "" } : m;
     case "failed":
-      return a.id === m.id ? { ...m, state: "error", error: a.error } : m;
+      // Already being made (another window started it): it is under way, and its events will say how it goes.
+      if (a.id !== m.id) return m;
+      return a.error.trim() === ALREADY_MAKING ? { ...m, state: "working", error: "" } : { ...m, state: "error", error: a.error.trim() || "The summary could not be made" };
     case "event": {
       const e = normalizeSummaryEvent(a.event);
       if (!e || e.id !== m.id) return m;
       // Done brings the new summary; working, stopped and a failure keep the one before, if there was one.
       const summary = e.summary ?? (e.state === "done" ? null : m.summary);
-      const counts = e.counts ?? (e.summary || e.state === "done" ? null : m.counts);
+      const counts = e.state === "done" ? e.counts : m.counts;
       return { id: m.id, state: e.state === "done" && !summary ? "none" : e.state, summary, counts, error: e.state === "error" ? e.error || "The summary could not be made" : "" };
     }
   }
 }
 
-/** The quiet line under a summary: "9 kept, 1 dropped: no source". "" when nothing was counted. */
-export function countsLine(c: SummaryCounts | null): string {
-  if (!c || (!c.kept && !c.dropped)) return "";
-  const kept = `${c.kept} kept`;
-  if (!c.dropped) return kept;
-  return `${kept}, ${c.dropped} dropped${c.why.length ? `: ${c.why.join(", ")}` : ""}`;
+/** The quiet line under a summary, as the engine words it (summary.rs `counts`): "9 kept, 1 dropped: no source", or
+ * "4 kept". "" when nothing was counted. */
+export function countsLine(kept: number, dropped: number): string {
+  if (!kept && !dropped) return "";
+  return dropped ? `${kept} kept, ${dropped} dropped: no source` : `${kept} kept`;
 }
 
 /** One point as the view shows it. `by`: the one small word that says whose words the quote is ("You" for the
@@ -189,16 +160,16 @@ function pointView(p: SummaryPoint, i: number, group: string, known: (n: number)
   };
 }
 
-/** What the summary view shows: the title, "Key points" and "Still open" (each only when it has points), and the foot.
- * `turns`: the turns the session has, so a reference to one of them can go there. */
-export function summaryView(s: Summary, counts: SummaryCounts | null, turns: number[]): SummaryView {
+/** What the summary view shows: the title, "Key points" and "Still open" (each only when it has points), and the foot
+ * (the engine's counts line when it sent one, else the same words from the summary's own counts). `turns`: the turns
+ * the session has, so a reference to one of them can go there. */
+export function summaryView(s: Summary, counts: string, turns: number[]): SummaryView {
   const known = (n: number) => turns.includes(n);
   const groups: PointGroup[] = [
     { id: "points" as const, label: "Key points", items: s.key_points.map((p, i) => pointView(p, i, "points", known)) },
     { id: "open" as const, label: "Still open", items: s.open_questions.map((p, i) => pointView(p, i, "open", known)) },
   ].filter((g) => g.items.length);
-  const c = counts ?? { kept: s.kept, dropped: s.dropped, why: s.why };
-  return { title: s.title || "Summary", groups, foot: [countsLine(c), s.provider].filter(Boolean).join(" · ") };
+  return { title: s.title || "Summary", groups, foot: [counts || countsLine(s.kept, s.dropped), s.provider].filter(Boolean).join(" · ") };
 }
 
 /** The summary as plain text, for Copy as text: the title, each group with its points, the turn each rests on and its
@@ -229,7 +200,6 @@ export function previewSummary(provider = "ChatGPT"): Summary {
     open_questions: [{ text: "Whether multiplying the two alone ever gives a probability you asked for.", turn: 3, from: "question", quote: "and not just multiply the two?" }],
     kept: 5,
     dropped: 1,
-    why: ["no source"],
     made_ms: 0,
     provider,
     model: "gpt-5.1",
@@ -247,7 +217,6 @@ export function previewSummaryOf(title: string, provider = "ChatGPT"): Summary {
     open_questions: [{ text: "What happens after the second part.", turn: 2, from: "question", quote: "And what about part 2?" }],
     kept: 3,
     dropped: 0,
-    why: [],
     made_ms: 0,
     provider,
     model: "gpt-5.1",

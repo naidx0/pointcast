@@ -41,6 +41,9 @@ export type LiveSnapshot = {
   picture: LivePicture | null;
   /** The person took the picture out: nothing but the words is sent. */
   dropped: boolean;
+  /** A picture marked up with no question under way: it goes with the next question, spoken or typed, whatever the
+   * field's picture switch says; `live_drop_picture` takes it off. */
+  next_picture: LivePicture | null;
   provider: string | { id?: string; name?: string } | null;
   error: LiveErrorPayload;
   /** True while only reasoning has arrived for the current turn: the AI is working, nothing to show yet. */
@@ -73,6 +76,7 @@ export const CLOSED: LiveSnapshot = {
   words: "",
   picture: null,
   dropped: false,
+  next_picture: null,
   provider: null,
   error: null,
 };
@@ -143,6 +147,7 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     words: typeof v.words === "string" ? v.words : "",
     picture: pictureOf(v.picture),
     dropped: !!v.dropped,
+    next_picture: pictureOf((v as { next_picture?: unknown }).next_picture),
     provider: v.provider ?? null,
     error: v.error ?? null,
     thinking: v.thinking === true,
@@ -242,6 +247,8 @@ export type LiveView = {
   announce: string;
   /** A new session, open on nothing yet (`sessions_new`): one quiet line and the field, ready. */
   empty: boolean;
+  /** The marked picture waiting for the next question (shown by the field), or null. */
+  next: LivePicture | null;
 };
 
 export function providerName(p: LiveSnapshot["provider"]): string {
@@ -337,6 +344,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     hide: false,
     announce: "",
     empty: false,
+    next: safePicture(s.next_picture),
   };
   const hearing = { compact: true, title: "", question: "" };
   const name = provider || "the AI";
@@ -494,20 +502,22 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
 /** The preview's snapshot for a state named in the address, shaped as the engine sends it. `conversation` is a session
  * of three turns, the third in the panel's own fields (asked as this panel opening's first question, so `turn` is 1);
  * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
- * session. `marked`: the picture was marked up. */
-export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean } = {}): LiveSnapshot {
+ * session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
+ * next one. */
+export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
   const session = { id: "preview", title: "Why do we divide by P(B)", turns: 1 };
   const picture = o.marked ? { ...previewPicture(), marked: true } : previewPicture();
-  const common = { ...CLOSED, session, turn: 1, picture, provider, words: PREVIEW_WORDS };
+  const next_picture = o.next ? { ...previewPicture("code"), marked: true } : null;
+  const common = { ...CLOSED, session, turn: 1, picture, provider, words: PREVIEW_WORDS, next_picture };
   const three = { id: "preview", title: "Bayes' rule on the slide", turns: 3 };
   switch (kind) {
     case "conversation":
       return { ...common, state: "shown", answer: PREVIEW_ANSWER, session: three, turns: previewTurns().slice(0, 2) };
     case "opened":
-      return { ...CLOSED, state: "shown", session: three, turns: previewTurns() };
+      return { ...CLOSED, state: "shown", session: three, turns: previewTurns(), next_picture };
     case "empty":
-      return { ...CLOSED, state: "shown" };
+      return { ...CLOSED, state: "shown", next_picture };
     case "listening":
       return { ...common, state: "listening", session: { ...session, title: "" }, words: "" };
     case "finishing":
