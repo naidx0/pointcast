@@ -48,9 +48,12 @@ export function usePermissions(initial?: Permissions) {
         .catch(() => undefined);
     tick();
     const id = setInterval(tick, 1500);
+    // Back from System Settings: show a switch just turned on at once, not up to 1.5 s later.
+    window.addEventListener("focus", tick);
     return () => {
       live = false;
       clearInterval(id);
+      window.removeEventListener("focus", tick);
     };
   }, []);
   return [p, setP] as const;
@@ -67,7 +70,8 @@ export function PermissionRows({
 }) {
   const kinds = (Object.keys(COPY) as PermissionKind[]).filter((k) => perms.gated[k]);
   const [asked, setAsked] = useState<Partial<Record<PermissionKind, boolean>>>({});
-  const settingsName = platform() === "mac" ? "System Settings" : "Settings";
+  const mac = platform() === "mac";
+  const settingsName = mac ? "System Settings" : "Settings";
 
   async function allow(kind: PermissionKind) {
     setAsked((a) => ({ ...a, [kind]: true }));
@@ -111,12 +115,13 @@ export function PermissionRows({
               <span className="badge ok">Allowed</span>
             ) : s === "denied" || asked[k] ? (
               <div style={{ display: "flex", gap: 8, flex: "none" }}>
-                {s === "denied" ? (
+                {/* macOS asks only once: after a No, its switch in System Settings is the only way, so it is the one button. */}
+                {s === "denied" && !mac ? (
                   <button type="button" className="btn primary" onClick={() => allow(k)}>
                     Allow…
                   </button>
                 ) : null}
-                <button type="button" className="btn" onClick={() => permissionOpen(k).catch(() => undefined)}>
+                <button type="button" className={`btn${s === "denied" && mac ? " primary" : ""}`} onClick={() => permissionOpen(k).catch(() => undefined)}>
                   Open {settingsName}
                 </button>
               </div>
