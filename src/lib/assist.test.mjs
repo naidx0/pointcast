@@ -19,6 +19,7 @@ import {
   defaultModel,
   goesLine,
   groups,
+  groupOf,
   hostOf,
   installHelp,
   isHere,
@@ -132,8 +133,8 @@ test("routes are grouped plainly, in order, and empty groups are left out", () =
   const a = previewAssist("fresh");
   assert.deepEqual(GROUPS.map(([, t]) => t), ["Ready to use", "Your subscriptions", "With a key", "On this computer"]);
   assert.deepEqual(groups(a).map((g) => [g.title, g.routes.map((r) => r.id)]), [
-    ["Ready to use", ["gemini-cli", "claude-code"]],
-    ["Your subscriptions", ["codex", "copilot", "opencode"]],
+    ["Ready to use", ["claude-code"]],
+    ["Your subscriptions", ["codex", "gemini-cli", "copilot", "opencode"]],
     ["With a key", ["openai", "anthropic", "xai", "gemini", "groq", "mistral", "deepseek", "openrouter", "custom"]],
     ["On this computer", ["ollama", "lmstudio"]],
   ]);
@@ -449,4 +450,13 @@ test("the Thinking menu lists what the chosen model offers, in words, and keeps 
   assert.deepEqual(effortView({ effort: null }, codex, { efforts: [] }).options.length, 6, "a model that names none: the route's list");
   assert.deepEqual(normalizeModels([{ id: "m", efforts: ["low", 2, "max"] }])[0].efforts, ["low", "max"]);
   assert.equal("efforts" in normalizeModels([{ id: "m" }])[0], false);
+});
+
+test("Ready to use lists only what is known to work; an installed agent that cannot say it is signed in waits under subscriptions, still usable", () => {
+  const a = previewAssist("fresh");
+  const gemini = byId(a, "gemini-cli");
+  assert.deepEqual([gemini.state, gemini.sure, groupOf(gemini)], ["ready", false, "subscription"]);
+  assert.equal(routeView(gemini, a).action, "use");
+  assert.equal(groupOf({ ...gemini, sure: true }), "ready");
+  assert.equal(normalizeAssist({ providers: [{ id: "x", kind: "agent", state: "ready" }] }).providers[0].sure, false, "not said: not sure");
 });

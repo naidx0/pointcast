@@ -4,6 +4,7 @@
 //! The address the person types for "Other OpenAI-compatible" is kept as the destination they agreed to.
 
 use super::acp;
+use super::claude;
 use super::anthropic;
 use super::codex::{self, Codex};
 use super::vault::{self, Secret};
@@ -129,6 +130,9 @@ pub struct Row {
     /// only in the pane, so the person sees whom they are signed in as.
     pub plan: Option<String>,
     pub email: Option<String>,
+    /// Its readiness is known, not assumed: signed in as its own app says, a key saved, a server answering. An agent
+    /// that is installed but cannot say whether anyone is signed in until it is asked is usable and not sure.
+    pub sure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -294,7 +298,8 @@ pub fn probes(held: Arc<Held>, home: PathBuf) -> Vec<Probe> {
         all.push(Probe {
             ids: vec![a.id],
             run: Box::new(move || {
-                let h = acp::health(a);
+                // Claude Code is asked by its own `auth status`, which knows whether anyone is signed in.
+                let h = if a.id == CLAUDE_CODE { claude::health() } else { acp::health(a) };
                 Box::new(move |l: &mut Look| {
                     l.agents.retain(|(id, _)| *id != a.id);
                     l.agents.push((a.id, h));
@@ -450,7 +455,13 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                 _ => (r.goes_to.to_owned(), None),
             };
             let available = true;
-            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email }
+            let sure = state == Status::Ready
+                && match r.way {
+                    Way::Plan => matches!(&look.codex, Some((_, Some(true)))),
+                    Way::Agent => r.id == CLAUDE_CODE && line.ends_with(claude::SIGNED_IN),
+                    Way::Key | Way::Local => true,
+                };
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email, sure }
         })
         .collect();
     List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows }
@@ -917,6 +928,25 @@ mod tests {
         s.assist_claude_code_ok = false;
         assert_eq!(made(&s), Ok(CLAUDE_CODE));
         assert!(providers(&s, &Look::default()).providers.iter().all(|r| r.available));
+    }
+
+    #[test]
+    fn only_what_is_known_to_work_is_sure_and_claude_is_known_by_its_own_sign_in() {
+        let h = |state, line: &str| Health { state, line: line.into(), goes_to: "" };
+        let look = Look {
+            agents: vec![
+                ("gemini-cli", h(State::Ready, "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.")),
+                (CLAUDE_CODE, h(State::Ready, &format!("Claude Code 2.1.322 is installed. {}", claude::SIGNED_IN))),
+            ],
+            ..Look::default()
+        };
+        let rows = providers(&Settings::default(), &look).providers;
+        let sure = |id: &str| rows.iter().find(|r| r.id == id).map(|r| (r.state, r.sure)).unwrap();
+        assert_eq!(sure("gemini-cli"), (Status::Ready, false), "installed, sign-in unknown: usable, not sure");
+        assert_eq!(sure(CLAUDE_CODE), (Status::Ready, true));
+        assert!(!sure("openai").1, "no key saved: not sure");
+        let signed_out = Look { agents: vec![(CLAUDE_CODE, h(State::SignedOut, "Run claude in a terminal once and sign in, then Check again."))], ..Look::default() };
+        assert_eq!(providers(&Settings::default(), &signed_out).providers.iter().find(|r| r.id == CLAUDE_CODE).map(|r| (r.state, r.sure)), Some((Status::SignedOut, false)));
     }
 
     #[test]

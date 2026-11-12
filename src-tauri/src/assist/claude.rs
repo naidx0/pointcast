@@ -520,6 +520,9 @@ pub fn health() -> Health {
 }
 
 /// `health`, from what was found: what `--version` printed, and whether the CLI said it is signed in.
+/// The end of the line of a Claude Code whose own `auth status` says someone is signed in.
+pub const SIGNED_IN: &str = "You are signed in.";
+
 fn health_of(found: Option<(Result<String, String>, Option<bool>)>) -> Health {
     let (state, line) = match found {
         None => (State::NotInstalled, "Claude Code is not installed on this computer. Install it first.".to_owned()),
@@ -527,7 +530,7 @@ fn health_of(found: Option<(Result<String, String>, Option<bool>)>) -> Health {
         Some((Ok(said), signed)) => {
             let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();
             match signed {
-                Some(true) => (State::Ready, format!("Claude Code{v} is installed. You are signed in.")),
+                Some(true) => (State::Ready, format!("Claude Code{v} is installed. {SIGNED_IN}")),
                 Some(false) => (State::SignedOut, format!("Claude Code{v} is installed. Run claude in a terminal once and sign in, then Check again.")),
                 None => (State::Ready, format!("Claude Code{v} is installed. Whether you are signed in is checked when you ask.")),
             }

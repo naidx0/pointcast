@@ -37,6 +37,8 @@ export type Route = {
   email: string | null;
   /** Files the route always sends along with each question (Codex: the person's own AGENTS.md); empty when none. */
   adds: string[];
+  /** Its readiness is known (signed in as its own app says, a key saved, a server answering), not assumed. */
+  sure: boolean;
 };
 
 /** The reply of `assist_providers`. */
@@ -87,8 +89,8 @@ export const GROUPS: readonly (readonly [GroupId, string])[] = [
 
 /** The group a route is drawn in: ready ones together, the rest by how they are set up (a ChatGPT plan through Codex
  * is a subscription like Claude's or Gemini's). */
-export const groupOf = (p: Pick<Route, "kind" | "state" | "available">): GroupId =>
-  p.available && p.state === "ready" ? "ready" : p.kind === "plan" || p.kind === "agent" ? "subscription" : p.kind;
+export const groupOf = (p: Pick<Route, "kind" | "state" | "available" | "sure">): GroupId =>
+  p.available && p.state === "ready" && p.sure ? "ready" : p.kind === "plan" || p.kind === "agent" ? "subscription" : p.kind;
 
 /** OpenAI's own install line for its Codex CLI (the same line updates it). */
 export const CODEX_INSTALL = "npm i -g @openai/codex";
@@ -121,6 +123,7 @@ export function normalizeAssist(x: unknown): Assist {
       plan: str(p.plan) || str((p as { planType?: unknown }).planType) || null,
       email: str(p.email).trim() || null,
       adds: (Array.isArray(p.adds) ? p.adds : []).filter((f) => typeof f === "string" && f.trim()),
+      sure: p.sure === true,
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
   return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, offline_only: v.offline_only === true, providers };
@@ -467,6 +470,8 @@ export function previewAssist(kind: string): Assist {
     plan: null,
     email: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
+    // An installed agent that cannot say whether anyone is signed in (Gemini here) is usable but not sure.
+    sure: state === "ready" && (k !== "agent" || id === "claude-code"),
   });
   const missing = (cli: string) => `${cli} is not installed on this computer. Install it first.`;
   const a: Assist = {
@@ -494,7 +499,7 @@ export function previewAssist(kind: string): Assist {
     ],
   };
   const set = (id: string, p: Partial<Route>) => {
-    a.providers = a.providers.map((x) => (x.id === id ? { ...x, ...p, models: p.state === "ready" ? MODELS[id] ?? [] : x.models } : x));
+    a.providers = a.providers.map((x) => (x.id === id ? { ...x, ...p, models: p.state === "ready" ? MODELS[id] ?? [] : x.models, sure: p.state ? p.state === "ready" : x.sure } : x));
   };
   const choose = (id: string) => {
     set(id, { state: "ready", consented: true });
@@ -564,11 +569,11 @@ export function previewApply(
       return a.chosen === c.id ? { ...next, chosen: null, model: null } : next;
     }
     case "key_set":
-      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [] }));
+      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [], sure: true }));
     case "key_delete":
-      return { ...map(c.id, (p) => ({ ...p, state: "no_key", models: [] })), ...(a.chosen === c.id ? { chosen: null, model: null } : {}) };
+      return { ...map(c.id, (p) => ({ ...p, state: "no_key", models: [], sure: false })), ...(a.chosen === c.id ? { chosen: null, model: null } : {}) };
     case "signed_in":
-      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [], plan: p.kind === "plan" ? "free" : p.plan }));
+      return map(c.id, (p) => ({ ...p, state: "ready", models: MODELS[p.id] ?? [], plan: p.kind === "plan" ? "free" : p.plan, sure: true }));
   }
 }
 
