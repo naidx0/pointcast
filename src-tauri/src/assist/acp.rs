@@ -495,11 +495,11 @@ pub fn launch_of(a: &Agent) -> Option<Launch> {
 /// is signed in is not asked, since none of these says so without reaching its service.
 pub fn health(a: &Agent) -> Health {
     let (state, line) = match detect::on_path(a.program) {
-        None => (State::NotInstalled, format!("{} is not installed on this computer. Install it first.", a.cli)),
+        None => (State::NotInstalled, format!("{} is not installed on this computer. Choose Install.", a.cli)),
         Some(exe) => match detect::version_of(&exe) {
             Ok(said) => {
                 let v = detect::version_in(&said).map(|(x, y, z)| format!(" {x}.{y}.{z}")).unwrap_or_default();
-                (State::Ready, format!("{}{v} is installed. If it asks you to sign in, choose Sign in.", a.cli))
+                (State::Ready, format!("{}{v} is installed.", a.cli))
             }
             Err(why) => (State::Unknown, format!("{} is installed, but Pointcast could not read its version: {why}.", a.cli)),
         },
@@ -853,7 +853,7 @@ pub mod tests {
         }
         let missing = Agent { id: "x", name: "Nobody", cli: "Nobody CLI", program: "pointcast-no-such-program", args: &["acp"], goes_to: "nowhere" };
         let h = health(&missing);
-        assert_eq!((h.state, h.line.as_str(), h.goes_to), (State::NotInstalled, "Nobody CLI is not installed on this computer. Install it first.", "nowhere"));
+        assert_eq!((h.state, h.line.as_str(), h.goes_to), (State::NotInstalled, "Nobody CLI is not installed on this computer. Choose Install.", "nowhere"));
         let leaked: &'static Agent = Box::leak(Box::new(missing));
         assert!(matches!(Acp::new(leaked, scratch("acp-missing")).start("", &[]), Err(Failure::NotInstalled)));
         assert!(Shared::allows("authenticate").is_err() && Shared::allows("session/prompt").is_ok());

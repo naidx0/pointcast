@@ -935,7 +935,11 @@ function Ai() {
     if (v.action === "sign_in") return signIn(p);
     if (v.action === "install" || v.action === "update") return setup(p, v.action);
     if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
-    if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
+    // An app Pointcast cannot install itself: its download page opens at once, and how to finish shows under the row.
+    if (v.action === "get") {
+      if (v.help?.page) void (inTauri ? openUrl(v.help.page) : window.open(v.help.page, "_blank"));
+      return setMore({ id: p.id, what: "help" });
+    }
     if (v.action === "check") return run(p.id, () => Promise.resolve(), true);
   };
 

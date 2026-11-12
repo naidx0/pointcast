@@ -79,7 +79,7 @@ test("each state offers the action that fits it", () => {
   assert.deepEqual(act({ kind: "key", id: "openai", state: "no_key" }), ["add_key", "Add key"]);
   assert.deepEqual(act({ state: "not_installed" }), ["install", "Install"], "Pointcast installs Codex itself");
   assert.deepEqual(act({ state: "too_old" }), ["update", "Update"], "Pointcast updates Codex itself");
-  assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_installed" }), ["get", "Install"], "an app Pointcast cannot install shows where to get it");
+  assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_installed" }), ["get", "Download"], "an app Pointcast cannot install opens its download page");
   assert.deepEqual(act({ kind: "agent", id: "claude-code", name: "Claude", state: "signed_out" }), ["sign_in", "Sign in"], "a signed-out agent signs in in one click");
   assert.deepEqual(act({ kind: "agent", id: "gemini-cli", name: "Gemini", state: "not_installed" }), ["install", "Install"]);
   assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_running" }), ["check", "Check again"]);
@@ -153,12 +153,12 @@ test("routes are grouped plainly, in order, and empty groups are left out", () =
 test("an agent shows the engine's line as is, offers Use when installed, Check again when not, and no model", () => {
   const a = previewAssist("fresh");
   const gemini = routeView(byId(a, "gemini-cli"), a);
-  assert.deepEqual([gemini.name, gemini.line, gemini.action, gemini.label], ["Gemini", "Gemini CLI 0.9.0 is installed. If it asks you to sign in, choose Sign in.", "use", "Use"]);
+  assert.deepEqual([gemini.name, gemini.line, gemini.action, gemini.label], ["Gemini", "Gemini CLI 0.9.0 is installed.", "use", "Use"]);
   assert.equal(gemini.signIn, true, "an agent that cannot say it is signed in offers Sign in beside Use");
   const copilot = routeView(byId(a, "copilot"), a);
-  assert.deepEqual([copilot.line, copilot.action, copilot.label], ["GitHub Copilot CLI is not installed on this computer. Install it first.", "install", "Install"]);
+  assert.deepEqual([copilot.line, copilot.action, copilot.label], ["GitHub Copilot CLI is not installed on this computer. Choose Install.", "install", "Install"]);
   assert.deepEqual([copilot.help.command, copilot.help.page], ["npm install -g @github/copilot", "https://github.com/github/copilot-cli"]);
-  assert.match(copilot.help.account, /sign in/);
+  assert.match(copilot.help.account, /^Then choose Sign in/, "the help points at the one-click Sign in, not a terminal");
   for (const id of ["gemini-cli", "copilot", "opencode", "claude-code"]) {
     const h = installHelp({ id, name: id });
     assert.ok(h.command.startsWith("npm install -g ") && h.page.startsWith("https://") && h.account, id);
