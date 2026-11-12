@@ -191,16 +191,26 @@ fn stopped(said: &str) -> String {
     }
 }
 
-/// Whether the account is signed in, and under which plan. The address it is under is never read.
-#[derive(Debug, Clone, PartialEq)]
+/// Whether the account is signed in, under which plan, and the address Codex's own `account/read` names, which is
+/// shown only to the person in Settings › AI so they can see whom they are signed in as. The address is never in a
+/// log line (`Debug` leaves it out), a setting or a question.
+#[derive(Clone, PartialEq)]
 pub struct Account {
     pub plan: Option<String>,
     pub api_key: bool,
+    pub email: Option<String>,
+}
+
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account").field("plan", &self.plan).field("api_key", &self.api_key).field("email", &self.email.as_ref().map(|_| "(left out)")).finish()
+    }
 }
 
 fn account_of(v: &Value) -> Option<Account> {
     let a = v.get("account").filter(|a| a.is_object())?;
-    Some(Account { plan: a["planType"].as_str().map(str::to_owned), api_key: a["type"].as_str() == Some("apiKey") })
+    let email = a["email"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned);
+    Some(Account { plan: a["planType"].as_str().map(str::to_owned), api_key: a["type"].as_str() == Some("apiKey"), email })
 }
 
 /// The turn being answered.
@@ -812,11 +822,13 @@ pub struct Codex {
     models: Mutex<Vec<Value>>,
     /// The files Codex added to the last conversation it started (`CodexChat::adds`).
     adds: Mutex<Vec<String>>,
+    /// Who the last greeting said is signed in.
+    account: Mutex<Option<Account>>,
 }
 
 impl Codex {
     pub fn new(home: PathBuf) -> Codex {
-        Codex { home, model: None, effort: Some("low".into()), launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default() }
+        Codex { home, model: None, effort: Some("low".into()), launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default(), account: Mutex::default() }
     }
 
     /// Run `launch` in place of the `codex` found on this computer.
@@ -846,6 +858,7 @@ impl Codex {
         let (proc, stdin, stdout) = self.spawn()?;
         let chat = CodexChat::connect(stdout, stdin, Some(proc))?;
         *self.models.lock().unwrap() = chat.models.clone();
+        *self.account.lock().unwrap() = Some(chat.account.clone());
         Ok(chat)
     }
 
@@ -929,6 +942,10 @@ impl Provider for Codex {
 
     fn adds(&self) -> Vec<String> {
         Codex::adds(self)
+    }
+
+    fn account(&self) -> Option<Account> {
+        self.account.lock().unwrap().clone()
     }
 
     /// The models of the last greeting, none before one.
@@ -1427,9 +1444,9 @@ pub mod tests {
     }
 
     #[test]
-    fn the_address_of_the_account_is_never_kept() {
+    fn the_address_of_the_account_is_shown_to_the_person_and_never_in_a_log_line() {
         let (chat, _) = wire("normal");
-        assert_eq!(chat.account, Account { plan: Some("plus".into()), api_key: false });
+        assert_eq!(chat.account, Account { plan: Some("plus".into()), api_key: false, email: Some(fake::PLANTED.into()) });
         assert!(!format!("{:?} {:?}", chat.account, chat.models).contains(fake::PLANTED));
     }
 

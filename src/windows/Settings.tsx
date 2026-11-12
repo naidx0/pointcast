@@ -19,6 +19,7 @@ import {
   assistOfflineOnly,
   assistProviders,
   assistSignIn,
+  onAssistProviders,
   gpuRetry,
   historyClear,
   historyList,
@@ -783,17 +784,24 @@ function Ai() {
   const [finding, setFinding] = useState(false);
   // The routes did not come: one quiet line with Try again, never an empty pane.
   const [failed, setFailed] = useState(false);
-  const load = () =>
-    assistProviders()
+  // The engine answers at once from what it knows; each route's probe fills in through onAssistProviders. `refresh`
+  // asks every route again (Check again, after a sign-in).
+  const load = (refresh = false) =>
+    assistProviders(refresh)
       .then((x) => {
         setA(x);
         setFailed(false);
       })
       .catch(() => setFailed(true));
   useEffect(() => {
+    const again = () => load();
     load();
-    window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
+    const off = onAssistProviders(setA);
+    window.addEventListener("focus", again);
+    return () => {
+      off();
+      window.removeEventListener("focus", again);
+    };
   }, []);
   const chosen = a ? chosenRoute(a) : null;
   // The chosen route's full model list can take a few seconds: the quick list stands in until it comes. An agent picks
@@ -814,13 +822,13 @@ function Ai() {
     return failed ? (
       <p className="ai-fail" role="status">
         <span>The list of AIs didn’t load.</span>
-        <button type="button" className="btn" onClick={load}>
+        <button type="button" className="btn" onClick={() => load()}>
           Try again
         </button>
       </p>
     ) : null;
 
-  const run = async (id: string, job: () => Promise<unknown>) => {
+  const run = async (id: string, job: () => Promise<unknown>, refresh = false) => {
     setErrs((e) => ({ ...e, [id]: "" }));
     setBusy(id);
     try {
@@ -831,7 +839,7 @@ function Ai() {
       return false;
     } finally {
       setBusy("");
-      await load();
+      await load(refresh);
     }
   };
   // A key's or a server's models are not in the quick list: they are asked for before the choice, which needs one.
@@ -850,10 +858,10 @@ function Ai() {
   };
   const act = (v: RouteView, p: Route) => {
     if (v.action === "use") return needsConsent(p) ? setConsent({ route: p }) : choose(p, false);
-    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id));
+    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id), true);
     if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
     if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
-    if (v.action === "check") return run(p.id, () => Promise.resolve());
+    if (v.action === "check") return run(p.id, () => Promise.resolve(), true);
   };
 
   const now = nowView(a);
@@ -930,7 +938,7 @@ function Ai() {
                   more={open}
                   form={form}
                   act={() => act(v, p)}
-                  check={() => run(p.id, () => Promise.resolve())}
+                  check={() => run(p.id, () => Promise.resolve(), true)}
                   forget={() => run(p.id, () => assistForget(p.id))}
                 />
               );

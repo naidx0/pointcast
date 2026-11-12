@@ -405,13 +405,32 @@ fn assist_home() -> std::path::PathBuf {
     settings::data_dir().join("assistant")
 }
 
-/// Every AI Pointcast offers and where each stands. Spends nothing: Codex is asked its version and whether it is
-/// signed in, the store which keys it holds, and the usual ports on this computer for their model lists (2 s).
+/// The event that carries the whole list again each time one route's probe answers.
+const ASSIST_PROVIDERS: &str = "assist-providers";
+
+/// Every AI Pointcast offers and where each stands, from what is known now: it never waits on a probe. A round of
+/// probes (Codex's version, sign-in and account; each agent's version; the usual ports on this computer) starts when
+/// the last is stale or `refresh` asks, and each answer sends the list again as `assist-providers`. Spends nothing.
 #[tauri::command]
-async fn assist_providers(svc: tauri::State<'_, Arc<App>>, held: tauri::State<'_, Arc<assist::catalog::Held>>) -> Result<assist::catalog::List, String> {
-    let s = svc.settings.lock().unwrap().clone();
-    let held = held.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || assist::catalog::providers(&s, &assist::catalog::look(&held))).await.map_err(|e| e.to_string())
+fn assist_providers(
+    app: AppHandle,
+    svc: tauri::State<'_, Arc<App>>,
+    held: tauri::State<'_, Arc<assist::catalog::Held>>,
+    survey: tauri::State<'_, Arc<assist::catalog::Survey>>,
+    refresh: Option<bool>,
+) -> assist::catalog::List {
+    let (svc, held, survey) = (svc.inner().clone(), held.inner().clone(), survey.inner().clone());
+    let list = |svc: &App, held: &assist::catalog::Held, survey: &assist::catalog::Survey| {
+        let s = svc.settings.lock().unwrap().clone();
+        survey.now(&s, assist::vault::has, held.held())
+    };
+    let now = list(&svc, &held, &survey);
+    let (s2, h2, v2) = (svc.clone(), held.clone(), survey.clone());
+    let told = Arc::new(move || {
+        let _ = app.emit(ASSIST_PROVIDERS, list(&s2, &h2, &v2));
+    });
+    survey.refresh(assist::catalog::probes(held, assist_home()), refresh.unwrap_or(false), told);
+    now
 }
 
 /// The models `id` offers, asked of it now (Codex is started for its list). Never a question.
@@ -2292,6 +2311,7 @@ pub fn run() {
             tray::setup(&handle, &svc)?;
             let held = Arc::new(assist::catalog::Held::new(assist_home()));
             app.manage(held.clone());
+            app.manage(Arc::new(assist::catalog::Survey::default()));
             app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);

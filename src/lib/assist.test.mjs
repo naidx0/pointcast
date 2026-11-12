@@ -7,6 +7,9 @@ import {
   CUSTOM,
   GROUPS,
   PREVIEW_KINDS,
+  CODEX_SIGN_OUT,
+  checkingAssist,
+  modelName,
   askReady,
   baseOf,
   chosenRoute,
@@ -28,7 +31,7 @@ import {
   visibleRoutes,
 } from "./assist.ts";
 
-const STATES = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported"];
+const STATES = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported", "checking"];
 const route = (o = {}) => ({
   id: "codex",
   name: "ChatGPT",
@@ -42,6 +45,7 @@ const route = (o = {}) => ({
   consented: false,
   models: [],
   plan: null,
+  email: null,
   adds: [],
   ...o,
 });
@@ -79,7 +83,7 @@ test("a signed-in plan says which plan, in plain words", () => {
   assert.equal(routeView(route({ state: "ready", plan: "PLUS" }), none).line, "ChatGPT Plus, through Codex");
   assert.equal(routeView(route({ state: "ready" }), none).line, "Signed in", "no plan said: no plan guessed");
   assert.equal(normalizeAssist({ providers: [{ id: "codex", kind: "plan", planType: "free" }] }).providers[0].plan, "free");
-  assert.equal(routeView(previewAssist("codex-ready").providers[0], previewAssist("codex-ready")).line, "ChatGPT Free, through Codex");
+  assert.equal(routeView(previewAssist("codex-ready").providers[0], previewAssist("codex-ready")).line, "Signed in as you@example.com", "the address Codex names comes first");
 });
 
 test("a route on this computer drops the words its group already says", () => {
@@ -358,4 +362,39 @@ test("every preview kind is a whole reply, and the preview commands change it as
   assert.equal(routeView(byId(a, "openai"), a).line, "Key saved");
   a = previewApply(a, { cmd: "forget", id: "openai" });
   assert.equal(byId(a, "openai").state, "no_key", "forget clears the key too");
+});
+
+test("the first answer draws every route at once: a route being checked says so and offers nothing until its probe answers", () => {
+  const filled = previewAssist("codex-ready");
+  const first = checkingAssist(filled);
+  assert.equal(first.chosen, "codex", "the choice is known at once");
+  assert.equal(first.model, "gpt-6-luna");
+  for (const p of first.providers) {
+    if (p.kind === "key" || !p.available) assert.notEqual(p.state, "checking", `${p.id}: known at once`);
+    else assert.equal(p.state, "checking", p.id);
+  }
+  const v = routeView(byId(first, "codex"), first);
+  assert.deepEqual([v.line, v.action, v.label, v.checking, v.chosen], ["Checking…", null, null, true, true]);
+  assert.equal(nowView(first).title, "ChatGPT", "the chosen AI heads the pane before its probe answers");
+  assert.equal(modelName(first, byId(first, "codex")), "GPT-6-Luna", "the chosen model is named before its list comes");
+  assert.equal(normalizeAssist({ providers: [{ id: "x", kind: "agent", state: "checking" }] }).providers[0].state, "checking");
+});
+
+test("the ChatGPT row says whom Codex is signed in as and on which plan, and points to Codex's own sign-out", () => {
+  const p = route({ state: "ready", plan: "plus", email: "someone@example.test" });
+  const v = routeView(p, none);
+  assert.equal(v.line, "Signed in as someone@example.test");
+  assert.deepEqual(v.account, { who: "someone@example.test", plan: "Plus" });
+  assert.deepEqual(routeView(route({ state: "ready", plan: "free" }), none).account, { who: null, plan: "Free" });
+  assert.equal(routeView(route({ state: "signed_out", email: "someone@example.test" }), none).account, null, "nobody named once signed out");
+  assert.equal(routeView(route({ id: "openai", kind: "key", state: "ready" }), none).account, null);
+  assert.equal(normalizeAssist({ providers: [{ id: "codex", kind: "plan", email: " a@b.test " }] }).providers[0].email, "a@b.test");
+  assert.equal(CODEX_SIGN_OUT, "codex logout");
+});
+
+test("a model is named in plain words, from its list when there is one", () => {
+  assert.equal(modelName({ model: "gpt-6-luna" }, null), "GPT-6-Luna");
+  assert.equal(modelName({ model: "m1" }, { models: [{ id: "m1", name: "Model One", images: true }] }), "Model One");
+  assert.equal(modelName({ model: null }, { models: [{ id: "a", name: "A", images: true, default: true }] }), "A");
+  assert.equal(modelName({ model: null }, null), null);
 });
