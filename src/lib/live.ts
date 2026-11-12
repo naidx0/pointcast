@@ -4,8 +4,9 @@
 // (src/lib/live.test.mjs).
 
 export type LiveStateName = "closed" | "listening" | "finishing" | "sending" | "answering" | "shown" | "error" | "discarded";
-/** `label`: the app or window the picture is of, when the engine names it ("" otherwise). */
-export type LivePicture = { src: string; w: number; h: number; label?: string };
+/** `label`: the app or window the picture is of, when the engine names it ("" otherwise). `marked`: the person marked
+ * it up in the overlay (`live_mark`) and the marked one is what goes. */
+export type LivePicture = { src: string; w: number; h: number; label?: string; marked?: boolean };
 /** The engine's error: a message, or a code with an optional message. `no_provider` asks for Settings. */
 export type LiveErrorPayload = string | { code?: string; message?: string } | null;
 
@@ -25,10 +26,14 @@ export type LiveTurn = {
 /** The payload of `live://state` and the reply of `live_state`. */
 export type LiveSnapshot = {
   state: LiveStateName;
-  /** `turns`: how many turns the session has kept. */
+  /** `turns`: how many turns the session has kept, the one in the fields below included once it is kept (so then
+   * that one's number). */
   session: { id: string; title: string; turns: number };
-  /** The session's finished turns, oldest first. The turn under way stays in the fields below. */
+  /** The session's finished turns, oldest first, never the one in the fields below. After `sessions_open` every turn
+   * is here and the fields below are empty. Joining a closed session, they arrive a moment after the first snapshot. */
   turns: LiveTurn[];
+  /** Which question of this panel opening the fields below belong to (what deltas carry), counted from 1; 0 before
+   * the first. Not the turn's number in the session: that is `openNumber`. */
   turn: number;
   /** The person's words: as they are heard while listening, then the question. */
   words: string;
@@ -80,7 +85,13 @@ const STATES: LiveStateName[] = ["closed", "listening", "finishing", "sending", 
 function pictureOf(p: unknown): LivePicture | null {
   const v = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
   if (typeof v.src !== "string") return null;
-  return { src: v.src, w: Number(v.w) || 0, h: Number(v.h) || 0, label: typeof v.label === "string" ? v.label.trim() : "" };
+  return {
+    src: v.src,
+    w: Number(v.w) || 0,
+    h: Number(v.h) || 0,
+    label: typeof v.label === "string" ? v.label.trim() : "",
+    ...(v.marked === true ? { marked: true } : {}),
+  };
 }
 
 /** An engine error as one line: its message, else a plain sentence when only a code came; null for none. */
@@ -229,6 +240,8 @@ export type LiveView = {
   hide: boolean;
   /** What a screen reader hears, politely, when it changes. */
   announce: string;
+  /** A new session, open on nothing yet (`sessions_new`): one quiet line and the field, ready. */
+  empty: boolean;
 };
 
 export function providerName(p: LiveSnapshot["provider"]): string {
@@ -263,19 +276,38 @@ export function firstWords(words: string, n = 6): string {
   return w.length > n ? w.slice(0, n).join(" ") + "…" : w.join(" ");
 }
 
-/** The turn the panel shows open: the snapshot's own when the session kept it, or, for a session opened finished with
- * nothing in the top-level fields, its newest kept turn. Null when the turn under way is not kept yet. */
-export function currentTurn(s: LiveSnapshot): LiveTurn | null {
-  const own = s.turns.find((t) => t.n === s.turn);
-  if (own) return own;
-  if (s.state === "shown" && !s.words.trim() && s.answer === undefined && s.turns.length) return s.turns[s.turns.length - 1];
-  return null;
+/** Shown with nothing in the panel's own fields: no words, no answer, no picture, no error. A session opened from the
+ * list (its turns kept) or a new one (none yet). */
+function settledBare(s: LiveSnapshot): boolean {
+  return s.state === "shown" && !s.words.trim() && !(s.answer ?? "").trim() && !s.picture && !s.error;
 }
 
-/** The kept turns before the open one, oldest first. */
+/** The turn the panel shows open when it is one of `turns`: after `sessions_open`, the newest kept turn. Null while
+ * the open turn is the one in the panel's own fields (the engine never lists that one in `turns`). */
+export function currentTurn(s: LiveSnapshot): LiveTurn | null {
+  return settledBare(s) && s.turns.length ? s.turns[s.turns.length - 1] : null;
+}
+
+/** A new session open on nothing (`sessions_new`): shown, no turns, nothing in the fields. */
+export function isEmptySession(s: LiveSnapshot): boolean {
+  return settledBare(s) && !s.turns.length;
+}
+
+/** The kept turns before the open one, oldest first: every kept turn, less the one opened from the list. */
 export function earlierTurns(s: LiveSnapshot): LiveTurn[] {
-  const n = currentTurn(s)?.n ?? s.turn;
-  return s.turns.filter((t) => t.n !== n);
+  return currentTurn(s) ? s.turns.slice(0, -1) : s.turns;
+}
+
+/** The open turn's number in the session (what `live_sent` and a summary's references use). The engine counts it in
+ * `session.turns` once it keeps it (at sending), and never lists it in `turns`; a question still being heard is not
+ * kept yet, and joining a closed session its earlier turns may not have arrived. 0 for a new session. */
+export function openNumber(s: LiveSnapshot): number {
+  const opened = currentTurn(s);
+  if (opened) return opened.n;
+  if (isEmptySession(s)) return 0;
+  const last = s.turns.reduce((n, t) => Math.max(n, t.n), 0);
+  if (s.state === "listening" || s.state === "finishing") return Math.max(s.session.turns, last) + 1;
+  return Math.max(s.session.turns, last + 1);
 }
 
 export function liveView(m: LiveModel, now: number): LiveView {
@@ -304,6 +336,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
     sent: m.sent,
     hide: false,
     announce: "",
+    empty: false,
   };
   const hearing = { compact: true, title: "", question: "" };
   const name = provider || "the AI";
@@ -337,8 +370,13 @@ export function liveView(m: LiveModel, now: number): LiveView {
       if (s.thinking && !m.text) return thinkingView(base, name, null);
       return { ...base, phase: "answering", line: "margin", tone: "accent", inFlight: true, stop: true, announce: `${provider || "The AI"} is answering` };
     case "shown":
+      // A new session: nothing yet, the field ready. Never "Not sent", never hidden.
+      if (isEmptySession(s)) return { ...base, phase: "shown", line: "none", tone: "quiet", title: s.session.title, empty: true, announce: "New session" };
+      // A session opened from the list whose newest turn has no answer: it says why, and the panel stays.
+      if (!m.text && kept)
+        return { ...base, phase: "shown", line: "none", tone: "quiet", complete: true, note: kept.error ? "Not answered" : "Stopped", announce: "Session opened" };
       // A follow-up stopped before any answer: the conversation stays, the turn says so.
-      if (!m.text && earlierTurns(s).length)
+      if (!m.text && (earlierTurns(s).length || openNumber(s) > 1))
         return { ...base, phase: "shown", line: "none", tone: "quiet", complete: true, note: m.sent ? "Stopped" : "Not sent", announce: "Stopped" };
       // Stopped before any answer came: nothing is ready, and nothing is said to have been sent unless it was.
       if (!m.text) return endedView(base, m.sent);
@@ -453,14 +491,23 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
   ];
 }
 
-/** The preview's snapshot for a state named in the address. `conversation` is a session of three turns, the third shown. */
-export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string } = {}): LiveSnapshot {
+/** The preview's snapshot for a state named in the address, shaped as the engine sends it. `conversation` is a session
+ * of three turns, the third in the panel's own fields (asked as this panel opening's first question, so `turn` is 1);
+ * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
+ * session. `marked`: the picture was marked up. */
+export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
   const session = { id: "preview", title: "Why do we divide by P(B)", turns: 1 };
-  const common = { ...CLOSED, session, turn: 1, picture: previewPicture(), provider, words: PREVIEW_WORDS };
+  const picture = o.marked ? { ...previewPicture(), marked: true } : previewPicture();
+  const common = { ...CLOSED, session, turn: 1, picture, provider, words: PREVIEW_WORDS };
+  const three = { id: "preview", title: "Bayes' rule on the slide", turns: 3 };
   switch (kind) {
     case "conversation":
-      return { ...common, state: "shown", answer: PREVIEW_ANSWER, turn: 3, session: { id: "preview", title: "Bayes' rule on the slide", turns: 3 }, turns: previewTurns() };
+      return { ...common, state: "shown", answer: PREVIEW_ANSWER, session: three, turns: previewTurns().slice(0, 2) };
+    case "opened":
+      return { ...CLOSED, state: "shown", session: three, turns: previewTurns() };
+    case "empty":
+      return { ...CLOSED, state: "shown" };
     case "listening":
       return { ...common, state: "listening", session: { ...session, title: "" }, words: "" };
     case "finishing":

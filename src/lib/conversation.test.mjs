@@ -6,6 +6,7 @@ import {
   canSend,
   earlierLabel,
   earlierRows,
+  fieldPlaceholder,
   followKey,
   followUpShown,
   isFocusKey,
@@ -15,17 +16,62 @@ import {
   sizeLabel,
   turnRow,
 } from "./conversation.ts";
-import { initialLive, liveReduce, liveView, normalizeSnapshot, previewPicture, previewSnapshot } from "./live.ts";
+import { initialLive, liveReduce, liveView, normalizeSnapshot, openNumber, previewPicture, previewSnapshot } from "./live.ts";
 
 const pic = previewPicture();
 const turn = (n, over = {}) => ({ n, question: `Question ${n}?`, answer: `Answer ${n}.`, picture: null, stopped: false, error: null, at_ms: n, ...over });
 const snap = (over = {}) => normalizeSnapshot({ state: "shown", session: { id: "s", title: "T" }, turn: 3, words: "Question 3?", ...over });
 
-test("the earlier rows are the kept turns before the open one, whether or not the engine keeps the open one too", () => {
-  const without = snap({ turns: [turn(1), turn(2)] });
-  const withOpen = snap({ turns: [turn(1), turn(2), turn(3)] });
-  assert.deepEqual(earlierRows(without).map((r) => r.n), [1, 2]);
-  assert.deepEqual(earlierRows(withOpen).map((r) => r.n), [1, 2]);
+test("the earlier rows are every kept turn: the engine never lists the open one, and the panel's own count is no turn's number", () => {
+  // The panel's first question (its `turn` 1) is the session's third: turns 1 and 2 are both earlier rows.
+  for (const own of [1, 2]) {
+    const s = snap({ turn: own, session: { id: "s", title: "T", turns: 3 }, turns: [turn(1), turn(2)] });
+    assert.deepEqual(earlierRows(s).map((r) => r.n), [1, 2], `panel turn ${own}`);
+    assert.equal(openNumber(s), 3, "the open turn is the session's third, as `session.turns` counts it once kept");
+  }
+  const m = liveReduce(initialLive(), { type: "snapshot", snap: snap({ turn: 1, session: { id: "s", title: "T", turns: 3 }, turns: [turn(1), turn(2)] }), now: 0 });
+  assert.equal(liveView(m, 0).question, "Question 3?", "an older turn with the panel's number never stands in for the open one");
+});
+
+test("the open turn's number: heard and not kept yet, the next one; kept, the session's count; opened, the newest kept", () => {
+  const at = (over) => openNumber(normalizeSnapshot({ session: { id: "s", title: "T", turns: 2 }, turn: 0, words: "Q", ...over }));
+  assert.equal(at({ state: "listening", turns: [] }), 3, "joining a closed session of two, before its turns arrive");
+  assert.equal(at({ state: "listening", turns: [turn(1), turn(2)] }), 3);
+  assert.equal(at({ state: "sending", session: { id: "s", title: "T", turns: 3 }, turns: [] }), 3);
+  assert.equal(at({ state: "shown", session: { id: "s", title: "T", turns: 3 }, turns: [turn(1), turn(2)] }), 3);
+  assert.equal(at({ state: "sending", session: { id: "s", title: "T", turns: 2 }, turns: [turn(1), turn(2)] }), 3, "sent and not kept yet");
+  assert.equal(at({ state: "shown", words: "", turns: [turn(1), turn(2)] }), 2, "opened: the newest kept turn");
+  assert.equal(openNumber(previewSnapshot("empty")), 0);
+});
+
+test("joining a closed session, its turns arriving a moment later keep the open turn, its answer and its number", () => {
+  const first = { state: "answering", session: { id: "s", title: "T", turns: 3 }, turn: 1, words: "Question 3?", turns: [] };
+  let m = liveReduce(initialLive(), { type: "snapshot", snap: first, now: 0 });
+  m = liveReduce(m, { type: "deltas", deltas: [{ turn: 1, text: "Part of it" }] });
+  assert.equal(openNumber(m.snap), 3);
+  m = liveReduce(m, { type: "snapshot", snap: { ...first, turns: [turn(1), turn(2)] }, now: 1 });
+  assert.deepEqual([m.text, openNumber(m.snap), liveView(m, 1).question], ["Part of it", 3, "Question 3?"]);
+  assert.deepEqual(earlierRows(m.snap).map((r) => r.n), [1, 2]);
+});
+
+test("a session opened from the list opens on its newest turn, whether the fields come empty or absent", () => {
+  const empty = normalizeSnapshot({ state: "shown", session: { id: "s", title: "T", turns: 2 }, turn: 0, words: "", answer: "", picture: null, error: null, turns: [turn(1), turn(2)] });
+  const v = liveView(liveReduce(initialLive(), { type: "snapshot", snap: empty, now: 0 }), 0);
+  assert.deepEqual([v.phase, v.question, v.complete, v.hide], ["shown", "Question 2?", true, false]);
+  const opened = liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot("opened"), now: 0 }), 0);
+  assert.deepEqual([opened.phase, opened.complete, opened.thumb?.src.slice(0, 10)], ["shown", true, "data:image"]);
+  // Its newest turn was stopped before any answer: it says so and the panel stays.
+  const stopped = normalizeSnapshot({ state: "shown", session: { id: "s", title: "T", turns: 1 }, turn: 0, words: "", turns: [turn(1, { answer: "", stopped: true })] });
+  const sv = liveView(liveReduce(initialLive(), { type: "snapshot", snap: stopped, now: 0 }), 0);
+  assert.deepEqual([sv.phase, sv.note, sv.hide], ["shown", "Stopped", false]);
+});
+
+test("a new session is open on nothing: never 'Not sent', never hidden, the field ready for its first question", () => {
+  const v = liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot("empty"), now: 0 }), 0);
+  assert.deepEqual([v.phase, v.empty, v.hide, v.note, v.complete, v.thumb], ["shown", true, false, null, false, null]);
+  assert.equal(followUpShown(v), true);
+  assert.deepEqual([fieldPlaceholder(true), fieldPlaceholder(false)], ["Type a question", "Ask a follow-up"]);
+  assert.equal(earlierRows(previewSnapshot("empty")).length, 0);
 });
 
 test("a session opened finished, with nothing at the top, opens on its newest turn", () => {
@@ -107,6 +153,26 @@ test("Sent with nothing but words: no pictures, no earlier questions, nothing ad
   assert.equal(sentView("text"), null);
   assert.equal(normalizeSent({ pictures: [{ src: "https://example.com/x.png" }] }).pictures[0].n, 1);
   assert.equal(sentView({ pictures: [{ src: "https://example.com/x.png" }] }).pictures[0].src, null, "a web address is never shown");
+});
+
+test("Sent shows the earlier turns sent again when the conversation was reopened: their words on request, their pictures small", () => {
+  const p = (turn, n) => ({ n, turn, w: 1280, h: 720, bytes: 188_400, mime: "image/jpeg", src: pic.src });
+  const v = sentView({
+    text: "Question 3?",
+    pictures: [{ ...p(3, 1) }],
+    earlier: [1, 2],
+    provider: "Codex",
+    adds: ["Codex's own instructions for answering", "MCP server started by Codex: github"],
+    replay: "  Question 1: What does the line mean?  ",
+    again: [p(2, 1), p(1, 2), p(1, 1)],
+  });
+  assert.equal(v.replay.text, "Question 1: What does the line mean?");
+  assert.deepEqual(v.replay.pictures.map((x) => x.label), ["Question 1, picture 1", "Question 1, picture 2", "Question 2"]);
+  assert.equal(v.replay.pictures[0].size, "1280 × 720 · 188 KB · JPEG");
+  assert.equal(v.replay.meta, "Their words and 3 pictures");
+  assert.deepEqual([v.addsBy, v.adds[1]], ["Codex added", "MCP server started by Codex: github"]);
+  assert.equal(sentView({ text: "x", replay: "", again: [] }).replay, null, "nothing sent again: no row");
+  assert.equal(sentView({ text: "x", replay: "Q1" }).replay.meta, "Their words");
 });
 
 test("sizes, kinds and the earlier questions read as a person says them", () => {
