@@ -326,6 +326,7 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             }),
             out: Box::new(move |o| match o {
                 live::Out::State(s) => {
+                    tray::ask(&handle, s.state);
                     let _ = handle.emit("live://state", &s);
                 }
                 live::Out::Delta { turn, text } => {
