@@ -358,6 +358,8 @@ struct Inner {
     marked: Option<Marked>,
     /// The mark-up overlay is open on a picture of that question.
     marking: Option<Marking>,
+    /// The AI's helper being started at a press: a conversation opened after it waits for it, and so takes it.
+    warming: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct Live {
@@ -570,7 +572,6 @@ impl Live {
         // The screen as it is now, before the panel is on it; never when the person marked a picture up for this
         // question, or is marking one (the overlay is what the screen shows).
         let frame = if g.marked.is_some() || g.marking.is_some() { None } else { (self.deps.grab)().ok() };
-        provider.warm();
         match self.deps.voice.start() {
             Ok(true) => {}
             Ok(false) => return false,
@@ -583,6 +584,12 @@ impl Live {
         let run = g.run;
         let now = (self.deps.now)();
         g.press_ms = now;
+        // The AI's helper starts while the question is said, off the panel's lock (Codex takes seconds), and only when
+        // no conversation is open: one that is holds its own helper, and a warmed one would sit unused.
+        if g.chat.is_none() && g.warming.as_ref().is_none_or(|w| w.is_finished()) {
+            let p = provider.clone();
+            g.warming = Some(std::thread::spawn(move || p.warm()));
+        }
         self.begin(&mut g, provider, now);
         g.snap.words.clear();
         self.step(&mut g, Step::Press);
@@ -1338,6 +1345,11 @@ impl Live {
         // A conversation still open holds the earlier turns. One opened anew is given them as they were said, and makes
         // them into its own context (`assist::replay`, once, by the contract of `Provider::open`).
         let fresh = chat.is_none();
+        // A helper still starting from the press is the one this conversation takes, not a second one beside it.
+        let warming = if fresh { self.inner.lock().unwrap().warming.take() } else { None };
+        if let Some(w) = warming {
+            let _ = w.join();
+        }
         // Opening can take a while (a helper starts): never under the lock.
         let opened = match chat {
             Some(c) => Ok(c),
@@ -3004,6 +3016,85 @@ mod tests {
         r.live.release();
         r.until(State::Shown);
         assert_eq!(script.asked.lock().unwrap().len(), 1);
+        r.end();
+    }
+
+    /// Keeps one warmed helper as Codex does: `warm` starts one when none waits (holding its slot while it starts), and
+    /// `open` takes the one waiting, else starts its own. Counts every helper started.
+    struct Helpers {
+        script: Scripted,
+        gate: Arc<Mutex<()>>,
+        warmed: Mutex<bool>,
+        spawns: Arc<AtomicUsize>,
+    }
+
+    impl Provider for Helpers {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn caps(&self, m: Option<&str>) -> Caps {
+            self.script.caps(m)
+        }
+        fn health(&self) -> Health {
+            self.script.health()
+        }
+        fn warm(&self) {
+            let _slow = self.gate.lock();
+            let mut w = self.warmed.lock().unwrap();
+            if !*w {
+                std::thread::sleep(Duration::from_millis(30));
+                self.spawns.fetch_add(1, Ordering::SeqCst);
+                *w = true;
+            }
+        }
+        fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
+            if !std::mem::take(&mut *self.warmed.lock().unwrap()) {
+                self.spawns.fetch_add(1, Ordering::SeqCst);
+            }
+            self.script.open(system, earlier)
+        }
+    }
+
+    fn helpers(gate: &Arc<Mutex<()>>) -> (Arc<Helpers>, Arc<AtomicUsize>) {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        (Arc::new(Helpers { script: Scripted::new(&[(1, "ok")]), gate: gate.clone(), warmed: Mutex::new(false), spawns: spawns.clone() }), spawns)
+    }
+
+    #[test]
+    fn the_press_listens_at_once_while_the_ai_is_still_warming() {
+        let gate = Arc::new(Mutex::new(()));
+        let (p, _) = helpers(&gate);
+        let r = rig("warm-slow", Some(p), FIRST_WAIT);
+        let slow = gate.lock().unwrap();
+        let live = r.live.clone();
+        let pressed = std::thread::spawn(move || live.press());
+        // Read without the panel's lock, which a press stuck in the warm would hold.
+        let t = Instant::now();
+        while !r.voice.busy() {
+            assert!(t.elapsed() < Duration::from_secs(10), "the microphone waited for the AI's helper to start");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(pressed.join().unwrap(), "the press returned while the helper still starts");
+        assert_eq!(r.live.snapshot().state, State::Listening);
+        drop(slow);
+        r.live.stop();
+        r.end();
+    }
+
+    #[test]
+    fn a_follow_up_press_starts_no_second_helper_while_the_conversation_is_open() {
+        let gate = Arc::new(Mutex::new(()));
+        let (p, spawns) = helpers(&gate);
+        let r = rig("warm-once", Some(p), FIRST_WAIT);
+        r.ask("one", State::Shown);
+        r.ask("two", State::Shown);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "one helper, warmed at the first press and taken by its conversation");
+        // Closed, the next question warms one again and its conversation takes that one.
+        r.live.close();
+        r.ask("three", State::Shown);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
         r.end();
     }
 }
