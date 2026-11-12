@@ -3024,3 +3024,10 @@ html.win .undo-btn {
   display: inline-flex;
   align-items: center;
 }
+.onb-ai-model {
+  border-top: 0.5px solid var(--sep);
+}
+.onb-ai-model select {
+  flex: none;
+  max-width: 260px;
+}

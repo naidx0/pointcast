@@ -375,7 +375,7 @@ function AiPick({ a, setA }: { a: Assist; setA: (a: Assist) => void }) {
               : v.action === "use" || v.chosen
                 ? p.offline
                   ? "Stays on this computer"
-                  : `Sends your words and pictures to ${destination(p.goes_to).split(",")[0] || "the AI"}`
+                  : `Sends to ${destination(p.goes_to).split(/,| on /)[0] || "the AI"}`
                 : v.line;
         return (
           <div key={v.id} className="onb-ai-row" role="listitem">
@@ -402,11 +402,48 @@ function AiPick({ a, setA }: { a: Assist; setA: (a: Assist) => void }) {
           </div>
         );
       })}
+      {chosenRoute(a) && (chosenRoute(a)!.models.length > 1) ? <ModelPick a={a} setA={setA} /> : null}
       {every.length > choices.length ? (
         <button type="button" className="link onb-ai-more" onClick={() => setAll(true)}>
           Show {every.length - choices.length} more
         </button>
       ) : null}
+    </div>
+  );
+}
+
+/** The chosen AI's model, right under the list: the one its app recommends is chosen until another is picked. */
+function ModelPick({ a, setA }: { a: Assist; setA: (a: Assist) => void }) {
+  const p = chosenRoute(a)!;
+  const [busy, setBusy] = useState(false);
+  const value = a.model ?? defaultModel(p) ?? "";
+  return (
+    <div className="onb-ai-row onb-ai-model">
+      <div className="grow">
+        <div className="lbl">Model</div>
+      </div>
+      <select
+        className="field"
+        aria-label={`${shortName(p)} model`}
+        value={value}
+        disabled={busy}
+        onChange={(e) => {
+          setBusy(true);
+          assistChoose(p.id, e.target.value, false)
+            .then(() => assistProviders())
+            .then(setA)
+            .catch(() => undefined)
+            .finally(() => setBusy(false));
+        }}
+      >
+        {p.models.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.name}
+            {m.default ? " (recommended)" : ""}
+            {m.images ? "" : " · words only"}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
