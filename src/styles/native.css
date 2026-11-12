@@ -1246,12 +1246,17 @@ html.win .home-recent button {
   line-height: 16px;
 }
 /* Its links are quiet, as the page's are; the one that still needs doing (Choose an AI) is in the text colour. */
+/* The chevron sits on the words' own middle: inline, `vertical-align: middle` puts its centre half an x-height above
+   the baseline, whatever the font (a flex centre put it 2 px above the letters in both skins). */
 .feature .link {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
+  display: inline-block;
   font: inherit;
   color: var(--label-2);
+  white-space: nowrap;
+}
+.feature .link svg {
+  vertical-align: middle;
+  margin-left: 2px;
 }
 .feature .link:hover {
   color: var(--label);
