@@ -55,6 +55,12 @@ html.vibrant.win[data-theme="dark"] .live {
 .live.closed {
   background: transparent;
 }
+/* macOS panels have round corners: the material is cut at 14 px (tauri.conf.json, windowEffects.radius) and the
+   tint and the hairline follow it, so no square corner shows through. */
+html:not(.win) .live {
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 0.5px var(--box-line);
+}
 
 .live button {
   cursor: default;

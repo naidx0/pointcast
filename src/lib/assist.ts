@@ -42,7 +42,7 @@ export type Route = {
 };
 
 /** The reply of `assist_providers`. */
-export type Assist = { chosen: string | null; model: string | null; effort: string | null; offline_only: boolean; providers: Route[] };
+export type Assist = { chosen: string | null; model: string | null; effort: string | null; offline_only: boolean; providers: Route[]; checking?: boolean };
 
 /** The one action a route offers in its state. */
 /** `install` and `update` are done by Pointcast itself (the vendor's own package); `get` only shows where to get an app
@@ -130,7 +130,7 @@ export function normalizeAssist(x: unknown): Assist {
       sure: p.sure === true,
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
-  return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, offline_only: v.offline_only === true, providers };
+  return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, offline_only: v.offline_only === true, providers, ...(v.checking === true ? { checking: true } : {}) };
 }
 
 export function normalizeModels(x: unknown): AssistModel[] {
@@ -193,7 +193,8 @@ function planLine(p: Route): string {
  * why and offers nothing; an agent's line is the engine's own, which already ends in its one next step. */
 export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">): RouteView {
   const chosen = a.chosen === p.id && p.available && (!a.offline_only || p.offline);
-  const account = p.kind === "plan" && p.state === "ready" ? { who: p.email ?? null, plan: p.plan ? planName(p.plan) : null } : null;
+  // Who is signed in, where the app says: ChatGPT through Codex, and Claude through Claude Code.
+  const account = (p.kind === "plan" || p.id === "claude-code") && p.state === "ready" && (p.plan || p.email) ? { who: p.email ?? null, plan: p.plan ? planName(p.plan) : null } : null;
   const base = {
     id: p.id,
     name: shortName(p),
@@ -212,6 +213,7 @@ export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">):
     if (p.state === "not_installed" && AGENT_INSTALL[p.id]) return { ...base, line, action: "install", label: "Install", help: installHelp(p) };
     if (p.state === "signed_out") return { ...base, line, action: "sign_in", label: "Sign in", help: installHelp(p) };
     if (p.state === "too_old") return { ...base, line, action: "update", label: "Update", help: installHelp(p, true) };
+    if (p.state === "ready" && p.email) return { ...v, line: `Signed in as ${p.email}` };
     if (p.state === "ready") return { ...v, line, signIn: p.id !== "claude-code" && !!AGENT_INSTALL[p.id] };
     return p.state === "unsupported" ? { ...v, line } : { ...base, line, action: "check", label: "Check again" };
   }
@@ -585,3 +587,16 @@ export function previewApply(
 }
 
 export const previewModels = (id: string): AssistModel[] => MODELS[id] ?? [];
+
+/** The AIs onboarding offers, each with its one click: the ones ready on this computer first, then the ones a click
+ * signs in or updates, then the ones a click installs; at most `max`. Keys, addresses and apps Pointcast cannot
+ * install wait in Settings, so the step asks for nothing typed. */
+export function onboardingChoices(a: Assist, max = 5): RouteView[] {
+  const rank = (v: RouteView) => (v.chosen ? 0 : v.action === "use" ? 1 : v.action === "sign_in" || v.action === "update" ? 2 : v.action === "install" ? 3 : 9);
+  return visibleRoutes(a)
+    .filter((p) => p.available && p.kind !== "key" && p.id !== CUSTOM)
+    .map((p) => routeView(p, a))
+    .filter((v) => rank(v) < 9)
+    .sort((x, y) => rank(x) - rank(y))
+    .slice(0, max);
+}

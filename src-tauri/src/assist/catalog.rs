@@ -142,6 +142,8 @@ pub struct List {
     pub effort: Option<String>,
     pub offline_only: bool,
     pub providers: Vec<Row>,
+    /// A round of checks is out now: Refresh shows it until the last answer is in.
+    pub checking: bool,
 }
 
 /// What is known of each route without spending anything.
@@ -158,6 +160,8 @@ pub struct Look {
     pub local: Vec<openai::Found>,
     /// Each agent as `acp::health` found it.
     pub agents: Vec<(&'static str, Health)>,
+    /// Who is signed in to Claude Code, as its own `auth status` says.
+    pub claude_who: claude::Who,
     /// Who Codex says is signed in, once it was asked.
     pub account: Option<codex::Account>,
     /// The routes whose probe has not answered yet.
@@ -181,6 +185,7 @@ pub fn gather(places: &[(&'static str, &str)], codex: impl FnOnce() -> (Health, 
         keys_here: cfg!(any(windows, target_os = "macos")),
         local,
         agents: Vec::new(),
+        claude_who: claude::Who::default(),
         account: None,
         pending: Vec::new(),
     }
@@ -251,7 +256,7 @@ impl Survey {
             look.adds = p.adds();
             look.account = p.account().or(look.account);
         }
-        providers(s, &look)
+        List { checking: self.busy(), ..providers(s, &look) }
     }
 
     /// Whether a round of probes is out now.
@@ -299,10 +304,13 @@ pub fn probes(held: Arc<Held>, home: PathBuf) -> Vec<Probe> {
             ids: vec![a.id],
             run: Box::new(move || {
                 // Claude Code is asked by its own `auth status`, which knows whether anyone is signed in.
-                let h = if a.id == CLAUDE_CODE { claude::health() } else { acp::health(a) };
+                let (h, who) = if a.id == CLAUDE_CODE { claude::look() } else { (acp::health(a), claude::Who::default()) };
                 Box::new(move |l: &mut Look| {
                     l.agents.retain(|(id, _)| *id != a.id);
                     l.agents.push((a.id, h));
+                    if a.id == CLAUDE_CODE {
+                        l.claude_who = who;
+                    }
                 })
             }),
         });
@@ -428,7 +436,12 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                 },
                 Way::Agent => match look.agents.iter().find(|(id, _)| *id == r.id).map(|(_, h)| h) {
                     Some(h) => match h.state {
-                        State::Ready => (Status::Ready, h.line.clone()),
+                        State::Ready => {
+                            if r.id == CLAUDE_CODE {
+                                (plan, email) = (look.claude_who.plan.clone(), look.claude_who.email.clone());
+                            }
+                            (Status::Ready, h.line.clone())
+                        }
                         State::NotInstalled => (Status::NotInstalled, h.line.clone()),
                         State::TooOld => (Status::TooOld, h.line.clone()),
                         State::Unknown => (Status::Unsupported, h.line.clone()),
@@ -464,7 +477,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
             Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email, sure }
         })
         .collect();
-    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows }
+    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows, checking: false }
 }
 
 /// Every effort Codex names, lowest first; the first is what Pointcast starts with. Each model offers some of them
@@ -1134,5 +1147,31 @@ mod tests {
         choose(&mut s, "openai", Some("m".into()), true, 1).unwrap();
         assert_eq!(forget(&mut s, &keys, "openai"), Ok(()));
         assert!(s.assist_provider.is_none() && s.assist_consent.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod on_this_computer {
+    /// What the AI page gets on this computer after one round of probes. Prints only; run by hand with --ignored.
+    #[test]
+    #[ignore]
+    fn print_the_list() {
+        crate::shell_path::widen();
+        let home = std::env::temp_dir().join("pointcast-probe");
+        let held = std::sync::Arc::new(super::Held::new(home.clone()));
+        let survey = std::sync::Arc::new(super::Survey::default());
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let tx = std::sync::Mutex::new(tx);
+        survey.refresh(super::probes(held.clone(), home), true, std::sync::Arc::new(move || {
+            let _ = tx.lock().unwrap().send(());
+        }));
+        while survey.busy() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(30));
+        }
+        let s = crate::settings::Settings::default();
+        let list = survey.now(&s, |_| false, held.held());
+        for r in list.providers.iter().filter(|r| matches!(r.id, "codex" | "claude-code" | "gemini-cli" | "copilot")) {
+            println!("{} {:?} plan={:?} email={} models={:?} line={}", r.id, r.state, r.plan, r.email.is_some(), r.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), r.line);
+        }
     }
 }

@@ -8,7 +8,7 @@ test("setup has five steps: welcome, access, try it, Ask, done", () => {
 });
 
 test("the Ask step never holds Continue back: choosing an AI can wait", () => {
-  for (const practiced of [true, false]) assert.deepEqual(nextButton("ask", practiced), { label: "Continue" });
+  for (const practiced of [true, false]) assert.deepEqual(nextButton("ask", practiced), { label: "Continue", skip: "Skip" }, "choosing an AI can always be skipped");
 });
 
 test("only the recommended model's Download is primary, and only while no model can run", () => {

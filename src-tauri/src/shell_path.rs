@@ -80,6 +80,12 @@ pub fn widen() {
         if !path.is_empty() {
             std::env::set_var("PATH", path);
         }
+        // Claude Code finds its sign-in in the Keychain by the user's name: without USER it reads as signed out.
+        if std::env::var_os("USER").map_or(true, |u| u.is_empty()) {
+            if let Some(name) = std::env::var_os("LOGNAME").filter(|n| !n.is_empty()).or_else(|| dirs::home_dir().and_then(|h| h.file_name().map(|n| n.to_owned()))) {
+                std::env::set_var("USER", name);
+            }
+        }
     }
 }
 

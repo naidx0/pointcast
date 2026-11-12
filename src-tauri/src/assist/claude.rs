@@ -488,6 +488,23 @@ fn signed_in_of(said: &str) -> Option<bool> {
     serde_json::from_str::<Value>(said.trim()).ok()?["loggedIn"].as_bool()
 }
 
+/// Who is signed in, as `claude auth status --json` says it: the plan ("pro", "max", "team", "enterprise") and the
+/// address, when it names them. Shown on the AI page; the organisation and every other field are never kept.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Who {
+    pub plan: Option<String>,
+    pub email: Option<String>,
+}
+
+pub fn who_of(said: &str) -> Who {
+    let v: Value = serde_json::from_str(said.trim()).unwrap_or(Value::Null);
+    if v["loggedIn"].as_bool() != Some(true) {
+        return Who::default();
+    }
+    let s = |k: &str| v[k].as_str().map(str::trim).filter(|x| !x.is_empty()).map(str::to_owned);
+    Who { plan: s("subscriptionType"), email: s("email") }
+}
+
 /// What `exe auth status --json` printed, within 10 seconds.
 fn auth_status(exe: &Path) -> Option<String> {
     let mut cmd = Command::new(exe);
@@ -516,7 +533,15 @@ fn auth_status(exe: &Path) -> Option<String> {
 /// Whether Claude Code can be used, in one line. Spends nothing: the CLI is found, asked its version and asked
 /// whether it is signed in; no question is sent.
 pub fn health() -> Health {
-    health_of(detect::on_path(PROGRAM).map(|exe| (detect::version_of(&exe), auth_status(&exe).as_deref().and_then(signed_in_of))))
+    look().0
+}
+
+/// `health`, and who is signed in: one `auth status` read serves both.
+pub fn look() -> (Health, Who) {
+    let Some(exe) = detect::on_path(PROGRAM) else { return (health_of(None), Who::default()) };
+    let said = auth_status(&exe);
+    let who = said.as_deref().map(who_of).unwrap_or_default();
+    (health_of(Some((detect::version_of(&exe), said.as_deref().and_then(signed_in_of)))), who)
 }
 
 /// `health`, from what was found: what `--version` printed, and whether the CLI said it is signed in.
@@ -921,4 +946,14 @@ pub mod tests {
         assert_eq!(crate::assist::catalog::route(ID).map(|r| r.goes_to), Some(GOES_TO));
         assert!(Claude::new("unused".into()).caps(None).images);
     }
+
+    #[test]
+    fn who_is_signed_in_is_the_plan_and_the_address_only() {
+        let said = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@b.c","orgId":"x","orgName":"Org","subscriptionType":"pro"}"#;
+        assert_eq!(who_of(said), Who { plan: Some("pro".into()), email: Some("a@b.c".into()) });
+        assert_eq!(who_of(r#"{"loggedIn":false,"email":"a@b.c","subscriptionType":"pro"}"#), Who::default(), "signed out names no one");
+        assert_eq!(who_of("not json"), Who::default());
+        assert_eq!(who_of(r#"{"loggedIn":true,"subscriptionType":""}"#), Who::default());
+    }
+
 }
