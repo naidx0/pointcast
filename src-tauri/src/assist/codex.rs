@@ -58,9 +58,8 @@ pub const MCP_STARTED: &str = "MCP server started by Codex: ";
 /// The names of the MCP servers the person's own Codex is set up with, from the answer to `config/read`. Only the
 /// names are read: what a server runs and the environment it is given never leave that answer.
 fn servers_of(read: &Value) -> Vec<String> {
-    // UNCONFIRMED on a real app-server: the generated schema (0.164.0) types `config` in the answer as a table that
-    // takes keys it does not name, and names no `mcp_servers` among those it does; that the table is there under
-    // that key, one entry a server, is read from Codex's config file, not from the schema.
+    // Measured on the real app-server (0.164.0, 2026-11-11): `config/read` answers with the person's servers under
+    // `config.mcp_servers`, one entry a server. The schema does not name that key.
     let mut names: Vec<String> = read["config"]["mcp_servers"].as_object().into_iter().flatten().map(|(name, _)| name.clone()).collect();
     names.sort();
     names
@@ -76,8 +75,8 @@ fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String
     // `features.<name>` key is read as that feature's switch.
     // Measured on the real CLI: an empty `mcp_servers` table is laid over the person's config, not put in its place,
     // so their servers still start. So each one is named with `enabled = false`, which the same laying-over carries
-    // onto the person's entry. UNCONFIRMED until a real turn shows no `mcpServer/startupStatus/updated`: that a
-    // server's entry takes `enabled`, and that a nested table here is merged as the empty one was.
+    // onto the person's entry. Measured the same day: with the empty table the person's server was reported
+    // starting; with it named `enabled = false` (nested, as here, or as a dotted key) no start was reported.
     let off: serde_json::Map<String, Value> = servers.iter().map(|name| (name.clone(), json!({ "enabled": false }))).collect();
     let mut config = serde_json::Map::new();
     config.insert("mcp_servers".into(), Value::Object(off));
