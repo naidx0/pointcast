@@ -1643,14 +1643,106 @@ html.win .onb-body {
   height: 104px;
   margin-bottom: 18px;
 }
+/* A step's mark: a line icon in the text colour on the page itself, never a tinted tile. */
 .onb-glyph {
-  width: 56px;
-  height: 56px;
-  margin-bottom: 14px;
-  border-radius: 14px;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 16px;
   display: grid;
   place-items: center;
-  color: #fff;
+  color: var(--label);
+}
+/* The welcome's three points: an icon in the text colour beside each, on one left edge. */
+.onb-points {
+  list-style: none;
+  width: 100%;
+  max-width: 420px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 16px;
+  text-align: left;
+}
+.onb-points li {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.onb-points svg {
+  margin-top: 0;
+  color: var(--label);
+}
+.onb-point-t {
+  font-weight: 600;
+  line-height: 20px;
+}
+/* The Ask step: its key and its AI as two quiet rows on a hairline, centred under the words. */
+.onb-rows {
+  width: 100%;
+  max-width: 360px;
+  text-align: left;
+}
+.onb-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.onb-row + .onb-row {
+  border-top: 0.5px solid var(--sep);
+}
+html.win .onb-row + .onb-row {
+  border-top-width: 1px;
+}
+.onb-row .lbl {
+  flex: 1;
+  color: var(--label-2);
+}
+.onb-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font: inherit;
+  color: var(--label);
+}
+.onb-ai:hover {
+  text-decoration: none;
+  color: var(--label-2);
+}
+.onb-ai.strong {
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--label-3);
+  text-underline-offset: 2px;
+}
+.onb-later {
+  margin-top: 16px;
+}
+/* The practice run's shortcuts: rows on hairlines, not boxes holding boxes; each shortcut is its keys and Change. */
+.onb .cards:has(> .card.try) {
+  gap: 0;
+}
+.onb .card.try {
+  padding: 12px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.onb .card.try + .card.try {
+  border-top: 0.5px solid var(--sep);
+}
+html.win .onb .card.try + .card.try {
+  border-top-width: 1px;
+}
+.onb .card.try > span > .btn {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.onb .card.try > span > .btn:hover {
+  background: var(--fill);
 }
 .onb-step .t-hero,
 .onb-step .t-title {
@@ -1668,10 +1760,10 @@ html.win .onb-body {
   padding: 16px 20px;
   border-top: 0.5px solid var(--sep);
 }
+/* The foot is the page, set apart by one hairline: no second fill. */
 html.win .onb-foot {
   padding: 20px 24px;
-  background: var(--fill);
-  border-top: 1px solid var(--box-line);
+  border-top: 1px solid var(--sep);
 }
 .dots {
   display: flex;
@@ -1731,6 +1823,10 @@ html.win .onb-foot {
 .card.try.down {
   box-shadow: 0 0 0 2px var(--accent);
   border-color: transparent;
+}
+.onb .card.try.down {
+  box-shadow: none;
+  background: var(--fill);
 }
 
 /* —— About: credits —— */
@@ -2268,8 +2364,9 @@ html.win .hist-list {
 .hist-item:hover {
   background: var(--fill);
 }
+/* The one picked lifts by fill alone, in the page's grey: no colour but the text's. */
 .hist-item[aria-current="true"] {
-  background: var(--accent-wash);
+  background: var(--fill-2);
 }
 html.win .hist-item {
   border-radius: 4px;
@@ -2279,36 +2376,42 @@ html.win .hist-item {
   align-items: center;
   gap: 6px;
   font-size: var(--fs-small);
-  font-weight: 600;
+  line-height: 16px;
+  font-weight: 400;
   color: var(--label-2);
+  font-variant-numeric: tabular-nums;
 }
-.hist-tag {
-  height: 16px;
-  padding: 0 6px;
-  font-size: 10px;
+/* Recovered, Partial: the one small warm word, no pill. */
+.hist-tag.badge {
+  height: auto;
+  padding: 0;
+  background: none;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--orange-ink);
 }
 .hist-text {
-  font-size: var(--fs-caption);
-  line-height: 1.4;
+  font-size: var(--fs-body);
+  line-height: 20px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
+/* The kept audio: one quiet row over the prompt, set apart by a hairline, not a box. */
 .audio-bar {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--fill);
+  margin: 0 0 20px;
+  padding: 0 0 12px;
+  border-bottom: 0.5px solid var(--sep);
 }
 html.win .audio-bar {
-  border-radius: 4px;
+  border-bottom-width: 1px;
 }
 .audio-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .audio-row .btn:disabled {
   opacity: 1;

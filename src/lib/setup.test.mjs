@@ -1,10 +1,25 @@
 // Run: node --test src/lib/setup.test.mjs (Node 22.6+ reads the TypeScript module directly).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, downloadOnce, nextButton, percent, speechLine } from "./setup.ts";
+import { STEPS, downloadOnce, nextButton, percent, primaryDownload, speechLine } from "./setup.ts";
 
-test("setup has four steps: welcome, access, try it, done", () => {
-  assert.deepEqual([...STEPS], ["welcome", "access", "try", "done"]);
+test("setup has five steps: welcome, access, try it, Ask, done", () => {
+  assert.deepEqual([...STEPS], ["welcome", "access", "try", "ask", "done"]);
+});
+
+test("the Ask step never holds Continue back: choosing an AI can wait", () => {
+  for (const practiced of [true, false]) assert.deepEqual(nextButton("ask", practiced), { label: "Continue" });
+});
+
+test("only the recommended model's Download is primary, and only while no model can run", () => {
+  const models = [
+    { id: "base", ready: false },
+    { id: "tiny", ready: false },
+  ];
+  assert.equal(primaryDownload(models, "base"), "base");
+  assert.equal(primaryDownload([{ id: "base", ready: false }, { id: "tiny", ready: true }], "base"), null);
+  assert.equal(primaryDownload(models, "gone"), null);
+  assert.equal(primaryDownload(models, null), null);
 });
 
 test("Continue is enabled on every step while the speech model downloads", () => {
@@ -13,7 +28,7 @@ test("Continue is enabled on every step while the speech model downloads", () =>
     const n = nextButton(step, true);
     assert.notEqual(n.enabled, false, `${step} with the practice run done`);
   }
-  for (const step of ["welcome", "access", "done"]) assert.notEqual(nextButton(step, false).enabled, false, step);
+  for (const step of ["welcome", "access", "ask", "done"]) assert.notEqual(nextButton(step, false).enabled, false, step);
 });
 
 test("before the practice run, Try it offers Skip, which the footer shows only beside a held-back Continue", () => {

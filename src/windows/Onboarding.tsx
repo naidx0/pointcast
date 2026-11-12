@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AudioLines, Check, ClipboardPaste, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
-import { ACTIONS, ShortcutField } from "@/components/Shortcut";
+import { AudioLines, Check, ChevronRight, ClipboardPaste, MessageCircleQuestion, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
+import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
 import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
+import { askReady, chosenRoute, shortName } from "@/lib/assist";
 import {
+  assistProviders,
   inTauri,
   loginSet,
   onboardingFinish,
+  settingsOpenOn,
   onHotkey,
   onPracticeResult,
   onState,
@@ -90,6 +93,7 @@ export function Onboarding() {
                 onResult={() => setPracticed(true)}
               />
             )}
+            {step === "ask" && <AskStep cfg={cfg} />}
             {step === "done" && <DoneStep cfg={cfg} patch={patch} />}
           </>
         )}
@@ -217,44 +221,87 @@ function AppIcon() {
   return <img className="onb-icon" src={platform() === "mac" ? "/icon-mac.png" : "/icon-win.png"} alt="" draggable={false} />;
 }
 
-function Glyph({ tile, children }: { tile: string; children: ReactNode }) {
-  return <span className={`onb-glyph ${tile}`}>{children}</span>;
+/** A step's mark: a line icon in the text colour, never a tinted tile. */
+function Glyph({ children }: { children: ReactNode }) {
+  return (
+    <span className="onb-glyph" aria-hidden="true">
+      {children}
+    </span>
+  );
 }
 
 function Welcome() {
   const points = [
-    { icon: Mic, tile: "tile-orange", t: "Talk", s: "Say what you see. Speech is turned into text on this computer." },
-    {
-      icon: MousePointer2,
-      tile: "tile-purple",
-      t: "Point",
-      s: "Box, pin, arrow or zoom anything on screen, in any app.",
-    },
-    {
-      icon: ClipboardPaste,
-      tile: "tile-blue",
-      t: "Paste",
-      s: "Get one prompt with your words and pictures for ChatGPT, Claude, Cursor or any chat.",
-    },
+    { icon: Mic, t: "Talk", s: "Say what you see. Speech is turned into text on this computer." },
+    { icon: MousePointer2, t: "Point", s: "Box, pin, arrow or zoom anything on screen, in any app." },
+    { icon: ClipboardPaste, t: "Paste", s: "Get one prompt with your words and pictures for ChatGPT, Claude, Cursor or any chat." },
   ];
   return (
     <div className="onb-step">
       <AppIcon />
       <h1 className="t-hero">Welcome to Pointcast</h1>
       <p className="t-body">Show an AI what you mean instead of describing it. Setup takes about a minute.</p>
-      <div className="cards" style={{ gap: 14, maxWidth: 420 }}>
+      <ul className="onb-points">
         {points.map((p) => (
-          <div key={p.t} style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-            <span className={`onb-glyph ${p.tile}`} style={{ width: 36, height: 36, borderRadius: 9, margin: 0, flex: "none" }}>
-              <p.icon size={19} strokeWidth={2} />
-            </span>
+          <li key={p.t}>
+            <p.icon size={20} strokeWidth={1.5} aria-hidden="true" />
             <div>
-              <div style={{ fontWeight: 600 }}>{p.t}</div>
+              <div className="onb-point-t">{p.t}</div>
               <div className="t-caption">{p.s}</div>
             </div>
-          </div>
+          </li>
         ))}
+      </ul>
+    </div>
+  );
+}
+
+/** One calm step for Ask: what it does, its key, and where its AI is chosen. Nothing here is required. */
+function AskStep({ cfg }: { cfg: Config }) {
+  // The AI that answers, by its short name; "" when none is chosen, null until the engine says. Read again when the
+  // window comes back from Settings.
+  const [ai, setAi] = useState<string | null>(null);
+  useEffect(() => {
+    const load = () =>
+      assistProviders()
+        .then((a) => {
+          const r = askReady(a) ? chosenRoute(a) : null;
+          setAi(r ? shortName(r) : "");
+        })
+        .catch(() => setAi(""));
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, []);
+  const key = cfg.hotkeys.ask?.label;
+  return (
+    <div className="onb-step">
+      <Glyph>
+        <MessageCircleQuestion size={32} strokeWidth={1.5} />
+      </Glyph>
+      <h1 className="t-title">Ask about your screen</h1>
+      <p className="t-body">Press the key and ask out loud about what you see. The answer opens beside your work.</p>
+      <div className="onb-rows">
+        <div className="onb-row">
+          <span className="lbl">Ask</span>
+          {key ? <Keycaps label={key} /> : <span className="t-caption">Set a key in Settings › Shortcuts</span>}
+        </div>
+        <div className="onb-row">
+          <span className="lbl">AI</span>
+          {ai == null ? null : (
+            <button
+              type="button"
+              className={`link onb-ai${ai ? "" : " strong"}`}
+              aria-label={ai ? `Answers come from ${ai}. Change it in Settings` : "Choose an AI in Settings"}
+              onClick={() => void settingsOpenOn("ai").catch(() => undefined)}
+            >
+              {ai || "Choose an AI"}
+              <ChevronRight size={14} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
+      <p className="t-caption onb-later">{ai ? "You can change it any time in Settings." : "You can skip this and choose one later in Settings."}</p>
     </div>
   );
 }
@@ -264,8 +311,8 @@ function AccessStep({ cfg }: { cfg: Config }) {
   const mac = platform() === "mac";
   return (
     <div className="onb-step">
-      <Glyph tile="tile-blue">
-        <ShieldCheck size={28} strokeWidth={1.8} />
+      <Glyph>
+        <ShieldCheck size={32} strokeWidth={1.5} />
       </Glyph>
       <h1 className="t-title">Allow access</h1>
       <p className="t-body">
@@ -290,8 +337,8 @@ function ModelsStep({
 }) {
   return (
     <div className="onb-step">
-      <Glyph tile="tile-orange">
-        <AudioLines size={28} strokeWidth={1.8} />
+      <Glyph>
+        <AudioLines size={32} strokeWidth={1.5} />
       </Glyph>
       <h1 className="t-title">Speech model</h1>
       <p className="t-body">
@@ -414,8 +461,8 @@ function TryStep({
   const warn = rec && !!st?.quiet_mic && !words(st.partial || st.text);
   return (
     <div className="onb-step">
-      <Glyph tile="tile-green">
-        <Play size={26} strokeWidth={2} />
+      <Glyph>
+        <Play size={32} strokeWidth={1.5} />
       </Glyph>
       <h1 className="t-title">Try it</h1>
       <p className="t-body">

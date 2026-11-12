@@ -295,12 +295,12 @@ export function Result() {
         {sel && exp ? (
           <button
             type="button"
-            className="btn icon result-del"
+            className="btn icon plain result-del"
             title={`Delete (${mac ? "Delete key" : "Del"})`}
             aria-label="Delete this prompt"
             onClick={() => removeEntry(sel)}
           >
-            <Trash2 size={15} />
+            <Trash2 size={16} strokeWidth={1.5} />
           </button>
         ) : null}
         <div style={{ flex: 1 }} />
@@ -324,23 +324,23 @@ export function Result() {
                   })
                 }
               >
-                <Send size={13} />
+                <Send size={14} strokeWidth={1.5} />
                 {t.name}
               </button>
             ))}
             {folder && sel === shown[0]?.id ? (
               <button
                 type="button"
-                className="btn icon"
+                className="btn icon plain"
                 title="Show in folder"
                 aria-label="Show in folder"
                 onClick={() => run(() => openFolder(folder))}
               >
-                <FolderOpen size={15} />
+                <FolderOpen size={16} strokeWidth={1.5} />
               </button>
             ) : null}
             <button type="button" className="btn" disabled={busy} onClick={() => run(() => historyCopy(sel), "copied")}>
-              <Copy size={14} />
+              <Copy size={14} strokeWidth={1.5} />
               {done === "copied" ? "Copied" : "Copy"}
             </button>
             <button
@@ -350,8 +350,8 @@ export function Result() {
               disabled={busy}
               onClick={() => run(() => historyPaste(sel), "pasted")}
             >
-              <ClipboardPaste size={14} />
-              {done === "pasted" ? "Pasted" : "Paste into App"}
+              <ClipboardPaste size={14} strokeWidth={1.5} />
+              {done === "pasted" ? "Pasted" : "Paste into app"}
             </button>
           </>
         ) : null}
@@ -487,7 +487,7 @@ function AudioBar({
             </>
           ) : audio ? (
             <>
-              <Mic size={12} strokeWidth={2} aria-hidden="true" />
+              <Mic size={14} strokeWidth={1.5} aria-hidden="true" />
               Audio kept on this computer
             </>
           ) : null}
@@ -510,7 +510,7 @@ function AudioBar({
             title={other ? "Another recording is being transcribed" : "Write this recording down again from its audio"}
             onClick={onRun}
           >
-            <RotateCw size={13} />
+            <RotateCw size={14} strokeWidth={1.5} />
             Transcribe again
           </button>
         ) : null}
