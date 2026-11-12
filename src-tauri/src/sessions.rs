@@ -69,6 +69,9 @@ pub struct SentPicture {
     /// The window it shows, by its title; empty for a whole screen or a window that is never named.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// The person marked it up before it was sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub marked: bool,
 }
 
 /// A picture of an earlier turn that was sent again when the conversation was opened anew: the turn, by id, and the
@@ -125,6 +128,8 @@ pub struct Wire<'a> {
     pub mime: Mime,
     /// The title of the window it shows, or empty.
     pub label: &'a str,
+    /// The person marked it up.
+    pub marked: bool,
 }
 
 /// A question to keep: what was said and shown, its recording as a WAV file when that was kept, and its pictures as
@@ -248,7 +253,7 @@ impl Sessions {
             let n = k as u32 + 1;
             let file = turn.join(sent_name(n, p.mime));
             history::write_atomic(&file, p.bytes).map_err(undo)?;
-            answer.sent.pictures.push(SentPicture { n, w: p.w, h: p.h, bytes: p.bytes.len() as u64, sha256: sha256(p.bytes), mime: p.mime, label: p.label.into() });
+            answer.sent.pictures.push(SentPicture { n, w: p.w, h: p.h, bytes: p.bytes.len() as u64, sha256: sha256(p.bytes), mime: p.mime, label: p.label.into(), marked: p.marked });
             files.push(file);
         }
         write_json(&turn.join(ANSWER), &answer).map_err(undo)?;
@@ -690,7 +695,7 @@ mod tests {
             sent: Sent { text: "what does the denominator mean\n[image 1] 3x2".into(), ..Sent::default() },
             ..Answer::default()
         };
-        let q = Question { created_ms: T0, pictures: &[Wire { bytes: &wire, w: 3, h: 2, mime: Mime::Jpeg, label: "" }], ..words(&items) };
+        let q = Question { created_ms: T0, pictures: &[Wire { bytes: &wire, w: 3, h: 2, mime: Mime::Jpeg, label: "", marked: false }], ..words(&items) };
         let kept = s.save_turn(None, q, asked, "direct", T0 + 960).unwrap();
         assert_eq!(kept.session.id, kept.turn, "a new session is named for its first turn");
         assert_eq!((kept.session.title.as_str(), kept.session.turns, kept.session.pictures), ("what does the denominator in this", 1, 1));
@@ -733,7 +738,7 @@ mod tests {
         let s = Sessions::new(&root("sent"));
         let items = [said("and this one"), shown(90)];
         let (first, second) = (vec![1u8, 2, 3, 4, 5, 6, 7], png(33));
-        let pictures = [Wire { bytes: &first, w: 4, h: 3, mime: Mime::Jpeg, label: "" }, Wire { bytes: &second, w: 1, h: 1, mime: Mime::Png, label: "" }];
+        let pictures = [Wire { bytes: &first, w: 4, h: 3, mime: Mime::Jpeg, label: "", marked: false }, Wire { bytes: &second, w: 1, h: 1, mime: Mime::Png, label: "", marked: false }];
         let kept = s.save_turn(None, Question { created_ms: T0, pictures: &pictures, ..words(&items) }, Answer::default(), "direct", T0).unwrap();
         let (file, bytes) = s.sent_picture(&kept.session.id, &kept.turn, 1).unwrap();
         assert_eq!((bytes.as_slice(), file.as_path()), (first.as_slice(), kept.pictures[0].as_path()));
@@ -813,7 +818,7 @@ mod tests {
     fn asked(s: &Sessions, session: Option<&str>, at: u64, q: &str, a: &str, label: &str) -> Saved {
         let items = [said(q)];
         let picture = png((at / 1000) as u8);
-        let wires = [Wire { bytes: &picture, w: 1, h: 1, mime: Mime::Png, label }];
+        let wires = [Wire { bytes: &picture, w: 1, h: 1, mime: Mime::Png, label, marked: false }];
         let sent = Sent { text: format!("{q}\n\n[Picture: 1 x 1 pixels]"), ..Sent::default() };
         let answer = Answer { text: a.into(), provider: crate::assist::codex::ID.into(), sent, ..Answer::default() };
         s.save_turn(session, Question { created_ms: at, pictures: &wires, ..words(&items) }, answer, "", at).unwrap()

@@ -1270,7 +1270,7 @@ mod tests {
         for i in 0..turns {
             let asked = format!("question {} about the nucleus", i + 1);
             let items = [words(0, 900, &asked)];
-            let wires = [Wire { bytes: &picture, w: 8, h: 6, mime: crate::assist::Mime::Png, label: "Cells.pdf" }];
+            let wires = [Wire { bytes: &picture, w: 8, h: 6, mime: crate::assist::Mime::Png, label: "Cells.pdf", marked: false }];
             let a = Answer { text: answer.into(), sent: Sent { text: asked.clone(), ..Sent::default() }, ..Answer::default() };
             let q = Question { items: &items, created_ms: CREATED + i * 1000, duration_ms: 900, audio: None, pictures: &wires };
             id = Some(store.save_turn(id.as_deref(), q, a, "", CREATED + i * 1000).unwrap().session.id);
