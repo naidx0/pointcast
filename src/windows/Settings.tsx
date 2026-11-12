@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeybo
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share } from "lucide-react";
 import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
@@ -622,6 +622,7 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
                     <button type="button" aria-label={`${r.label}. Open it`} onClick={() => sessionsOpen(r.id).catch(() => undefined)}>
                       <span className="t">{r.title}</span>
                       <span className="m">
+                        {r.summary ? <ScrollText className="hasum" size={12} strokeWidth={1.5} aria-hidden="true" /> : null}
                         {r.turns} · {r.day}
                       </span>
                     </button>

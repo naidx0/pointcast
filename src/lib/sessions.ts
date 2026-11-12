@@ -12,6 +12,8 @@ export type SessionMeta = {
   pictures: number;
   provider: string;
   size_bytes: number;
+  /** A summary of it is kept (`summary_get` has one). */
+  has_summary: boolean;
   hit?: string;
 };
 
@@ -44,6 +46,7 @@ export function normalizeSessions(raw: unknown): SessionMeta[] {
       pictures: count(u.pictures),
       provider: typeof provider === "string" ? provider : "",
       size_bytes: count(u.size_bytes),
+      has_summary: u.has_summary === true,
       ...(typeof u.hit === "string" && fold(u.hit) ? { hit: fold(u.hit) } : {}),
     });
   }
@@ -67,6 +70,8 @@ export type SessionRow = {
   hit: string;
   /** The session open in the panel. */
   current: boolean;
+  /** It has a summary: a small mark on the row. */
+  summary: boolean;
   /** Everything the row says, for a screen reader. */
   label: string;
 };
@@ -90,7 +95,8 @@ export function sessionRows(
       day,
       hit: s.hit ?? "",
       current,
-      label: [title, turns, day.toLowerCase(), current ? "open now" : ""].filter(Boolean).join(", "),
+      summary: s.has_summary,
+      label: [title, turns, day.toLowerCase(), s.has_summary ? "summarized" : "", current ? "open now" : ""].filter(Boolean).join(", "),
     };
   });
 }
@@ -104,15 +110,16 @@ export function renameValue(input: string, was: string): string | null {
 
 // —— Browser preview fixtures: data only; api.ts plays them. ——
 
-/** Five sessions over two weeks; the newest is the panel's three-question preview session. */
+/** Five sessions over two weeks; the newest is the panel's three-question preview session. The one about the header has
+ * a summary. */
 export function previewSessions(now: number): SessionMeta[] {
   const day = 86_400_000;
   return [
-    { id: "preview", title: "Bayes' rule on the slide", updated_ms: now - 60_000, turns: 3, pictures: 2, provider: "ChatGPT", size_bytes: 412_000 },
-    { id: "s-header", title: "Why the header wraps on a small screen", updated_ms: now - day - 3_600_000, turns: 2, pictures: 2, provider: "Codex", size_bytes: 388_000 },
-    { id: "s-regex", title: "What this regular expression matches", updated_ms: now - 3 * day, turns: 1, pictures: 1, provider: "ChatGPT", size_bytes: 96_000 },
-    { id: "s-loss", title: "Reading the loss curve", updated_ms: now - 9 * day, turns: 4, pictures: 3, provider: "ChatGPT", size_bytes: 702_000 },
-    { id: "s-gap", title: "The gap between the toolbar buttons", updated_ms: now - 15 * day, turns: 2, pictures: 1, provider: "Codex", size_bytes: 201_000 },
+    { id: "preview", title: "Bayes' rule on the slide", updated_ms: now - 60_000, turns: 3, pictures: 2, provider: "ChatGPT", size_bytes: 412_000, has_summary: false },
+    { id: "s-header", title: "Why the header wraps on a small screen", updated_ms: now - day - 3_600_000, turns: 2, pictures: 2, provider: "Codex", size_bytes: 388_000, has_summary: true },
+    { id: "s-regex", title: "What this regular expression matches", updated_ms: now - 3 * day, turns: 1, pictures: 1, provider: "ChatGPT", size_bytes: 96_000, has_summary: false },
+    { id: "s-loss", title: "Reading the loss curve", updated_ms: now - 9 * day, turns: 4, pictures: 3, provider: "ChatGPT", size_bytes: 702_000, has_summary: false },
+    { id: "s-gap", title: "The gap between the toolbar buttons", updated_ms: now - 15 * day, turns: 2, pictures: 1, provider: "Codex", size_bytes: 201_000, has_summary: false },
   ];
 }
 

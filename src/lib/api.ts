@@ -6,7 +6,10 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import {
   LEVEL_FIELDS,
   PREVIEW_ANSWER,
+  currentTurn,
+  firstWords,
   levelOf,
+  openNumber,
   previewChunks,
   previewLevel,
   previewPicture,
@@ -18,6 +21,7 @@ import {
 } from "./live";
 import { previewSent } from "./conversation";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
+import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
 import { CUSTOM, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -246,6 +250,8 @@ export const regionFrame = () =>
     /** A picture from History: its labels already drawn in, new pins numbered on from `base`. */
     edit?: boolean;
     base?: number;
+    /** Opened by `live_mark` on a question's picture; new pins number on from `base`. */
+    ask?: boolean;
   } | null>(
     "region_frame",
   );
@@ -522,19 +528,25 @@ export const LIVE = {
   /** The level's fields on UiState, first found wins: an engine-smoothed level if the engine sends one, else the raw
    * meter level (0 to 1 over 50 dB). */
   levelFields: LEVEL_FIELDS,
-  /** command { text, picture: boolean }: a typed follow-up in the open session, with a fresh picture when asked */
+  /** command { text, picture: boolean }: a typed follow-up in the open session, with a fresh picture when asked; an
+   * error string while a question is under way ("A question is already under way.") */
   askTyped: "live_ask_typed",
-  /** command { turn } → { text, pictures: [{ n, w, h, bytes, mime, src }], earlier: number[], provider, model, adds } */
+  /** command { turn } → { text, pictures: [{ n, w, h, bytes, mime, src, turn }], earlier: number[], provider, model,
+   * adds: string[], replay?: string, again?: [{ n, w, h, bytes, mime, src, turn }] }. `turn` is the turn's number in
+   * the session; `replay` and `again` are the earlier turns sent again when the conversation had to be reopened. */
   sent: "live_sent",
+  /** command: open the mark-up overlay on the question's picture (its frame says `purpose: "ask"`); afterwards the
+   * snapshot's `picture.marked` is true, or the picture is as it was when the overlay was cancelled */
+  mark: "live_mark",
 } as const;
 
 /** Ask's kept sessions: the one adapter. Every engine name the session list and Home use is here. */
 export const SESSIONS = {
-  /** command → [{ id, title, updated_ms, turns, pictures, provider, size_bytes }] */
+  /** command → [{ id, title, updated_ms, turns, pictures, provider, size_bytes, has_summary }] */
   list: "sessions_list",
   /** command { id }: the panel opens on that session */
   open: "sessions_open",
-  /** command: a new, empty session */
+  /** command: a new, empty session; the panel stays open on nothing (shown, no turns) */
   new: "sessions_new",
   /** command { id, title } */
   rename: "sessions_rename",
@@ -542,8 +554,21 @@ export const SESSIONS = {
   delete: "sessions_delete",
   /** command { q } → the list's shape, each with `hit` */
   search: "sessions_search",
-  /** command { id } → the folder it was saved to */
+  /** command { id } → the folder it was saved to (pictures may be .jpg) */
   export: "sessions_export",
+} as const;
+
+/** A session's summary: the one adapter. Every engine name the summary view uses is here. */
+export const SUMMARY = {
+  /** command { id }: make (or make again) the summary of a session; how it goes arrives as `state` */
+  make: "summary_make",
+  /** command { id } */
+  stop: "summary_stop",
+  /** command { id } → the kept summary ({ title, key_points, open_questions, kept, dropped, made_ms, provider, model })
+   * or null */
+  get: "summary_get",
+  /** event { id, state: "working" | "done" | "error" | "stopped", summary, counts, error } */
+  state: "summary://state",
 } as const;
 
 
@@ -578,8 +603,18 @@ export const liveRetry = () => (inTauri ? invoke<void>(LIVE.retry) : pvCommand("
 /** A typed follow-up; `picture`: take a fresh picture of the screen to go with it. */
 export const liveAskTyped = (text: string, picture: boolean) =>
   inTauri ? invoke<void>(LIVE.askTyped, { text, picture }) : pvAskTyped(text, picture);
-/** Exactly what left the computer for a turn, as the engine kept it (read with sentView in conversation.ts). */
+/** Exactly what left the computer for a turn (its number in the session), as the engine kept it (read with sentView in
+ * conversation.ts). */
 export const liveSent = (turn: number): Promise<unknown> => (inTauri ? invoke<unknown>(LIVE.sent, { turn }) : pvLater(160, () => pvSent(turn)));
+/** Mark up the question's picture in the overlay. */
+export const liveMark = () => (inTauri ? invoke<void>(LIVE.mark) : pvMark());
+
+export const summaryMake = (id: string) => (inTauri ? invoke<void>(SUMMARY.make, { id }) : pvSummaryMake(id));
+export const summaryStop = (id: string) => (inTauri ? invoke<void>(SUMMARY.stop, { id }) : pvSummaryStop(id));
+export const summaryGet = (id: string): Promise<Summary | null> =>
+  (inTauri ? invoke<unknown>(SUMMARY.get, { id }) : pvLater(120, () => summaryPv.kept.get(id) ?? null)).then(normalizeSummary);
+/** The raw payload: read with summaryReduce in summary.ts. */
+export const onSummaryState = (fn: Sink<unknown>) => (inTauri ? listen<unknown>(SUMMARY.state, (e) => fn(e.payload)) : pvOn(summaryPv.sinks)(fn));
 
 export const sessionsList = (): Promise<SessionMeta[]> => (inTauri ? invoke<unknown>(SESSIONS.list) : Promise.resolve(pvSessions())).then(normalizeSessions);
 export const sessionsSearch = (q: string): Promise<SessionMeta[]> =>
@@ -641,7 +676,8 @@ function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
     startLivePreview("answering");
     return Promise.resolve();
   }
-  if (c === "drop") pvEmit({ ...s, dropped: true });
+  // Drop takes off a picture waiting for the next question first, as the engine does.
+  if (c === "drop") pvEmit(s.next_picture ? { ...s, next_picture: null } : { ...s, dropped: true });
   else if (c === "close") {
     livePv.timers.forEach(clearTimeout);
     pvEmit({ ...s, state: "closed" });
@@ -663,17 +699,20 @@ const pvSessions = () => (sessionsPv.list ??= location.search.includes("sessions
 /** A follow-up answered in a few short pieces, so the preview shows a typed question's whole round. */
 const FOLLOW_ANSWER = "Yes. Without the bottom, the top is a count of cases, not a share of them: dividing by **P(B)** is what makes the shares add up to 1.";
 
+/** `replay=1`: the conversation was reopened, so the earlier turns went again with each question. */
 function pvSent(turn: number) {
   const s = livePv.snap;
-  const t: Pick<LiveTurn, "n" | "question" | "picture"> | null =
-    s?.turns.find((x) => x.n === turn) ?? (s && s.turn === turn ? { n: turn, question: s.words, picture: s.dropped ? null : s.picture } : null);
-  return previewSent(t, providerName(s?.provider ?? null));
+  const all = s ? keptTurns(s) : [];
+  const t: Pick<LiveTurn, "n" | "question" | "picture"> | null = all.find((x) => x.n === turn) ?? null;
+  return previewSent(t, providerName(s?.provider ?? null) || "ChatGPT", { replay: location.search.includes("replay=1") ? all : [] });
 }
 
-/** The open turn, kept: what the engine adds to `turns` once a turn is finished. */
+/** Every turn of the session, the open one kept too: what the engine lists in `turns` once the next question begins. */
 function keptTurns(s: LiveSnapshot): LiveTurn[] {
-  if (!s.turn || s.turns.some((t) => t.n === s.turn)) return s.turns;
-  return [...s.turns, { n: s.turn, question: s.words, answer: s.answer ?? PREVIEW_ANSWER, picture: s.dropped ? null : s.picture, stopped: false, error: null, at_ms: Date.now() }];
+  if (currentTurn(s) || !s.words.trim()) return s.turns;
+  const n = openNumber(s);
+  if (s.turns.some((t) => t.n === n)) return s.turns;
+  return [...s.turns, { n, question: s.words, answer: s.answer ?? PREVIEW_ANSWER, picture: s.dropped ? null : s.picture, stopped: false, error: null, at_ms: Date.now() }];
 }
 
 function pvAskTyped(text: string, picture: boolean): Promise<void> {
@@ -681,20 +720,28 @@ function pvAskTyped(text: string, picture: boolean): Promise<void> {
   if (!s) return Promise.resolve();
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
+  // The open turn joins the earlier ones; the new one is kept at once, so the session counts it.
   const turns = keptTurns(s);
-  const n = Math.max(s.turn, ...turns.map((t) => t.n)) + 1;
+  const n = turns.reduce((m, t) => Math.max(m, t.n), 0) + 1;
+  const id = s.session.id || "new";
+  const title = s.session.title || firstWords(text);
+  if (!s.session.id)
+    sessionsPv.list = [{ id, title, updated_ms: Date.now(), turns: 1, pictures: picture ? 1 : 0, provider: "ChatGPT", size_bytes: 0, has_summary: false }, ...pvSessions()];
   const next: LiveSnapshot = {
     ...s,
     state: "sending",
-    turn: n,
+    turn: s.turn + 1,
     words: text,
     answer: undefined,
     thinking: false,
     error: null,
     dropped: false,
-    picture: picture ? previewPicture("code") : null,
+    provider: s.provider || "ChatGPT",
+    // A picture marked for the next question goes with it, whatever the switch says.
+    picture: s.next_picture ?? (picture ? previewPicture("code") : null),
+    next_picture: null,
     turns,
-    session: { ...s.session, turns: n },
+    session: { id, title, turns: n },
   };
   pvEmit(next);
   pvStream(FOLLOW_ANSWER, 900);
@@ -707,10 +754,11 @@ function pvOpen(id: string): Promise<void> {
   const meta = pvSessions().find((s) => s.id === id);
   if (!meta) return Promise.reject("That session is gone");
   if (id === "preview") {
-    pvEmit(previewSnapshot("conversation", { provider: meta.provider }));
+    pvEmit({ ...previewSnapshot("opened"), session: { id, title: meta.title, turns: 3 } });
     return Promise.resolve();
   }
-  // Opened finished, with nothing in the top-level fields: the panel shows the newest kept turn.
+  // Opened finished, with nothing in the panel's own fields: the panel shows the newest kept turn. The engine names no
+  // AI until the next question.
   const turns: LiveTurn[] = Array.from({ length: Math.max(1, meta.turns) }, (_, i) => ({
     n: i + 1,
     question: i === 0 ? `${meta.title}?` : `And what about part ${i + 1}?`,
@@ -720,12 +768,61 @@ function pvOpen(id: string): Promise<void> {
     error: null,
     at_ms: meta.updated_ms,
   }));
-  pvEmit({ ...previewSnapshot("shown", { provider: meta.provider }), session: { id, title: meta.title, turns: turns.length }, turn: 0, words: "", answer: undefined, picture: null, turns });
+  pvEmit({ ...previewSnapshot("opened"), session: { id, title: meta.title, turns: turns.length }, turns });
   return Promise.resolve();
 }
 
+/** The panel stays open on nothing: shown, no session, no turns. */
 function pvNew(): Promise<void> {
-  startLivePreview("listening");
+  livePv.timers.forEach(clearTimeout);
+  livePv.timers = [];
+  pvEmit(previewSnapshot("empty"));
+  return Promise.resolve();
+}
+
+/** The overlay is the engine's: the preview plays a mark-up used a moment later, on the question's picture while it
+ * is heard, else on a picture of the screen that waits for the next question. Refused as the engine refuses. */
+function pvMark(): Promise<void> {
+  const s = livePv.snap;
+  if (!s) return Promise.resolve();
+  if (s.state === "finishing" || s.state === "sending" || s.state === "answering") return Promise.reject("A question is already under way.");
+  const later = (f: (x: LiveSnapshot) => LiveSnapshot) => livePv.timers.push(setTimeout(() => livePv.snap && pvEmit(f(livePv.snap)), 500));
+  if (s.state === "listening") {
+    if (s.picture && !s.dropped) later((x) => (x.picture ? { ...x, picture: { ...x.picture, marked: true } } : x));
+  } else later((x) => ({ ...x, next_picture: { ...previewPicture("code"), marked: true } }));
+  return Promise.resolve();
+}
+
+// —— The preview's summaries: `summary=done` gives the preview session one; the one about the header always has one.
+// `summary=working` makes one that never ends (for a look at the work under way). ——
+
+const summaryPv = {
+  sinks: new Set<Sink<unknown>>(),
+  timer: undefined as ReturnType<typeof setTimeout> | undefined,
+  kept: new Map<string, Summary>([
+    ["s-header", previewSummaryOf("Why the header wraps on a small screen", "Codex")],
+    ...(typeof location !== "undefined" && location.search.includes("summary=done") ? ([["preview", previewSummary()]] as [string, Summary][]) : []),
+  ]),
+};
+const pvSummaryEmit = (e: Record<string, unknown>) => summaryPv.sinks.forEach((f) => f(e));
+
+function pvSummaryMake(id: string): Promise<void> {
+  clearTimeout(summaryPv.timer);
+  pvSummaryEmit({ id, state: "working", summary: null, counts: "", error: null });
+  if (location.search.includes("summary=working")) return Promise.resolve();
+  summaryPv.timer = setTimeout(() => {
+    const title = pvSessions().find((x) => x.id === id)?.title ?? "This session";
+    const s = id === "preview" ? previewSummary() : previewSummaryOf(title);
+    summaryPv.kept.set(id, s);
+    sessionsPv.list = pvSessions().map((x) => (x.id === id ? { ...x, has_summary: true } : x));
+    pvSummaryEmit({ id, state: "done", summary: s, counts: countsLine(s.kept, s.dropped), error: null });
+  }, 1600);
+  return Promise.resolve();
+}
+
+function pvSummaryStop(id: string): Promise<void> {
+  clearTimeout(summaryPv.timer);
+  pvSummaryEmit({ id, state: "stopped", summary: null, counts: "", error: null });
   return Promise.resolve();
 }
 
@@ -765,17 +862,25 @@ function pvStream(text: string, delay: number) {
 }
 
 /** The browser preview: live.html?preview=1&state=listening|finishing|thinking|answering|shown|error|discarded|conversation
- * [&error=provider][&pic=switch][&provider=Codex] plays the fixtures in src/lib/live.ts: a synthetic microphone for
- * listening (with pic=switch the person moves to another app after 2 s, so the picture changes), the scripted stream
- * for answering (which ends in shown); thinking shows its 8 s and 20 s lines when left that long. `conversation` is a
- * session of three turns, the third open; a typed follow-up there is answered by the script too. */
+ * |opened|empty[&error=provider][&pic=switch][&provider=Codex][&marked=1][&replay=1][&summary=working|done] plays the
+ * fixtures in src/lib/live.ts: a synthetic microphone for listening (with pic=switch the person moves to another app
+ * after 2 s, so the picture changes), the scripted stream for answering (which ends in shown); thinking shows its 8 s
+ * and 20 s lines when left that long. `conversation` is a session of three turns, the third open; a typed follow-up
+ * there is answered by the script too. `opened` is a session opened from the list (`open=<id>` picks another one);
+ * `empty` a new session. */
 export function startLivePreview(kind?: string) {
+  // `next=1`: a picture marked with no question under way waits for the next one.
   livePv.timers.forEach(clearTimeout);
   livePv.timers = [];
   const q = new URLSearchParams(location.search);
   const state = kind ?? q.get("state") ?? "thinking";
   const later = (ms: number, f: () => void) => livePv.timers.push(setTimeout(f, ms));
-  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined });
+  const other = q.get("open");
+  if (state === "opened" && other) {
+    void pvOpen(other).catch(() => undefined);
+    return;
+  }
+  const snap = previewSnapshot(state, { error: q.get("error"), provider: q.get("provider") ?? undefined, marked: q.get("marked") === "1", next: q.get("next") === "1" });
   pvEmit(snap);
   if (state === "listening") {
     let i = 0;

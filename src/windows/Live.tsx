@@ -1,11 +1,12 @@
-import { createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
-import { ArrowUp, Check, Copy, ImagePlus, MessagesSquare, Plus, Square, X } from "lucide-react";
+import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
+import { ArrowUp, Check, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
 import {
   inTauri,
   liveAskTyped,
   liveClose,
   liveDropPicture,
   liveFit,
+  liveMark,
   liveOpenSettings,
   liveRetry,
   liveSent,
@@ -15,6 +16,7 @@ import {
   onLiveDelta,
   onLiveLevel,
   onLiveState,
+  onSummaryState,
   preview,
   sessionsDelete,
   sessionsExport,
@@ -24,15 +26,18 @@ import {
   sessionsRename,
   sessionsSearch,
   subscribe,
+  summaryGet,
+  summaryMake,
+  summaryStop,
   takeListAsk,
 } from "@/lib/api";
 import {
   ENDED_MS,
-  currentTurn,
   initialLive,
   isPinned,
   liveReduce,
   liveView,
+  openNumber,
   pictureCaption,
   sentLine,
   type LiveDelta,
@@ -41,13 +46,32 @@ import {
   type Phase,
   type Tone,
 } from "@/lib/live";
-import { FOLLOW_MAX, canSend, earlierRows, followKey, followUpShown, isFocusKey, rowLabel, sendText, sentView, type SentView, type TurnRow } from "@/lib/conversation";
+import {
+  FOLLOW_MAX,
+  canSend,
+  earlierRows,
+  fieldPlaceholder,
+  followKey,
+  followUpShown,
+  isFocusKey,
+  rowLabel,
+  sendText,
+  sentView,
+  type ReplayView,
+  type SentView,
+  type TurnRow,
+} from "@/lib/conversation";
 import { renameValue, searchQuery, sessionRows, turnsLabel, type SessionMeta } from "@/lib/sessions";
+import { canSummarize, noSummary, summaryReduce, summaryText, summaryView, type SummaryModel } from "@/lib/summary";
 import { marginPath, restPath } from "@/lib/line";
 import { platform } from "@/lib/theme";
+import { useConfig } from "@/lib/useConfig";
 import { Line, type LevelSource } from "@/components/Line";
+import { Keycaps } from "@/components/Shortcut";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
 import { PressButton } from "@/components/PressButton";
+import { MarkUpControl, MarkedBadge } from "@/components/MarkUp";
+import { isMarkKey, markedLabel } from "@/lib/markup";
 
 const noop = () => undefined;
 const plain = (e: unknown) => String(e).replace(/^Error: */, "");
@@ -63,7 +87,7 @@ const VOICE_H = 36;
 const REST = 14;
 
 /** The browser preview opens a part of the panel for a look: `sessions=1` the session list, `sent=<turn>` that turn's
- * Sent view, `expand=<turn>` an earlier turn's answer. */
+ * Sent view, `expand=<turn>` an earlier turn's answer, `summary=working|done` the summary view. */
 const pvAsk = (k: string) => (preview && !inTauri ? new URLSearchParams(location.search).get(k) : null);
 
 /** The Ask panel: a question about the screen and its answer, docked at the right edge. While listening it is one quiet
@@ -80,6 +104,13 @@ export function Live() {
   // The turn whose Sent view is open, and the earlier turns opened to their answers.
   const [sentOf, setSentOf] = useState<number | null>(() => Number(pvAsk("sent")) || null);
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set(pvAsk("expand") ? [Number(pvAsk("expand"))] : []));
+  // The session's summary, and whether its view is open in place of the conversation.
+  const [sum, sumDispatch] = useReducer(summaryReduce, undefined, () => noSummary());
+  const [sumOpen, setSumOpen] = useState(() => !!pvAsk("summary"));
+  // A turn a summary point referred to: opened and brought into view once the conversation is back.
+  const [goto, setGoto] = useState<number | null>(null);
+  // The follow-up field's "a picture goes along", here so the M key knows whether there is a picture to mark up.
+  const [fieldPic, setFieldPic] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<LiveDelta[]>([]);
   const frame = useRef(0);
@@ -125,10 +156,25 @@ export function Live() {
 
   const v = liveView(m, sending ? now : 0);
   const earlier = useMemo(() => earlierRows(m.snap), [m.snap]);
-  const turnN = currentTurn(m.snap)?.n ?? m.snap.turn;
-  const multi = earlier.length > 0;
-  const showField = followUpShown(v) && !sheet;
+  // The open turn's number in the session (never the panel's own question count).
+  const turnN = openNumber(m.snap);
+  // A conversation once the session has a turn before the open one, even before those turns arrive (joining a closed
+  // session they come a moment later): the header does not flip from the question to the title.
+  const multi = earlier.length > 0 || turnN > 1;
+  const showField = followUpShown(v) && !sheet && !sumOpen;
   const session = m.snap.session.id;
+  // Every turn the session has, the open one once it is answered.
+  const turnCount = Math.max(m.snap.session.turns, earlier.length + (v.complete ? 1 : 0));
+  const hasSummary = sum.state !== "none";
+  const offerSummary = !!session && canSummarize(turnCount) && !hasSummary;
+  const turnNumbers = useMemo(() => [...earlier.map((r) => r.n), ...(v.complete ? [turnN] : [])], [earlier, v.complete, turnN]);
+  // The question's picture can still be marked up: heard and not sent yet, or a typed question's picture to come.
+  const canMark = (v.canDrop && !!v.thumb) || (followUpShown(v) && (fieldPic || !!v.next));
+  // A first question: nothing answered in this session yet.
+  const first = v.empty || (!m.snap.session.turns && !earlier.length && !v.complete);
+  // Why the field's last ask or mark-up was refused, said quietly under it, until the panel moves on.
+  const [fieldNote, setFieldNote] = useState("");
+  useEffect(() => setFieldNote(""), [m.snap.state, session]);
 
   useEffect(() => setBig(false), [m.snap.turn, v.thumb == null, v.compact]);
   // Another session: nothing of the last one stays open. The first id to arrive is the same session, not another.
@@ -139,7 +185,40 @@ export function Live() {
     if (!was || !session || was === session) return;
     setOpened(new Set());
     setSentOf(null);
+    setSumOpen(false);
   }, [session]);
+
+  // The summary follows the session: what it has kept, then how a summary being made goes.
+  useEffect(() => subscribe(onSummaryState((e) => sumDispatch({ type: "event", event: e }))), []);
+  useEffect(() => {
+    sumDispatch({ type: "session", id: session });
+    if (!session) return;
+    let live = true;
+    summaryGet(session)
+      .then((s) => live && sumDispatch({ type: "got", id: session, summary: s }))
+      .catch(noop);
+    // The preview's `summary=working` shows a summary under way.
+    if (pvAsk("summary") === "working") void summaryMake(session).catch(noop);
+    return () => {
+      live = false;
+    };
+  }, [session]);
+  const makeSummary = () => {
+    if (!session) return;
+    rememberScroll();
+    sumDispatch({ type: "make", id: session });
+    setSheet(false);
+    setSentOf(null);
+    setSumOpen(true);
+    summaryMake(session).catch((e) => sumDispatch({ type: "failed", id: session, error: plain(e) }));
+  };
+  const toggleSummary = () => {
+    if (!sumOpen) rememberScroll();
+    setSheet(false);
+    setSumOpen((o) => !o);
+  };
+  // A new session's field starts with a picture of the screen going along: its question is about the screen.
+  useEffect(() => setFieldPic(v.empty), [v.empty]);
 
   // Not sent: said for a moment, then the panel hides.
   useEffect(() => {
@@ -148,8 +227,9 @@ export function Live() {
     return () => clearTimeout(id);
   }, [v.hide, m.snap.turn]);
 
-  // Esc always works: it makes the picture small again, closes the session list or the Sent view, stops what is under
-  // way, or closes. Delete takes the picture out. Ctrl+K (Cmd+K) goes to the follow-up field. The field keeps its own Esc.
+  // Esc always works: it makes the picture small again, closes the session list, the summary or the Sent view, stops
+  // what is under way, or closes. Delete takes the picture out; M marks it up. Ctrl+K (Cmd+K) goes to the follow-up
+  // field. The field keeps its own Esc.
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
@@ -157,11 +237,15 @@ export function Live() {
         e.preventDefault();
         if (big) setBig(false);
         else if (sheet) setSheet(false);
+        else if (sumOpen) setSumOpen(false);
         else if (sentOf != null) setSentOf(null);
         else (v.stop ? liveStop() : liveClose()).catch(noop);
-      } else if ((e.key === "Delete" || e.key === "Backspace") && v.canDrop && !typing(e.target)) {
+      } else if ((e.key === "Delete" || e.key === "Backspace") && (v.canDrop || (showField && !!v.next)) && !typing(e.target)) {
         e.preventDefault();
         liveDropPicture().catch(noop);
+      } else if (canMark && isMarkKey(e) && !typing(e.target)) {
+        e.preventDefault();
+        liveMark().catch((err) => setFieldNote(plain(err)));
       } else if (showField && isFocusKey(e, platform() === "mac")) {
         e.preventDefault();
         field.current?.focus();
@@ -169,7 +253,7 @@ export function Live() {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [big, sheet, sentOf, showField, v.stop, v.canDrop]);
+  }, [big, sheet, sumOpen, sentOf, showField, v.stop, v.canDrop, canMark, !!v.next]);
 
   // Nothing animates while the window is hidden.
   useEffect(() => {
@@ -207,6 +291,40 @@ export function Live() {
     if (b) pinned.current = isPinned(b.scrollTop, b.scrollHeight, b.clientHeight);
   };
 
+  // The summary takes the conversation's place: back to the conversation is back where the reader was, unless a point
+  // sent them to a turn, which then opens and comes into view.
+  const savedScroll = useRef<number | null>(null);
+  const rememberScroll = () => {
+    if (!sumOpen && !sheet) savedScroll.current = body.current?.scrollTop ?? null;
+  };
+  const wasSum = useRef(sumOpen);
+  useLayoutEffect(() => {
+    const b = body.current;
+    const back = wasSum.current && !sumOpen;
+    wasSum.current = sumOpen;
+    if (!b) return;
+    if (sumOpen) b.scrollTop = 0;
+    else if (back && goto == null && savedScroll.current != null) b.scrollTop = savedScroll.current;
+  }, [sumOpen, goto]);
+  useEffect(() => {
+    if (goto == null || sumOpen || sheet) return;
+    const el = document.getElementById(`turn-${goto}`);
+    if (!el) return setGoto(null);
+    pinned.current = false;
+    el.scrollIntoView({ block: "start" });
+    // Focus after the press's own mouse-down, whose default focus would land where the reference was.
+    const id = setTimeout(() => {
+      el.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+      setGoto(null);
+    }, 0);
+    return () => clearTimeout(id);
+  }, [goto, sumOpen, sheet]);
+  const goTurn = (n: number) => {
+    if (earlier.some((r) => r.n === n)) setOpened((o) => new Set(o).add(n));
+    setSumOpen(false);
+    setGoto(n);
+  };
+
   // The window's height follows the content, from one row up to 60 % of the screen (Tauri only; the preview lays out
   // by CSS). The scrolling body counts at its content's height.
   const root = useRef<HTMLDivElement>(null);
@@ -231,7 +349,7 @@ export function Live() {
     for (const c of Array.from(r.querySelectorAll(".live > *, .live-inner"))) ro.observe(c);
     fit();
     return () => ro.disconnect();
-  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField]);
+  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty]);
 
   if (v.phase === "closed") return <div className="live closed" ref={root} />;
 
@@ -279,18 +397,73 @@ export function Live() {
       if (!next.delete(n)) next.add(n);
       return next;
     });
+  const conversation = (
+    <>
+      {earlier.length ? (
+        <ol className="live-turns" aria-label="Earlier questions">
+          {earlier.map((r) => (
+            <EarlierTurn
+              key={r.n}
+              r={r}
+              open={opened.has(r.n)}
+              toggle={() => toggleOpen(r.n)}
+              provider={v.provider}
+              sent={sentOf === r.n}
+              toggleSent={() => toggleSent(r.n)}
+            />
+          ))}
+        </ol>
+      ) : null}
+      <section className="live-now" id={`turn-${turnN}`} ref={now_} aria-label={multi ? `Question ${turnN}` : undefined}>
+        {multi ? <Question key={m.snap.turn} text={v.question} now /> : null}
+        {v.thumb ? (
+          <div className="live-pic">
+            {/* A marked picture says so: a small mark on its thumbnail, and in words beside it. */}
+            <Picture pic={v.thumb} label={markedLabel(v.label, !!v.thumb.marked)} big={big} setBig={setBig} canDrop={v.canDrop} />
+            {v.thumb.marked ? <MarkedBadge /> : null}
+          </div>
+        ) : null}
+        {bigPic}
+        {v.line === "loops" ? (
+          <div className="live-think">
+            <LineRow v={v} />
+            {v.provider ? <span className="live-provider">{v.provider}</span> : null}
+          </div>
+        ) : null}
+        {v.note ? <p className="live-note live-in">{v.note}</p> : null}
+        {v.error ? <ErrorLine err={v.error} /> : null}
+        {asked && m.text ? <Answer text={m.text} phase={v.phase} tone={v.tone} /> : null}
+        {v.complete && m.text ? <TurnFoot text={m.text} line={sentLine(v)} sent={sentOf === turnN} toggleSent={() => toggleSent(turnN)} /> : null}
+        {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
+        {v.complete && offerSummary ? (
+          <div className="live-next live-in">
+            <PressButton className="live-text" title="Key points and what is still open, from this session" act={makeSummary}>
+              Summarize
+            </PressButton>
+          </div>
+        ) : null}
+      </section>
+    </>
+  );
   return (
-    <div className={`live phase-${v.phase}${multi ? " multi" : ""}`} ref={root} aria-label="Ask about the screen">
+    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}`} ref={root} aria-label="Ask about the screen">
       <header className="live-head">
         {sheet ? (
           <span className="live-title">Sessions</span>
-        ) : multi ? (
+        ) : multi || sumOpen ? (
           <span className="live-title" title={v.title}>
             {v.title}
           </span>
+        ) : v.empty ? (
+          <span className="live-title">New session</span>
         ) : (
           <Question key={m.snap.turn} text={v.question} />
         )}
+        {hasSummary && !sheet ? (
+          <PressButton className={`live-sumbtn${sumOpen ? " on" : ""}`} aria-pressed={sumOpen} title={sumOpen ? "Back to the conversation" : "This session's summary"} act={toggleSummary}>
+            Summary
+          </PressButton>
+        ) : null}
         <PressButton
           className={`live-hb${sheet ? " on" : ""}`}
           title="Sessions"
@@ -305,51 +478,24 @@ export function Live() {
       <div className="live-body" ref={body} onScroll={onScroll}>
         <div className="live-inner">
           {sheet ? (
-            <SessionSheet current={session} title={m.snap.session.title || v.title} turns={m.snap.session.turns} done={() => setSheet(false)} />
+            <SessionSheet
+              current={session}
+              title={m.snap.session.title || v.title}
+              turns={turnCount}
+              summary={hasSummary}
+              summarize={canSummarize(turnCount) ? (hasSummary ? toggleSummary : makeSummary) : null}
+              done={() => setSheet(false)}
+            />
+          ) : sumOpen ? (
+            <SummaryPanel sum={sum} turns={turnNumbers} make={makeSummary} stop={() => void summaryStop(session).catch(noop)} back={() => setSumOpen(false)} go={goTurn} />
+          ) : v.empty ? (
+            <EmptySession />
           ) : (
-            <>
-              {multi ? (
-                <ol className="live-turns" aria-label="Earlier questions">
-                  {earlier.map((r) => (
-                    <EarlierTurn
-                      key={r.n}
-                      r={r}
-                      open={opened.has(r.n)}
-                      toggle={() => toggleOpen(r.n)}
-                      provider={v.provider}
-                      sent={sentOf === r.n}
-                      toggleSent={() => toggleSent(r.n)}
-                    />
-                  ))}
-                </ol>
-              ) : null}
-              <section className="live-now" ref={now_} aria-label={multi ? `Question ${turnN}` : undefined}>
-                {multi ? <Question key={m.snap.turn} text={v.question} now /> : null}
-                {v.thumb ? (
-                  <div className="live-pic">
-                    <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} />
-                  </div>
-                ) : null}
-                {bigPic}
-                {v.line === "loops" ? (
-                  <div className="live-think">
-                    <LineRow v={v} />
-                    {v.provider ? <span className="live-provider">{v.provider}</span> : null}
-                  </div>
-                ) : null}
-                {v.note ? <p className="live-note live-in">{v.note}</p> : null}
-                {v.error ? <ErrorLine err={v.error} /> : null}
-                {asked && m.text ? <Answer text={m.text} phase={v.phase} tone={v.tone} /> : null}
-                {v.complete && m.text ? (
-                  <TurnFoot text={m.text} line={sentLine(v)} sent={sentOf === turnN} toggleSent={() => toggleSent(turnN)} />
-                ) : null}
-                {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
-              </section>
-            </>
+            conversation
           )}
         </div>
       </div>
-      {showField ? <FollowUp field={field} /> : null}
+      {showField ? <FollowUp field={field} first={first} pic={fieldPic} setPic={setFieldPic} next={v.next} note={fieldNote} setNote={setFieldNote} /> : null}
       {sr}
     </div>
   );
@@ -405,7 +551,7 @@ function EarlierTurn({
 }) {
   const line = r.note && r.note !== "No answer" ? r.note : sentLine({ thumb: r.picture, provider, sent: true });
   return (
-    <li className={`live-prev${open ? " open" : ""}`}>
+    <li className={`live-prev${open ? " open" : ""}`} id={`turn-${r.n}`}>
       <div className="live-prev-row">
         <PressButton className="live-prev-q" aria-expanded={open} aria-label={rowLabel(r, open)} title={open ? undefined : r.question || r.line} act={toggle}>
           <span>{r.line}</span>
@@ -493,10 +639,13 @@ function SentPanel({ turn }: { turn: number }) {
         </div>
       )}
       {s.rows.map((r) => (
-        <div key={r.label}>
-          <dt>{r.label}</dt>
-          <dd className={r.value === "None" ? "quiet" : undefined}>{r.value}</dd>
-        </div>
+        <Fragment key={r.label}>
+          <div>
+            <dt>{r.label}</dt>
+            <dd className={r.value === "None" ? "quiet" : undefined}>{r.value}</dd>
+          </div>
+          {r.label === "Earlier" && s.replay ? <SentAgain r={s.replay} /> : null}
+        </Fragment>
       ))}
       {s.adds.length ? (
         <div>
@@ -514,9 +663,53 @@ function SentPanel({ turn }: { turn: number }) {
   );
 }
 
-/** The session list, in place of the conversation: this session (its title renames in place; Export, Delete), New,
- * a search through every kept session, and the recent ones. Choosing one opens it. */
-function SessionSheet({ current, title, turns, done }: { current: string; title: string; turns: number; done: () => void }) {
+/** The earlier turns sent again because the conversation had to be reopened: one row that opens to their transcript as
+ * it went, and their pictures, small. */
+function SentAgain({ r }: { r: ReplayView }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="again">
+      <dt className="live-sr">Sent again</dt>
+      <dd>
+        <PressButton className="live-again" aria-expanded={open} act={() => setOpen((o) => !o)}>
+          <ChevronRight className="chev" size={14} strokeWidth={1.5} aria-hidden="true" />
+          <span className="t">Earlier turns sent again</span>
+          <span className="quiet">{r.meta}</span>
+        </PressButton>
+        {open && r.text ? <pre className="live-replay live-in">{r.text}</pre> : null}
+        {r.pictures.length ? (
+          <ul className="live-again-pics" aria-label="Their pictures, sent again">
+            {r.pictures.map((p) => (
+              <li key={`${p.label}-${p.n}`} title={p.size}>
+                {p.src ? <img src={p.src} alt="" draggable={false} /> : null}
+                <span>{p.label}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </dd>
+    </div>
+  );
+}
+
+/** The session list, in place of the conversation: this session (its title renames in place; Summarize or its Summary,
+ * Export, Delete), New, a search through every kept session, and the recent ones, a small mark on those with a
+ * summary. Choosing one opens it. */
+function SessionSheet({
+  current,
+  title,
+  turns,
+  summary,
+  summarize,
+  done,
+}: {
+  current: string;
+  title: string;
+  turns: number;
+  summary: boolean;
+  summarize: (() => void) | null;
+  done: () => void;
+}) {
   const [q, setQ] = useState("");
   const [list, setList] = useState<SessionMeta[] | null>(null);
   const [note, setNote] = useState("");
@@ -544,7 +737,7 @@ function SessionSheet({ current, title, turns, done }: { current: string; title:
   };
   return (
     <div className="live-sheet live-in">
-      {current ? <ThisSession id={current} title={title} turns={turns} setNote={setNote} done={done} /> : null}
+      {current ? <ThisSession id={current} title={title} turns={turns} summary={summary} summarize={summarize} setNote={setNote} done={done} /> : null}
       <div className="live-sheet-bar">
         <input
           className="live-search"
@@ -582,6 +775,7 @@ function SessionSheet({ current, title, turns, done }: { current: string; title:
                   {r.hit && r.hit !== r.title ? <span className="hit">{r.hit}</span> : null}
                 </span>
                 <span className="meta">
+                  {r.summary ? <ScrollText className="live-hasum" size={12} strokeWidth={1.5} aria-hidden="true" /> : null}
                   {r.turns} · {r.day}
                 </span>
               </PressButton>
@@ -597,7 +791,23 @@ function SessionSheet({ current, title, turns, done }: { current: string; title:
 
 /** This session: its title, which a press turns into a field to rename it in place; its questions; Export, which
  * says where it was saved with Copy; Delete, which asks once. */
-function ThisSession({ id, title, turns, setNote, done }: { id: string; title: string; turns: number; setNote: (s: string) => void; done: () => void }) {
+function ThisSession({
+  id,
+  title,
+  turns,
+  summary,
+  summarize,
+  setNote,
+  done,
+}: {
+  id: string;
+  title: string;
+  turns: number;
+  summary: boolean;
+  summarize: (() => void) | null;
+  setNote: (s: string) => void;
+  done: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(title);
   const [sure, setSure] = useState(false);
@@ -651,6 +861,11 @@ function ThisSession({ id, title, turns, setNote, done }: { id: string; title: s
       )}
       <div className="live-this-meta">
         <span>{turns ? `${turnsLabel(turns)} · This session` : "This session"}</span>
+        {summarize ? (
+          <PressButton className="live-text" act={summarize}>
+            {summary ? "Summary" : "Summarize"}
+          </PressButton>
+        ) : null}
         <PressButton
           className="live-text"
           act={() =>
@@ -689,13 +904,31 @@ function ThisSession({ id, title, turns, setNote, done }: { id: string; title: s
   );
 }
 
-/** The typed follow-up: one slim field at the foot, shown once an answer is. Enter sends, Shift+Enter is a new line,
- * Esc lets go. The cursor is put here only by a click or Ctrl+K (Cmd+K); after sending the field lets go and the
- * engine gives focus back to the app it came from. A fresh picture goes along only when asked for. */
-function FollowUp({ field }: { field: RefObject<HTMLTextAreaElement> }) {
+/** The typed question: one slim field at the foot, shown once an answer is, in a new session for its first question,
+ * and after a question failed. Enter sends, Shift+Enter is a new line, Esc lets go. The cursor is put here only by a
+ * click or Ctrl+K (Cmd+K); after sending the field lets go and the engine gives focus back to the app it came from. A
+ * fresh picture goes along only when asked for (in a new session, from the start) and can be marked up first; a
+ * picture marked with no question under way (`next`) waits above the field and goes with the question whatever the
+ * switch says, until it is taken off. Refused (a question is already under way, the picture is being marked up), the
+ * words stay and one quiet line says why. */
+function FollowUp({
+  field,
+  first,
+  pic,
+  setPic,
+  next,
+  note,
+  setNote,
+}: {
+  field: RefObject<HTMLTextAreaElement>;
+  first: boolean;
+  pic: boolean;
+  setPic: (f: (p: boolean) => boolean) => void;
+  next: LivePicture | null;
+  note: string;
+  setNote: (s: string) => void;
+}) {
   const [text, setText] = useState("");
-  const [pic, setPic] = useState(false);
-  const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   useLayoutEffect(() => {
     const t = field.current;
@@ -707,32 +940,46 @@ function FollowUp({ field }: { field: RefObject<HTMLTextAreaElement> }) {
     const t = sendText(text);
     if (!canSend(t, busy)) return;
     setBusy(true);
-    setErr("");
+    setNote("");
     field.current?.blur();
-    liveAskTyped(t, pic)
+    liveAskTyped(t, pic || !!next)
       .then(() => {
         setText("");
-        setPic(false);
+        setPic(() => false);
       })
-      .catch((e) => setErr(plain(e)))
+      .catch((e) => setNote(plain(e)))
       .finally(() => setBusy(false));
   };
   const ready = canSend(text, busy);
+  const ask = fieldPlaceholder(first);
   return (
     <footer className="live-follow live-in">
+      {next ? (
+        <div className="live-nextpic live-in" title="Goes with your question">
+          <span className="thumb">
+            <img src={next.src} alt="" draggable={false} />
+            {next.marked ? <MarkedBadge /> : null}
+          </span>
+          <span className="l">{next.label?.trim() || "The picture"}</span>
+          <MarkUpControl marked={!!next.marked} onError={setNote} />
+          <PressButton className="live-icon" title="Don't send the picture (Delete)" aria-label="Don't send the picture" act={() => void liveDropPicture().catch(noop)}>
+            <X size={14} strokeWidth={1.5} />
+          </PressButton>
+        </div>
+      ) : null}
       <div className={`live-field${text ? " has" : ""}`}>
         <textarea
           ref={field}
           rows={1}
-          placeholder="Ask a follow-up"
-          aria-label="Ask a follow-up"
+          placeholder={ask}
+          aria-label={ask}
           aria-keyshortcuts={platform() === "mac" ? "Meta+K" : "Control+K"}
           maxLength={FOLLOW_MAX}
           value={text}
           spellCheck
           onChange={(e) => {
             setText(e.target.value);
-            if (err) setErr("");
+            if (note) setNote("");
           }}
           onKeyDown={(e) => {
             const act = followKey(
@@ -751,22 +998,27 @@ function FollowUp({ field }: { field: RefObject<HTMLTextAreaElement> }) {
             }
           }}
         />
-        <PressButton
-          className="live-pic-toggle"
-          aria-pressed={pic}
-          aria-label="Include a new picture of the screen"
-          title={pic ? "A new picture of the screen goes with it" : "Words only. Press to include a new picture of the screen"}
-          act={() => setPic((p) => !p)}
-        >
-          <ImagePlus size={16} strokeWidth={1.5} />
-        </PressButton>
+        {next ? null : (
+          <>
+            {pic ? <MarkUpControl className="in-field" onError={setNote} /> : null}
+            <PressButton
+              className="live-pic-toggle"
+              aria-pressed={pic}
+              aria-label="Include a new picture of the screen"
+              title={pic ? "A new picture of the screen goes with it" : "Words only. Press to include a new picture of the screen"}
+              act={() => setPic((p) => !p)}
+            >
+              <ImagePlus size={16} strokeWidth={1.5} />
+            </PressButton>
+          </>
+        )}
         <PressButton className="live-send" aria-label="Send" title="Send (Enter)" disabled={!ready} act={send}>
           <ArrowUp size={14} strokeWidth={1.75} />
         </PressButton>
       </div>
-      {err ? (
-        <p className="live-follow-err" role="alert">
-          {err}
+      {note ? (
+        <p className="live-follow-err" role="status">
+          {note}
         </p>
       ) : null}
     </footer>
@@ -959,5 +1211,119 @@ function Code({ b, tail }: { b: CodeBlock; tail: ReactNode }) {
         {done ? <Check size={14} strokeWidth={1.75} /> : <Copy size={14} strokeWidth={1.5} />}
       </PressButton>
     </div>
+  );
+}
+
+/** A new session, open on nothing yet: one quiet line with the Ask key; the field below is ready for a typed one. */
+function EmptySession() {
+  const { cfg } = useConfig();
+  const key = cfg?.hotkeys.ask?.label;
+  return (
+    <div className="live-blank live-in">
+      <span>Ask about your screen</span>
+      {key ? <Keycaps label={key} /> : null}
+    </div>
+  );
+}
+
+/** The session's summary, in place of the conversation: its title, the key points and what is still open, each with
+ * the words it rests on (marked as yours or the AI's by one small word) and its turn, which a press goes back to; one
+ * quiet line with what was kept and dropped and the AI that made it; Copy as text, Redo, Back. While it is made, the
+ * line loops in the accent with Stop. */
+function SummaryPanel({
+  sum,
+  turns,
+  make,
+  stop,
+  back,
+  go,
+}: {
+  sum: SummaryModel;
+  turns: number[];
+  make: () => void;
+  stop: () => void;
+  back: () => void;
+  go: (n: number) => void;
+}) {
+  const [copied, copy] = useCopied();
+  const working = sum.state === "working";
+  const v = sum.summary && !working ? summaryView(sum.summary, sum.counts, turns) : null;
+  return (
+    <section className="live-sum" aria-label="Summary" aria-busy={working}>
+      {working ? (
+        <div className="live-think live-sum-work live-in">
+          <Line mode="think" className="live-line" tone="accent" height={ROW} loops={7} />
+          <span className="live-provider">Summarizing</span>
+          <PressButton className="live-text" act={stop}>
+            Stop
+          </PressButton>
+        </div>
+      ) : null}
+      {sum.state === "error" ? (
+        <div className="live-err live-in">
+          <svg className="ln warn" width={16} height={20} viewBox="0 0 16 20" aria-hidden="true">
+            <path d={restPath(0.75, 10, 12)} />
+          </svg>
+          <span className="live-err-text">{sum.error}</span>
+          <PressButton className="btn" act={make}>
+            Try again
+          </PressButton>
+        </div>
+      ) : null}
+      {sum.state === "stopped" ? <p className="live-note live-in">{v ? "Stopped. This is the summary from before." : "Stopped"}</p> : null}
+      {v ? (
+        <div className="live-in">
+          <h2 className="live-sum-title">{v.title}</h2>
+          {v.groups.map((g) => (
+            <section key={g.id} className="live-sum-group" aria-labelledby={`sum-${g.id}`}>
+              <h3 id={`sum-${g.id}`}>{g.label}</h3>
+              <ul>
+                {g.items.map((p) => (
+                  <li key={p.key} className="live-point">
+                    <span className="t">{p.text}</span>
+                    {p.ref ? (
+                      p.go ? (
+                        <PressButton className="live-ref" title={`Go to question ${p.turn}`} aria-label={`Go to question ${p.turn}`} act={() => go(p.turn)}>
+                          {p.ref}
+                        </PressButton>
+                      ) : (
+                        <span className="live-ref off" title={`Question ${p.turn}`}>
+                          {p.ref}
+                        </span>
+                      )
+                    ) : null}
+                    {p.quote ? (
+                      <span className="q">
+                        <span className="by" title={p.by === "You" ? "Your words" : "The AI's words"}>
+                          {p.by}
+                        </span>
+                        <span className="qt">“{p.quote}”</span>
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+          {v.foot ? <p className="live-sum-foot">{v.foot}</p> : null}
+        </div>
+      ) : null}
+      {!working && !v && sum.state !== "error" && sum.state !== "stopped" ? <p className="live-empty">No summary yet.</p> : null}
+      <div className="live-sum-acts">
+        {v ? (
+          <PressButton className="live-text" act={() => copy(summaryText(v))} aria-label={copied ? "Copied" : "Copy the summary as text"}>
+            {copied ? "Copied" : "Copy as text"}
+          </PressButton>
+        ) : null}
+        {working ? null : (
+          <PressButton className="live-text" act={make}>
+            {sum.summary ? "Redo" : "Summarize"}
+          </PressButton>
+        )}
+        <PressButton className="live-text back" act={back}>
+          Back to the conversation
+        </PressButton>
+      </div>
+    </section>
   );
 }

@@ -28,6 +28,7 @@ import {
 } from "@/lib/api";
 import { REDACT_EDGE_CSS, REDACT_FILL_CSS, edgeWidth, hiddenNote, overlaps, redact } from "@/lib/redact";
 import { captionMarks, empty, hist, kept, labelsFor, numbers, view, type A, type H } from "@/lib/marks";
+import { markHint, markPurpose, markWording, wholeFrame, type MarkPurpose } from "@/lib/markup";
 import "../styles/overlay.css";
 
 type Layer = "selecting" | "annotating" | "pinning" | "drawing";
@@ -75,13 +76,26 @@ type Ix =
 type Box2 = Extract<Shape, { a: Pt }> & { kind: "rect" | "redact" };
 const isBox = (x: Shape | undefined): x is Box2 => x?.kind === "rect" || x?.kind === "redact";
 
-// `edit`: a picture from History, its labels already drawn in; new pins are numbered on from `base`.
-type Frame = { png_b64: string; width: number; height: number; pointer?: Pt | null; element?: ElementMark | null; edit?: boolean; base?: number };
+// `edit`: a picture from History, its labels already drawn in; new pins are numbered on from `base`. `ask`: `live_mark`
+// opened it on a question's picture (marked whole, like a picture from History; the primary action uses it for the
+// question; new pins number on from `base`).
+type Frame = {
+  png_b64: string;
+  width: number;
+  height: number;
+  pointer?: Pt | null;
+  element?: ElementMark | null;
+  edit?: boolean;
+  base?: number;
+  ask?: boolean;
+  purpose?: string;
+};
 
 type Out = { url: string; w: number; h: number; labels: Label[]; element: ElementMark | null; hidden: number };
 
 const PREVIEW = typeof location !== "undefined" && location.search.includes("preview=1");
 const PREVIEW_EDIT = PREVIEW && location.search.includes("edit=1");
+const PREVIEW_ASK = PREVIEW && location.search.includes("purpose=ask");
 const COLORS = ["#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#007AFF"];
 const COLOR_NAMES = ["Red", "Orange", "Yellow", "Green", "Blue"];
 const HL = "#FFCC00";
@@ -534,6 +548,7 @@ export function Overlay() {
   const spaceRef = useRef(false);
   const [edit, setEdit] = useState(false);
   const [base, setBase] = useState(0);
+  const [purpose, setPurpose] = useState<MarkPurpose>(PREVIEW_ASK ? "ask" : "capture");
   const [hs, dispatch] = useReducer((h: H<Shape>, a: A<Shape>) => hist(h, a), empty<Shape>());
   const ix = useRef<Ix | null>(null);
   const ids = useRef(0);
@@ -552,11 +567,13 @@ export function Overlay() {
     const load = (f: Frame) => {
       setSrc(`data:image/png;base64,${f.png_b64}`);
       setNatural({ w: f.width, h: f.height });
-      // A picture from History is the whole box from the start: there is nothing around it to select.
-      setEdit(!!f.edit);
-      setBase(f.edit ? (f.base ?? 0) : 0);
-      setLayer(f.edit ? "annotating" : "selecting");
-      setBox(f.edit ? { x: 0, y: 0, w: f.width, h: f.height } : null);
+      // A picture from History, or a question's, is the whole box from the start: there is nothing around it to select.
+      const { whole, base } = wholeFrame(f);
+      setEdit(whole);
+      setPurpose(markPurpose(f));
+      setBase(base);
+      setLayer(whole ? "annotating" : "selecting");
+      setBox(whole ? { x: 0, y: 0, w: f.width, h: f.height } : null);
       setLive(null);
       setEditing(null);
       setOut(null);
@@ -566,9 +583,9 @@ export function Overlay() {
       editRef.current = null;
       ix.current = null;
       setCrop(false);
-      seed.current = f.edit ? [] : placed(f.element, f.pointer, colorRef.current);
+      seed.current = whole ? [] : placed(f.element, f.pointer, colorRef.current);
       restart();
-      if (f.edit) dispatch({ t: "frame", r: { x: 0, y: 0, w: f.width, h: f.height } });
+      if (whole) dispatch({ t: "frame", r: { x: 0, y: 0, w: f.width, h: f.height } });
     };
     let u: Promise<(() => void) | null> = Promise.resolve(null);
     let f: Promise<(() => void) | null> = Promise.resolve(null);
@@ -586,9 +603,9 @@ export function Overlay() {
         setSrc("/freeze.png");
         setNatural({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
         setLayer("annotating");
-        if (PREVIEW_EDIT) {
+        if (PREVIEW_EDIT || PREVIEW_ASK) {
           setEdit(true);
-          setBase(1);
+          setBase(PREVIEW_EDIT ? 1 : 0);
           const r = { x: 0, y: 0, w: img.naturalWidth || 1280, h: img.naturalHeight || 800 };
           setBox(r);
           seed.current = [];
@@ -1028,6 +1045,7 @@ export function Overlay() {
   }
 
   const ed = editing != null ? vis.find((x) => x.id === editing) : undefined;
+  const wording = markWording(purpose, edit);
   const edW = ed && "text" in ed ? Math.max(112, textW(ed.text || " ", M.font) + 2 * M.padX + 10) : 0;
   const readout = cur && box ? `${Math.round(box.w)} × ${Math.round(box.h)} px` : "";
   const rw = readout.length * 7 + 20;
@@ -1289,16 +1307,16 @@ export function Overlay() {
             <Redo2 size={18} strokeWidth={1.75} />
           </button>
           <span className="ov-sep" />
-          <button type="button" className="ov-go" title={edit ? "Save (Return)" : "Capture (Enter)"} onClick={() => void commit()}>
+          <button type="button" className="ov-go" title={wording.goTitle} onClick={() => void commit()}>
             <Check size={16} strokeWidth={2.25} />
-            {edit ? "Save" : "Capture"}
+            {wording.go}
           </button>
-          <button type="button" className="ov-btn ov-x" aria-label="Cancel" title="Cancel (Esc)" onClick={leave}>
+          <button type="button" className="ov-btn ov-x" aria-label="Cancel" title={wording.cancelTitle} onClick={leave}>
             <X size={18} strokeWidth={1.75} />
           </button>
         </div>
       ) : null}
-      {src && !gone ? <div className="ov-hud ov-hint">{hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit, crop)}</div> : null}
+      {src && !gone ? <div className="ov-hud ov-hint">{markHint(hint(layer, tool, vis.find((x) => x.id === picked)?.kind, edit, crop), purpose)}</div> : null}
       {out ? (
         <div className="ov-hud ov-out" onPointerDown={(e) => e.stopPropagation()}>
           <img src={out.url} alt="Captured result" />
