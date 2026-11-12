@@ -294,3 +294,111 @@ test("the level prefers an engine-smoothed field, falls back to the raw level, a
   assert.equal(levelOf({ mic: true, level: 0.4, loudness: 0.7 }, LEVEL_FIELDS), 0.7);
   assert.equal(levelOf({ mic: true, level: 0.4 }, LEVEL_FIELDS), 0.4);
 });
+
+// —— The answer's reveal: even, never ahead of what arrived, and exactly all of it at the end ——
+import { REVEAL_CATCH_MS, REVEAL_MAX_LAG_MS, revealSlice, revealStep, settledSplit } from "./live.ts";
+import { parseMarkdown, settleTail } from "./markdown.ts";
+
+/** Plays chunks arriving at the given times through the reveal at 60 frames a second; returns each frame's state. */
+function play(arrivals, until, o = {}) {
+  let total = 0;
+  let shown = 0;
+  const at = [];
+  const frames = [];
+  let k = 0;
+  for (let t = 0; t <= until; t += 16) {
+    while (k < arrivals.length && arrivals[k][0] <= t) {
+      for (let i = 0; i < arrivals[k][1]; i++) at.push(arrivals[k][0]);
+      total += arrivals[k][1];
+      k++;
+    }
+    const lag = Math.floor(shown) < total ? t - at[Math.floor(shown)] : 0;
+    const next = revealStep({ shown, total, dt: 16, lag, done: o.doneAt != null && t >= o.doneAt });
+    frames.push({ t, total, prev: shown, shown: next, lag });
+    shown = next;
+  }
+  return frames;
+}
+
+test("the reveal is even: bursts become a steady flow, never ahead of what arrived, never going back", () => {
+  // 60 characters at once every 400 ms, as a provider streams.
+  const bursts = Array.from({ length: 12 }, (_, i) => [i * 400, 60]);
+  const f = play(bursts, 6000);
+  for (const x of f) {
+    assert.ok(x.shown <= x.total, `ahead at ${x.t}`);
+    assert.ok(x.shown >= x.prev, `back at ${x.t}`);
+  }
+  const steps = f.slice(1).map((x) => Math.floor(x.shown) - Math.floor(x.prev));
+  assert.ok(Math.max(...steps) <= 6, `at most a few characters a frame, not a burst of 60: ${Math.max(...steps)}`);
+  // Moving most of the time while text waits: frames with a backlog where nothing appears are rare.
+  const waiting = f.filter((x) => x.total - x.prev >= 1);
+  const still = waiting.filter((x) => Math.floor(x.shown) === Math.floor(x.prev)).length;
+  assert.ok(still / waiting.length < 0.5, `${still} still of ${waiting.length}`);
+  assert.equal(f[f.length - 1].shown, 720, "it all shows in the end");
+});
+
+test("the reveal catches up in a bounded time and stays only a little behind", () => {
+  const f = play([[0, 2000]], 3000);
+  const done = f.find((x) => x.shown === 2000);
+  assert.ok(done && done.t <= REVEAL_MAX_LAG_MS + 16, `2000 characters at once are shown by ${done?.t} ms`);
+  const steady = play(Array.from({ length: 60 }, (_, i) => [i * 100, 12]), 7000);
+  assert.ok(Math.max(...steady.map((x) => x.lag)) <= REVEAL_CATCH_MS * 2.5, "a steady stream is followed closely");
+});
+
+test("done, or less motion, shows everything at once and lands exactly on the full text", () => {
+  assert.equal(revealStep({ shown: 3.4, total: 500, dt: 16, done: true }), 500);
+  assert.equal(revealStep({ shown: 10, total: 500, dt: 16, lag: REVEAL_MAX_LAG_MS }), 500, "an old backlog");
+  const f = play([[0, 300]], 200, { doneAt: 100 });
+  assert.equal(f[f.length - 1].shown, 300);
+  assert.equal(revealStep({ shown: 499.9, total: 500, dt: 16 }), 500, "the last fraction lands exactly");
+  assert.equal(revealStep({ shown: 900, total: 500, dt: 16 }), 500, "a shorter text (a new turn) is never overshot");
+  assert.equal(revealStep({ shown: 10, total: 500, dt: 0 }), 10);
+  assert.equal(revealSlice("ab😀c", 3), "ab😀", "never half a character");
+  assert.equal(revealSlice("abc", 9.7), "abc");
+});
+
+test("only the tail is re-read: the settled blocks parse the same alone as in the whole, at every length", () => {
+  const src = PREVIEW_ANSWER;
+  let moved = 0;
+  let last = 0;
+  for (let n = 0; n <= src.length; n++) {
+    const p = src.slice(0, n);
+    const k = settledSplit(p);
+    assert.ok(k >= 0 && k <= p.length);
+    if (k !== last) moved++;
+    last = k;
+    const parts = [...parseMarkdown(p.slice(0, k)), ...parseMarkdown(settleTail(p.slice(k)))];
+    assert.deepEqual(parts, parseMarkdown(settleTail(p)), `at ${n}: split ${k}`);
+  }
+  assert.ok(moved >= 4, "it settles block by block");
+  const fenced = ["```", "a", "", "b"].join(String.fromCharCode(10));
+  assert.equal(settledSplit(fenced), 0, "never inside a code block");
+  const list = ["1. one", "", "2. two"].join(String.fromCharCode(10));
+  assert.equal(settledSplit(list), 0, "never between items of one list");
+});
+
+import { ANSWER_MIN_H, PANEL_MAX_SHARE, PANEL_W, panelHeight } from "./live.ts";
+
+test("the panel opens bigger: 452 wide, a reading surface once an answer shows, never past 60 % of the screen", () => {
+  assert.equal(PANEL_W, 452, "as platform.rs PANEL_WIDTH docks it");
+  assert.equal(panelHeight(96, 1040, false), 96, "listening: one row, nothing empty below");
+  assert.equal(panelHeight(180, 1040, true), ANSWER_MIN_H, "a short answer still opens tall");
+  assert.ok(ANSWER_MIN_H >= 300);
+  assert.equal(panelHeight(500, 1040, true), 500, "a longer one grows with its content");
+  assert.equal(panelHeight(2000, 1040, true), Math.round(1040 * PANEL_MAX_SHARE), "up to 60 % of the screen");
+  assert.equal(panelHeight(180, 400, true), 240, "a short screen wins over the minimum");
+  assert.equal(panelHeight(NaN, 1040, false), 0);
+});
+
+test("a spoken follow-up is heard inside the conversation; only a brand-new question is the one quiet row", () => {
+  const at = (kind) => liveView(liveReduce(initialLive(), { type: "snapshot", snap: previewSnapshot(kind), now: 0 }), 0);
+  const fresh = at("listening");
+  assert.deepEqual([fresh.phase, fresh.compact, fresh.title, fresh.mic, fresh.line], ["listening", true, "", true, "voice"]);
+  const follow = at("follow");
+  assert.deepEqual([follow.phase, follow.compact, follow.title, follow.mic, follow.line, follow.question], ["listening", false, "Bayes' rule on the slide", true, "voice", ""]);
+  assert.equal(follow.stop, true, "Esc and Stop still stop the follow-up");
+  // Finishing the follow-up's words: still the conversation.
+  const snap = { ...previewSnapshot("follow"), state: "finishing" };
+  const fin = liveView(liveReduce(initialLive(), { type: "snapshot", snap, now: 0 }), 0);
+  assert.deepEqual([fin.phase, fin.compact, fin.line], ["finishing", false, "loops"]);
+});

@@ -94,3 +94,34 @@ export function readyNote(s: { phase: string; mic: boolean; preparing_gpu?: bool
   if (s.preparing_gpu) return { lines: ["Setting up graphics card", "(first time only)"], full: "Setting up your graphics card (first time only)" };
   return { lines: ["Getting ready…"], full: "Getting ready…" };
 }
+
+/** Whether the person is looking at the time: the pointer is over the capsule, or the keyboard is on one of its
+ * buttons. Kept by the page and not left to :hover or :focus-within, which stuck: a click on a picture button kept its
+ * focus, and a capsule hidden with the pointer over it came back "hovered" (no pointer-leave reaches a hidden window),
+ * so the time stayed for the whole of the next recording (owner, 2026-11-12: "sometimes the timer stays"). */
+export type Peek = { pointer: boolean; keyboard: boolean };
+export const NO_PEEK: Peek = { pointer: false, keyboard: false };
+/** enter / leave: the pointer. key-focus: a button reached by the keyboard (a click's focus is not a look). blur: the
+ * focus left the capsule. hidden: the window went off screen. start: a new recording began. */
+export type PeekEvent = "enter" | "leave" | "key-focus" | "blur" | "hidden" | "start";
+
+export function peekStep(p: Peek, e: PeekEvent): Peek {
+  switch (e) {
+    case "enter":
+      return { ...p, pointer: true };
+    case "leave":
+      return { ...p, pointer: false };
+    case "key-focus":
+      return { ...p, keyboard: true };
+    case "blur":
+      return { ...p, keyboard: false };
+    default:
+      return NO_PEEK;
+  }
+}
+
+/** Whether the recording's time shows beside the line: only while the microphone is live, and then from a minute on,
+ * with the microphone warning, or while the person looks (Peek). Never once the recording has ended. */
+export function timeShown(s: { live: boolean; durationMs: number; warned: boolean; peek: Peek }): boolean {
+  return s.live && (timeStays(s.durationMs, s.warned) || s.peek.pointer || s.peek.keyboard);
+}

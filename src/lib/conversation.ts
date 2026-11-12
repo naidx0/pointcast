@@ -54,8 +54,13 @@ export function followUpShown(v: Pick<LiveView, "phase" | "complete" | "empty" |
   return v.phase === "shown" && (v.complete || v.empty);
 }
 
-/** What the field asks for: a first question (nothing answered in the session yet), or a follow-up. */
-export const fieldPlaceholder = (first: boolean) => (first ? "Type a question" : "Ask a follow-up");
+/** The Ask key as the app ships it, said when the person's own chord is not known yet. */
+export const ASK_KEY = "Ctrl+Shift+/";
+
+/** What the field asks for: a first question (nothing answered in the session yet), or a follow-up, which also says the
+ * key that asks it by voice (`key`: the person's own chord, as prose). */
+export const fieldPlaceholder = (first: boolean, key = ASK_KEY) =>
+  first ? "Type a question" : `Ask a follow-up, or press ${key || ASK_KEY} to say it`;
 
 export function canSend(text: string, busy: boolean): boolean {
   const t = text.trim();

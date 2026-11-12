@@ -90,10 +90,18 @@
         "label": "live",
         "title": "Pointcast",
         "url": "live.html",
-        "width": 380,
+        "width": 452,
         "height": 120,
         "visible": false,
         "decorations": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "popover",
+            "acrylic"
+          ],
+          "state": "active"
+        },
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,

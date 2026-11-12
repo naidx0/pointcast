@@ -80,3 +80,13 @@
     opacity: 0.45;
   }
 }
+
+/* The capsule's time shows only while the page says someone looks (capsule.ts timeShown): never by :hover or
+   :focus-within alone, which stuck after a click on a button or a hide with the pointer over it. */
+html .hud .scribe:not(.timed) .time {
+  opacity: 0;
+}
+html .hud .scribe:not(.timed) .line-voice {
+  -webkit-mask-position: -40px 0;
+  mask-position: -40px 0;
+}

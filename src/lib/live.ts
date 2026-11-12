@@ -352,7 +352,11 @@ export function liveView(m: LiveModel, now: number): LiveView {
     empty: false,
     next: safePicture(s.next_picture),
   };
-  const hearing = { compact: true, title: "", question: "" };
+  // A brand-new question is heard in one quiet row. A spoken follow-up (the session already has a turn: the engine
+  // lists the one just answered in `turns` as soon as the press listens) keeps the conversation in view, its title and
+  // the earlier turns above, the listening row where the field was, so the person sees it goes on.
+  const follow = s.turns.length > 0;
+  const hearing = follow ? { compact: false, question: "" } : { compact: true, title: "", question: "" };
   const name = provider || "the AI";
   switch (s.state) {
     case "closed":
@@ -417,6 +421,87 @@ function thinkingView(base: LiveView, name: string, note: string | null): LiveVi
  * scroll up. */
 export function isPinned(scrollTop: number, scrollHeight: number, clientHeight: number, slack = 24): boolean {
   return scrollHeight - scrollTop - clientHeight <= slack;
+}
+
+// —— The answer as it streams: what arrived is the truth; what shows follows it smoothly ——
+
+/** The text shown catches up with what arrived at this share of the backlog per ms: everything waiting is shown in
+ * about this long, so the reveal runs a little behind the AI and its uneven chunks become an even flow. */
+export const REVEAL_CATCH_MS = 250;
+/** The slowest the text is revealed, in characters a second, so a short tail never crawls. */
+export const REVEAL_MIN_CPS = 45;
+/** Text that has waited this long is shown at once (a hidden window, a stalled frame). */
+export const REVEAL_MAX_LAG_MS = 1500;
+
+/** How much of the answer shows (a count of characters, fractional between frames) after `dt` ms. `total`: how much
+ * has arrived. `lag`: how long the oldest character not yet shown has waited. `done`: the answer is complete (or the
+ * person asked for less motion): everything shows. Never more than arrived, never less than was shown, and it lands
+ * exactly on `total`. */
+export function revealStep(p: { shown: number; total: number; dt: number; lag?: number; done?: boolean }): number {
+  const total = Math.max(0, p.total);
+  const shown = Number.isFinite(p.shown) ? Math.max(0, p.shown) : 0;
+  if (p.done || shown >= total || (p.lag ?? 0) >= REVEAL_MAX_LAG_MS) return total;
+  if (!(p.dt > 0)) return shown;
+  const backlog = total - shown;
+  const add = Math.max(REVEAL_MIN_CPS / 1000, backlog / REVEAL_CATCH_MS) * p.dt;
+  return add >= backlog ? total : shown + add;
+}
+
+/** The first `n` characters of `s`, never ending inside a surrogate pair. */
+export function revealSlice(s: string, n: number): string {
+  let k = Math.max(0, Math.min(s.length, Math.floor(n)));
+  const c = s.charCodeAt(k - 1);
+  if (k > 0 && k < s.length && c >= 0xd800 && c <= 0xdbff) k++;
+  return s.slice(0, k);
+}
+
+const NL = String.fromCharCode(10);
+const LIST_OR_INDENT = /^(\s|[-*+]\s|\d+[.)]\s|>)/;
+const FENCE = /^ {0,3}(```|~~~)/;
+
+/** Where the streamed answer splits into blocks that are settled (rendered once) and the tail still being written:
+ * just after the last blank line outside a code fence or a math block that starts a new block of its own (not a list
+ * item, an indented line or a quote, which could belong to the block above). The settled part parses the same alone
+ * as it does in the whole. 0 while there is no such line. */
+export function settledSplit(src: string): number {
+  const lines = src.split(NL);
+  let fence = "";
+  let math = false;
+  let at = 0;
+  let split = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const t = l.trim();
+    const f = FENCE.exec(l);
+    if (fence) {
+      if (f && f[1] === fence && t.replace(/[`~]/g, "") === "") fence = "";
+    } else if (math) {
+      if (t.endsWith("$$")) math = false;
+    } else if (f) fence = f[1];
+    else if (t.startsWith("$$") && !(t.length > 4 && t.endsWith("$$"))) math = true;
+    else if (t === "" && i > 0 && i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (next.trim() && !LIST_OR_INDENT.test(next)) split = at + l.length + 1;
+    }
+    at += l.length + 1;
+  }
+  return split;
+}
+
+/** The panel's width in logical pixels: as platform.rs PANEL_WIDTH docks it (owner, 2026-11-12: "it should open up
+ * bigger"). */
+export const PANEL_W = 452;
+/** Once an answer shows, the panel is at least this tall, so a short answer opens as a reading surface, not a strip. */
+export const ANSWER_MIN_H = 320;
+/** The most of the screen's height the panel takes. */
+export const PANEL_MAX_SHARE = 0.6;
+
+/** The height the panel asks for: its content's, at least ANSWER_MIN_H while an answer shows, and never more than
+ * PANEL_MAX_SHARE of the screen. */
+export function panelHeight(content: number, screenH: number, answer: boolean): number {
+  const most = Math.round(Math.max(0, screenH) * PANEL_MAX_SHARE);
+  const want = Math.max(0, Number.isFinite(content) ? content : 0);
+  return Math.min(most, answer ? Math.max(want, ANSWER_MIN_H) : want);
 }
 
 /** How long "Not sent" stays before the panel hides. */
@@ -509,7 +594,7 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
 /** The preview's snapshot for a state named in the address, shaped as the engine sends it. `conversation` is a session
  * of three turns, the third in the panel's own fields (asked as this panel opening's first question, so `turn` is 1);
  * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
- * session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
+ * session; `follow` is a spoken follow-up being heard in that session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
  * next one. */
 export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
@@ -527,6 +612,9 @@ export function previewSnapshot(kind: string, o: { error?: string | null; provid
       return { ...CLOSED, state: "shown", next_picture };
     case "listening":
       return { ...common, state: "listening", session: { ...session, title: "" }, words: "" };
+    case "follow":
+      // Ctrl+Shift+/ again after an answer: listening for a follow-up, the turns so far kept.
+      return { ...common, state: "listening", session: three, turns: previewTurns(), words: "" };
     case "finishing":
       return { ...common, state: "finishing" };
     case "answering":

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { VOICE_DX, VOICE_STEP_MS, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
+import { VOICE_DX, VOICE_STEP_MS, VOICE_STROKE_STEPS, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
 
 /** Where the line hears the voice: called with a setter for the level (0 to 1, `loudness`), returns the unsubscribe. */
 export type LevelSource = (set: (raw: number) => void) => () => void;
@@ -7,7 +7,7 @@ export type LevelSource = (set: (raw: number) => void) => () => void;
 export type LineTone = "ink" | "accent" | "warn" | "quiet";
 
 /** The one line of Pointcast, drawn the same way in the Ask panel and the dictation capsule. Listening: the voice draws
- * it (the adaptive meter, one broad stroke every VOICE_STEP_MS); thinking: it loops while it waits; at rest: flat. The
+ * it (one flowing wave whose height follows the voice at once); thinking: it loops while it waits; at rest: flat. The
  * place it sits in sets its colour (ink, or Ask's accent) and size. */
 export function Line({
   mode,
@@ -39,8 +39,9 @@ export function Line({
   return <Voice className={className} tone={tone} height={height} levels={levels} dx={dx} tip={tip} still={mode === "rest"} />;
 }
 
-/** The voice's line. The level is eased toward the voice every frame (quick to rise, slow to fall) and laid down as one
- * broad stroke every VOICE_STEP_MS while the paper moves smoothly under the pen. Drawn straight into the SVG, so React
+/** The voice's line. The level is read over the room's floor and eased toward the voice every frame (within a frame to
+ * rise, gently to fall); the pen shows it at once, and a sample is laid down every VOICE_STEP_MS while the paper moves
+ * smoothly under the pen. Drawn straight into the SVG, so React
  * does not render 60 times a second. At rest, or with reduced motion: a still flat line. */
 function Voice({
   className,
@@ -87,7 +88,7 @@ function Voice({
     if (still || !levels || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const s = pen.current;
     let last = performance.now();
-    const keep = Math.ceil(w / dx) + 2;
+    const keep = Math.ceil((w * VOICE_STROKE_STEPS) / Math.max(2, dx)) + 2;
     const off = levels((x) => (s.raw = x));
     let raf = 0;
     const draw = (t: number) => {
