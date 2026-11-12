@@ -208,3 +208,50 @@ test("a loud word does not squash the quiet words after it, and quiet words stay
   const loud = run(m, talk(60, 0.4)).out.filter((v, i) => i % 6 < 4);
   assert.ok(Math.max(...soft) < Math.min(...loud), "a quiet voice draws lower than a loud one");
 });
+
+test("on a speech-like level the line keeps moving: off the line most of the time, never frozen while the voice changes", () => {
+  // The engine's level at 30 Hz: a second of room, 3.3 s of syllables at 5 Hz between 0.05 and 0.4 with a 300 ms pause,
+  // then room again. The panel draws at 60 frames a second, as Line.tsx does.
+  const level = (ms) => {
+    if (ms < 1000 || ms >= 4300) return 0.02;
+    const t = ms - 1000;
+    if (t > 1500 && t < 1800) return 0.03;
+    const syl = 0.5 - 0.5 * Math.cos((2 * Math.PI * 5 * t) / 1000);
+    return 0.05 + 0.35 * syl * (0.6 + 0.4 * Math.sin(t / 370));
+  };
+  const up = base - 4;
+  let m = meterStart();
+  let env = 0;
+  let acc = 0;
+  const hist = [];
+  let speech = 0;
+  let off = 0;
+  let still = 0;
+  let longest = 0;
+  let lastY = null;
+  let quietAfter = [];
+  for (let t = 0; t < 5600; t += 16) {
+    const raw = level(Math.floor(t / 33) * 33);
+    m = meterStep(m, raw, 16);
+    env = smoothLevel(env, meterLevel(m, raw), 16);
+    acc += 16;
+    while (acc >= VOICE_STEP_MS) {
+      acc -= VOICE_STEP_MS;
+      hist.push(env);
+    }
+    const first = Math.max(0, hist.length - 120);
+    const tip = voicePath(hist.slice(first), box, { first, shift: acc / VOICE_STEP_MS, live: env }).tip;
+    const talking = t >= 1000 && t < 4300 && !(t > 2500 && t < 2800);
+    if (talking) {
+      speech++;
+      if (base - tip.y > 0.15 * up) off++;
+      if (lastY != null && Math.abs(tip.y - lastY) < 0.05) longest = Math.max(longest, (still += 16));
+      else still = 0;
+    }
+    if (t > 5000) quietAfter.push(tip.y);
+    lastY = tip.y;
+  }
+  assert.ok(off / speech > 0.7, `off the line in ${Math.round((100 * off) / speech)} % of speech frames`);
+  assert.ok(longest <= 150, `frozen for ${longest} ms while the voice changed`);
+  assert.ok(quietAfter.every((y) => Math.abs(y - base) <= 0.5), "and flat again in the room after");
+});

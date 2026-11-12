@@ -118,13 +118,13 @@ export function voiceLevel(raw: number, floor = 0): number {
 }
 
 /** Where the voice wave stands at running sample index `t` (fractional) for the drawn level `a` (0 to 1): its height
- * above the baseline as a share of the room above it. A wave between a tenth of the level and all of it, one stroke up
- * and one down per wavelength, so the pen is off the line the moment there is voice (never at a crossing) and flat at
- * silence. */
+ * above the baseline as a share of the room above it. A wave between 0.3 of the level and all of it, one stroke up and
+ * one down per wavelength, so the pen is plainly off the line the whole time there is voice (never at a crossing, never
+ * "bounce, stop, bounce") and flat at silence. */
 export function waveLift(t: number, a: number): number {
   const v = unit(a);
   if (v === 0) return 0;
-  return v * (0.55 + 0.45 * Math.sin((Math.PI * t) / VOICE_STROKE_STEPS));
+  return v * (0.65 + 0.35 * Math.sin((Math.PI * t) / VOICE_STROKE_STEPS));
 }
 
 /** Listening: the drawn levels (0 to 1, from meterLevel and smoothLevel, oldest first, one per VOICE_STEP_MS) as one
