@@ -438,7 +438,7 @@ export function Live() {
         {v.error ? <ErrorLine err={v.error} /> : null}
         {asked && m.text ? <Answer text={m.text} phase={v.phase} tone={v.tone} /> : null}
         {v.complete && m.text ? <TurnFoot text={m.text} line={sentLine(v)} sent={sentOf === turnN} toggleSent={() => toggleSent(turnN)} /> : null}
-        {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
+        {/* Summarize stays under the answer's foot; what was sent opens below it, so it never reads as a row of that list. */}
         {v.complete && offerSummary ? (
           <div className="live-next live-in">
             <PressButton className="live-text" title="Key points and what is still open, from this session" act={makeSummary}>
@@ -446,6 +446,7 @@ export function Live() {
             </PressButton>
           </div>
         ) : null}
+        {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
       </section>
     </>
   );
@@ -608,7 +609,7 @@ function SentPanel({ turn }: { turn: number }) {
     let live = true;
     setS(null);
     liveSent(turn)
-      .then((r) => live && setS(sentView(r) ?? "none"))
+      .then((r) => live && setS(sentView(r, turn) ?? "none"))
       .catch(() => live && setS("none"));
     return () => {
       live = false;

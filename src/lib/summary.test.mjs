@@ -42,8 +42,9 @@ test("a summary groups its points, marks whose words each quote is by a word, an
 });
 
 test("the counts line says what was kept and what was dropped for want of a source, with the AI's name", () => {
-  assert.equal(countsLine(9, 1), "9 kept, 1 dropped: no source");
-  assert.equal(countsLine(4, 0), "4 kept");
+  assert.equal(countsLine(9, 1), "9 points, every quote found in the session; 1 left out, its quote was not");
+  assert.equal(countsLine(4, 0), "4 points, every quote found in the session");
+  assert.equal(countsLine(1, 2), "1 point, every quote found in the session; 2 left out, their quotes were not");
   assert.equal(countsLine(0, 0), "");
   const s = normalizeSummary(raw);
   assert.deepEqual([s.kept, s.dropped, s.model], [3, 1, ""], "a model the engine leaves null is none");

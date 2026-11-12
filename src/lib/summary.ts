@@ -117,7 +117,8 @@ export function summaryReduce(m: SummaryModel, a: SummaryAction): SummaryModel {
  * "4 kept". "" when nothing was counted. */
 export function countsLine(kept: number, dropped: number): string {
   if (!kept && !dropped) return "";
-  return dropped ? `${kept} kept, ${dropped} dropped: no source` : `${kept} kept`;
+  const points = `${kept} ${kept === 1 ? "point" : "points"}, every quote found in the session`;
+  return dropped ? `${points}; ${dropped} left out, ${dropped === 1 ? "its quote was" : "their quotes were"} not` : points;
 }
 
 /** One point as the view shows it. `by`: the one small word that says whose words the quote is ("You" for the

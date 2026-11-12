@@ -208,14 +208,22 @@ export function replayMeta(pictures: number): string {
   return pictures ? `Their words and ${pictures} ${pictures === 1 ? "picture" : "pictures"}` : "Their words";
 }
 
-export function sentView(raw: unknown): SentView | null {
+/** `turn`: the question's number in its session. A follow-up that went alone (nothing listed, nothing sent again) went
+ * into a conversation the AI still held, so its earlier questions were already there: Sent says so, never "None". */
+export function sentView(raw: unknown, turn = 1): SentView | null {
   const p = normalizeSent(raw);
   if (!p) return null;
   const words = p.text.trim();
   const pictures = p.pictures.map((x) => pictureView(x, p.pictures.length > 1 ? `Picture ${x.n}` : "Picture"));
   const rows: SentRow[] = [];
   const earlier = earlierLabel(p.earlier);
-  rows.push({ label: "Earlier", value: earlier ? `${earlier}, with ${p.earlier.length === 1 ? "its answer" : "their answers"}` : "None" });
+  const held = !earlier && !p.replay && !p.again.length && turn > 1;
+  const heldBy = p.provider || "the AI";
+  const before = turn === 2 ? "Question 1" : `Questions 1 to ${turn - 1}`;
+  rows.push({
+    label: "Earlier",
+    value: earlier ? `${earlier}, with ${p.earlier.length === 1 ? "its answer" : "their answers"}` : held ? `${before}, already with ${heldBy} in this conversation` : "None",
+  });
   const to = [p.provider, p.model].filter(Boolean).join(" · ");
   if (to) rows.push({ label: "To", value: to });
   // A picture of a turn that had several says which one it was.

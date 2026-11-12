@@ -1346,7 +1346,7 @@ mod tests {
                 "",
                 "## Summary",
                 "",
-                "The nucleus. A summary of 2 turns. 1 kept, 2 dropped: no source.",
+                "The nucleus. A summary of 2 turns. 1 point, every quote found in the session; 2 left out, their quotes were not.",
                 "",
                 "### Key points",
                 "",

@@ -307,11 +307,14 @@ pub fn load(session: &Told) -> Option<Summary> {
     std::fs::read(session.dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
-/// "9 kept, 1 dropped: no source": the line a summary shows about its own receipts.
+/// "9 points, every quote found in the session; 1 left out, its quote was not": the line a summary shows about its
+/// own receipts.
 pub fn counts(summary: &Summary) -> String {
+    let points = |n: usize| if n == 1 { "1 point".to_owned() } else { format!("{n} points") };
     match summary.dropped {
-        0 => format!("{} kept", summary.kept),
-        n => format!("{} kept, {n} dropped: no source", summary.kept),
+        0 if summary.kept == 0 => "No points".to_owned(),
+        0 => format!("{}, every quote found in the session", points(summary.kept as usize)),
+        n => format!("{}, every quote found in the session; {n} left out, {} not", points(summary.kept as usize), if n == 1 { "its quote was" } else { "their quotes were" }),
     }
 }
 
@@ -513,7 +516,7 @@ mod tests {
         assert_eq!(s.key_points, [Point { text: "The denominator is the total evidence.".into(), turn: 1, from: From::Answer, quote: "every way the data could have come about".into() }]);
         assert_eq!((s.open_questions.len(), s.open_questions[0].turn, s.open_questions[0].from), (1, 2, From::Question));
         assert!(s.made_ms >= T0);
-        assert_eq!(counts(&s), "2 kept, 1 dropped: no source");
+        assert_eq!(counts(&s), "2 points, every quote found in the session; 1 left out, its quote was not");
         // Asked once, in a conversation of its own that starts from nothing.
         let (system, turns) = request(&session());
         assert_eq!(*script.opened.lock().unwrap(), [(system, vec![])]);
@@ -646,7 +649,7 @@ mod tests {
     #[test]
     fn the_request_numbers_turns_and_labels_pictures() {
         let (_sessions, told) = kept("request");
-        assert_eq!(told.title, "what does this button do and");
+        assert_eq!(told.title, "what does this button do and…");
         assert_eq!(told.turns.iter().map(|t| t.question.as_str()).collect::<Vec<_>>(), ["what does this button do and this page", "is it safe to press"]);
         let (system, turns) = request(&told);
         assert_eq!(turns.len(), 1, "one turn of words, no picture");
@@ -720,7 +723,7 @@ mod tests {
             [
                 "# Bayes' rule",
                 "",
-                "A summary of 2 turns. 2 kept, 1 dropped: no source.",
+                "A summary of 2 turns. 2 points, every quote found in the session; 1 left out, its quote was not.",
                 "",
                 "## Key points",
                 "",
@@ -735,7 +738,7 @@ mod tests {
         );
         // Nothing kept: the title and the count, and no empty heading.
         let none = Summary { dropped: 0, key_points: vec![], open_questions: vec![], kept: 0, title: String::new(), ..s };
-        assert_eq!(to_markdown(&none, &session()), "# what does the denominator in this\n\nA summary of 2 turns. 0 kept.\n");
+        assert_eq!(to_markdown(&none, &session()), "# what does the denominator in this\n\nA summary of 2 turns. No points.\n");
     }
 
     /// A maker over the data folder `told` is kept in, with every state it told. `chosen` is the AI the settings name,
@@ -780,7 +783,7 @@ mod tests {
         let states = told_of(&outs, 2);
         assert_eq!(states[0], State { id: told.id.clone(), state: Stage::Working, summary: None, counts: String::new(), error: None });
         let made = states[1].summary.clone().expect("done carries the summary");
-        assert_eq!((states[1].state, states[1].counts.as_str(), &states[1].error, states.len()), (Stage::Done, "1 kept, 1 dropped: no source", &None, 2));
+        assert_eq!((states[1].state, states[1].counts.as_str(), &states[1].error, states.len()), (Stage::Done, "1 point, every quote found in the session; 1 left out, its quote was not", &None, 2));
         // Who made it is the AI as the person knows it, with the model the settings name.
         assert_eq!((made.provider.as_str(), made.model.as_deref(), made.kept, made.dropped, made.title.as_str()), ("ChatGPT", Some("m-1"), 1, 1, "The order button"));
         assert_eq!(made.key_points, [Point { text: "The button places the order.".into(), turn: 1, from: From::Answer, quote: "It places the order".into() }]);
@@ -792,7 +795,7 @@ mod tests {
         assert_eq!((script.opened.lock().unwrap().len(), script.asked.lock().unwrap().len()), (1, 1));
         // What the panel is told, as it reads it.
         let wire = serde_json::to_value(&states[1]).unwrap();
-        assert_eq!((&wire["id"], &wire["state"], &wire["counts"], &wire["error"]), (&json!(told.id), &json!("done"), &json!("1 kept, 1 dropped: no source"), &Value::Null));
+        assert_eq!((&wire["id"], &wire["state"], &wire["counts"], &wire["error"]), (&json!(told.id), &json!("done"), &json!("1 point, every quote found in the session; 1 left out, its quote was not"), &Value::Null));
         assert_eq!(wire["summary"]["key_points"][0], json!({ "text": "The button places the order.", "turn": 1, "from": "answer", "quote": "It places the order" }));
         assert_eq!((&wire["summary"]["provider"], &wire["summary"]["model"]), (&json!("ChatGPT"), &json!("m-1")));
         assert_eq!(["working", "error", "stopped"].map(|s| json!(s)), [Stage::Working, Stage::Error, Stage::Stopped].map(|s| serde_json::to_value(s).unwrap()));

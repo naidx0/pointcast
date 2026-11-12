@@ -609,7 +609,8 @@ fn count(s: &mut Session, store: &Store, provider: &str, now_ms: u64) {
     }
 }
 
-/// The first words of the question, in the order they were said.
+/// The first words of the question, in the order they were said; "…" when there were more, so a title cut short never
+/// reads as a whole question.
 fn title(items: &[Item]) -> String {
     let mut said: Vec<(u64, &str)> = items
         .iter()
@@ -619,7 +620,12 @@ fn title(items: &[Item]) -> String {
         })
         .collect();
     said.sort_by_key(|s| s.0);
-    said.iter().flat_map(|s| s.1.split_whitespace()).take(TITLE_WORDS).collect::<Vec<_>>().join(" ")
+    let words: Vec<&str> = said.iter().flat_map(|s| s.1.split_whitespace()).collect();
+    if words.len() <= TITLE_WORDS {
+        return words.join(" ");
+    }
+    let head = words[..TITLE_WORDS].join(" ");
+    format!("{}…", head.trim_end_matches([',', ';', ':', '.', '-']))
 }
 
 fn sent_name(n: u32, mime: Mime) -> String {
@@ -698,7 +704,7 @@ mod tests {
         let q = Question { created_ms: T0, pictures: &[Wire { bytes: &wire, w: 3, h: 2, mime: Mime::Jpeg, label: "", marked: false }], ..words(&items) };
         let kept = s.save_turn(None, q, asked, "direct", T0 + 960).unwrap();
         assert_eq!(kept.session.id, kept.turn, "a new session is named for its first turn");
-        assert_eq!((kept.session.title.as_str(), kept.session.turns, kept.session.pictures), ("what does the denominator in this", 1, 1));
+        assert_eq!((kept.session.title.as_str(), kept.session.turns, kept.session.pictures), ("what does the denominator in this…", 1, 1));
         assert_eq!((kept.session.created_ms, kept.session.updated_ms, kept.session.style.as_str()), (T0, T0 + 960, "direct"));
         assert_eq!(kept.answer.sent.pictures.len(), 1);
         let p = &kept.answer.sent.pictures[0];

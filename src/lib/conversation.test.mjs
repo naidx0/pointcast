@@ -191,6 +191,12 @@ test("Sent shows the earlier turns sent again when the conversation was reopened
   assert.equal(v.replay.meta, "Their words and 3 pictures");
   assert.deepEqual([v.addsBy, v.adds[1]], ["Codex added", "MCP server started by Codex: github"]);
   assert.equal(sentView({ text: "x", replay: "", again: [] }).replay, null, "nothing sent again: no row");
+  const earlierRow = (raw, turn) => sentView(raw, turn).rows.find((r) => r.label === "Earlier").value;
+  const alone = { text: "And 12 times 14?", replay: "", again: [], earlier: [], provider: { name: "ChatGPT" } };
+  assert.equal(earlierRow(alone, 2), "Question 1, already with ChatGPT in this conversation", "a follow-up into a held conversation");
+  assert.equal(earlierRow(alone, 4), "Questions 1 to 3, already with ChatGPT in this conversation");
+  assert.equal(earlierRow(alone, 1), "None", "a first question has nothing earlier");
+  assert.equal(earlierRow({ ...alone, replay: "Q1" }, 3), "None", "sent again as a transcript: the replay row says it, not held");
   assert.equal(sentView({ text: "x", replay: "Q1" }).replay.meta, "Their words");
 });
 
