@@ -426,7 +426,8 @@ export const ENDED_MS = 1100;
 export function sentLine(v: Pick<LiveView, "thumb" | "provider" | "sent">): string {
   if (!v.sent) return "";
   const to = v.provider ? ` to ${v.provider}` : "";
-  return v.thumb ? `Sent your words and the picture${to}` : `Sent your words only${to}`;
+  // Never "only": a follow-up into a reopened conversation also carries the earlier questions, which Sent lists.
+  return v.thumb ? `Sent your words and the picture${to}` : `Sent your words${to}`;
 }
 
 // —— Browser preview fixtures (live.html?preview=1&state=…): data only; api.ts plays them. ——

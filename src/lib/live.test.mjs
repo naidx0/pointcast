@@ -214,7 +214,7 @@ test("only a complete answer has the foot row, and it says what left the compute
   const v = liveView(at(snap({ state: "shown", answer: "Yes." })), 0);
   assert.equal(v.complete, true);
   assert.equal(sentLine(v), "Sent your words and the picture to ChatGPT");
-  assert.equal(sentLine(liveView(at(snap({ state: "shown", dropped: true, answer: "Yes." })), 0)), "Sent your words only to ChatGPT");
+  assert.equal(sentLine(liveView(at(snap({ state: "shown", dropped: true, answer: "Yes." })), 0)), "Sent your words to ChatGPT");
 });
 
 test("a question stopped before it was sent never says it was sent, nor that an answer is ready", () => {
