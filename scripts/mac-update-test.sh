@@ -116,7 +116,12 @@ sign - "$work/adhoc-n/Pointcast.app"
 ditto "$work/n1/Pointcast.app" "$work/adhoc-n1/Pointcast.app"
 sign - "$work/adhoc-n1/Pointcast.app"
 for v in n n1 adhoc-n adhoc-n1; do
-  hdiutil create -quiet -ov -volname Pointcast -srcfolder "$work/$v" -format UDZO "$work/$v.dmg"
+  # A runner's disk arbitration is sometimes busy for a moment ("Resource busy"): try again before calling it a fault.
+  for try in 1 2 3; do
+    hdiutil create -quiet -ov -volname Pointcast -srcfolder "$work/$v" -format UDZO "$work/$v.dmg" && break
+    [ "$try" = 3 ] && die "hdiutil create failed three times for $v"
+    sleep 3
+  done
   echo "-- $v"
   codesign -dvv "$work/$v/Pointcast.app" 2>&1 | grep -E '^(Identifier|CodeDirectory|Signature|Authority|TeamIdentifier)' || true
   echo "designated => $(requirement "$work/$v/Pointcast.app")"
