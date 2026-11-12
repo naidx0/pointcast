@@ -72,7 +72,7 @@ function previewConfig(): Config {
     also_clipboard: true,
     export_dir: null,
     zoom_px: 512,
-    mark_point: "ring",
+    mark_point: "off",
     zoom_target: "dwell",
     zoom_sharpen: true,
     outline_element: true,

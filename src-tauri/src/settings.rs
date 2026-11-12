@@ -18,8 +18,9 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkPoint {
-    Off,
+    /// The default for a new install, and for a settings file that never set it (the owner, 2026-11-12).
     #[default]
+    Off,
     Ring,
     /// The ring and the last few seconds of the path.
     Trail,
@@ -463,7 +464,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("settings.json");
         let s = Settings::default();
-        assert_eq!((s.mark_point, s.zoom_target, s.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
+        assert_eq!((s.mark_point, s.zoom_target, s.zoom_sharpen), (MarkPoint::Off, ZoomTarget::Dwell, true));
         let mine = Settings { mark_point: MarkPoint::Trail, zoom_target: ZoomTarget::Window, zoom_sharpen: false, ..s };
         mine.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -473,7 +474,7 @@ mod tests {
         std::fs::write(&path, r#"{"zoom_px":640,"onboarded":true}"#).unwrap();
         let old = Settings::load(&path);
         assert!(old.onboarded && old.zoom_px == 640);
-        assert_eq!((old.mark_point, old.zoom_target, old.zoom_sharpen), (MarkPoint::Ring, ZoomTarget::Dwell, true));
+        assert_eq!((old.mark_point, old.zoom_target, old.zoom_sharpen), (MarkPoint::Off, ZoomTarget::Dwell, true));
         assert!(old.outline_element, "outlines are on for a file from before they existed");
         assert_eq!(old.spoken_anchors, SpokenAnchors::Ring, "and so are spoken anchors");
         std::fs::write(&path, r#"{"mark_point":"off","zoom_target":"pointer"}"#).unwrap();
@@ -681,5 +682,15 @@ mod tests {
         Settings { assist_claude_code_ok: true, ..Settings::default() }.save(&f).unwrap();
         assert!(Settings::load(&f).assist_claude_code_ok);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_install_has_no_ring_and_large_close_ups_and_a_saved_choice_is_kept() {
+        let d = Settings::default();
+        assert_eq!((d.mark_point, d.zoom_px), (MarkPoint::Off, 512), "no ring, close-ups Large (512 px)");
+        let never_set: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!((never_set.mark_point, never_set.zoom_px), (MarkPoint::Off, 512));
+        let chosen: Settings = serde_json::from_str(r#"{"mark_point":"ring","zoom_px":256}"#).unwrap();
+        assert_eq!((chosen.mark_point, chosen.zoom_px), (MarkPoint::Ring, 256), "a file that set them keeps them");
     }
 }

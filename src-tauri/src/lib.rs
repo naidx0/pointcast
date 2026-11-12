@@ -2885,7 +2885,7 @@ mod tests {
         assert_eq!((next.mark_point, next.zoom_target, next.zoom_sharpen), (settings::MarkPoint::Trail, settings::ZoomTarget::Window, false));
         assert!(merge(&next, p(json!({ "mark_point": "sparkles" }))).is_err());
         let back = merge(&next, p(json!({ "mark_point": null }))).unwrap();
-        assert_eq!(back.mark_point, settings::MarkPoint::Ring);
+        assert_eq!(back.mark_point, settings::MarkPoint::Off);
         let quiet = merge(&back, p(json!({ "outline_element": false }))).unwrap();
         assert!(!quiet.outline_element && back.outline_element);
         let mute = merge(&quiet, p(json!({ "spoken_anchors": "off" }))).unwrap();
