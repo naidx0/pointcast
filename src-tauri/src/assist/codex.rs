@@ -731,6 +731,10 @@ impl Chat for CodexChat {
         self.shared.shut(child::CLOSE_GRACE);
     }
 
+    fn context(&self) -> Vec<Part> {
+        self.context.clone()
+    }
+
     fn adds(&self) -> Vec<String> {
         let started = self.shared.inner.lock().unwrap().servers.clone();
         self.adds.iter().cloned().chain(started.iter().map(|name| format!("{MCP_STARTED}{name}"))).collect()

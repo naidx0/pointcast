@@ -528,9 +528,14 @@ export const LIVE = {
   /** The level's fields on UiState, first found wins: an engine-smoothed level if the engine sends one, else the raw
    * meter level (0 to 1 over 50 dB). */
   levelFields: LEVEL_FIELDS,
-  /** command { text, picture: boolean }: a typed follow-up in the open session, with a fresh picture when asked; an
-   * error string while a question is under way ("A question is already under way.") */
+  /** command { text, picture: boolean }: a typed follow-up in the open session. It takes no picture itself: the one
+   * waiting above the field (`next_picture`, taken by `take` or marked up) goes with it, else none. An error string
+   * while a question is under way ("A question is already under way.") */
   askTyped: "live_ask_typed",
+  /** command: the field's picture switch went on: one picture of the screen, taken now, waits above the field as
+   * `next_picture` (marked: false) and goes with the next question. Refused while a question is under way. Switched
+   * off, `drop` takes it away. */
+  take: "live_take_picture",
   /** command { turn } → { text, pictures: [{ n, w, h, bytes, mime, src, turn }], earlier: number[], provider, model,
    * adds: string[], replay?: string, again?: [{ n, w, h, bytes, mime, src, turn }] }. `turn` is the turn's number in
    * the session; `replay` and `again` are the earlier turns sent again when the conversation had to be reopened. */
@@ -600,9 +605,11 @@ export const liveDropPicture = () => (inTauri ? invoke<void>(LIVE.drop) : pvComm
 export const liveStop = () => (inTauri ? invoke<void>(LIVE.stop) : pvCommand("stop"));
 export const liveClose = () => (inTauri ? invoke<void>(LIVE.close) : pvCommand("close"));
 export const liveRetry = () => (inTauri ? invoke<void>(LIVE.retry) : pvCommand("retry"));
-/** A typed follow-up; `picture`: take a fresh picture of the screen to go with it. */
+/** A typed follow-up; the picture waiting above the field, if there is one, goes with it. */
 export const liveAskTyped = (text: string, picture: boolean) =>
   inTauri ? invoke<void>(LIVE.askTyped, { text, picture }) : pvAskTyped(text, picture);
+/** Take a picture of the screen now; it waits above the field, shown, for the next question. */
+export const liveTakePicture = () => (inTauri ? invoke<void>(LIVE.take) : pvTake());
 /** Exactly what left the computer for a turn (its number in the session), as the engine kept it (read with sentView in
  * conversation.ts). */
 export const liveSent = (turn: number): Promise<unknown> => (inTauri ? invoke<unknown>(LIVE.sent, { turn }) : pvLater(160, () => pvSent(turn)));
@@ -716,7 +723,7 @@ function keptTurns(s: LiveSnapshot): LiveTurn[] {
   return [...s.turns, { n, question: s.words, answer: s.answer ?? PREVIEW_ANSWER, picture: s.dropped ? null : s.picture, stopped: false, error: null, at_ms: Date.now() }];
 }
 
-function pvAskTyped(text: string, picture: boolean): Promise<void> {
+function pvAskTyped(text: string, _picture: boolean): Promise<void> {
   const s = livePv.snap;
   if (!s) return Promise.resolve();
   livePv.timers.forEach(clearTimeout);
@@ -727,7 +734,7 @@ function pvAskTyped(text: string, picture: boolean): Promise<void> {
   const id = s.session.id || "new";
   const title = s.session.title || firstWords(text);
   if (!s.session.id)
-    sessionsPv.list = [{ id, title, updated_ms: Date.now(), turns: 1, pictures: picture ? 1 : 0, provider: "ChatGPT", size_bytes: 0, has_summary: false }, ...pvSessions()];
+    sessionsPv.list = [{ id, title, updated_ms: Date.now(), turns: 1, pictures: s.next_picture ? 1 : 0, provider: "ChatGPT", size_bytes: 0, has_summary: false }, ...pvSessions()];
   const next: LiveSnapshot = {
     ...s,
     state: "sending",
@@ -738,8 +745,8 @@ function pvAskTyped(text: string, picture: boolean): Promise<void> {
     error: null,
     dropped: false,
     provider: s.provider || "ChatGPT",
-    // A picture marked for the next question goes with it, whatever the switch says.
-    picture: s.next_picture ?? (picture ? previewPicture("code") : null),
+    // Only the picture waiting above the field goes, as the engine sends it; none is taken as it is sent.
+    picture: s.next_picture ?? null,
     next_picture: null,
     turns,
     session: { id, title, turns: n },
@@ -770,6 +777,15 @@ function pvOpen(id: string): Promise<void> {
     at_ms: meta.updated_ms,
   }));
   pvEmit({ ...previewSnapshot("opened"), session: { id, title: meta.title, turns: turns.length }, turns });
+  return Promise.resolve();
+}
+
+/** The switch went on: a picture of the screen waits above the field, unmarked. Refused as the engine refuses. */
+function pvTake(): Promise<void> {
+  const s = livePv.snap;
+  if (!s) return Promise.resolve();
+  if (s.state === "listening" || s.state === "finishing" || s.state === "sending" || s.state === "answering") return Promise.reject("A question is already under way.");
+  if (!s.next_picture) pvEmit({ ...s, next_picture: { ...previewPicture("code"), marked: false } });
   return Promise.resolve();
 }
 

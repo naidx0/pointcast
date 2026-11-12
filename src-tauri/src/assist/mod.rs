@@ -192,6 +192,11 @@ pub trait Chat: Send {
         (self.stopper())()
     }
     fn close(&mut self);
+    /// What goes ahead of the next question: the earlier turns this conversation was opened on, as its own `replay`
+    /// made them (pictures left out when the model takes none). Empty once that question went, or with none.
+    fn context(&self) -> Vec<Part> {
+        Vec::new()
+    }
     /// The files the AI's own app added to this conversation.
     fn adds(&self) -> Vec<String> {
         Vec::new()
@@ -285,6 +290,9 @@ pub struct Scripted {
     /// What `open` was given, and every turn asked, in order.
     pub opened: Arc<Mutex<Vec<(String, Vec<Turn>)>>>,
     pub asked: Arc<Mutex<Vec<Turn>>>,
+    /// Every question as it went on the wire: the replay of the earlier turns, as an adapter makes it from what `open`
+    /// was given, ahead of the first one, then the question's own parts.
+    pub wire: Arc<Mutex<Vec<Vec<Part>>>>,
 }
 
 impl Scripted {
@@ -296,6 +304,7 @@ impl Scripted {
             pictures: true,
             opened: Arc::default(),
             asked: Arc::default(),
+            wire: Arc::default(),
         }
     }
 
@@ -322,12 +331,15 @@ impl Provider for Scripted {
 
     fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
         self.opened.lock().unwrap().push((system.to_owned(), earlier.to_vec()));
-        Ok(Box::new(ScriptedChat { script: self.clone(), current: Arc::default(), halted: Arc::default() }))
+        // As every adapter does: the earlier turns are replayed once, with no pictures for a model that takes none.
+        let context = replay(earlier, if self.pictures { 2 } else { 0 });
+        Ok(Box::new(ScriptedChat { script: self.clone(), context, current: Arc::default(), halted: Arc::default() }))
     }
 }
 
 struct ScriptedChat {
     script: Scripted,
+    context: Vec<Part>,
     /// The turn asked last, and the newest turn that was stopped.
     current: Arc<AtomicU64>,
     halted: Arc<AtomicU64>,
@@ -338,6 +350,9 @@ impl Chat for ScriptedChat {
         if !self.script.pictures && turn.parts.iter().any(|p| matches!(p, Part::Picture { .. })) {
             return Err(Failure::NoPictures);
         }
+        let mut wire = std::mem::take(&mut self.context);
+        wire.extend(turn.parts.iter().cloned());
+        self.script.wire.lock().unwrap().push(wire);
         self.script.asked.lock().unwrap().push(turn);
         // A newer turn stops the one before it.
         let n = self.current.fetch_add(1, Ordering::SeqCst) + 1;
@@ -371,6 +386,10 @@ impl Chat for ScriptedChat {
 
     fn close(&mut self) {
         self.cancel();
+    }
+
+    fn context(&self) -> Vec<Part> {
+        self.context.clone()
     }
 }
 

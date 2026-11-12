@@ -423,11 +423,9 @@ impl Sessions {
             .map(|k| home.join(if k == 1 { base.clone() } else { format!("{base} {k}") }))
             .find(|d| !d.exists() || ours(d))
             .ok_or("no free folder name for the export")?;
-        let _ = std::fs::remove_dir_all(&dir);
-        crate::prompt::create_private(&dir).map_err(|e| e.to_string())?;
         let width = if pictures.len() >= 100 { 3 } else { 2 };
         let name = |p: &Shown| format!("{:0width$}.{}", p.n, ext(p.mime));
-        let write = || -> Result<(), String> {
+        let write = |dir: &Path| -> Result<(), String> {
             for p in &pictures {
                 std::fs::copy(&p.file, dir.join(name(p))).map_err(|e| e.to_string())?;
             }
@@ -451,12 +449,42 @@ impl Sessions {
             });
             std::fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
         };
-        if let Err(e) = write() {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
-        }
+        write_anew(&dir, &format!("{now_ms}"), write)?;
         Ok(dir)
     }
+}
+
+/// Fill `dir` anew through `fill`, which writes into an empty folder beside it: only once it is all written does the new
+/// folder take the place of the old one. On any failure the folder is as it was, and nothing is left beside it.
+fn write_anew(dir: &Path, stamp: &str, fill: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+    let parent = dir.parent().ok_or("the export has no folder to go in")?;
+    let base = dir.file_name().ok_or("the export has no name")?.to_string_lossy().into_owned();
+    // Hidden, and no export's name: neither is ever taken for an export.
+    let (new, old) = (parent.join(format!(".{base}.new-{stamp}")), parent.join(format!(".{base}.old-{stamp}")));
+    let _ = std::fs::remove_dir_all(&new);
+    crate::prompt::create_private(&new).map_err(|e| e.to_string())?;
+    if let Err(e) = fill(&new) {
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(e);
+    }
+    let had = dir.exists();
+    if had {
+        if let Err(e) = std::fs::rename(dir, &old) {
+            let _ = std::fs::remove_dir_all(&new);
+            return Err(e.to_string());
+        }
+    }
+    if let Err(e) = std::fs::rename(&new, dir) {
+        if had {
+            let _ = std::fs::rename(&old, dir);
+        }
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(e.to_string());
+    }
+    if had {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(())
 }
 
 /// A session's title is cut at this many characters.
@@ -939,5 +967,42 @@ mod tests {
         crate::prompt::prune_handoff(&handoff, later, None);
         assert!(like.join("session.md").is_file(), "an export is never pruned");
         assert!(!plain.exists(), "and the scan does prune a handoff folder as old");
+    }
+
+    #[test]
+    fn an_export_written_again_that_fails_leaves_the_earlier_one_whole_and_nothing_beside_it() {
+        let d = root("export-again");
+        let s = Sessions::new(&d);
+        let id = asked(&s, None, T0, "what is this", "A cell.", "").session.id;
+        let handoff = d.join("handoff");
+        let dir = s.export(&id, &handoff, T0 + 20_000).unwrap();
+        let before: Vec<(String, Vec<u8>)> = {
+            let mut v: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(before.len(), 3, "session.md, manifest.json and its picture");
+        // A write that fails partway, as a picture that cannot be copied does: the earlier export stands as it was.
+        let failed = write_anew(&dir, "1", |into| {
+            std::fs::write(into.join("session.md"), "half").unwrap();
+            Err("a picture could not be copied".into())
+        });
+        assert_eq!(failed, Err("a picture could not be copied".to_owned()));
+        let mut after: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap())).collect();
+        after.sort();
+        assert_eq!(after, before);
+        assert_eq!(std::fs::read_dir(handoff.join(EXPORTS)).unwrap().count(), 1, "no half-written folder beside it");
+        // One that succeeds takes its place whole, and leaves nothing beside it either.
+        let fill = |into: &Path| -> Result<(), String> {
+            std::fs::copy(dir.join("manifest.json"), into.join("manifest.json")).map_err(|e| e.to_string())?;
+            std::fs::write(into.join("session.md"), "new").map_err(|e| e.to_string())
+        };
+        assert_eq!(write_anew(&dir, "2", fill), Ok(()));
+        assert_eq!((std::fs::read_to_string(dir.join("session.md")).unwrap(), std::fs::read_dir(&dir).unwrap().count()), ("new".to_owned(), 2));
+        assert_eq!(std::fs::read_dir(handoff.join(EXPORTS)).unwrap().count(), 1);
+        // And through the export itself: written again, the same folder, whole.
+        assert_eq!(s.export(&id, &handoff, T0 + 30_000).unwrap(), dir);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        assert_eq!(std::fs::read_dir(handoff.join(EXPORTS)).unwrap().count(), 1);
     }
 }

@@ -530,6 +530,10 @@ impl Chat for OpenAiChat {
     fn close(&mut self) {
         self.cancel();
     }
+
+    fn context(&self) -> Vec<Part> {
+        self.context.clone()
+    }
 }
 
 impl Drop for OpenAiChat {
