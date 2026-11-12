@@ -25,9 +25,11 @@ export function noticeView(
     case "pasted":
       return { lines: ["Pasted"], mark: "ok", action: "history" };
     case "copied":
-      return o.pasteBlocked
-        ? { lines: [`Copied · ${keys} to paste`, "Turn on auto-paste"], mark: "ok", action: "permission" }
-        : { lines: [`Copied · ${keys} to paste`], mark: "ok", action: "history" };
+      // Auto-paste was the choice and did not happen: say so, and on macOS (Accessibility) offer to allow it.
+      if (!o.pasteBlocked) return { lines: [`Copied · ${keys} to paste`], mark: "ok", action: "history" };
+      return o.mac
+        ? { lines: [`Not pasted · on the clipboard, press ${keys}`, "Allow auto-paste"], mark: "warn", action: "permission" }
+        : { lines: [`Not pasted · on the clipboard, press ${keys}`], mark: "warn", action: "history" };
     case "saved":
       return { lines: ["Saved to your folder"], mark: "ok", action: "history" };
     case "kept":

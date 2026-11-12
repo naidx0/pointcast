@@ -35,10 +35,15 @@ test("copied names the paste keys per platform", () => {
   assert.equal(noticeView("copied", mac).action, "history");
 });
 
-test("copied because auto-paste had no permission offers to turn it on", () => {
+test("an auto-paste that did not happen says the prompt is on the clipboard, and on macOS offers Allow", () => {
   const v = noticeView("copied", { ...mac, pasteBlocked: true });
-  assert.deepEqual(v.lines, ["Copied · ⌘V to paste", "Turn on auto-paste"]);
+  assert.deepEqual(v.lines, ["Not pasted · on the clipboard, press ⌘V", "Allow auto-paste"]);
   assert.equal(v.action, "permission");
+  assert.equal(v.mark, "warn");
+  // Windows refuses a paste into an app run as administrator: no permission to give, so no Allow.
+  const w = noticeView("copied", { ...win, pasteBlocked: true });
+  assert.deepEqual(w.lines, ["Not pasted · on the clipboard, press Ctrl+V"]);
+  assert.equal(w.action, "history");
 });
 
 test("pasted and saved keep their short form", () => {

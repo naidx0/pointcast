@@ -772,7 +772,7 @@ impl App {
         let mut st = self.state.lock().unwrap();
         st.notice = Some(notice(&items, mode, delivered.is_ok(), audio_kept, partial.then_some(has_audio)));
         st.entry = entry;
-        st.paste_blocked = paste_blocked(settings.output, can_paste);
+        st.paste_blocked = paste_blocked(settings.output, can_paste, delivered.is_ok());
         st.phase = Phase::Ready;
         Ok(Some(exp))
     }
@@ -1516,9 +1516,10 @@ pub fn paste_or_copy(mode: OutputMode, can_paste: bool) -> OutputMode {
     }
 }
 
-/// The prompt was copied only because auto-paste lacked the OS permission: the capsule then offers to turn it on.
-pub fn paste_blocked(mode: OutputMode, can_paste: bool) -> bool {
-    mode == OutputMode::AutoPaste && !can_paste
+/// Auto-paste was the choice and the prompt was only copied: the OS permission is missing (macOS Accessibility), or
+/// the paste itself failed. The capsule then says to paste it by hand, and on macOS offers to allow it.
+pub fn paste_blocked(mode: OutputMode, can_paste: bool, delivered: bool) -> bool {
+    mode == OutputMode::AutoPaste && (!can_paste || !delivered)
 }
 
 /// What the HUD says after a stop. `cut` when Cancel saved it before every word was in: whether its audio was kept.
@@ -2440,10 +2441,16 @@ mod tests {
 
     #[test]
     fn only_auto_paste_without_the_permission_offers_to_turn_it_on() {
-        assert!(paste_blocked(OutputMode::AutoPaste, false));
-        assert!(!paste_blocked(OutputMode::AutoPaste, true));
-        assert!(!paste_blocked(OutputMode::Clipboard, false), "copying was the choice, not a fallback");
-        assert!(!paste_blocked(OutputMode::Folder, false));
+        assert!(paste_blocked(OutputMode::AutoPaste, false, true));
+        assert!(!paste_blocked(OutputMode::AutoPaste, true, true));
+        assert!(!paste_blocked(OutputMode::Clipboard, false, true), "copying was the choice, not a fallback");
+        assert!(!paste_blocked(OutputMode::Folder, false, true));
+    }
+
+    #[test]
+    fn an_auto_paste_that_failed_says_the_prompt_is_only_copied() {
+        assert!(paste_blocked(OutputMode::AutoPaste, true, false), "the keys were refused: paste it by hand");
+        assert!(!paste_blocked(OutputMode::Clipboard, true, false));
     }
 
     #[test]
