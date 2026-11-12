@@ -3,9 +3,10 @@ import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share } from "lucide-react";
-import { ACTIONS, Keycaps, ShortcutField } from "@/components/Shortcut";
+import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField, askPress } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
+import { BrandTile } from "@/components/Brands";
 import {
   HOTKEY_FIELD,
   agentConnect,
@@ -13,12 +14,14 @@ import {
   agentRemove,
   agentsStatus,
   assistChoose,
+  assistEffort,
   assistForget,
   assistKeySet,
   assistModels,
   assistOfflineOnly,
   assistProviders,
   assistSignIn,
+  onAssistProviders,
   gpuRetry,
   historyClear,
   historyList,
@@ -63,23 +66,28 @@ import { computerView, micStatus } from "@/lib/hardware";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
-import { recentRows, type RecentRow } from "@/lib/home";
+import { askNews, recentRows, type RecentRow } from "@/lib/home";
 import { RECENT_SESSIONS, sessionRows, type SessionRow } from "@/lib/sessions";
 import {
+  CODEX_SIGN_OUT,
   CUSTOM,
   askReady,
   chosenRoute,
   consentText,
   customCheck,
   defaultModel,
+  effortView,
   groups,
   hostOf,
   isHere,
   modelLabel,
+  modelName,
   needsConsent,
   needsConsentAt,
   nowView,
+  offlineSaid,
   shortName,
+  withOffline,
   type Assist,
   type AssistModel,
   type Route,
@@ -249,7 +257,7 @@ export function Settings() {
             </div>
           ) : null}
           {!cfg ? null : pane === "home" ? (
-            <Home cfg={cfg} go={setPane} />
+            <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
             <Ai />
           ) : pane === "general" ? (
@@ -539,7 +547,9 @@ const RANGES = [
 /** The first pane, the hub: the two features side by side, each with its keys and where it is set up (dictation with
  * mark-up; Ask with the AI that answers), then what was dictated (four numbers for the week or for all time, then when
  * in the week) and the last few recordings. Read once, as the pane opens. */
-function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
+function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: Patch }) {
+  // "New: Ask about your screen", once, for someone who finished setup before Ask existed; Got it remembers it.
+  const [news, setNews] = useState(() => askNews(cfg));
   const [counts, setCounts] = useState<Counts | null>(null);
   const [recent, setRecent] = useState<RecentRow[]>([]);
   const [range, setRange] = useState<Range>("week");
@@ -592,6 +602,34 @@ function Home({ cfg, go }: { cfg: Config; go: (p: Pane) => void }) {
   };
   return (
     <div className="home">
+      {news && cfg.hotkeys.ask ? (
+        <section className="home-news" aria-labelledby="hub-news">
+          <MessageCircleQuestion size={20} strokeWidth={1.5} aria-hidden="true" />
+          <div className="grow">
+            <div className="t" id="hub-news">
+              New: Ask about your screen
+            </div>
+            <div className="s">
+              Press <Keycaps label={cfg.hotkeys.ask.label} /> and ask your AI out loud about what you see.
+            </div>
+          </div>
+          {ai === "" ? (
+            <button type="button" className="btn" onClick={() => go("ai")}>
+              Choose an AI
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn plain"
+            onClick={() => {
+              setNews(false);
+              patch({ ask_intro_seen: true }).catch(() => undefined);
+            }}
+          >
+            Got it
+          </button>
+        </section>
+      ) : null}
       <div className="home-hub">
         <section className="feature" aria-labelledby="hub-dictate">
           <h2 id="hub-dictate">Dictate and mark up</h2>
@@ -783,17 +821,26 @@ function Ai() {
   const [finding, setFinding] = useState(false);
   // The routes did not come: one quiet line with Try again, never an empty pane.
   const [failed, setFailed] = useState(false);
-  const load = () =>
-    assistProviders()
+  // What the last flip of "Only on this computer" did, in one quiet line.
+  const [said, setSaid] = useState("");
+  // The engine answers at once from what it knows; each route's probe fills in through onAssistProviders. `refresh`
+  // asks every route again (Check again, after a sign-in).
+  const load = (refresh = false) =>
+    assistProviders(refresh)
       .then((x) => {
         setA(x);
         setFailed(false);
       })
       .catch(() => setFailed(true));
   useEffect(() => {
+    const again = () => load();
     load();
-    window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
+    const off = onAssistProviders(setA);
+    window.addEventListener("focus", again);
+    return () => {
+      off();
+      window.removeEventListener("focus", again);
+    };
   }, []);
   const chosen = a ? chosenRoute(a) : null;
   // The chosen route's full model list can take a few seconds: the quick list stands in until it comes. An agent picks
@@ -814,13 +861,13 @@ function Ai() {
     return failed ? (
       <p className="ai-fail" role="status">
         <span>The list of AIs didn’t load.</span>
-        <button type="button" className="btn" onClick={load}>
+        <button type="button" className="btn" onClick={() => load()}>
           Try again
         </button>
       </p>
     ) : null;
 
-  const run = async (id: string, job: () => Promise<unknown>) => {
+  const run = async (id: string, job: () => Promise<unknown>, refresh = false) => {
     setErrs((e) => ({ ...e, [id]: "" }));
     setBusy(id);
     try {
@@ -831,8 +878,14 @@ function Ai() {
       return false;
     } finally {
       setBusy("");
-      await load();
+      await load(refresh);
     }
+  };
+  // The switch flips at once and says what it did; the engine's list then confirms it (or puts it back, with why).
+  const offline = (on: boolean) => {
+    setA((x) => (x ? { ...x, offline_only: on } : x));
+    setSaid(on ? "On. Only AIs on this computer are shown and asked." : "Off. Every AI is shown again.");
+    run("offline", () => assistOfflineOnly(on)).then((ok) => ok || setSaid(""));
   };
   // A key's or a server's models are not in the quick list: they are asked for before the choice, which needs one.
   const choose = (p: Route, consent: boolean, model?: string, base?: string) =>
@@ -850,22 +903,34 @@ function Ai() {
   };
   const act = (v: RouteView, p: Route) => {
     if (v.action === "use") return needsConsent(p) ? setConsent({ route: p }) : choose(p, false);
-    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id));
+    if (v.action === "sign_in") return run(p.id, () => assistSignIn(p.id), true);
     if (v.action === "add_key") return setMore({ id: p.id, what: "key" });
     if (v.action === "get") return setMore((m) => (m?.id === p.id && m.what === "help" ? null : { id: p.id, what: "help" }));
-    if (v.action === "check") return run(p.id, () => Promise.resolve());
+    if (v.action === "check") return run(p.id, () => Promise.resolve(), true);
   };
 
   const now = nowView(a);
   const quick = chosen?.models ?? [];
   const list = found && found.id === chosen?.id && found.list.length ? found.list : quick;
   const model = chosen ? (a.model ?? defaultModel(chosen)) : null;
-  const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: model, images: true }, ...list] : list;
+  const named = chosen ? modelName({ model }, { models: list }) : null;
+  const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: named ?? model, images: true }, ...list] : list;
+  const effort = effortView(a, chosen);
   return (
     <>
       <div className="group">
-        <Row label={now.title} sub={now.line}>
-          {chosen && chosen.kind !== "agent" ? (
+        <div className="row ai-now">
+          {chosen ? <BrandTile id={chosen.id} name={chosen.name} size={24} /> : null}
+          <div className="grow">
+            <div className="lbl">
+              {now.title}
+              {named ? <span className="ai-now-model">{named}</span> : null}
+            </div>
+            <div className="sub">{now.line}</div>
+          </div>
+        </div>
+        {chosen && chosen.kind !== "agent" ? (
+          <Row label="Model" sub="The models your plan or key offers. Words only means it cannot see your pictures.">
             <select
               className="field ai-model"
               aria-label="Model"
@@ -883,18 +948,36 @@ function Ai() {
                 <option value="">{finding ? "Finding models…" : "No models found"}</option>
               )}
             </select>
-          ) : null}
-        </Row>
+          </Row>
+        ) : null}
+        {effort ? (
+          <Row label="Thinking" sub="Low answers soonest. High thinks longer before it answers.">
+            <Seg label="Thinking" value={effort.value} options={effort.options} set={(v) => run("effort", () => assistEffort(v))} />
+          </Row>
+        ) : null}
         <Row
           label="Only on this computer"
-          sub={errs.offline ? <span style={{ color: "var(--red-ink)" }}>{errs.offline}</span> : "Hides every AI that sends your words off this computer."}
+          sub={
+            errs.offline ? (
+              <span style={{ color: "var(--red-ink)" }}>{errs.offline}</span>
+            ) : (
+              <span role="status">{said || "Hides every AI that sends your words off this computer."}</span>
+            )
+          }
         >
-          <Toggle label="Only on this computer" on={a.offline_only} set={(v) => run("offline", () => assistOfflineOnly(v))} />
+          <Toggle label="Only on this computer" on={a.offline_only} set={offline} />
         </Row>
       </div>
-      {groups(a).map((g) => (
+      {groups(a).map((g, i) => (
         <Fragment key={g.kind}>
-          <h2 className="group-title">{g.title}</h2>
+          <div className="group-title ai-group-title">
+            <h2>{g.title}</h2>
+            {i === 0 ? (
+              <button type="button" className="btn plain" disabled={busy === "refresh"} onClick={() => run("refresh", () => Promise.resolve(), true)} title="Look again for the AIs on this computer">
+                {busy === "refresh" ? "Looking…" : "Refresh"}
+              </button>
+            ) : null}
+          </div>
           <div className="group routes">
             {g.routes.map((v) => {
               const p = a.providers.find((x) => x.id === v.id)!;
@@ -930,7 +1013,8 @@ function Ai() {
                   more={open}
                   form={form}
                   act={() => act(v, p)}
-                  check={() => run(p.id, () => Promise.resolve())}
+                  switchAccount={() => run(p.id, () => assistSignIn(p.id), true)}
+                  check={() => run(p.id, () => Promise.resolve(), true)}
                   forget={() => run(p.id, () => assistForget(p.id))}
                 />
               );
@@ -965,8 +1049,10 @@ function RouteRow(props: {
   act: () => void;
   check: () => void;
   forget: () => void;
+  switchAccount: () => void;
 }) {
   const { v, busy, err, more } = props;
+  const [out, setOut] = useState(false);
   const [sure, setSure] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -983,10 +1069,24 @@ function RouteRow(props: {
   );
   const cmd = v.help?.command;
   return (
-    <div className="row ai-route">
+    <div className={`row ai-route${v.checking ? " checking" : ""}`}>
+      <BrandTile id={v.id} name={v.name} />
       <div className="grow">
-        <div className="lbl">{v.name}</div>
+        <div className="lbl">
+          {v.name}
+          {v.account?.plan ? <span className="ai-plan">{v.account.plan}</span> : null}
+        </div>
         <div className="sub">{line}</div>
+        {v.account && !err ? (
+          <div className="ai-account">
+            <button type="button" className="link" disabled={busy} onClick={props.switchAccount}>
+              {busy ? "Finish in your browser" : "Use another account"}
+            </button>
+            <button type="button" className="link" aria-expanded={out} onClick={() => setOut((o) => !o)}>
+              Sign out
+            </button>
+          </div>
+        ) : null}
       </div>
       {v.chosen ? (
         <span className="ai-inuse">
@@ -1021,9 +1121,20 @@ function RouteRow(props: {
         </button>
       ) : null}
       {more === "key" ? props.form : null}
+      {out && v.account ? (
+        <div className="ai-more">
+          <p className="ai-help">Sign out in Codex itself: run this in a terminal, then Refresh. Pointcast never touches your sign-in.</p>
+          <div className="ai-help-row">
+            <div className="ai-cmd">
+              <code>{CODEX_SIGN_OUT}</code>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {more === "help" && v.help ? (
         <div className="ai-more">
           <p className="ai-help">{v.help.text}</p>
+          {v.help.account ? <p className="ai-help">{v.help.account}</p> : null}
           <div className="ai-help-row">
             {cmd ? (
               <div className="ai-cmd">
@@ -1042,6 +1153,11 @@ function RouteRow(props: {
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
+            ) : null}
+            {v.help.page ? (
+              <button type="button" className="btn plain" onClick={() => (inTauri ? openUrl(v.help!.page!) : window.open(v.help!.page!, "_blank")) && undefined}>
+                Official page
+              </button>
             ) : null}
             <button type="button" className="btn" disabled={busy} onClick={props.check}>
               {busy ? "Checking…" : "Check again"}
@@ -1225,9 +1341,11 @@ function ConsentSheet({ route, allow, cancel }: { route: Route; allow: () => voi
 }
 
 function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: (c: Config) => void }) {
-  const custom = ACTIONS.some((a) => cfg.hotkeys[a.id].label !== cfg.hotkeys[a.id].default);
+  const all = [...ACTIONS, ASK_ACTION].filter((a) => cfg.hotkeys[a.id]);
+  const custom = all.some((a) => cfg.hotkeys[a.id].label !== cfg.hotkeys[a.id].default);
   return (
     <>
+      <h2 className="group-title">Dictate and mark up</h2>
       <div className="group">
         {ACTIONS.map((a) => (
           <Row key={a.id} label={a.name} sub={a.sub}>
@@ -1235,6 +1353,18 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
           </Row>
         ))}
       </div>
+      {cfg.hotkeys.ask ? (
+        <>
+          <h2 className="group-title" style={{ marginTop: 20 }}>
+            {ASK_ACTION.name}
+          </h2>
+          <div className="group">
+            <Row label="Ask" sub={`${ASK_ACTION.sub} ${askPress(cfg.talk_mode)}`}>
+              <ShortcutField action={ASK_ACTION.id} cfg={cfg} patch={patch} setCfg={setCfg} />
+            </Row>
+          </div>
+        </>
+      ) : null}
       <p className="group-note">Click a shortcut, then press the new keys. Esc cancels. Shortcuts work in every app.</p>
       <div className="group" style={{ marginTop: 20 }}>
         <Row
@@ -1261,7 +1391,7 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
           type="button"
           className="btn"
           disabled={!custom}
-          onClick={() => patch(Object.fromEntries(ACTIONS.map((a) => [HOTKEY_FIELD[a.id], null])))}
+          onClick={() => patch(Object.fromEntries(all.map((a) => [HOTKEY_FIELD[a.id], null])))}
         >
           Restore Defaults
         </button>

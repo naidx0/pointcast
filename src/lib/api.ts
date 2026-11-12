@@ -23,7 +23,7 @@ import {
 import { previewSent } from "./conversation";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
 import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
-import { CUSTOM, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
+import { CUSTOM, checkingAssist, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 export const preview = !inTauri && typeof location !== "undefined" && location.search.includes("preview=1");
@@ -99,7 +99,7 @@ export type Access = "granted" | "unknown" | "denied";
 export type PermissionKind = "microphone" | "screen" | "accessibility";
 export type Permissions = Record<PermissionKind, Access> & { gated: Record<PermissionKind, boolean> };
 
-export type Action = "session" | "full" | "region" | "zoom";
+export type Action = "session" | "full" | "region" | "zoom" | "ask";
 export type HotkeyView = { label: string; keys: string[]; default: string };
 
 /** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
@@ -195,6 +195,8 @@ export type Config = {
   /** Why sharing with agents did not start at launch. */
   mcp_error?: string | null;
   onboarded: boolean;
+  /** Ask was introduced: the setup assistant's step, or Home's one-time card. */
+  ask_intro_seen?: boolean;
   sounds: boolean;
   speech: SpeechView;
   /** How the last load-and-run of the speech engine went; null before the first. */
@@ -219,6 +221,7 @@ export const HOTKEY_FIELD: Record<Action, string> = {
   full: "full_hotkey",
   region: "region_hotkey",
   zoom: "zoom_hotkey",
+  ask: "ask_hotkey",
 };
 
 export const settingsGet = () => invoke<Config>("settings_get");
@@ -1000,10 +1003,16 @@ export const ASSIST = {
   signIn: "assist_sign_in",
   /** command { on } */
   offlineOnly: "assist_offline_only",
+  /** command { effort }: the thinking effort for the chosen AI, where it offers one */
+  effort: "assist_effort",
+  /** event → Assist: the whole list again, each time one route's probe answers */
+  event: "assist-providers",
 } as const;
 
-const assistPv = { a: null as Assist | null };
+const assistPv = { a: null as Assist | null, checking: typeof location !== "undefined" && location.search.includes("assist=checking") };
 const pvAssist = () => (assistPv.a ??= previewAssist(new URLSearchParams(location.search).get("assist") ?? "fresh"));
+/** The preview's first answer: with `assist=checking`, every route a probe finds says it is being checked. */
+const pvAssistFirst = () => (assistPv.checking ? checkingAssist(pvAssist()) : pvAssist());
 const pvDo = (c: Parameters<typeof previewApply>[1]): Promise<void> => {
   const r = previewApply(pvAssist(), c);
   if (typeof r === "string") return Promise.reject(r);
@@ -1012,13 +1021,28 @@ const pvDo = (c: Parameters<typeof previewApply>[1]): Promise<void> => {
 };
 const pvLater = <T,>(ms: number, f: () => T | Promise<T>) => new Promise<T>((res, rej) => setTimeout(() => Promise.resolve().then(f).then(res, rej), ms));
 
-export const assistProviders = (): Promise<Assist> =>
+/** The list from what the engine knows now: it never waits on a probe. `refresh` asks every route again (Check again,
+ * after a sign-in); otherwise a round starts only when the last is stale. Each probe's answer arrives through
+ * `onAssistProviders`. */
+export const assistProviders = (refresh = false): Promise<Assist> =>
   (inTauri
-    ? invoke<unknown>(ASSIST.providers)
+    ? invoke<unknown>(ASSIST.providers, { refresh })
     : new URLSearchParams(location.search).get("assist") === "fail"
       ? Promise.reject("assist_providers failed (preview)")
-      : Promise.resolve(pvAssist())
+      : Promise.resolve(pvAssistFirst())
   ).then(normalizeAssist);
+/** The whole list again, each time one route's probe answers. In the preview (`assist=checking`) the routes being
+ * checked fill in a moment after the first draw. */
+export function onAssistProviders(fn: (a: Assist) => void): () => void {
+  if (inTauri) return subscribe(listen<unknown>(ASSIST.event, (e) => fn(normalizeAssist(e.payload))));
+  const t = setTimeout(() => {
+    if (assistPv.checking) {
+      assistPv.checking = false;
+      fn(normalizeAssist(pvAssist()));
+    }
+  }, 1200);
+  return () => clearTimeout(t);
+}
 export const assistModels = (id: string): Promise<AssistModel[]> =>
   inTauri ? invoke<unknown>(ASSIST.models, { id }).then(normalizeModels) : pvLater(1200, () => previewModels(id));
 /** `base` reaches the engine only for the other service (`custom`); every other route has its own address. */
@@ -1032,6 +1056,7 @@ export const assistKeySet = (id: string, key: string) =>
   inTauri ? invoke<void>(ASSIST.keySet, { id, key }) : pvDo({ cmd: "key_set", id });
 export const assistKeyDelete = (id: string) => (inTauri ? invoke<void>(ASSIST.keyDelete, { id }) : pvDo({ cmd: "key_delete", id }));
 export const assistSignIn = (id: string) => (inTauri ? invoke<void>(ASSIST.signIn, { id }) : pvLater(1800, () => pvDo({ cmd: "signed_in", id })));
+export const assistEffort = (effort: string) => (inTauri ? invoke<void>(ASSIST.effort, { effort }) : pvDo({ cmd: "effort", effort }));
 export const assistOfflineOnly = (on: boolean) => (inTauri ? invoke<void>(ASSIST.offlineOnly, { on }) : pvDo({ cmd: "offline", on }));
 
 export function stamp(ms: number): string {

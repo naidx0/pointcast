@@ -72,7 +72,7 @@ function previewConfig(): Config {
     also_clipboard: true,
     export_dir: null,
     zoom_px: 512,
-    mark_point: "ring",
+    mark_point: "off",
     zoom_target: "dwell",
     zoom_sharpen: true,
     outline_element: true,
@@ -85,7 +85,7 @@ function previewConfig(): Config {
     hidden: ["1Password", "Bitwarden", "KeePass", "Dashlane", "LastPass", "Keychain Access"],
     mcp_bind: "127.0.0.1:47821",
     mcp_enabled: true,
-    onboarded: false,
+    onboarded: typeof location !== "undefined" && location.search.includes("news=1"),
     sounds: true,
     speech: {
       runtime: { id: "runtime", installed: false, lib: "" },

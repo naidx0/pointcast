@@ -405,13 +405,32 @@ fn assist_home() -> std::path::PathBuf {
     settings::data_dir().join("assistant")
 }
 
-/// Every AI Pointcast offers and where each stands. Spends nothing: Codex is asked its version and whether it is
-/// signed in, the store which keys it holds, and the usual ports on this computer for their model lists (2 s).
+/// The event that carries the whole list again each time one route's probe answers.
+const ASSIST_PROVIDERS: &str = "assist-providers";
+
+/// Every AI Pointcast offers and where each stands, from what is known now: it never waits on a probe. A round of
+/// probes (Codex's version, sign-in and account; each agent's version; the usual ports on this computer) starts when
+/// the last is stale or `refresh` asks, and each answer sends the list again as `assist-providers`. Spends nothing.
 #[tauri::command]
-async fn assist_providers(svc: tauri::State<'_, Arc<App>>, held: tauri::State<'_, Arc<assist::catalog::Held>>) -> Result<assist::catalog::List, String> {
-    let s = svc.settings.lock().unwrap().clone();
-    let held = held.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || assist::catalog::providers(&s, &assist::catalog::look(&held))).await.map_err(|e| e.to_string())
+fn assist_providers(
+    app: AppHandle,
+    svc: tauri::State<'_, Arc<App>>,
+    held: tauri::State<'_, Arc<assist::catalog::Held>>,
+    survey: tauri::State<'_, Arc<assist::catalog::Survey>>,
+    refresh: Option<bool>,
+) -> assist::catalog::List {
+    let (svc, held, survey) = (svc.inner().clone(), held.inner().clone(), survey.inner().clone());
+    let list = |svc: &App, held: &assist::catalog::Held, survey: &assist::catalog::Survey| {
+        let s = svc.settings.lock().unwrap().clone();
+        survey.now(&s, assist::vault::has, held.held())
+    };
+    let now = list(&svc, &held, &survey);
+    let (s2, h2, v2) = (svc.clone(), held.clone(), survey.clone());
+    let told = Arc::new(move || {
+        let _ = app.emit(ASSIST_PROVIDERS, list(&s2, &h2, &v2));
+    });
+    survey.refresh(assist::catalog::probes(held, assist_home()), refresh.unwrap_or(false), told);
+    now
 }
 
 /// The models `id` offers, asked of it now (Codex is started for its list). Never a question.
@@ -468,6 +487,12 @@ async fn assist_sign_in(app: AppHandle, id: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The thinking effort for the chosen AI, where it offers one (Codex: low, medium, high).
+#[tauri::command]
+fn assist_effort(svc: tauri::State<'_, Arc<App>>, effort: String) -> Result<(), String> {
+    assist_change(&svc, |s| assist::catalog::set_effort(s, &effort))
 }
 
 #[tauri::command]
@@ -2282,6 +2307,7 @@ pub fn run() {
             assist_key_delete,
             assist_sign_in,
             assist_offline_only,
+            assist_effort,
             platform_info,
         ])
         .setup(move |app| {
@@ -2292,6 +2318,17 @@ pub fn run() {
             tray::setup(&handle, &svc)?;
             let held = Arc::new(assist::catalog::Held::new(assist_home()));
             app.manage(held.clone());
+            // Which AIs this computer has is looked at once, at launch; Refresh in Settings › AI looks again.
+            let survey = Arc::new(assist::catalog::Survey::default());
+            app.manage(survey.clone());
+            {
+                let (h, s2, v2, hd) = (handle.clone(), svc.clone(), survey.clone(), held.clone());
+                let told = Arc::new(move || {
+                    let s = s2.settings.lock().unwrap().clone();
+                    let _ = h.emit(ASSIST_PROVIDERS, v2.now(&s, assist::vault::has, hd.held()));
+                });
+                survey.refresh(assist::catalog::probes(held.clone(), assist_home()), false, told);
+            }
             app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
@@ -2865,7 +2902,7 @@ mod tests {
         assert_eq!((next.mark_point, next.zoom_target, next.zoom_sharpen), (settings::MarkPoint::Trail, settings::ZoomTarget::Window, false));
         assert!(merge(&next, p(json!({ "mark_point": "sparkles" }))).is_err());
         let back = merge(&next, p(json!({ "mark_point": null }))).unwrap();
-        assert_eq!(back.mark_point, settings::MarkPoint::Ring);
+        assert_eq!(back.mark_point, settings::MarkPoint::Off);
         let quiet = merge(&back, p(json!({ "outline_element": false }))).unwrap();
         assert!(!quiet.outline_element && back.outline_element);
         let mute = merge(&quiet, p(json!({ "spoken_anchors": "off" }))).unwrap();

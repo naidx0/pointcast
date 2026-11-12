@@ -179,6 +179,10 @@ pub trait Provider: Send + Sync {
     fn adds(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Who is signed in, as the AI's own app said at its last greeting (Codex's `account/read`); none before one.
+    fn account(&self) -> Option<codex::Account> {
+        None
+    }
 }
 
 pub trait Chat: Send {

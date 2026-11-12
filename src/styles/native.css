@@ -1220,8 +1220,10 @@ html.win .home-recent button {
   line-height: 20px;
   letter-spacing: -0.01em;
 }
+/* Two lines kept for each block's sentence, so the keys of both blocks start on one line across the page. */
 .feature p {
   margin: 4px 0 0;
+  min-height: 32px;
   font-size: var(--fs-small);
   line-height: 16px;
   color: var(--label-2);
@@ -1229,7 +1231,8 @@ html.win .home-recent button {
 /* Each key's name and its caps on one row; the caps of every row start on one edge. */
 .feature-keys {
   display: grid;
-  grid-template-columns: max-content max-content;
+  /* One label column for both blocks: their caps start the same distance in. */
+  grid-template-columns: 64px max-content;
   justify-content: start;
   align-items: center;
   gap: 8px 12px;
@@ -1246,12 +1249,17 @@ html.win .home-recent button {
   line-height: 16px;
 }
 /* Its links are quiet, as the page's are; the one that still needs doing (Choose an AI) is in the text colour. */
+/* The chevron sits on the words' own middle: inline, `vertical-align: middle` puts its centre half an x-height above
+   the baseline, whatever the font (a flex centre put it 2 px above the letters in both skins). */
 .feature .link {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
+  display: inline-block;
   font: inherit;
   color: var(--label-2);
+  white-space: nowrap;
+}
+.feature .link svg {
+  vertical-align: middle;
+  margin-left: 2px;
 }
 .feature .link:hover {
   color: var(--label);
@@ -2812,4 +2820,103 @@ html.win .undo-btn {
   font-size: var(--fs-small);
   font-weight: 500;
   color: rgba(255, 255, 255, 0.6);
+}
+
+/* —— Settings › AI: each route's own mark in a small rounded tile, the chosen AI and its model at the top. —— */
+.brand-tile {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 0.5px var(--sep);
+  color: var(--label);
+}
+.brand-tile.mono span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-2);
+}
+.ai-route .brand-tile,
+.ai-now .brand-tile {
+  margin-right: 12px;
+}
+.ai-route.checking .brand-tile {
+  opacity: 0.55;
+}
+.ai-now .lbl {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.ai-now-model {
+  font-weight: 600;
+  color: var(--label);
+}
+.ai-now-model::before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--label-3);
+  font-weight: 400;
+}
+.ai-plan {
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--label-2);
+  box-shadow: inset 0 0 0 0.5px var(--label-3);
+}
+.ai-account {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+}
+.ai-account .link {
+  font: inherit;
+  font-size: 12px;
+  color: var(--label-2);
+}
+.ai-account .link:hover {
+  color: var(--label);
+}
+.ai-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.ai-group-title h2 {
+  margin: 0;
+  font: inherit;
+}
+/* Home's one-time card for Ask, for someone who finished setup before it existed. */
+.home-news {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  border-radius: var(--r-card);
+  box-shadow: inset 0 0 0 0.5px var(--label-3);
+}
+.home-news .grow {
+  flex: 1;
+  min-width: 0;
+}
+.home-news .t {
+  font-weight: 600;
+}
+.home-news .s {
+  margin-top: 2px;
+  font-size: var(--fs-small);
+  color: var(--label-2);
+}
+.home-news .s .keys {
+  vertical-align: middle;
+}
+.onb-try .keys {
+  vertical-align: middle;
+  margin: 0 2px;
 }

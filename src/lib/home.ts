@@ -3,6 +3,10 @@
 
 import type { HistoryMeta } from "./api";
 
+/** Home's one-time "New: Ask about your screen" card: for someone who finished setup before Ask existed and has not
+ * seen it introduced. Dismissed, it is remembered in the settings (`ask_intro_seen`). */
+export const askNews = (cfg: { onboarded: boolean; ask_intro_seen?: boolean }) => cfg.onboarded && !cfg.ask_intro_seen;
+
 /** How many recordings Home lists. */
 export const RECENT = 5;
 

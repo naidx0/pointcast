@@ -7,28 +7,35 @@ import {
   CUSTOM,
   GROUPS,
   PREVIEW_KINDS,
+  CODEX_SIGN_OUT,
+  checkingAssist,
+  modelName,
   askReady,
   baseOf,
   chosenRoute,
   consentText,
   customCheck,
+  effortView,
   defaultModel,
   goesLine,
   groups,
   hostOf,
+  installHelp,
   isHere,
   modelLabel,
   needsConsent,
   needsConsentAt,
   normalizeAssist,
   nowView,
+  offlineSaid,
+  withOffline,
   previewApply,
   previewAssist,
   routeView,
   visibleRoutes,
 } from "./assist.ts";
 
-const STATES = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported"];
+const STATES = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported", "checking"];
 const route = (o = {}) => ({
   id: "codex",
   name: "ChatGPT",
@@ -41,7 +48,9 @@ const route = (o = {}) => ({
   base: "",
   consented: false,
   models: [],
+  efforts: [],
   plan: null,
+  email: null,
   adds: [],
   ...o,
 });
@@ -67,7 +76,7 @@ test("each state offers the action that fits it", () => {
   assert.deepEqual(act({ state: "ready" }), ["use", "Use"]);
   assert.deepEqual(act({ state: "signed_out" }), ["sign_in", "Sign in"]);
   assert.deepEqual(act({ kind: "key", id: "openai", state: "no_key" }), ["add_key", "Add key"]);
-  assert.deepEqual(act({ state: "not_installed" }), ["get", "How to get it"]);
+  assert.deepEqual(act({ state: "not_installed" }), ["get", "Install"]);
   assert.deepEqual(act({ state: "too_old" }), ["get", "How to update"]);
   assert.deepEqual(act({ kind: "local", id: "ollama", name: "Ollama on this computer", state: "not_running" }), ["check", "Check again"]);
   assert.deepEqual(act({ state: "unsupported" }), [null, null]);
@@ -79,7 +88,7 @@ test("a signed-in plan says which plan, in plain words", () => {
   assert.equal(routeView(route({ state: "ready", plan: "PLUS" }), none).line, "ChatGPT Plus, through Codex");
   assert.equal(routeView(route({ state: "ready" }), none).line, "Signed in", "no plan said: no plan guessed");
   assert.equal(normalizeAssist({ providers: [{ id: "codex", kind: "plan", planType: "free" }] }).providers[0].plan, "free");
-  assert.equal(routeView(previewAssist("codex-ready").providers[0], previewAssist("codex-ready")).line, "ChatGPT Free, through Codex");
+  assert.equal(routeView(previewAssist("codex-ready").providers[0], previewAssist("codex-ready")).line, "Signed in as you@example.com", "the address Codex names comes first");
 });
 
 test("a route on this computer drops the words its group already says", () => {
@@ -108,6 +117,7 @@ test("Codex's help is OpenAI's own one-line install; the others say where to get
   assert.equal(ollama.help.command, null);
   assert.match(ollama.help.text, /ollama\.com/);
   assert.equal(routeView(route({ state: "ready" }), none).help, null);
+  assert.match(get.account, /Sign in/, "then the account, through Codex's own sign-in");
 });
 
 test("forget is offered only when there is something to forget", () => {
@@ -139,12 +149,13 @@ test("an agent shows the engine's line as is, offers Use when installed, Check a
   const gemini = routeView(byId(a, "gemini-cli"), a);
   assert.deepEqual([gemini.name, gemini.line, gemini.action, gemini.label], ["Gemini", "Gemini CLI 0.9.0 is installed. Sign in with the Gemini CLI first.", "use", "Use"]);
   const copilot = routeView(byId(a, "copilot"), a);
-  assert.deepEqual([copilot.line, copilot.action, copilot.label, copilot.help], [
-    "GitHub Copilot CLI is not installed on this computer. Install it first.",
-    "check",
-    "Check again",
-    null,
-  ]);
+  assert.deepEqual([copilot.line, copilot.action, copilot.label], ["GitHub Copilot CLI is not installed on this computer. Install it first.", "get", "Install"]);
+  assert.deepEqual([copilot.help.command, copilot.help.page], ["npm install -g @github/copilot", "https://github.com/github/copilot-cli"]);
+  assert.match(copilot.help.account, /sign in/);
+  for (const id of ["gemini-cli", "copilot", "opencode", "claude-code"]) {
+    const h = installHelp({ id, name: id });
+    assert.ok(h.command.startsWith("npm install -g ") && h.page.startsWith("https://") && h.account, id);
+  }
   assert.equal(routeView(route({ kind: "agent", id: "opencode", name: "OpenCode", state: "unsupported", line: "OpenCode is installed, but…" }), none).action, null);
   assert.equal(defaultModel(byId(a, "gemini-cli")), null, "an agent picks its own model");
   // Chosen, it says where the words go, with the destination the engine names.
@@ -315,7 +326,7 @@ test("a route starts on a model that can see pictures, and one that cannot is ma
 });
 
 test("a reply of any shape reads as a whole one", () => {
-  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, offline_only: false, providers: [] });
+  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, effort: null, offline_only: false, providers: [] });
   const a = normalizeAssist({
     chosen: "gone",
     providers: [{ id: "x", kind: "local", state: "weird" }, { id: "", kind: "key" }, { id: "y", kind: "nope" }, { id: "z", kind: "key", models: [{ id: "m" }, null] }],
@@ -358,4 +369,64 @@ test("every preview kind is a whole reply, and the preview commands change it as
   assert.equal(routeView(byId(a, "openai"), a).line, "Key saved");
   a = previewApply(a, { cmd: "forget", id: "openai" });
   assert.equal(byId(a, "openai").state, "no_key", "forget clears the key too");
+});
+
+test("the first answer draws every route at once: a route being checked says so and offers nothing until its probe answers", () => {
+  const filled = previewAssist("codex-ready");
+  const first = checkingAssist(filled);
+  assert.equal(first.chosen, "codex", "the choice is known at once");
+  assert.equal(first.model, "gpt-6-luna");
+  for (const p of first.providers) {
+    if (p.kind === "key" || !p.available) assert.notEqual(p.state, "checking", `${p.id}: known at once`);
+    else assert.equal(p.state, "checking", p.id);
+  }
+  const v = routeView(byId(first, "codex"), first);
+  assert.deepEqual([v.line, v.action, v.label, v.checking, v.chosen], ["Checking…", null, null, true, true]);
+  assert.equal(nowView(first).title, "ChatGPT", "the chosen AI heads the pane before its probe answers");
+  assert.equal(modelName(first, byId(first, "codex")), "GPT-6-Luna", "the chosen model is named before its list comes");
+  assert.equal(normalizeAssist({ providers: [{ id: "x", kind: "agent", state: "checking" }] }).providers[0].state, "checking");
+});
+
+test("the ChatGPT row says whom Codex is signed in as and on which plan, and points to Codex's own sign-out", () => {
+  const p = route({ state: "ready", plan: "plus", email: "someone@example.test" });
+  const v = routeView(p, none);
+  assert.equal(v.line, "Signed in as someone@example.test");
+  assert.deepEqual(v.account, { who: "someone@example.test", plan: "Plus" });
+  assert.deepEqual(routeView(route({ state: "ready", plan: "free" }), none).account, { who: null, plan: "Free" });
+  assert.equal(routeView(route({ state: "signed_out", email: "someone@example.test" }), none).account, null, "nobody named once signed out");
+  assert.equal(routeView(route({ id: "openai", kind: "key", state: "ready" }), none).account, null);
+  assert.equal(normalizeAssist({ providers: [{ id: "codex", kind: "plan", email: " a@b.test " }] }).providers[0].email, "a@b.test");
+  assert.equal(CODEX_SIGN_OUT, "codex logout");
+});
+
+test("a model is named in plain words, from its list when there is one", () => {
+  assert.equal(modelName({ model: "gpt-6-luna" }, null), "GPT-6-Luna");
+  assert.equal(modelName({ model: "m1" }, { models: [{ id: "m1", name: "Model One", images: true }] }), "Model One");
+  assert.equal(modelName({ model: null }, { models: [{ id: "a", name: "A", images: true, default: true }] }), "A");
+  assert.equal(modelName({ model: null }, null), null);
+});
+
+test("Only on this computer flips at once and says what it did in one quiet line", () => {
+  const a = previewAssist("codex-ready");
+  const on = withOffline(a, true);
+  assert.equal(on.offline_only, true);
+  assert.ok(visibleRoutes(on).every((p) => p.offline), "only this computer's AIs are listed at once");
+  assert.equal(chosenRoute(on), null, "ChatGPT is off for now, before the engine answers");
+  assert.equal(a.offline_only, false, "the list it came from is untouched");
+  assert.equal(withOffline(on, false).providers.length, visibleRoutes(withOffline(on, false)).length);
+  assert.equal(offlineSaid(true), "On. Only AIs on this computer are shown and asked.");
+  assert.equal(offlineSaid(false), "Off. Every AI is shown again.");
+});
+
+test("the effort control shows only for a route that offers one, starting where the route starts", () => {
+  let a = previewAssist("codex-ready");
+  const codex = byId(a, "codex");
+  assert.deepEqual(effortView(a, codex), { value: "low", options: [["low", "Low"], ["medium", "Medium"], ["high", "High"]] });
+  a = previewApply(a, { cmd: "effort", effort: "high" });
+  assert.equal(effortView(a, codex).value, "high");
+  assert.equal(typeof previewApply(a, { cmd: "effort", effort: "extreme" }), "string");
+  const key = previewAssist("key");
+  assert.equal(effortView(key, chosenRoute(key)), null, "a key route offers no effort: no control");
+  assert.equal(effortView(a, null), null);
+  assert.deepEqual(normalizeAssist({ effort: "medium", providers: [{ id: "codex", kind: "plan", efforts: ["low", 3, "high"] }] }).providers[0].efforts, ["low", "high"]);
 });

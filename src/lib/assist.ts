@@ -5,7 +5,8 @@
 /** How a route is paid for: the ChatGPT plan through Codex, another subscription through its vendor's own agent, a
  * pasted key, or nothing (a model on this computer). */
 export type RouteKind = "plan" | "agent" | "key" | "local";
-export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported";
+/** `checking`: its probe has not answered yet; the pane draws at once and the route fills in when it does. */
+export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported" | "checking";
 /** `default`: the model the route itself starts with. */
 export type AssistModel = { id: string; name: string; images: boolean; default?: boolean };
 
@@ -28,14 +29,18 @@ export type Route = {
   /** The person allowed this AI and destination once. */
   consented: boolean;
   models: AssistModel[];
+  /** The thinking efforts it offers, lowest first (Codex: low, medium, high); empty where it offers no choice. */
+  efforts: string[];
   /** The ChatGPT plan Codex is signed in with ("free", "plus"); null when not said. Read from `plan` or `planType`. */
   plan: string | null;
+  /** The address Codex's own account/read says the person is signed in with; null when not said. Shown, never kept. */
+  email: string | null;
   /** Files the route always sends along with each question (Codex: the person's own AGENTS.md); empty when none. */
   adds: string[];
 };
 
 /** The reply of `assist_providers`. */
-export type Assist = { chosen: string | null; model: string | null; offline_only: boolean; providers: Route[] };
+export type Assist = { chosen: string | null; model: string | null; effort: string | null; offline_only: boolean; providers: Route[] };
 
 /** The one action a route offers in its state. */
 export type RouteAction = "use" | "sign_in" | "add_key" | "get" | "check" | null;
@@ -52,8 +57,22 @@ export type RouteView = {
   forget: boolean;
   /** What "How to get it" opens: a sentence and, for Codex, the official one-line install. */
   help: Help | null;
+  /** Signed in through the vendor's own app: whom as (the address, when it says) and on which plan ("Plus"). */
+  account: { who: string | null; plan: string | null } | null;
+  /** The route is being checked: its line says so and it offers nothing yet. */
+  checking: boolean;
 };
-export type Help = { text: string; command: string | null };
+/** How to get a missing app: a sentence, the vendor's own install line (Copy), its official page, and how to set up
+ * the account through the vendor's own sign-in; then Refresh. Pointcast runs none of it. */
+export type Help = { text: string; command: string | null; page?: string; account?: string };
+
+/** Each agent's official install line, page and own sign-in, as its vendor publishes them. */
+export const AGENT_INSTALL: Record<string, { command: string; page: string; account: string }> = {
+  "gemini-cli": { command: "npm install -g @google/gemini-cli", page: "https://github.com/google-gemini/gemini-cli", account: "Then run gemini in a terminal once and sign in with Google." },
+  copilot: { command: "npm install -g @github/copilot", page: "https://github.com/github/copilot-cli", account: "Then run copilot in a terminal once and sign in with /login." },
+  opencode: { command: "npm install -g opencode-ai", page: "https://opencode.ai/docs", account: "Then run opencode auth login in a terminal and choose your AI." },
+  "claude-code": { command: "npm install -g @anthropic-ai/claude-code", page: "https://docs.claude.com/en/docs/claude-code/setup", account: "Then run claude in a terminal once and sign in." },
+};
 
 export const GROUPS: readonly (readonly [RouteKind, string])[] = [
   ["plan", "Your plan"],
@@ -69,7 +88,7 @@ export const CODEX_INSTALL = "npm i -g @openai/codex";
 export const CUSTOM = "custom";
 
 const KINDS: RouteKind[] = ["plan", "agent", "key", "local"];
-const STATES: RouteState[] = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported"];
+const STATES: RouteState[] = ["ready", "signed_out", "not_installed", "too_old", "no_key", "not_running", "unsupported", "checking"];
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
 /** A reply with every field in its type, whatever arrived; a route without an id or a known kind is dropped. */
@@ -89,11 +108,13 @@ export function normalizeAssist(x: unknown): Assist {
       base: str(p.base).trim(),
       consented: p.consented === true,
       models: normalizeModels(p.models),
+      efforts: (Array.isArray(p.efforts) ? p.efforts : []).filter((e) => typeof e === "string" && e),
       plan: str(p.plan) || str((p as { planType?: unknown }).planType) || null,
+      email: str(p.email).trim() || null,
       adds: (Array.isArray(p.adds) ? p.adds : []).filter((f) => typeof f === "string" && f.trim()),
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
-  return { chosen, model: str(v.model) || null, offline_only: v.offline_only === true, providers };
+  return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, offline_only: v.offline_only === true, providers };
 }
 
 export function normalizeModels(x: unknown): AssistModel[] {
@@ -113,6 +134,12 @@ export function chosenRoute(a: Assist): Route | null {
   const p = a.providers.find((r) => r.id === a.chosen) ?? null;
   return p && p.available && (!a.offline_only || p.offline) ? p : null;
 }
+
+/** "Only on this computer", flipped at once in the pane before the engine confirms it. */
+export const withOffline = (a: Assist, on: boolean): Assist => ({ ...a, offline_only: on });
+
+/** What the switch did, in one quiet line under it. */
+export const offlineSaid = (on: boolean) => (on ? "On. Only AIs on this computer are shown and asked." : "Off. Every AI is shown again.");
 
 /** Ask can answer: an AI is chosen and allowed. Home shows the Ask key only then. */
 export const askReady = (a: Assist) => chosenRoute(a) != null;
@@ -134,8 +161,10 @@ export const shortName = (p: Pick<Route, "name">) => p.name.replace(/ on this co
 /** A ChatGPT plan in plain words: "free" is "Free", "plus" is "Plus". */
 const planName = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase();
 
-/** A signed-in plan: "ChatGPT Free, through Codex". */
+/** A signed-in plan: "Signed in as someone@example.com" when Codex names the address, else "ChatGPT Free, through
+ * Codex". */
 function planLine(p: Route): string {
+  if (p.email) return `Signed in as ${p.email}`;
   if (!p.plan) return "Signed in";
   const named = `${p.name} ${planName(p.plan)}`;
   return p.id === "codex" ? `${named}, through Codex` : named;
@@ -145,12 +174,23 @@ function planLine(p: Route): string {
  * why and offers nothing; an agent's line is the engine's own, which already ends in its one next step. */
 export function routeView(p: Route, a: Pick<Assist, "chosen" | "offline_only">): RouteView {
   const chosen = a.chosen === p.id && p.available && (!a.offline_only || p.offline);
-  const base = { id: p.id, name: shortName(p), chosen, forget: chosen || p.consented || (p.kind === "key" && p.state !== "no_key"), help: null };
+  const account = p.kind === "plan" && p.state === "ready" ? { who: p.email ?? null, plan: p.plan ? planName(p.plan) : null } : null;
+  const base = {
+    id: p.id,
+    name: shortName(p),
+    chosen,
+    forget: chosen || p.consented || (p.kind === "key" && p.state !== "no_key"),
+    help: null,
+    account,
+    checking: false,
+  };
   const use = (line: string): RouteView => ({ ...base, line, action: chosen ? null : "use", label: chosen ? null : "Use" });
   if (!p.available) return { ...base, line: p.line || "Not available yet", action: null, label: null };
+  if (p.state === "checking") return { ...base, line: "Checking…", action: null, label: null, checking: true };
   if (p.kind === "agent") {
     const v = stateView(p, base, use);
     const line = p.line || v.line;
+    if (p.state === "not_installed" && AGENT_INSTALL[p.id]) return { ...base, line, action: "get", label: "Install", help: installHelp(p) };
     return p.state === "ready" || p.state === "unsupported" ? { ...v, line } : { ...base, line, action: "check", label: "Check again" };
   }
   if (p.id === CUSTOM && p.state !== "unsupported") {
@@ -179,18 +219,47 @@ function stateView(p: Route, base: Omit<RouteView, "line" | "action" | "label">,
         label: "Check again",
       };
     case "not_installed":
-      return { ...base, line: `${app(p)} is not on this computer`, action: "get", label: "How to get it", help: installHelp(p) };
+      return { ...base, line: `${app(p)} is not on this computer`, action: "get", label: "Install", help: installHelp(p) };
     case "too_old":
       return { ...base, line: p.line || `This ${app(p)} is too old`, action: "get", label: "How to update", help: installHelp(p, true) };
     case "unsupported":
       return { ...base, line: p.line || "Not available on this computer", action: null, label: null };
+    case "checking":
+      return { ...base, line: "Checking…", action: null, label: null, checking: true };
   }
+}
+
+/** Codex's own way to sign out, said as a pointer: Pointcast never signs anyone out of another app. */
+export const CODEX_SIGN_OUT = "codex logout";
+
+/** The first answer while the probes are out: every route a probe finds says it is being checked, with nothing
+ * offered yet; keys, the choice and the switch are known at once. */
+export function checkingAssist(a: Assist): Assist {
+  return { ...a, providers: a.providers.map((p) => (p.kind === "key" || !p.available ? p : { ...p, state: "checking", line: "", models: [] })) };
+}
+
+/** A model id in plain words, for when its list has not come yet: "gpt-6-luna" is "GPT-6-Luna". */
+export function modelName(a: Pick<Assist, "model">, p: Pick<Route, "models"> | null): string | null {
+  if (!a.model) return p ? (p.models.find((m) => m.default)?.name ?? null) : null;
+  const known = p?.models.find((m) => m.id === a.model);
+  if (known) return known.name;
+  return a.model
+    .split("-")
+    .map((w) => (/^gpt$/i.test(w) ? "GPT" : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join("-");
 }
 
 /** What "How to get it" shows: Codex's official install line, or where the app is published. */
 export function installHelp(p: Pick<Route, "id" | "name">, update = false): Help {
   if (p.id === "codex")
-    return { text: `${update ? "Update" : "Install"} Codex in a terminal, then check again. It needs Node.js.`, command: CODEX_INSTALL };
+    return {
+      text: `${update ? "Update" : "Install"} Codex in a terminal, then check again. It needs Node.js.`,
+      command: CODEX_INSTALL,
+      page: "https://github.com/openai/codex",
+      account: "Then come back and choose Sign in: Codex opens ChatGPT's own sign-in page.",
+    };
+  const agent = AGENT_INSTALL[p.id];
+  if (agent) return { text: `Install ${p.name}'s own app in a terminal, then check again. It needs Node.js.`, ...agent };
   if (p.id === "ollama") return { text: `Get Ollama from ollama.com, start it, then check again.`, command: null };
   if (p.id === "lmstudio") return { text: "Get LM Studio from lmstudio.ai, start its server, then check again.", command: null };
   return { text: `Install ${p.name}, then check again.`, command: null };
@@ -241,6 +310,14 @@ export function consentText(p: Pick<Route, "id" | "name" | "goes_to" | "offline"
 /** The model a route starts with when chosen: its own default, else the first that can see pictures, else the first. */
 export function defaultModel(p: Pick<Route, "models">): string | null {
   return (p.models.find((m) => m.default) ?? p.models.find((m) => m.images) ?? p.models[0])?.id ?? null;
+}
+
+/** The effort control for the chosen AI: its choices in words, the one in use (its first, the route's start, when
+ * none is saved); null for a route that offers no choice, which then shows no control. */
+export function effortView(a: Pick<Assist, "effort">, p: Pick<Route, "efforts"> | null): { value: string; options: [string, string][] } | null {
+  if (!p || !p.efforts.length) return null;
+  const options = p.efforts.map((e): [string, string] => [e, e.charAt(0).toUpperCase() + e.slice(1)]);
+  return { value: a.effort && p.efforts.includes(a.effort) ? a.effort : p.efforts[0], options };
 }
 
 /** A model as the select lists it; one that cannot see pictures says so. */
@@ -319,7 +396,7 @@ export const needsConsentAt = (p: Pick<Route, "consented" | "base">, base: strin
 
 // —— Browser preview fixtures (settings.html?preview=1&pane=ai&assist=…): data only; api.ts plays them. ——
 
-export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key", "local", "offline"] as const;
+export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key", "local", "offline", "checking"] as const;
 
 const MODELS: Record<string, AssistModel[]> = {
   // As Codex's model/list answered for a ChatGPT Free plan.
@@ -365,13 +442,16 @@ export function previewAssist(kind: string): Assist {
     base: "",
     consented: false,
     models: state === "ready" ? MODELS[id] ?? [] : [],
+    efforts: id === "codex" ? ["low", "medium", "high"] : [],
     plan: null,
+    email: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
   });
   const missing = (cli: string) => `${cli} is not installed on this computer. Install it first.`;
   const a: Assist = {
     chosen: null,
     model: null,
+    effort: null,
     offline_only: false,
     providers: [
       r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
@@ -401,9 +481,9 @@ export function previewAssist(kind: string): Assist {
     a.model = defaultModel(a.providers.find((x) => x.id === id)!);
   };
   if (kind === "codex-signed-out") set("codex", { state: "signed_out" });
-  if (kind === "codex-ready") {
+  if (kind === "codex-ready" || kind === "checking") {
     choose("codex");
-    set("codex", { plan: "free" });
+    set("codex", { plan: "plus", email: "you@example.com" });
   }
   if (kind === "key") {
     set("codex", { state: "signed_out" });
@@ -423,13 +503,19 @@ export function previewApply(
   c:
     | { cmd: "choose"; id: string; model: string | null; consent: boolean; base?: string }
     | { cmd: "forget" | "key_set" | "key_delete" | "signed_in"; id: string }
-    | { cmd: "offline"; on: boolean },
+    | { cmd: "offline"; on: boolean }
+    | { cmd: "effort"; effort: string },
 ): Assist | string {
   const find = (id: string) => a.providers.find((p) => p.id === id);
   const map = (id: string, f: (p: Route) => Route) => ({ ...a, providers: a.providers.map((p) => (p.id === id ? f(p) : p)) });
   switch (c.cmd) {
     case "offline":
       return { ...a, offline_only: c.on };
+    case "effort": {
+      const p = a.providers.find((x) => x.id === a.chosen);
+      if (!p || !p.efforts.includes(c.effort)) return `${p?.name ?? "That AI"} offers no "${c.effort}" effort.`;
+      return { ...a, effort: c.effort };
+    }
     case "choose": {
       const p = find(c.id);
       if (!p) return "Pointcast does not offer that AI.";
