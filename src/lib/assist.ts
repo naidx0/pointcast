@@ -122,6 +122,12 @@ export function chosenRoute(a: Assist): Route | null {
   return p && p.available && (!a.offline_only || p.offline) ? p : null;
 }
 
+/** "Only on this computer", flipped at once in the pane before the engine confirms it. */
+export const withOffline = (a: Assist, on: boolean): Assist => ({ ...a, offline_only: on });
+
+/** What the switch did, in one quiet line under it. */
+export const offlineSaid = (on: boolean) => (on ? "On. Only AIs on this computer are shown and asked." : "Off. Every AI is shown again.");
+
 /** Ask can answer: an AI is chosen and allowed. Home shows the Ask key only then. */
 export const askReady = (a: Assist) => chosenRoute(a) != null;
 

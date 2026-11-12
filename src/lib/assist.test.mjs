@@ -25,6 +25,8 @@ import {
   needsConsentAt,
   normalizeAssist,
   nowView,
+  offlineSaid,
+  withOffline,
   previewApply,
   previewAssist,
   routeView,
@@ -397,4 +399,16 @@ test("a model is named in plain words, from its list when there is one", () => {
   assert.equal(modelName({ model: "m1" }, { models: [{ id: "m1", name: "Model One", images: true }] }), "Model One");
   assert.equal(modelName({ model: null }, { models: [{ id: "a", name: "A", images: true, default: true }] }), "A");
   assert.equal(modelName({ model: null }, null), null);
+});
+
+test("Only on this computer flips at once and says what it did in one quiet line", () => {
+  const a = previewAssist("codex-ready");
+  const on = withOffline(a, true);
+  assert.equal(on.offline_only, true);
+  assert.ok(visibleRoutes(on).every((p) => p.offline), "only this computer's AIs are listed at once");
+  assert.equal(chosenRoute(on), null, "ChatGPT is off for now, before the engine answers");
+  assert.equal(a.offline_only, false, "the list it came from is untouched");
+  assert.equal(withOffline(on, false).providers.length, visibleRoutes(withOffline(on, false)).length);
+  assert.equal(offlineSaid(true), "On. Only AIs on this computer are shown and asked.");
+  assert.equal(offlineSaid(false), "Off. Every AI is shown again.");
 });

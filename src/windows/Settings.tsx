@@ -80,7 +80,9 @@ import {
   needsConsent,
   needsConsentAt,
   nowView,
+  offlineSaid,
   shortName,
+  withOffline,
   type Assist,
   type AssistModel,
   type Route,
@@ -784,6 +786,8 @@ function Ai() {
   const [finding, setFinding] = useState(false);
   // The routes did not come: one quiet line with Try again, never an empty pane.
   const [failed, setFailed] = useState(false);
+  // What the last flip of "Only on this computer" did, in one quiet line.
+  const [said, setSaid] = useState("");
   // The engine answers at once from what it knows; each route's probe fills in through onAssistProviders. `refresh`
   // asks every route again (Check again, after a sign-in).
   const load = (refresh = false) =>
@@ -842,6 +846,12 @@ function Ai() {
       await load(refresh);
     }
   };
+  // The switch flips at once and says what it did; the engine's list then confirms it (or puts it back, with why).
+  const offline = (on: boolean) => {
+    setA((x) => (x ? { ...x, offline_only: on } : x));
+    setSaid(on ? "On. Only AIs on this computer are shown and asked." : "Off. Every AI is shown again.");
+    run("offline", () => assistOfflineOnly(on)).then((ok) => ok || setSaid(""));
+  };
   // A key's or a server's models are not in the quick list: they are asked for before the choice, which needs one.
   const choose = (p: Route, consent: boolean, model?: string, base?: string) =>
     run(p.id, async () => {
@@ -895,9 +905,15 @@ function Ai() {
         </Row>
         <Row
           label="Only on this computer"
-          sub={errs.offline ? <span style={{ color: "var(--red-ink)" }}>{errs.offline}</span> : "Hides every AI that sends your words off this computer."}
+          sub={
+            errs.offline ? (
+              <span style={{ color: "var(--red-ink)" }}>{errs.offline}</span>
+            ) : (
+              <span role="status">{said || "Hides every AI that sends your words off this computer."}</span>
+            )
+          }
         >
-          <Toggle label="Only on this computer" on={a.offline_only} set={(v) => run("offline", () => assistOfflineOnly(v))} />
+          <Toggle label="Only on this computer" on={a.offline_only} set={offline} />
         </Row>
       </div>
       {groups(a).map((g) => (
