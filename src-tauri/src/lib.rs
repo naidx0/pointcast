@@ -385,7 +385,12 @@ fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Hel
         summary::Deps {
             chosen: Box::new(move || {
                 let s = chooser.settings.lock().unwrap().clone();
-                held.provider(&s).map(|p| (p, s.assist_model.clone()))
+                // A summary goes through a cheaper pick of the same AI (S3): its own provider, so the one held
+                // for Ask is not touched. Codex's list, when the held AI is Codex and has one, chooses the model.
+                let models = held.held().filter(|p| p.id() == assist::codex::ID).map(|p| p.models()).unwrap_or_default();
+                let pick = assist::catalog::summary_pick(&assist::catalog::picked(&s)?, &models);
+                let model = pick.model.clone();
+                assist::catalog::build(&pick, &assist_home()).map(|p| (p, model))
             }),
             out: Box::new(move |state| {
                 let _ = handle.emit("summary://state", &state);

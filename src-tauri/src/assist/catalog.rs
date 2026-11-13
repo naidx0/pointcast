@@ -783,6 +783,33 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
     Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s), computer: s.computer_use && may_act(r.id) })
 }
 
+/// The `Picked` a summary goes through, cheaper than an Ask's: Claude's Haiku thinking little, Codex's model that
+/// thinks least, every other AI's own model unchanged. It never acts on the computer — a summary only reads.
+/// `models` is what the route lists now; with none known yet, only the effort comes down.
+pub fn summary_pick(p: &Picked, models: &[Model]) -> Picked {
+    let mut s = Picked { computer: false, speed: None, ..p.clone() };
+    match route(p.id).map(|r| r.way) {
+        Some(Way::Agent) if p.id == CLAUDE_CODE => {
+            s.model = Some("haiku".into());
+            s.effort = Some("low".into());
+        }
+        Some(Way::Plan) => {
+            // The cheapest is the last listed that thinks at "minimal", else at "low": Codex lists its smaller
+            // models after the flagships. With none, the effort alone comes down on the chosen model.
+            let cheap = models.iter().rfind(|m| m.efforts.iter().any(|e| e.id == "minimal")).or_else(|| models.iter().rfind(|m| m.efforts.iter().any(|e| e.id == "low")));
+            match cheap {
+                Some(m) => {
+                    s.effort = m.efforts.first().map(|e| e.id.clone());
+                    s.model = Some(m.id.clone());
+                }
+                None => s.effort = Some("low".into()),
+            }
+        }
+        _ => {}
+    }
+    s
+}
+
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
 pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
     let r = route(p.id).ok_or(UNKNOWN)?;
@@ -925,6 +952,41 @@ mod tests {
         assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 1), Ok(()));
         let p = picked(&s).unwrap();
         assert_eq!((p.model.as_deref(), p.effort.as_deref()), (Some(super::super::claude::MODEL_START), Some(super::super::claude::EFFORT_START)));
+    }
+
+    #[test]
+    fn a_summary_asks_cheaper_than_an_ask_and_never_acts() {
+        // Claude's summaries go to Haiku thinking little, whatever an Ask picked.
+        let mut s = Settings::default();
+        assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 1), Ok(()));
+        s.assist_model = Some("opus".into());
+        s.assist_effort = Some("max".into());
+        s.computer_use = true;
+        let p = picked(&s).unwrap();
+        assert!(p.computer, "the Ask pick can act");
+        let sum = summary_pick(&p, &[]);
+        assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("haiku"), Some("low")));
+        assert!(!sum.computer && sum.speed.is_none());
+        // Codex's is the last listed that thinks at "minimal", then at "low"; the thinking is the model's lowest.
+        let mut codex = Picked { id: "codex", model: Some("gpt-7".into()), offline_only: false, base: None, effort: Some("high".into()), speed: Some("fast".into()), computer: true };
+        let offering = |id: &str, es: &[&str]| Model { id: id.into(), name: id.into(), images: false, efforts: es.iter().map(|e| Choice { id: (*e).into(), label: e.to_string(), default: false }).collect(), speeds: Vec::new(), default: false };
+        let models = vec![
+            offering("gpt-7", &["low", "medium", "high"]),
+            offering("gpt-7-luna", &["minimal", "low", "medium"]),
+            offering("gpt-7-mini", &["low", "medium"]),
+        ];
+        let sum = summary_pick(&codex, &models);
+        assert_eq!((sum.model.as_deref(), sum.effort.as_deref(), sum.speed.as_deref()), (Some("gpt-7-luna"), Some("minimal"), None));
+        assert!(!sum.computer);
+        codex.effort = None;
+        let sum = summary_pick(&codex, &models[..1]);
+        assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("gpt-7"), Some("low")));
+        let sum = summary_pick(&codex, &[]);
+        assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("gpt-7"), Some("low")), "with no list the effort alone comes down");
+        // A key route keeps the model in use: the same service's cheapest is not Pointcast's to pick.
+        let key = Picked { id: "openai", model: Some("gpt-x".into()), offline_only: false, base: None, effort: None, speed: None, computer: false };
+        let sum = summary_pick(&key, &[]);
+        assert_eq!(sum.model.as_deref(), Some("gpt-x"));
     }
 
     #[test]
