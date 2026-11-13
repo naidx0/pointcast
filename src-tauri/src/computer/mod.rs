@@ -452,6 +452,34 @@ pub fn worth(n: &Node) -> bool {
 #[cfg(test)]
 pub(crate) mod fake;
 
+/// Close the untitled TextEdit documents in front whose whole text is `text`, without saving: the hand-run tests'
+/// clean-up. A document with anything else in it is left alone.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn discard_textedit(desk: &Desk, text: &str) -> Vec<String> {
+    let mut said = vec![];
+    for _ in 0..3 {
+        let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
+        let ours = tree.app.name == "TextEdit"
+            && tree.window.starts_with("Untitled")
+            && tree.nodes.iter().any(|n| n.raw_role == "AXTextArea" && n.value.as_deref().is_some_and(|v| v.trim() == text));
+        if !ours {
+            said.push(format!("front: {} {:?}", tree.app.name, tree.window));
+            break;
+        }
+        let _ = desk.os.key(&tools::parse_keys("cmd+w").expect("a key"));
+        std::thread::sleep(Duration::from_millis(900));
+        let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
+        let Some(n) = tree.nodes.iter().find(|n| n.raw_role == "AXButton" && matches!(n.name.as_str(), "Delete" | "Don’t Save" | "Don't Save")) else {
+            said.push(format!("no save sheet in {:?}", tree.window));
+            break;
+        };
+        said.push(format!("pressed {:?} in {:?}", n.name, tree.window));
+        let _ = desk.os.press(&tree, n);
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    said
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

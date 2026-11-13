@@ -1290,6 +1290,54 @@ pub mod tests {
         assert!(!desk.granted());
     }
 
+    /// A real Claude turn on this Mac, through the real `claude`, Pointcast's server and this Mac's desk: run by hand,
+    /// once (it spends a little of the plan and drives TextEdit in front of the person).
+    #[test]
+    #[ignore = "a real Claude turn that opens TextEdit and types; run by hand"]
+    #[cfg(target_os = "macos")]
+    fn on_this_mac_a_real_claude_turn_opens_textedit_and_types() {
+        use crate::computer::guard::{Tier, Trust};
+        const TEXT: &str = "hello from Pointcast";
+        let desk = crate::computer::desk();
+        desk.set_trust(Trust::with([("TextEdit".to_string(), Tier::Full)]));
+        let mut raw = [0u8; 32];
+        getrandom::getrandom(&mut raw).unwrap();
+        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let addr = crate::mcp::spawn_stoppable("127.0.0.1:0", crate::mcp::Latest::default(), token.clone(), stop.clone()).unwrap();
+        let url = format!("http://{addr}/mcp");
+        let serve: Serve = Arc::new(move || Ok((url.clone(), token.clone())));
+        let home = scratch("claude-real-acting");
+        let claude = Claude::new(home).choosing(Some("sonnet".into()), Some("low".into())).acting(Some(Computer { desk, serve }));
+        let mut chat = claude.start("", &[]).unwrap();
+        let (tx, rx) = channel();
+        let t = Instant::now();
+        chat.ask(said(&format!("Open TextEdit, make a new document and type: {TEXT}")), tx).unwrap();
+        let mut got = Vec::new();
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(240)) {
+            let end = e.kind.ends();
+            got.push(e.kind);
+            if end {
+                break;
+            }
+        }
+        let answer: String = words(&got).concat();
+        println!("\nTURN ({:.1} s): {:?}", t.elapsed().as_secs_f32(), got.last());
+        println!("ANSWER: {answer}");
+        println!("GRANT LIVE AFTER THE TURN: {}", desk.granted());
+        println!("JOURNAL:");
+        let journal = crate::computer::journal().take();
+        for e in &journal {
+            println!("  {} | {} | {} | {:?}", e.app, e.tool, e.target, e.outcome);
+        }
+        chat.close();
+        std::thread::sleep(Duration::from_millis(800));
+        println!("CLEAN-UP: {:?}", crate::computer::discard_textedit(desk, TEXT));
+        crate::mcp::stop_at(addr, &stop);
+        assert_eq!(got.last(), Some(&Kind::Done));
+        assert!(journal.iter().any(|e| e.tool == "pointcast_type" && matches!(e.outcome, crate::computer::Outcome::Done(_))), "it typed");
+    }
+
     #[test]
     fn who_is_signed_in_is_the_plan_and_the_address_only() {
         let said = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@b.c","orgId":"x","orgName":"Org","subscriptionType":"pro"}"#;
