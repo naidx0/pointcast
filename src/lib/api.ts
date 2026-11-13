@@ -1,3 +1,4 @@
+import { NO_CALL, type CallView } from "./call";
 import { invoke } from "@tauri-apps/api/core";
 import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -543,6 +544,14 @@ export const speakSample = (voice: string | null, rate: number) => (inTauri ? in
 export const speakStop = () => (inTauri ? invoke<void>("speak_stop") : Promise.resolve());
 /** Whether an answer is being read aloud, each time that changes. */
 export const onSpeaking = (fn: (speaking: boolean) => void) => on<{ speaking: boolean }>("speak://state")((p) => fn(p.speaking));
+
+/** Call mode: the Ask panel's Call switch (start, or end the call under way), Esc during a call (once silences the voice,
+ * twice ends the call), how the call stands, and the level the capsule's line follows during a call. */
+export const callToggle = (): Promise<CallView> => (inTauri ? invoke<CallView>("call_toggle") : Promise.resolve(NO_CALL));
+export const callEsc = () => (inTauri ? invoke<void>("call_esc") : Promise.resolve());
+export const callState = (): Promise<CallView> => (inTauri ? invoke<CallView>("call_state") : Promise.resolve(NO_CALL));
+export const onCallState = on<CallView>("call://state");
+export const onCallLevel = on<number>("call://level");
 /** Each step of the natural voice's download (choosing a Kokoro voice, or Hear it with one, starts it). */
 export const onKokoroProgress = on<KokoroProgress>("kokoro://progress");
 /** The natural voice's download under way, if one is: for a Settings window opened in the middle of it. */

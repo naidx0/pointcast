@@ -1173,6 +1173,45 @@ html.win .live-sumbtn {
   color: var(--live-ink);
 }
 
+/* —— A call: one small pill, a hairline around it, a dot for who has the call (red: it listens to you, as the capsule's
+   recording dot; accent: it speaks; quiet: it thinks). —— */
+.live-call {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  margin-right: 4px;
+  padding: 0 9px 0 8px;
+  border-radius: 11px;
+  box-shadow: 0 0 0 0.5px var(--sep) inset;
+  color: var(--live-quiet);
+  font: 500 var(--fs-caption) / 1 var(--font);
+  white-space: nowrap;
+}
+.live-call::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--live-faint);
+}
+.live-call.side-listening::before {
+  background: var(--red);
+}
+.live-call.side-speaking::before {
+  background: var(--live-accent);
+}
+.live-cap .live-call {
+  margin: 0 auto;
+}
+html.win .live-call {
+  border-radius: var(--r-control);
+}
+.live-callbtn.on {
+  color: var(--red-ink);
+}
+
 /* —— A marked picture: a small pen in a dot at the thumbnail's lower left; its label says it in words —— */
 .live-pic {
   position: relative;

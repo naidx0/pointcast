@@ -2168,6 +2168,32 @@ html.win .hud {
 }
 /* The line the voice draws, Ask's line in the capsule's ink. Its past fades out to the left; on hover (and from a minute
    on) the fade widens and the time shows over it, so nothing moves. */
+/* A call: the dot says who has it, the words say it is a call and which side; no time, no picture tools. */
+.hud.call .rec.call-speaking {
+  background: var(--accent);
+  box-shadow: none;
+  animation: none;
+}
+.hud.call .rec.call-thinking {
+  background: transparent;
+  box-shadow: 0 0 0 1.5px var(--hud-ink-2) inset;
+  animation: ready 1.2s ease-in-out infinite alternate;
+}
+.hud .call-text {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 10px 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+.hud .call-text b {
+  font-weight: 600;
+}
+.hud .call-text span {
+  color: var(--hud-ink-2);
+  font-size: 11px;
+}
 .hud .scribe {
   position: relative;
   display: flex;

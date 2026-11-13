@@ -109,6 +109,7 @@ impl Call {
     }
 
     /// The person is in the middle of a turn.
+    #[cfg(test)]
     pub fn talking(&self) -> bool {
         self.talking
     }

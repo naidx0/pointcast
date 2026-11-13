@@ -563,6 +563,11 @@ impl Live {
         self.inner.lock().unwrap().snap.clone()
     }
 
+    /// Where the panel is, without a copy of everything it shows.
+    pub fn state(&self) -> State {
+        self.inner.lock().unwrap().snap.state
+    }
+
     pub fn listening(&self) -> bool {
         self.inner.lock().unwrap().snap.state == State::Listening
     }

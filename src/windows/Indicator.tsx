@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { PressButton } from "@/components/PressButton";
-import { Check, Monitor, SquareDashedMousePointer, TriangleAlert, X, ZoomIn } from "lucide-react";
+import { Check, Monitor, PhoneOff, SquareDashedMousePointer, TriangleAlert, X, ZoomIn } from "lucide-react";
 import {
+  callState,
+  callToggle,
   captureFull,
   captureZoom,
   historyOpen,
   historyRetranscribe,
   hudHold,
   inTauri,
+  onCallLevel,
+  onCallState,
   onState,
   permissionOpen,
   permissionRequest,
@@ -30,6 +34,7 @@ import { chordText } from "@/lib/keys";
 import { LEVEL_FIELDS, levelOf, previewLevel } from "@/lib/live";
 import { micNotice } from "@/lib/mic";
 import { platform } from "@/lib/theme";
+import { NO_CALL, callLine, callLineMode, previewCall, sideWord, type CallView } from "@/lib/call";
 
 const idle: UiState = {
   phase: "idle",
@@ -52,6 +57,12 @@ const hudLevels: LevelSource = (set) => {
   sinks.add(set);
   return () => void sinks.delete(set);
 };
+/** During a call the line hears `call://level`: the person's voice while it listens, its own while it speaks. */
+const callSinks = new Set<(raw: number) => void>();
+const callLevels: LevelSource = (set) => {
+  callSinks.add(set);
+  return () => void callSinks.delete(set);
+};
 /** The line's height in the 48 px capsule, and its width per stroke: narrower than Ask's, for a shorter line. */
 const LINE_H = 32;
 const LINE_DX = 11;
@@ -67,6 +78,18 @@ function built(): UiState {
 export function Indicator() {
   const [s, setS] = useState<UiState>(inTauri ? built : idle);
   const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
+  // A call shows in place of the recording row while it runs (?call=listening|thinking|speaking in the preview).
+  const [call, setCall] = useState<CallView>(() => (preview && !inTauri ? previewCall(new URLSearchParams(location.search)) : NO_CALL));
+  useEffect(() => {
+    if (!inTauri) return;
+    callState()
+      .then(setCall)
+      .catch(() => undefined);
+    return subscribe(
+      onCallState(setCall),
+      onCallLevel((l) => callSinks.forEach((f) => f(l))),
+    );
+  }, []);
 
   // The whole capsule moves it, by the rule every window keeps (drag.ts): from its wave, its words and its gaps, once the
   // pointer travels 3 px, never from its buttons; and it stays where it is put (platform.rs).
@@ -113,7 +136,11 @@ export function Indicator() {
       });
       // A made-up voice for the line, at the engine's rate.
       let i = 0;
-      const id = setInterval(() => sinks.forEach((f) => f(previewLevel(i++))), 33);
+      const id = setInterval(() => {
+        const l = previewLevel(i++);
+        sinks.forEach((f) => f(l));
+        callSinks.forEach((f) => f(l));
+      }, 33);
       return () => clearInterval(id);
     }
     return subscribe(
@@ -132,6 +159,7 @@ export function Indicator() {
         .catch(() => undefined);
   }, [s.phase === "recording"]);
 
+  if (call.active) return <InCall v={call} />;
   if (s.phase === "transcribing") return <Finishing s={s} />;
   if (s.phase === "ready" && s.notice) return <Done s={s} />;
 
@@ -289,6 +317,29 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
           act={() => sessionToggle().catch(() => undefined)}
         >
           <i />
+        </PressButton>
+      </div>
+    </div>
+  );
+}
+
+/** A call: the dot for who has it (red while it listens to you, the accent while it speaks, a ring while it thinks),
+ * the line following the voice of whoever talks, "In a call" over which side, and End. */
+function InCall({ v }: { v: CallView }) {
+  return (
+    <div className="hud-wrap drag">
+      <div className="hud call" role="toolbar" aria-label="Pointcast call">
+        <span className={`rec call-${v.side ?? "listening"}`} />
+        <span className="scribe">
+          <Line mode={callLineMode(v.side)} look="auto" layers={2} height={LINE_H} dx={LINE_DX} tip="ink" levels={callLevels} />
+        </span>
+        <span className="call-text" role="status" aria-label={callLine(v)}>
+          <b>In a call</b>
+          <span>{sideWord(v.side)}</span>
+        </span>
+        <span className="sep" />
+        <PressButton className="hb end" title="End the call" aria-label="End the call" act={() => void callToggle().catch(() => undefined)}>
+          <PhoneOff size={17} strokeWidth={1.75} />
         </PressButton>
       </div>
     </div>

@@ -1,6 +1,9 @@
 import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Phone, PhoneOff, Plus, ScrollText, Square, X } from "lucide-react";
 import {
+  callEsc,
+  callState,
+  callToggle,
   computerAnswer,
   computerStatus,
   inTauri,
@@ -18,6 +21,7 @@ import {
   liveTakePicture,
   liveState,
   liveStop,
+  onCallState,
   onComputerStatus,
   onListAsk,
   onLiveDelta,
@@ -93,6 +97,7 @@ import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } fro
 import { PressButton } from "@/components/PressButton";
 import { MarkUpControl, MarkedBadge } from "@/components/MarkUp";
 import { isMarkKey, markedLabel } from "@/lib/markup";
+import { NO_CALL, callAnnounce, callLine, callTitle, escAction, previewCall, type CallView } from "@/lib/call";
 
 const noop = () => undefined;
 const plain = (e: unknown) => String(e).replace(/^Error: */, "");
@@ -272,6 +277,20 @@ export function Live() {
   const [speaking, setSpeaking] = useState(false);
   useEffect(() => subscribe(onSpeaking(setSpeaking)), []);
 
+  // A call: talk, it answers aloud, it listens again. Esc is the call's while one runs.
+  const [call, setCall] = useState<CallView>(() => (preview && !inTauri ? previewCall(new URLSearchParams(location.search)) : NO_CALL));
+  useEffect(() => {
+    let live = true;
+    callState()
+      .then((c) => live && inTauri && setCall(c))
+      .catch(noop);
+    const off = subscribe(onCallState(setCall));
+    return () => {
+      live = false;
+      off();
+    };
+  }, []);
+
   // Esc always works: it makes the picture small again, closes the session list, the summary or the Sent view, stops
   // reading aloud, stops what is under way, or closes. Delete takes the picture out; M marks it up. Ctrl+K (Cmd+K)
   // goes to the follow-up field. The field keeps its own Esc.
@@ -280,12 +299,14 @@ export function Live() {
       if (e.defaultPrevented) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        if (big) setBig(false);
-        else if (sheet) setSheet(false);
-        else if (sumOpen) setSumOpen(false);
-        else if (sentOf != null) setSentOf(null);
-        else if (speaking) speakStop().catch(noop);
-        else (v.stop ? liveStop() : liveClose()).catch(noop);
+        const act = escAction({ big, sheet, summary: sumOpen, sent: sentOf != null, call: call.active, speaking, stop: v.stop });
+        if (act === "picture") setBig(false);
+        else if (act === "sheet") setSheet(false);
+        else if (act === "summary") setSumOpen(false);
+        else if (act === "sent") setSentOf(null);
+        else if (act === "call") callEsc().catch(noop);
+        else if (act === "speech") speakStop().catch(noop);
+        else (act === "stop" ? liveStop() : liveClose()).catch(noop);
       } else if ((e.key === "Delete" || e.key === "Backspace") && (v.canDrop || (showField && !!v.next)) && !typing(e.target)) {
         e.preventDefault();
         liveDropPicture().catch(noop);
@@ -299,7 +320,7 @@ export function Live() {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [big, sheet, sumOpen, sentOf, speaking, showField, v.stop, v.canDrop, canMark, !!v.next]);
+  }, [big, sheet, sumOpen, sentOf, speaking, call.active, showField, v.stop, v.canDrop, canMark, !!v.next]);
 
   // Nothing animates while the window is hidden.
   useEffect(() => {
@@ -410,6 +431,7 @@ export function Live() {
   const sr = (
     <div className="live-sr" aria-live="polite" role="status">
       {v.announce}
+      {call.active || call.ended ? ` ${callAnnounce(call)}` : ""}
     </div>
   );
   const bigPic = big && v.thumb ? <BigPicture pic={v.thumb} close={() => setBig(false)} /> : null;
@@ -443,6 +465,11 @@ export function Live() {
           </p>
         ) : v.noPicture && v.phase !== "discarded" ? (
           <NoPictureLine n={v.noPicture} />
+        ) : null}
+        {call.active ? (
+          <p className="live-cap live-in">
+            <CallPill v={call} />
+          </p>
         ) : null}
         {bigPic}
         {sr}
@@ -536,6 +563,7 @@ export function Live() {
         ) : (
           <Question key={m.snap.turn} text={v.question} />
         )}
+        {call.active && !sheet ? <CallPill v={call} /> : null}
         {hasSummary && !sheet ? (
           <PressButton className={`live-sumbtn${sumOpen ? " on" : ""}`} aria-pressed={sumOpen} title={sumOpen ? "Back to the conversation" : "This session's summary"} act={toggleSummary}>
             Summary
@@ -550,6 +578,7 @@ export function Live() {
         >
           <MessagesSquare size={16} strokeWidth={1.5} />
         </PressButton>
+        <CallButton active={call.active} />
         <StopButton stop={v.stop} />
       </header>
       <div className="live-body drag-self" ref={body} onScroll={onScroll}>
@@ -673,6 +702,30 @@ function NoPictureLine({ n }: { n: NoPictureView }) {
         </PressButton>
       ) : null}
     </p>
+  );
+}
+
+/** "In a call", and which side is talking: a small pill in the header (and under the listening row). */
+function CallPill({ v }: { v: CallView }) {
+  return (
+    <span className={`live-call side-${v.side ?? "listening"}`} title="Talk when it listens; talk over it to stop it. Esc twice ends the call.">
+      {callLine(v)}
+    </span>
+  );
+}
+
+/** The Call switch: starts a call (talk, it answers aloud, it listens again, no keys), or ends the one under way. */
+function CallButton({ active }: { active: boolean }) {
+  return (
+    <PressButton
+      className={`live-hb live-callbtn${active ? " on" : ""}`}
+      title={callTitle(active)}
+      aria-label={active ? "End the call" : "Start a call"}
+      aria-pressed={active}
+      act={() => void callToggle().catch(noop)}
+    >
+      {active ? <PhoneOff size={15} strokeWidth={1.5} /> : <Phone size={15} strokeWidth={1.5} />}
+    </PressButton>
   );
 }
 

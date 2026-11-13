@@ -378,7 +378,7 @@ fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Hel
 /// Answers read aloud with the system's voice or the natural one (Kokoro), the way the settings say; `speak://state`
 /// says when speech starts and when it has all ended, `kokoro://progress` how the natural voice's download goes.
 fn reader_for(app: &AppHandle, svc: &Arc<App>) -> Arc<voice::speak::Reader> {
-    let (handle, svc) = (app.clone(), svc.clone());
+    let (handle, svc, calling) = (app.clone(), svc.clone(), app.clone());
     let fetching = app.clone();
     let kokoro = voice::kokoro::Kokoro::new(voice::models::speech_dir(), move |p| {
         let _ = fetching.emit("kokoro://progress", p);
@@ -388,13 +388,126 @@ fn reader_for(app: &AppHandle, svc: &Arc<App>) -> Arc<voice::speak::Reader> {
     Arc::new(voice::speak::Reader::new(
         Arc::new(voice::speak::Voices::new(voice::speak::system(), Some(natural))),
         move || {
+            // In a call answers are always read aloud, whatever the setting.
+            let call = calling.try_state::<Arc<voice::call::Calls>>().is_some_and(|c| c.active());
             let s = svc.settings.lock().unwrap();
-            s.speak_answers.then(|| voice::speak::How { voice: s.speak_voice.clone(), rate: s.speak_rate })
+            (s.speak_answers || call).then(|| voice::speak::How { voice: s.speak_voice.clone(), rate: s.speak_rate })
         },
         move |speaking| {
             let _ = handle.emit("speak://state", json!({ "speaking": speaking }));
         },
     ))
+}
+
+/// The Ask side as a call drives it: the panel's loop and the voice reading its answers.
+struct CallAsk(AppHandle);
+
+impl CallAsk {
+    fn live(&self) -> Option<Arc<live::Live>> {
+        self.0.try_state::<Arc<live::Live>>().map(|l| l.inner().clone())
+    }
+}
+
+impl voice::call::Asking for CallAsk {
+    fn listen(&self) -> bool {
+        !update::installing() && self.live().is_some_and(|l| l.press())
+    }
+    fn ask(&self) {
+        if let Some(l) = self.live() {
+            l.release();
+        }
+    }
+    fn stop_answer(&self) {
+        // Only an answer on its way: Stop while the words are finished would throw the question away.
+        if let Some(l) = self.live().filter(|l| matches!(l.state(), live::State::Sending | live::State::Answering)) {
+            l.stop();
+        }
+    }
+    fn drop_turn(&self) {
+        if let Some(l) = self.live() {
+            l.drop_listening();
+        }
+    }
+    fn stop_speech(&self) {
+        speak_stop_now(&self.0);
+    }
+    fn stage(&self) -> voice::call::Stage {
+        use live::State::*;
+        use voice::call::Stage;
+        match self.live().map_or(Closed, |l| l.state()) {
+            Listening => Stage::Listening,
+            Finishing | Sending | Answering => Stage::Asking,
+            Shown | Error | Discarded => Stage::Done,
+            Closed => Stage::Closed,
+        }
+    }
+    fn speaking(&self) -> bool {
+        self.0.try_state::<Arc<voice::speak::Reader>>().is_some_and(|r| r.speaking())
+    }
+    fn played(&self) -> f32 {
+        voice::speak::out::played()
+    }
+    fn hear_words(&self, words: Option<live::Words>) {
+        if let Some(l) = self.live() {
+            l.hear_words(words);
+        }
+    }
+}
+
+/// Calls as the app runs them: the call's microphone is the one the settings name; the capsule shows while a call
+/// runs; `call://state` says how it stands and `call://level` what the capsule's line follows.
+fn calls_for(app: &AppHandle, svc: &Arc<App>) -> Arc<voice::call::Calls> {
+    let (handle, level, mics, lender) = (app.clone(), app.clone(), svc.clone(), svc.clone());
+    let shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    voice::call::Calls::new(voice::call::Deps {
+        ask: Arc::new(CallAsk(app.clone())),
+        open: Box::new(move |take| {
+            let device = mics.settings.lock().unwrap().device.clone();
+            voice::audio::Mic::open(device, take)
+        }),
+        lend: Box::new(move |feed| lender.lend_feed(feed)),
+        vad: Box::new(|| {
+            let root = voice::models::speech_dir();
+            let vad = voice::call::vad::best(&root);
+            // Level only this time: the model downloads for the next call.
+            if vad.name() == "energy" {
+                voice::call::vad::fetch(root);
+            }
+            vad
+        }),
+        told: Box::new(move |v| {
+            let _ = handle.emit("call://state", v);
+            if shown.swap(v.active, Ordering::SeqCst) != v.active {
+                if v.active {
+                    if let Some(svc) = handle.try_state::<Arc<App>>() {
+                        platform::show_indicator(&handle, &svc.ui());
+                    }
+                } else {
+                    hide_window(&handle, "indicator");
+                }
+            }
+        }),
+        level: Box::new(move |l| {
+            let _ = level.emit("call://level", l);
+        }),
+    })
+}
+
+/// The Call switch in the Ask panel: start a call, or end the one under way.
+#[tauri::command]
+async fn call_toggle(calls: tauri::State<'_, Arc<voice::call::Calls>>) -> Result<voice::call::View, String> {
+    calls.toggle()
+}
+
+/// Esc in the panel during a call: once silences the voice, twice ends the call.
+#[tauri::command]
+fn call_esc(calls: tauri::State<'_, Arc<voice::call::Calls>>) {
+    calls.esc();
+}
+
+#[tauri::command]
+fn call_state(calls: tauri::State<'_, Arc<voice::call::Calls>>) -> voice::call::View {
+    calls.view()
 }
 
 /// Stop reading aloud, at once.
@@ -1001,6 +1114,11 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         return;
     };
     let svc = svc.inner().clone();
+    // During a call only the Ask key acts (it ends the turn now, or talks over the answer); a dictation would take the
+    // call's microphone and the capsule.
+    if action != Action::Ask && app.try_state::<Arc<voice::call::Calls>>().is_some_and(|c| c.active()) {
+        return;
+    }
     let rec = recording(&svc);
     match routed(action, rec, asking(&svc), svc.hotkey_test.load(Ordering::SeqCst)) {
         Some(true) => return ask_key(app, &svc, pressed),
@@ -2474,6 +2592,9 @@ pub fn run() {
             speak_voices,
             speak_sample,
             speak_stop,
+            call_toggle,
+            call_esc,
+            call_state,
             speak_fetching,
             sessions_list,
             sessions_open,
@@ -2520,6 +2641,7 @@ pub fn run() {
             app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(reader_for(&handle, &svc));
             app.manage(live_for(&handle, &svc, held));
+            app.manage(calls_for(&handle, &svc));
             computer_hooks(&handle);
             // Server files of turns a crash or a kill cut short: each holds a key of a turn that is over.
             assist::claude::sweep(&assist_home().join(assist::catalog::CLAUDE_CODE));

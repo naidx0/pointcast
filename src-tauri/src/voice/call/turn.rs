@@ -59,19 +59,10 @@ impl Turn {
         self.min_ms = ms;
     }
 
-    /// Samples heard so far.
-    pub fn pos(&self) -> u64 {
-        self.pos
-    }
-
     /// A turn is under way (started and not ended).
+    #[cfg(test)]
     pub fn talking(&self) -> bool {
         self.started
-    }
-
-    /// Where the speech under way began, turn or not yet.
-    pub fn onset(&self) -> Option<u64> {
-        self.onset
     }
 
     /// Hear one window of `samples` (16 kHz) that the VAD called `speech` or not.
