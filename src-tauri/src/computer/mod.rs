@@ -360,6 +360,39 @@ mod tests {
         println!("type into {area:?}:\n{}\n", text(&r));
         let r = call(&desk, "pointcast_find", &json!({ "role": "text field" }));
         println!("find text fields:\n{}\n", text(&r));
+        // Close every document holding exactly this text, without saving: Cmd+W, then the sheet's Delete. The tool
+        // asks the person first, as it should; the test then presses it as the person would.
+        for _ in 0..3 {
+            let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
+            let ours = tree.app.name == "TextEdit"
+                && tree.nodes.iter().any(|n| n.raw_role == "AXTextArea" && n.value.as_deref() == Some("hello from Pointcast"));
+            if !ours {
+                break;
+            }
+            desk.os.key(&tools::parse_keys("cmd+w").unwrap()).unwrap();
+            std::thread::sleep(Duration::from_millis(900));
+            let tree = desk.os.tree(DEFAULT_LIMITS).unwrap();
+            let names = ids(&tree.app.name, &tree.nodes);
+            let Some(i) = tree.nodes.iter().position(|n| n.raw_role == "AXButton" && (n.name == "Delete" || n.name == "Don’t Save" || n.name == "Don't Save")) else {
+                println!("no save sheet in {:?}", tree.window);
+                break;
+            };
+            let r = call(&desk, "pointcast_click", &json!({ "id": names[i] }));
+            println!("the tool on {:?}: {}\n{}\n", tree.nodes[i].name, r["structuredContent"]["status"], text(&r));
+            if r["structuredContent"]["status"] != "done" {
+                desk.os.press(&tree, &tree.nodes[i]).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        let left: Vec<String> = desk
+            .os
+            .apps()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.app.name == "TextEdit")
+            .flat_map(|a| a.windows.into_iter().map(|w| format!("{:?}{}", w.title, if w.minimized { " (minimised)" } else { "" })))
+            .collect();
+        println!("TextEdit windows left: {left:?}\n");
         println!("journal:");
         for e in desk.journal.entries() {
             println!("  {} | {} | {} | {:?}", e.app, e.tool, e.target, e.outcome);
