@@ -5,7 +5,7 @@ use super::guard::{self, Kind, Target, Tier, Verdict};
 use super::{ids, worth, Combo, Desk, Limits, Modifier, Node, Outcome, Tree, AppRef, DEFAULT_LIMITS, UNTRUSTED};
 use serde_json::{json, Value};
 
-pub const NAMES: [&str; 10] = [
+pub const NAMES: [&str; 12] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -16,6 +16,8 @@ pub const NAMES: [&str; 10] = [
     "pointcast_scroll",
     "pointcast_open_app",
     "pointcast_focus",
+    "pointcast_plan",
+    "pointcast_plan_step",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -125,6 +127,37 @@ pub fn schemas() -> Value {
                 "properties": { "app": { "type": "string" }, "window": { "type": "string" } },
                 "required": ["app"]
             }
+        },
+        {
+            "name": "pointcast_plan",
+            "description": format!("Before work that takes more than one action: show the person your plan, short steps and the apps you will act in, and wait for them to press Start. Nothing acts until they do, and then only in these apps. A single obvious action, like opening one app, needs no plan. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array", "items": { "type": "string", "maxLength": 200 }, "minItems": 1, "maxItems": super::plan::MAX_STEPS,
+                        "description": "What you will do, in order, one short line each."
+                    },
+                    "apps": {
+                        "type": "array", "items": { "type": "string", "maxLength": 100 }, "minItems": 1, "maxItems": super::plan::MAX_APPS,
+                        "description": "The apps you will act in, by name (\"TextEdit\")."
+                    }
+                },
+                "required": ["steps", "apps"]
+            }
+        },
+        {
+            "name": "pointcast_plan_step",
+            "description": format!("Tick a step of the started plan as it ends: done, skipped or failed, with a short note. After a failed step, stop and ask the person. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "minimum": 1, "maximum": super::plan::MAX_STEPS, "description": "The step's number, 1 for the first." },
+                    "status": { "type": "string", "enum": ["done", "skipped", "failed"] },
+                    "note": { "type": "string", "maxLength": 200 }
+                },
+                "required": ["index", "status"]
+            }
         }
     ])
 }
@@ -153,7 +186,7 @@ struct Cx<'a> {
 /// A call waits on a card at most this many times (raised, then asked for a yes).
 const CARDS: usize = 3;
 
-fn result(text: &str, data: Value, error: bool) -> Value {
+pub(crate) fn result(text: &str, data: Value, error: bool) -> Value {
     json!({
         "content": [{ "type": "text", "text": format!("{UNTRUSTED}\n\n{text}") }],
         "structuredContent": data,
@@ -168,6 +201,14 @@ pub fn call(desk: &Desk, grant: u64, name: &str, args: &Value) -> Value {
         let why = format!("{name} works only during an Ask turn that lets the AI see and act.");
         desk.journal.push("", name, "", Outcome::Refused(why.clone()));
         return result(&why, json!({ "status": "refused", "reason": why }), true);
+    }
+    // The person cancelled this turn's plan: nothing more, looking included.
+    if let Some(why) = desk.plans.stopped(grant) {
+        desk.journal.push("", name, "", Outcome::Refused(why.into()));
+        return result(&format!("Not done. {why}"), json!({ "status": "refused", "reason": why }), true);
+    }
+    if matches!(name, "pointcast_plan" | "pointcast_plan_step") {
+        return super::plan::call(desk, grant, name, args);
     }
     let mut app = String::new();
     let mut target = String::new();
@@ -274,6 +315,9 @@ fn label(n: &Node) -> String {
 /// The guard's answer as an early return: `Ok(())` to go on. A tier the person could raise is told apart from a
 /// never; the person's yes, when this call carries one, lets exactly the action it was made for through, once.
 fn ask(desk: &Desk, cx: &Cx, kind: Kind, t: &Target, commits: bool, target: &str) -> Result<(), End> {
+    // The plan first: while one waits for Start nothing acts, and once started only in its apps. The tiers and the
+    // confirm cards still apply on top.
+    desk.plans.allows(cx.grant, kind, &t.app).map_err(End::Refused)?;
     let trust = desk.trust();
     match guard::check(&trust, kind, t, commits) {
         Verdict::Allow => Ok(()),

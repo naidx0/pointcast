@@ -1853,6 +1853,7 @@ pub mod tests {
         );
         let told = on["developerInstructions"].as_str().unwrap();
         assert!(told.starts_with(super::super::claude::ACTING) && told.ends_with("\n\nBe brief.") && !told.contains("No tools exist"), "{told}");
+        assert!(told.contains("call pointcast_plan first") && told.contains("pointcast_plan_step") && told.contains("needs no plan"), "the plan is asked for: {told}");
         // Everything else is the fence of today: shell, files, the web and the person's servers stay off.
         let (mut a, mut b) = (off.clone(), on.clone());
         for v in [&mut a, &mut b] {

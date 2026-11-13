@@ -2,7 +2,9 @@
 //! person. Pointcast's own MCP server serves them (`mcp.rs`), only while the turn holds a grant (`grant.rs`).
 //!
 //! See: `pointcast_screen`, `pointcast_elements`, `pointcast_apps`, `pointcast_find`. Act: `pointcast_click`,
-//! `pointcast_type`, `pointcast_key`, `pointcast_scroll`, `pointcast_open_app`, `pointcast_focus`. Accessibility
+//! `pointcast_type`, `pointcast_key`, `pointcast_scroll`, `pointcast_open_app`, `pointcast_focus`. Plan:
+//! `pointcast_plan` shows the steps and waits for the person's Start, `pointcast_plan_step` ticks them (`plan.rs`).
+//! Accessibility
 //! actions come first (AXPress and AXValue on macOS, Invoke and Value in UI Automation on Windows), synthetic input
 //! second. Every action asks the guard (`guard.rs`) first and goes into the journal (`journal.rs`). Linux answers
 //! "not supported".
@@ -10,6 +12,7 @@ mod confirm;
 pub mod guard;
 mod grant;
 mod journal;
+pub mod plan;
 pub(crate) mod tools;
 
 #[cfg(any(target_os = "macos", windows))]
@@ -181,6 +184,8 @@ pub struct Status {
     pub acting: bool,
     pub app: Option<String>,
     pub card: Option<Card>,
+    /// The turn's plan: waiting for Start, or started with its steps ticked as they end.
+    pub plan: Option<plan::Plan>,
 }
 
 /// What the app hangs on the desk: where the status goes, and how the Ask turn is ended (the Esc key while acting).
@@ -194,6 +199,7 @@ pub struct Desk {
     pub grants: Grants,
     pub journal: Journal,
     pub confirms: confirm::Confirms,
+    pub plans: plan::Plans,
     trust: RwLock<Trust>,
     os: Box<dyn Desktop>,
     hooks: RwLock<Option<Arc<Hooks>>>,
@@ -228,6 +234,7 @@ impl Drop for Acting {
         self.grant.take();
         // This grant's cards and approvals go; a newer turn's, if one took over, stay.
         self.desk.confirms.sweep();
+        self.desk.plans.sweep();
         *self.desk.last_app.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.desk.notify();
     }
@@ -238,6 +245,7 @@ impl Desk {
         let grants = Grants::default();
         Desk {
             confirms: confirm::Confirms::new(grants.clone()),
+            plans: plan::Plans::new(grants.clone()),
             grants,
             journal: Journal::default(),
             trust: RwLock::new(Trust::default()),
@@ -270,7 +278,12 @@ impl Desk {
 
     pub fn status(&self) -> Status {
         let acting = self.granted();
-        Status { acting, app: self.last_app.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|_| acting), card: self.confirms.card() }
+        Status {
+            acting,
+            app: self.last_app.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|_| acting),
+            card: self.confirms.card(),
+            plan: self.plans.plan(),
+        }
     }
 
     /// Tell the panel how things stand now.
@@ -296,8 +309,9 @@ impl Desk {
     pub fn begin(&'static self, ttl: Duration) -> Acting {
         *self.last_app.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let grant = self.grants.grant(ttl);
-        // An earlier turn's card and approvals end with its grant, at once.
+        // An earlier turn's card, approvals and plan end with its grant, at once.
         self.confirms.sweep();
+        self.plans.sweep();
         let alive = Arc::new(AtomicBool::new(true));
         if self.hooks().is_some() {
             let (me, alive) = (self, alive.clone());
@@ -316,10 +330,18 @@ impl Desk {
         r
     }
 
-    /// The stop key: the grant ends at once, the card goes, and the Ask turn is ended.
+    /// The person's Start (`true`) or Cancel on the plan the panel shows.
+    pub fn start_plan(&self, id: u64, start: bool) -> Result<(), String> {
+        let r = self.plans.answer(id, start);
+        self.notify();
+        r
+    }
+
+    /// The stop key: the grant ends at once, the card and the plan go, and the Ask turn is ended.
     pub fn halt(&self) {
         self.grants.end();
         self.confirms.end();
+        self.plans.end();
         self.notify();
         if let Some(h) = self.hooks() {
             (h.stop)();

@@ -1256,7 +1256,7 @@ mod tests {
             assert_eq!(r["error"]["code"], -32602, "{r}");
             assert!(r["error"]["message"].as_str().unwrap().contains("Ask turn"), "{r}");
         }
-        assert_eq!(desk.journal.entries().len(), 10);
+        assert_eq!(desk.journal.entries().len(), crate::computer::tools::NAMES.len());
         assert!(desk.journal.entries().iter().all(|e| matches!(e.outcome, Outcome::Refused(_))));
 
         // With a live grant: the token still neither lists nor calls any computer tool, and nothing happens.
@@ -1273,7 +1273,7 @@ mod tests {
         let latest_call = ask(TOKEN, "tools/call", json!({ "name": "pointcast_latest", "arguments": {} })).1;
         assert!(latest_call.get("error").is_none() && latest_call["result"]["isError"] == true, "the coding tools answer the token as before: {latest_call}");
 
-        // The grant's own secret: the ten computer tools and nothing else.
+        // The grant's own secret: the computer tools and nothing else.
         let (code, r) = ask(&key, "initialize", json!({ "protocolVersion": PROTOCOL }));
         assert_eq!((code, r["result"]["protocolVersion"].as_str()), (200, Some(PROTOCOL)), "{r}");
         assert_eq!(tool_names(&ask(&key, "tools/list", json!({})).1), computer);

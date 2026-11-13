@@ -1380,6 +1380,7 @@ pub mod tests {
         assert_eq!(prompt["sessionId"], "sess-1");
         let fence = prompt["prompt"][0]["text"].as_str().unwrap();
         assert!(fence.starts_with(crate::assist::claude::ACTING) && fence.ends_with("Be brief.") && !fence.contains("No tools exist"), "{fence}");
+        assert!(fence.contains("call pointcast_plan first") && fence.contains("pointcast_plan_step") && fence.contains("needs no plan"), "the plan is asked for: {fence}");
         // Only a call of Pointcast's tool, in the turn's own session, passes, and only once.
         assert_eq!(answered(&seen, 920), picked("yes"));
         for id in [921, 922, 923] {

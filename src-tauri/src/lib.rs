@@ -1779,6 +1779,18 @@ fn computer_answer(svc: tauri::State<'_, Arc<App>>, id: u64, answer: String) -> 
     Ok(())
 }
 
+/// The person's answer on the plan: "start" or "cancel". Start lets the AI act in the plan's apps; Cancel stops the turn's
+/// computer tools.
+#[tauri::command]
+fn computer_plan(id: u64, answer: String) -> Result<(), String> {
+    let start = match answer.as_str() {
+        "start" => true,
+        "cancel" => false,
+        _ => return Err(format!("\"{answer}\" is not an answer: start or cancel.")),
+    };
+    computer::desk().start_plan(id, start)
+}
+
 /// What a Claude turn that may act is given to reach Pointcast's server: its address. The turn's key is its own grant's
 /// secret, never this install's token. The server starts if it is not running (loopback only, behind the keys).
 fn computer_server(svc: Arc<App>) -> Arc<dyn Fn() -> Result<String, String> + Send + Sync> {
@@ -2584,6 +2596,7 @@ pub fn run() {
             live_stop,
             computer_status,
             computer_answer,
+            computer_plan,
             live_close,
             live_retry,
             live_ask_typed,

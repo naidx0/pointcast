@@ -50,6 +50,30 @@ fn the_ten_tools_have_object_schemas_that_say_screen_text_is_content() {
 }
 
 #[test]
+fn the_plan_tools_take_steps_and_apps_then_a_step_number_and_how_it_ended() {
+    let s = schemas();
+    let tool = |n: &str| s.as_array().unwrap().iter().find(|t| t["name"] == n).cloned().unwrap_or_else(|| panic!("{n} is served"));
+    let plan = tool("pointcast_plan");
+    let p = &plan["inputSchema"];
+    assert_eq!(p["required"], json!(["steps", "apps"]));
+    for key in ["steps", "apps"] {
+        assert_eq!((p["properties"][key]["type"].as_str(), p["properties"][key]["items"]["type"].as_str()), (Some("array"), Some("string")), "{key}");
+        assert_eq!(p["properties"][key]["minItems"], 1, "{key}");
+    }
+    assert_eq!(p["properties"]["steps"]["maxItems"], crate::computer::plan::MAX_STEPS);
+    assert_eq!(p["properties"]["apps"]["maxItems"], crate::computer::plan::MAX_APPS);
+    let d = plan["description"].as_str().unwrap();
+    assert!(d.contains("Start") && d.contains("more than one action") && d.contains("needs no plan"), "{d}");
+    let step = tool("pointcast_plan_step");
+    let p = &step["inputSchema"];
+    assert_eq!(p["required"], json!(["index", "status"]));
+    assert_eq!((p["properties"]["index"]["type"].as_str(), p["properties"]["index"]["minimum"].as_u64()), (Some("integer"), Some(1)), "numbered from 1");
+    assert_eq!(p["properties"]["status"]["enum"], json!(["done", "skipped", "failed"]));
+    assert_eq!(p["properties"]["note"]["type"], "string");
+    assert!(NAMES.ends_with(&["pointcast_plan", "pointcast_plan_step"]));
+}
+
+#[test]
 fn without_a_grant_every_tool_is_refused_does_nothing_and_is_logged() {
     let (d, log) = desk(mail());
     for name in NAMES {
@@ -481,5 +505,241 @@ mod cards {
         let r = call(d, "pointcast_open_app", &json!({ "name": "SecurityAgent" }));
         assert_eq!(status(&r), "refused");
         assert!(d.confirms.card().is_none());
+    }
+}
+
+mod plans {
+    use super::*;
+    use crate::computer::plan::{Mark, Plan, State, CANCELLED};
+    use crate::computer::{Answer, Hooks};
+
+    fn leaked(fake: Fake) -> (&'static Desk, Did) {
+        let did = fake.did.clone();
+        (Box::leak(Box::new(Desk::new(Box::new(fake)))), did)
+    }
+
+    /// The plan the panel shows once it is there in `state`.
+    fn shown(d: &Desk, state: State) -> Plan {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(p) = d.status().plan.filter(|p| p.state == state) {
+                return p;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "no {state:?} plan showed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The AI's `pointcast_plan` call, on its own thread: it waits for the person.
+    fn propose(d: &'static Desk, steps: &[&str], apps: &[&str]) -> std::thread::JoinHandle<Value> {
+        let args = json!({ "steps": steps, "apps": apps });
+        std::thread::spawn(move || call(d, "pointcast_plan", &args))
+    }
+
+    /// A plan for `apps`, shown and started by the person.
+    fn started(d: &'static Desk, apps: &[&str]) -> Value {
+        let waiting = propose(d, &["Open it", "Write the list", "Select all"], apps);
+        let p = shown(d, State::Proposed);
+        d.start_plan(p.id, true).unwrap();
+        waiting.join().unwrap()
+    }
+
+    #[test]
+    fn nothing_acts_before_start_and_after_it_only_in_the_planned_apps() {
+        let (d, log) = leaked(mail());
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let waiting = propose(d, &["Make the text bold", "Write the subject"], &["Mail"]);
+        let p = shown(d, State::Proposed);
+        assert_eq!((p.apps.clone(), p.steps.len()), (vec!["Mail".to_string()], 2));
+        assert!(p.steps.iter().all(|s| s.status == Mark::Pending && s.note.is_none()));
+        // Before Start: looking goes on, acting is refused, in the plan's apps or not.
+        assert_eq!(status(&call(d, "pointcast_elements", &json!({}))), "done");
+        for (name, args) in [
+            ("pointcast_click", json!({ "id": id_of(d, "Bold") })),
+            ("pointcast_type", json!({ "id": id_of(d, "Subject"), "text": "hi" })),
+            ("pointcast_key", json!({ "keys": "cmd+b" })),
+            ("pointcast_scroll", json!({ "direction": "down" })),
+            ("pointcast_open_app", json!({ "name": "Mail" })),
+            ("pointcast_focus", json!({ "app": "Mail" })),
+        ] {
+            let r = call(d, name, &args);
+            assert_eq!(status(&r), "refused", "{name}: {r}");
+            assert!(first_text(&r).contains("waits for the person to press Start"), "{r}");
+        }
+        assert!(d.confirms.card().is_none(), "a refusal, not a card");
+        assert!(done(&log).is_empty(), "nothing acted before Start");
+        // Start: the waiting call hears it, with the steps numbered.
+        d.start_plan(p.id, true).unwrap();
+        let r = waiting.join().unwrap();
+        assert_eq!((status(&r), r["isError"].clone()), ("started".to_string(), json!(false)), "{r}");
+        let text = first_text(&r);
+        assert!(text.contains("1. Make the text bold\n2. Write the subject") && text.contains("Mail only") && text.contains("pointcast_plan_step"), "{text}");
+        assert!(d.start_plan(p.id, true).is_err(), "started once");
+        // In the plan's app it acts; anywhere else it is refused, with the reason.
+        assert_eq!(status(&call(d, "pointcast_click", &json!({ "id": id_of(d, "Bold") }))), "done");
+        assert_eq!(status(&call(d, "pointcast_open_app", &json!({ "name": "mail.app" }))), "done");
+        let r = call(d, "pointcast_open_app", &json!({ "name": "Notes" }));
+        assert_eq!(status(&r), "refused");
+        assert!(first_text(&r).contains("Notes is not in the plan the person started, which acts in Mail only"), "{r}");
+        assert_eq!(done(&log), ["press Bold", "open mail.app"]);
+        // The tiers and the cards still apply on top: Mail is at click, so typing asks to allow it.
+        let subject = id_of(d, "Subject");
+        let typing = std::thread::spawn(move || call(d, "pointcast_type", &json!({ "id": subject, "text": "hi" })));
+        let t = std::time::Instant::now();
+        let c = loop {
+            if let Some(c) = d.confirms.card() {
+                break c;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "no card");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(c.raise, Some("full"));
+        d.answer(c.id, Answer::Cancel).unwrap();
+        assert_eq!(status(&typing.join().unwrap()), "declined");
+        assert_eq!(done(&log).len(), 2);
+    }
+
+    #[test]
+    fn a_plan_started_for_another_app_refuses_acting_in_the_front_one() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        assert_eq!(status(&started(d, &["TextEdit"])), "started");
+        let r = call(d, "pointcast_click", &json!({ "id": id_of(d, "Bold") }));
+        assert!(status(&r) == "refused" && first_text(&r).contains("Mail is not in the plan"), "{r}");
+        let r = call(d, "pointcast_click", &json!({ "x": 5, "y": 5 }));
+        assert!(status(&r) == "refused" && first_text(&r).contains("acts in TextEdit only"), "a point in Mail too: {r}");
+        assert!(done(&log).is_empty());
+    }
+
+    #[test]
+    fn with_no_plan_a_single_action_goes_as_before_and_a_plan_names_no_never_app() {
+        let (d, log) = leaked(mail());
+        let _g = d.grants.grant(Duration::from_secs(60));
+        assert_eq!(status(&call(d, "pointcast_open_app", &json!({ "name": "Notes" }))), "done", "no plan asked for, none required");
+        assert_eq!(done(&log), ["open Notes"]);
+        for (args, why) in [
+            (json!({ "steps": [], "apps": ["Notes"] }), "1 to 12 steps"),
+            (json!({ "steps": vec!["a"; 13], "apps": ["Notes"] }), "1 to 12 steps"),
+            (json!({ "steps": ["Open it"] }), "1 to 6 apps"),
+            (json!({ "steps": ["Open it"], "apps": ["/Applications/Notes.app"] }), "not a path"),
+            (json!({ "steps": ["Open it"], "apps": ["Pointcast"] }), "off limits"),
+            (json!({ "steps": ["Open it"], "apps": ["SecurityAgent"] }), "password or consent prompt"),
+        ] {
+            let r = call(d, "pointcast_plan", &args);
+            assert!(status(&r) == "refused" && first_text(&r).contains(why), "{args}: {r}");
+        }
+        assert!(d.status().plan.is_none(), "a refused plan is never shown");
+        // Nobody to press Start (no panel): nothing acts after the plan.
+        let r = call(d, "pointcast_plan", &json!({ "steps": ["Open it", "Type"], "apps": ["Notes"] }));
+        assert!(status(&r) == "refused" && first_text(&r).contains("Nobody can press Start"), "{r}");
+        assert_eq!(status(&call(d, "pointcast_open_app", &json!({ "name": "Notes" }))), "refused");
+        assert_eq!(done(&log), ["open Notes"]);
+    }
+
+    #[test]
+    fn cancel_or_no_answer_refuses_every_tool_for_the_rest_of_the_turn() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let bold = id_of(d, "Bold");
+        let waiting = propose(d, &["Bold it"], &["Mail"]);
+        let p = shown(d, State::Proposed);
+        d.start_plan(p.id, false).unwrap();
+        let r = waiting.join().unwrap();
+        assert_eq!((status(&r), r["isError"].clone()), ("declined".to_string(), json!(false)), "{r}");
+        assert!(first_text(&r).contains("The person cancelled the plan"), "{r}");
+        assert_eq!(d.status().plan.map(|p| p.state), Some(State::Cancelled));
+        assert!(d.start_plan(p.id, true).is_err(), "no Start after Cancel");
+        for name in NAMES {
+            let r = call(d, name, &json!({ "id": bold, "text": "hi", "keys": "a", "direction": "up", "name": "Mail", "app": "Mail", "steps": ["x"], "apps": ["Mail"], "index": 1, "status": "done" }));
+            assert!(status(&r) == "refused" && first_text(&r).contains(CANCELLED), "{name}: {r}");
+        }
+        assert!(done(&log).is_empty());
+        // No answer in time counts the same.
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_millis(60));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let bold = id_of(d, "Bold");
+        let r = call(d, "pointcast_plan", &json!({ "steps": ["Bold it"], "apps": ["Mail"] }));
+        assert!(status(&r) == "refused" && first_text(&r).contains("did not press Start"), "{r}");
+        assert_eq!(status(&call(d, "pointcast_click", &json!({ "id": bold }))), "refused");
+        assert!(done(&log).is_empty());
+    }
+
+    #[test]
+    fn a_new_turn_drops_the_plan_with_the_grant() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        // Turn A's plan waits; turn B starts: A's call ends at once and its plan is gone.
+        let a = d.begin(Duration::from_secs(60));
+        let waiting = propose(d, &["Bold it"], &["Mail"]);
+        let p = shown(d, State::Proposed);
+        let t = std::time::Instant::now();
+        let b = d.begin(Duration::from_secs(60));
+        let r = waiting.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2) && status(&r) == "refused" && first_text(&r).contains("turn ended"), "{r}");
+        assert!(d.status().plan.is_none(), "the panel shows no plan of an earlier turn");
+        assert!(d.start_plan(p.id, true).is_err(), "nor takes a Start for it");
+        // B has no plan of its own: it acts as before. A letting go late leaves B alone.
+        drop(a);
+        assert_eq!(status(&call(d, "pointcast_click", &json!({ "id": id_of(d, "Bold") }))), "done");
+        // B's plan, cancelled, refuses everything in B; the next turn C starts clean.
+        let waiting = propose(d, &["Bold it"], &["Mail"]);
+        d.start_plan(shown(d, State::Proposed).id, false).unwrap();
+        waiting.join().unwrap();
+        assert_eq!(status(&call(d, "pointcast_apps", &json!({}))), "refused");
+        drop(b);
+        assert!(d.status().plan.is_none(), "it goes with B's grant");
+        let c = d.begin(Duration::from_secs(60));
+        assert!(d.status().plan.is_none());
+        assert_eq!(status(&call(d, "pointcast_click", &json!({ "id": id_of(d, "Bold") }))), "done");
+        // A started plan goes with the stop key too.
+        assert_eq!(status(&started(d, &["Mail"])), "started");
+        d.halt();
+        assert!(d.status().plan.is_none());
+        drop(c);
+        assert_eq!(done(&log), ["press Bold", "press Bold"]);
+    }
+
+    #[test]
+    fn step_ticks_reach_the_panel_state() {
+        let (d, _log) = leaked(mail());
+        let seen: &'static std::sync::Mutex<Vec<crate::computer::Status>> = Box::leak(Box::default());
+        d.set_hooks(Hooks { status: Box::new(move |s| seen.lock().unwrap().push(s.clone())), stop: Box::new(|| ()) });
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let r = call(d, "pointcast_plan_step", &json!({ "index": 1, "status": "done" }));
+        assert!(status(&r) == "refused" && first_text(&r).contains("No started plan"), "{r}");
+        assert_eq!(status(&started(d, &["TextEdit"])), "started");
+        let last = || seen.lock().unwrap().last().cloned().and_then(|s| s.plan).expect("the panel heard a plan");
+        assert_eq!(last().state, State::Started);
+        let r = call(d, "pointcast_plan_step", &json!({ "index": 1, "status": "done", "note": "  TextEdit is open " }));
+        assert!(status(&r) == "done" && first_text(&r).contains("Step 1 of 3 is ticked done."), "{r}");
+        assert_eq!((last().steps[0].status, last().steps[0].note.as_deref()), (Mark::Done, Some("TextEdit is open")));
+        call(d, "pointcast_plan_step", &json!({ "index": 2, "status": "skipped" }));
+        let r = call(d, "pointcast_plan_step", &json!({ "index": 3, "status": "failed", "note": "no text to select" }));
+        assert!(first_text(&r).contains("Stop and ask the person"), "{r}");
+        // What the panel gets, as it reads it.
+        let panel = serde_json::to_value(seen.lock().unwrap().last().unwrap()).unwrap();
+        assert_eq!(panel["plan"]["state"], "started");
+        assert_eq!(panel["plan"]["apps"], json!(["TextEdit"]));
+        let marks: Vec<_> = panel["plan"]["steps"].as_array().unwrap().iter().map(|s| s["status"].as_str().unwrap().to_string()).collect();
+        assert_eq!(marks, ["done", "skipped", "failed"]);
+        assert_eq!(panel["plan"]["steps"][2]["note"], "no text to select");
+        // A step ticked again keeps the last word; numbers outside the plan and unknown words are refused.
+        let r = call(d, "pointcast_plan_step", &json!({ "index": 3, "status": "done" }));
+        assert!(first_text(&r).contains("Every step is ticked"), "{r}");
+        assert_eq!(last().steps[2].status, Mark::Done);
+        for args in [json!({ "index": 0, "status": "done" }), json!({ "index": 4, "status": "done" }), json!({ "index": 1, "status": "maybe" })] {
+            assert_eq!(status(&call(d, "pointcast_plan_step", &args)), "refused", "{args}");
+        }
+        let ticks: Vec<_> = d.journal.entries().into_iter().filter(|e| e.tool == "pointcast_plan_step" && matches!(e.outcome, Outcome::Done(_))).collect();
+        assert_eq!(ticks.len(), 4, "each tick is in the journal");
+        assert!(ticks.iter().all(|e| e.line().is_none()), "and none is listed under the answer as an action");
     }
 }
