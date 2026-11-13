@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const NAMES: [&str; 13] = [
+pub const NAMES: [&str; 14] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -19,6 +19,7 @@ pub const NAMES: [&str; 13] = [
     "pointcast_open_app",
     "pointcast_focus",
     "pointcast_files",
+    "pointcast_browser",
     "pointcast_plan",
     "pointcast_plan_step",
 ];
@@ -90,6 +91,53 @@ fn files_app() -> &'static str {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn files_app() -> &'static str {
     "Files"
+}
+
+/// Whether an app name is a browser this reads through AppleScript: Some(true) is the Chrome family's
+/// `activeTab`/`title`, Some(false) Safari's `currentTab`/`name`, None anything else (Firefox exposes no tabs).
+fn browser_kind(app: &str) -> Option<bool> {
+    const SAFARI: &[&str] = &["Safari", "Safari Technology Preview", "WebKit"];
+    const CHROME: &[&str] = &["Google Chrome", "Arc", "Brave Browser", "Microsoft Edge", "Chromium", "Vivaldi", "Opera"];
+    if SAFARI.contains(&app) {
+        Some(false)
+    } else if CHROME.contains(&app) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// The JavaScript for Automation asking one browser for its front tab or every tab. The app name goes in as a
+/// JSON string literal, so no name can carry code. A browser that answers with nothing says "no tabs".
+fn browser_script(app: &str, chrome: bool, tabs: bool) -> String {
+    let app = serde_json::to_string(app).unwrap_or_else(|_| "\"Safari\"".into());
+    let (tab, title) = if chrome { ("activeTab", "title") } else { ("currentTab", "name") };
+    if tabs {
+        format!(
+            "(() => {{\n  const a = Application({app});\n  if (!a.running()) return \"not running\";\n  const out = [];\n  a.windows().forEach(w => w.tabs().forEach(t => out.push(t.{title}() + \"\\t\" + t.url())));\n  return out.slice(0, 50).join(\"\\n\") || \"no tabs\";\n}})()"
+        )
+    } else {
+        format!(
+            "(() => {{\n  const a = Application({app});\n  if (!a.running()) return \"not running\";\n  const w = a.windows();\n  if (!w.length) return \"no windows\";\n  const t = w[0].{tab}();\n  return t.{title}() + \"\\t\" + t.url();\n}})()"
+        )
+    }
+}
+
+/// Runs `osascript -l JavaScript`; the script's last expression is the answer. Off macOS there is none.
+#[cfg(target_os = "macos")]
+fn osascript(script: &str) -> Result<String, String> {
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+#[cfg(not(target_os = "macos"))]
+fn osascript(_script: &str) -> Result<String, String> {
+    Err("only on macOS".into())
 }
 
 /// Path parts an AI never touches, whatever the action: credential and sign-in folders, app config, and
@@ -346,6 +394,16 @@ pub fn schemas() -> Value {
                     "limit": { "type": "integer", "minimum": 1, "maximum": LIST_MAX, "default": LIST }
                 },
                 "required": ["action", "path"]
+            }
+        },
+        {
+            "name": "pointcast_browser",
+            "description": format!("The browser in front, natively instead of from a picture: the front tab's title and address, or every tab in its windows. For Safari and the Chrome family (Chrome, Arc, Brave, Edge, Chromium, Vivaldi, Opera); another browser or another app says it cannot be read. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["front", "tabs"], "default": "front" }
+                }
             }
         },
         {
@@ -771,6 +829,30 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 _ => None,
             };
             return files_op(action, &p, to.as_deref(), limit);
+        }
+        "pointcast_browser" => {
+            let tabs = text(args, "action").is_some_and(|a| a == "tabs");
+            let front = os.front().map_err(|e| format!("The front app can't be told ({e})."))?;
+            *app = front.name.clone();
+            *target = format!("{}'s tabs", front.name);
+            let Some(chrome) = browser_kind(&front.name) else {
+                return Err(format!("The front app is \"{}\", not a browser this reads (Safari, Chrome, Arc, Brave, Edge, Chromium, Vivaldi, Opera).", front.name));
+            };
+            if let Some(e) = end(ask(desk, cx, Kind::See, &target_of(&front, "", None), false, target)) {
+                return Ok(e);
+            }
+            let out = osascript(&browser_script(&front.name, chrome, tabs)).map_err(|e| format!("\"{}\" didn't answer ({e}).", front.name))?;
+            let text = if tabs {
+                format!("Tabs in {}:\n{}", front.name, out)
+            } else {
+                let mut parts = out.splitn(2, '\t');
+                format!("The front tab of {} is \"{}\" — {}", front.name, parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+            };
+            return Ok(End::Done {
+                text,
+                how: "applescript".into(),
+                data: json!({ "browser": front.name, "tabs": out }),
+            });
         }
         _ => {}
     }

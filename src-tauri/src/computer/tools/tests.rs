@@ -912,3 +912,22 @@ fn file_acts_go_through_the_guard_and_trashing_waits_for_the_person() {
     assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "move", "path": "~/x", "to": "~/y" }))), "refused");
     assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "list", "path": "~" }))), "done");
 }
+
+#[test]
+fn a_browser_is_known_or_refused_and_the_script_carries_no_code() {
+    use super::{browser_kind, browser_script};
+    assert_eq!(browser_kind("Safari"), Some(false));
+    assert_eq!(browser_kind("Google Chrome"), Some(true));
+    assert_eq!(browser_kind("Arc"), Some(true));
+    assert_eq!(browser_kind("Firefox"), None);
+    assert_eq!(browser_kind("Finder"), None);
+    // The front-tab script names the app, asks for one tab's title and address.
+    let s = browser_script("Safari", false, false);
+    assert!(s.contains("Application(\"Safari\")") && s.contains("currentTab") && s.contains("t.url()"), "{s}");
+    // The Chrome family asks its own way, and the tabs script lists every window's tabs, capped.
+    let s = browser_script("Google Chrome", true, true);
+    assert!(s.contains("t.title()") && s.contains("slice(0, 50)"), "{s}");
+    // An app name that is itself JavaScript can carry nothing: it lands as a quoted string.
+    let s = browser_script("\"; evil()", false, false);
+    assert!(s.contains("Application(\"\\\"; evil()\")"), "{s}");
+}
