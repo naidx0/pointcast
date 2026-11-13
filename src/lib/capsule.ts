@@ -77,13 +77,6 @@ export function capsuleLine(s: { phase: string; mic: boolean }): LineMode {
   return (s.phase === "recording" || s.phase === "loading") && s.mic ? "listen" : "rest";
 }
 
-/** From this long on the recording's time stays beside the line; before, it shows over the line's faded end on hover. */
-export const TIME_STAYS_MS = 60_000;
-
-/** Whether the time stays shown without hover: from a minute on, and while the microphone warning is up (the time is
- * then the evidence that the recording runs). */
-export const timeStays = (durationMs: number, warned: boolean): boolean => warned || durationMs >= TIME_STAYS_MS;
-
 /** How long the microphone may take to start before the capsule says anything about it. */
 export const READY_WAIT_MS = 600;
 
@@ -122,8 +115,9 @@ export function peekStep(p: Peek, e: PeekEvent): Peek {
   }
 }
 
-/** Whether the recording's time shows beside the line: only while the microphone is live, and then from a minute on,
- * with the microphone warning, or while the person looks (Peek). Never once the recording has ended. */
+/** Whether the recording's time shows beside the line: only while the microphone is live, and then with the
+ * microphone warning or while the person looks (Peek). Never once the recording has ended, and never on its own:
+ * the owner asked for the clock on a look only (2026-11-13). */
 export function timeShown(s: { live: boolean; durationMs: number; warned: boolean; peek: Peek }): boolean {
-  return s.live && (timeStays(s.durationMs, s.warned) || s.peek.pointer || s.peek.keyboard);
+  return s.live && (s.warned || s.peek.pointer || s.peek.keyboard);
 }

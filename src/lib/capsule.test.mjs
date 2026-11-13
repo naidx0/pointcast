@@ -118,14 +118,6 @@ test("the capsule's line: the voice draws it once the microphone is live, flat b
   assert.equal(capsuleLine({ phase: "ready", mic: true }), "rest");
 });
 
-test("the time shows on hover until a minute, then stays; a quiet-mic warning keeps it", async () => {
-  const { TIME_STAYS_MS, timeStays } = await import("./capsule.ts");
-  assert.equal(timeStays(0, false), false);
-  assert.equal(timeStays(TIME_STAYS_MS - 1, false), false);
-  assert.equal(timeStays(TIME_STAYS_MS, false), true);
-  assert.equal(timeStays(5_000, true), true);
-});
-
 test("the capsule's line reads the same level as Ask's: loudness before the raw meter, nothing while the mic is not live", async () => {
   const { LEVEL_FIELDS, levelOf } = await import("./live.ts");
   // A session state carries both: level (0 to 1 over -60..-10 dBFS) and loudness (over -50..-10 dBFS), as Ask reads it.
@@ -135,7 +127,7 @@ test("the capsule's line reads the same level as Ask's: loudness before the raw 
   assert.equal(levelOf({ phase: "recording", mic: true, level: 0.62 }, LEVEL_FIELDS), 0.62);
 });
 
-import { NO_PEEK, TIME_STAYS_MS, peekStep, timeShown } from "./capsule.ts";
+import { NO_PEEK, peekStep, timeShown } from "./capsule.ts";
 
 test("the time shows only while someone looks, and never stays after a click, a hide or the end of a recording", () => {
   const at = (peek, o = {}) => timeShown({ live: true, durationMs: 16_000, warned: false, peek, ...o });
@@ -153,8 +145,8 @@ test("the time shows only while someone looks, and never stays after a click, a 
   for (const e of ["hidden", "start"]) assert.deepEqual(peekStep({ pointer: true, keyboard: true }, e), NO_PEEK, e);
   assert.equal(at(peekStep(over, "hidden")), false);
   // Ended (the microphone is no longer live): no time, whatever the look or the length.
-  assert.equal(timeShown({ live: false, durationMs: TIME_STAYS_MS * 3, warned: true, peek: over }), false);
-  // From a minute on, and with the microphone warning, it stays without a look.
-  assert.equal(at(NO_PEEK, { durationMs: TIME_STAYS_MS }), true);
+  assert.equal(timeShown({ live: false, durationMs: 3 * 60_000, warned: true, peek: over }), false);
+  // The clock never shows itself, however long the recording: only the microphone warning keeps it.
+  assert.equal(at(NO_PEEK, { durationMs: 3 * 60_000 }), false);
   assert.equal(at(NO_PEEK, { warned: true }), true);
 });

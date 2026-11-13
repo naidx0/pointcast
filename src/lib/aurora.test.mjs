@@ -89,7 +89,7 @@ test("ink: parsed from CSS, light ink adds light, dark ink mixes normally", () =
 
 test("the chosen wave: an unknown or missing value reads as Aurora", async () => {
   const { waveStyleOf, WAVE_STYLES } = await import("./aurora.ts");
-  assert.deepEqual([...WAVE_STYLES], ["pen", "breath", "aurora"]);
+  assert.deepEqual([...WAVE_STYLES], ["pen", "aurora"]);
   for (const s of WAVE_STYLES) assert.equal(waveStyleOf(s), s);
   for (const bad of [undefined, null, "", "Pen", "sparkles", 3, {}]) assert.equal(waveStyleOf(bad), "aurora");
 });

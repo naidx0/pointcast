@@ -23,6 +23,7 @@ import {
   onState,
   practice,
   preview,
+  statsGet,
   subscribe,
   type Action,
   type Config,
@@ -293,6 +294,11 @@ function AskStep({ cfg, patch, onChosen }: { cfg: Config; patch: (p: Record<stri
   const ai = list == null ? null : chosen ? shortName(chosen) : "";
   useEffect(() => onChosen(!!chosen), [!!chosen]);
   const key = cfg.hotkeys.ask?.label;
+  // Once the person has asked anything, the "Try it" nudge has done its job: it stops showing.
+  const [asked, setAsked] = useState<number | null>(null);
+  useEffect(() => {
+    statsGet().then((u) => setAsked(u.total.questions)).catch(() => setAsked(0));
+  }, []);
   return (
     <div className="onb-step">
       <h1 className="t-title">Prompt with your screen</h1>
@@ -304,7 +310,7 @@ function AskStep({ cfg, patch, onChosen }: { cfg: Config; patch: (p: Record<stri
         </div>
       </div>
       {list ? <AiPick a={list} setA={setList} /> : null}
-      {key && ai ? (
+      {key && ai && !asked ? (
         <p className="t-body onb-try">
           Try it: press <Keycaps label={key} /> and ask what is on your screen.
         </p>

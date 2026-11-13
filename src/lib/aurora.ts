@@ -19,7 +19,7 @@ export const AURORA_FLOOR = 0.14;
 export const AURORA_ATTACK_MS = 60;
 export const AURORA_RELEASE_MS = 260;
 /** The reference was chosen at its "Slow" setting: every dt is scaled by this. */
-export const AURORA_SPEED = 0.5;
+export const AURORA_SPEED = 0.8;
 /** A lens and its centre never leave this share of the half-height. */
 export const AURORA_EDGE = 0.96;
 
@@ -152,8 +152,9 @@ export function drawAurora(g: Ctx, w: number, h: number, s: Aurora, ink: Ink, ad
   g.globalCompositeOperation = "source-over";
 }
 
-/** The voice wave the person picked: Classic (the pen), Strands (breath) or Aurora. */
-export type WaveStyle = "pen" | "breath" | "aurora";
-export const WAVE_STYLES: readonly WaveStyle[] = ["pen", "breath", "aurora"];
-/** What a saved or sent value means: Aurora unless it names one of the others exactly. */
-export const waveStyleOf = (x: unknown): WaveStyle => (x === "pen" || x === "breath" ? x : "aurora");
+/** The voice wave the person picked: Classic (the pen) or Aurora. Strands ("breath") was retired 2026-11-13 on the
+ * owner's word; a kept "breath" setting reads as Aurora now. */
+export type WaveStyle = "pen" | "aurora";
+export const WAVE_STYLES: readonly WaveStyle[] = ["pen", "aurora"];
+/** What a saved or sent value means: Aurora unless it names the pen exactly. */
+export const waveStyleOf = (x: unknown): WaveStyle => (x === "pen" ? "pen" : "aurora");
