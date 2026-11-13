@@ -1,9 +1,9 @@
-# Handoff — 2026-11-13
+# Handoff — 2026-11-13 (evening)
 
-**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `ea0f25d`, 63 commits ahead of `origin/main` (merge-base `1926a749`).
+**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `66fc098`, 74 commits ahead of `origin/main` (merge-base `1926a749`).
 **Local only:** nothing is pushed. `pushRemote` is set to `no-push-local-only`. Push to main only on the owner's explicit yes.
 
-## Done on this branch (all gates green at ea0f25d: 807 Rust, 278 front-end, tsc, vite build)
+## Done on this branch (all gates green at 66fc098: 818 Rust, 278 front-end, tsc, vite build)
 
 - **Model and effort on every AI:** Settings › AI. Claude gets `--model`/`--effort`; Codex gets per-model efforts and a speed tier; ACP agents get `configOptions`. The choice is kept per route.
 - **Computer use, slices A–D** (`src-tauri/src/computer/`, docs/cua-plan.md):
@@ -19,25 +19,22 @@
 - **UI:**
   - the Aurora Glow wave (Settings › General › Appearance: Classic, Strands, Aurora);
   - the Glacier wash, now visible in light mode;
-  - Keep history (100, 500, 1,000 or Forever).
-- **Fixes:**
-  - stale macOS permissions after an update ("Reset and ask again");
-  - one drag rule for every window, and windows stay where they were put.
+  - Keep history (100, 500, 1,000 or Forever);
+  - the Ask panel opens at 640 px and reads at 15/22 px (resizable 380–900).
 
-## Voice review fixes (merged)
+## This session's work (committed, tested, not yet human-verified)
 
-Four of the five review findings are fixed, test-locked and merged; the last item, the call-end race, was folded into the first fix. 813 Rust tests pass.
-
-- A second Call click while the microphone opens cancels the start. A call's end, even after a panic, only clears its own state.
-- The speaker closes its stream with the buffer unlocked, so closing never deadlocks.
-- Huge ordinals and numbers never panic the natural voice.
-- A sentence that panics while it is being made is skipped, and the voice goes on to the next one.
-- **Not finished:** the guard against a duplicate Silero download, and the cap on the VAD buffer. The work in progress is saved as `docs/voice-fixes-wip-vad.patch` (not applied, not tested).
+- **VAD tail merged:** a duplicate Silero download is refused (`fetch_once`), and one stretch of speech is capped at 30 s so a false-positive voice can't grow the buffer without bound (`voice/call/vad.rs`). Was `docs/voice-fixes-wip-vad.patch`; now applied and test-locked.
+- **Call shortcut:** Ctrl+Shift+C by default, settable in Settings; starts a call, cancels one still opening, ends one in progress (`chord.rs`, `lib.rs`).
+- **Window positions persist:** the HUD and the Ask panel come back where they were put (`data_dir/spots.json`; a damaged file forgets only what it cannot read).
+- **Pointer ring while acting:** a small accent ring follows the pointer for as long as a turn holds the computer tools and pulses at each click (`computer/ring.rs`, `ring.html`). Click-through, and on the protected list so the AI never sees it in its own screenshots.
+- **Answered-model warning:** Claude (result `modelUsage`), Codex (completed turn) and ACP (what the session offers) report the model that answered; when it is not the one picked — an alias resolving to its own id doesn't count — the answer carries one quiet line (`Answered by x, not the y you picked.`). Kept turns carry it; Sent names the model asked.
+- **ACP `config_option_update`:** a model changed in the agent's own window updates what the session offers and names what answered.
 
 ## Next
 
-1. Rebuild the app (the voice fixes are merged). It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
-2. The owner tries a real call, a computer-use task and Kokoro on this Mac.
+1. Rebuild the app (all of the above is in). It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
+2. The owner tries a real call, a computer-use task and Kokoro on this Mac — now also: the bigger Ask panel, the Call key, restored window spots, the pointer ring.
 3. On the owner's yes: push to main.
    - The Windows code has never been compiled; CI is the first compile.
    - Then read CI.
@@ -49,14 +46,12 @@ Four of the five review findings are fixed, test-locked and merged; the last ite
   - a real call (echo margin, speaker volume, Bluetooth);
   - the confirm card and the plan card;
   - the physical Esc key while acting (may need Input Monitoring);
-  - ACP agents acting (Gemini not signed in; Copilot reports "auto" only).
+  - ACP agents acting (Gemini not signed in; Copilot reports "auto" only);
+  - the pointer ring on a real acting turn, and the answered-model line on a real mismatch.
 - Signing: an ad-hoc signature means every build resets macOS permissions. A Developer ID is needed (owner's money and identity).
 
 ## Follow-ups (not started)
 
-- A Call shortcut.
-- Window positions remembered across launches.
 - Echo cancellation through macOS voice processing.
-- A pointer ring while acting.
-- A warning when the model that answered differs from the one chosen.
-- `config_option_update` handling.
+- `docs/next-layer-plan.md` (untracked, scoped): S1 one history timeline on Home + resume-last-session; S3 cheap summariser per AI; S4 memory you can see (`memory.md`, accept-proposed, AI page view, off switch); S8 native integrations.
+- A "continue in the AI's own app" handoff (`claude --resume`, Codex thread resume, transcript/picture copy fallback).
