@@ -329,6 +329,16 @@ mod tests {
     }
 
     #[test]
+    fn a_new_computer_with_neither_node_nor_homebrew_is_told_what_to_get() {
+        for id in ["claude-code", "codex", "gemini-cli", "copilot", "opencode"] {
+            for job in [Job::Install, Job::Update] {
+                let said = plan_of(id, job, None, None, None).map(|p| p.typed());
+                assert!(said.as_ref().is_err_and(|e| e.contains("Node.js") && e.contains("nodejs.org")), "{id} {job:?}: {said:?}");
+            }
+        }
+    }
+
+    #[test]
     fn sign_in_is_the_vendors_own_command() {
         assert_eq!(plan_of("claude-code", Job::SignIn, Some(&p("/x/claude")), None, None).unwrap().typed(), "claude auth login");
         assert_eq!(plan_of("copilot", Job::SignIn, Some(&p("/x/copilot")), None, None).unwrap().typed(), "copilot login");
