@@ -4,10 +4,10 @@
 use super::{Done, How, Speaker, VoiceInfo};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use windows::core::HSTRING;
+use windows::core::{IInspectable, HSTRING};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Core::MediaSource;
-use windows::Media::Playback::MediaPlayer;
+use windows::Media::Playback::{MediaPlayer, MediaPlayerFailedEventArgs};
 use windows::Media::SpeechSynthesis::{SpeechSynthesizer, VoiceInformation};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
@@ -52,12 +52,12 @@ impl Speaker for Win {
             player.SetAutoPlay(false)?;
             player.SetSource(&source)?;
             let s = slot.clone();
-            player.MediaEnded(&TypedEventHandler::new(move |_, _| {
+            player.MediaEnded(&TypedEventHandler::<MediaPlayer, IInspectable>::new(move |_, _| {
                 call(&s);
                 Ok(())
             }))?;
             let s = slot.clone();
-            player.MediaFailed(&TypedEventHandler::new(move |_, _| {
+            player.MediaFailed(&TypedEventHandler::<MediaPlayer, MediaPlayerFailedEventArgs>::new(move |_, _| {
                 call(&s);
                 Ok(())
             }))?;
