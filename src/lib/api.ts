@@ -3,6 +3,7 @@ import { emptyUsage, previewUsage, type Usage } from "./usage";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { chainOf, dragAct } from "./drag";
 import {
   LEVEL_FIELDS,
   PANEL_W,
@@ -958,6 +959,17 @@ export const winClose = () => (inTauri ? win().close() : Promise.resolve());
 export const winStartDragging = () => (inTauri ? win().startDragging() : Promise.resolve());
 export const winIsMaximized = () => (inTauri ? win().isMaximized() : Promise.resolve(false));
 /** Whether the OS draws this window's frame; in the preview, no (so the drawn bar shows). */
+/** Every `.drag` area moves its window (src/lib/drag.ts): a press starts the native drag, a double press zooms, as a
+ * title bar does. A handler that already moved the window says so with preventDefault. Call once per window. */
+export function startWindowDrag() {
+  if (!inTauri) return;
+  document.addEventListener("mousedown", (e) => {
+    if (e.defaultPrevented) return;
+    const act = dragAct(chainOf(e.target as Element | null), e.button, e.detail);
+    if (act === "move") void win().startDragging().catch(() => undefined);
+    else if (act === "zoom") void win().toggleMaximize().catch(() => undefined);
+  });
+}
 export const winIsDecorated = () => (inTauri ? win().isDecorated() : Promise.resolve(false));
 export const onWinResized = (fn: () => void): Promise<UnlistenFn> => (inTauri ? win().onResized(() => fn()) : Promise.resolve(() => undefined));
 

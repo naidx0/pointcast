@@ -1,5 +1,5 @@
 import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from "react";
-import { ArrowUp, Check, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
 import {
   inTauri,
   liveAskTyped,
@@ -95,7 +95,7 @@ const typing = (t: EventTarget | null) => t instanceof HTMLElement && (t.isConte
 const h = createElement as unknown as H<ReactNode>;
 const ROW = 24;
 /** The listening line's height: room for a tall stroke above the baseline and a little below. */
-const VOICE_H = 36;
+const VOICE_H = 48;
 /** The resting stroke: as long as one line of text is tall, less its leading. */
 const REST = 14;
 
@@ -477,7 +477,7 @@ export function Live() {
             </PressButton>
           </div>
         ) : null}
-        {sentOf === turnN && v.complete ? <SentPanel turn={turnN} /> : null}
+        {sentOf === turnN && v.complete ? <SentPanel turn={turnN} close={() => setSentOf(null)} /> : null}
       </section>
       )}
     </>
@@ -486,7 +486,10 @@ export function Live() {
     <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Prompt with your screen">
       <header className="live-head">
         {sheet ? (
-          <span className="live-title">Sessions</span>
+          <PressButton className="live-back" title="Back to this session" aria-label="Back to this session" act={() => setSheet(false)}>
+            <ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />
+            Sessions
+          </PressButton>
         ) : multi || sumOpen ? (
           <span className="live-title" title={v.title}>
             {v.title}
@@ -703,7 +706,7 @@ function EarlierTurn({
           <TurnFoot text={r.answer} line={line} sent={sent} toggleSent={toggleSent} />
         </div>
       ) : null}
-      {sent ? <SentPanel turn={r.n} /> : null}
+      {sent ? <SentPanel turn={r.n} close={toggleSent} /> : null}
     </li>
   );
 }
@@ -732,7 +735,7 @@ function TurnFoot({ text, line, sent, toggleSent }: { text: string; line: string
 
 /** Exactly what left the computer for one turn, read from the engine's record: the words, each picture as sent with
  * its size, the earlier questions that went along, the AI and its model, and what the AI's own tool added. */
-function SentPanel({ turn }: { turn: number }) {
+function SentPanel({ turn, close }: { turn: number; close: () => void }) {
   const [s, setS] = useState<SentView | "none" | null>(null);
   const box = useRef<HTMLDListElement>(null);
   useEffect(() => {
@@ -794,6 +797,11 @@ function SentPanel({ turn }: { turn: number }) {
           </dd>
         </div>
       ) : null}
+      <div className="live-sentv-foot">
+        <PressButton className="live-pill" act={close}>
+          Hide what was sent
+        </PressButton>
+      </div>
     </dl>
   );
 }
@@ -981,18 +989,25 @@ function ThisSession({
           }}
         />
       ) : (
-        <PressButton
-          className="live-this-title"
-          title="Rename"
-          aria-label={`${title}. Rename`}
-          act={() => {
-            setName(title);
-            // After the press's own mouse-down: its default focus would land beside the new field and close it at once.
-            setTimeout(() => setEditing(true), 0);
-          }}
-        >
-          {title}
-        </PressButton>
+        <span className="live-this-head">
+          {/* The session's own title takes you back into it (owner, 2026-11-12: pressing it renamed it instead, and
+              the list felt like a dead end). Renaming is the pencil beside it. */}
+          <PressButton className="live-this-title" title="Back to this session" aria-label={`${title}. Back to this session`} act={done}>
+            {title}
+          </PressButton>
+          <PressButton
+            className="live-hb live-this-rename"
+            title="Rename"
+            aria-label="Rename this session"
+            act={() => {
+              setName(title);
+              // After the press's own mouse-down: its default focus would land beside the new field and close it at once.
+              setTimeout(() => setEditing(true), 0);
+            }}
+          >
+            <PenLine size={14} strokeWidth={1.5} />
+          </PressButton>
+        </span>
       )}
       <div className="live-this-meta">
         <span>{turns ? `${turnsLabel(turns)} · This session` : "This session"}</span>

@@ -271,8 +271,8 @@ export function pathPoints(d: string): Pt[] {
  * no frame repeats. The voice sets how high it swells and how fast it moves; at silence it still breathes, barely. */
 export type Breath = { phase: number; drift: number; amp: number };
 export const breathStart = (): Breath => ({ phase: 0, drift: 0, amp: 0 });
-/** At silence the waves keep this much of their height: alive, not flat. */
-export const BREATH_IDLE = 0.06;
+/** At silence the waves keep this much of their height: plainly alive, never a flat line (owner, 2026-11-12). */
+export const BREATH_IDLE = 0.14;
 /** How fast the waves travel, in radians per second, at silence and added at full voice. */
 export const BREATH_SPEED = 1.8;
 export const BREATH_SPEED_VOICE = 4.2;

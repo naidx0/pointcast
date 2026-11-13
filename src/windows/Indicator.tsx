@@ -52,7 +52,7 @@ const hudLevels: LevelSource = (set) => {
   return () => void sinks.delete(set);
 };
 /** The line's height in the 48 px capsule, and its width per stroke: narrower than Ask's, for a shorter line. */
-const LINE_H = 28;
+const LINE_H = 32;
 const LINE_DX = 11;
 
 /** The state the window was built for, set by the app before the page loads, so a freshly built capsule's first frame

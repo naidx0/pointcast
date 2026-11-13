@@ -155,7 +155,7 @@ html.win .live-hb:not(.stop) {
 .live-row-line {
   flex: 1;
   min-width: 0;
-  height: 40px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -168,7 +168,7 @@ html.win .live-hb:not(.stop) {
 .live-voice {
   flex: 1;
   min-width: 0;
-  height: 36px;
+  height: 48px;
   /* The line's baseline (22 of its 36 px) rests on the row's centre, level with Stop and the picture; the voice writes
      above it. */
   transform: translateY(-4px);
@@ -1570,4 +1570,50 @@ html.live-preview[data-wall="dark"] body {
 html.live-preview.vibrant .live {
   -webkit-backdrop-filter: blur(30px) saturate(1.3);
   backdrop-filter: blur(30px) saturate(1.3);
+}
+
+/* The way back from the session list: the header's own back button, and the session's title. */
+.live-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  /* It stands where the title stands, so the header's buttons stay at the right. */
+  margin: 0 auto 0 -6px;
+  padding: 2px 8px 2px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--live-ink);
+  font: inherit;
+  font-weight: 500;
+}
+.live-back:hover {
+  background: var(--fill-2);
+}
+.live-this-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.live-this-head .live-this-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-this-rename {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  opacity: 0.6;
+}
+.live-this-rename:hover {
+  opacity: 1;
+}
+/* What was sent ends with its own way out. */
+.live-sentv-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
 }

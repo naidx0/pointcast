@@ -71,7 +71,7 @@
         "label": "indicator",
         "title": "Pointcast recording",
         "url": "indicator.html",
-        "width": 392,
+        "width": 432,
         "height": 64,
         "visible": false,
         "decorations": false,

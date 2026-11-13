@@ -6,6 +6,7 @@ import { platform } from "@/lib/theme";
  * Windows title bar does. */
 export function dragWindow(e: ReactMouseEvent, maximizable = true) {
   if (e.button !== 0 || e.target !== e.currentTarget) return;
+  e.preventDefault(); // moved here: the window-wide drag (startWindowDrag) leaves this press alone
   (e.detail === 2 && maximizable ? winToggleMaximize() : winStartDragging()).catch(() => undefined);
 }
 

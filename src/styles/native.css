@@ -2154,8 +2154,9 @@ html.win .hud {
   position: relative;
   display: flex;
   align-items: center;
-  width: 92px;
-  height: 28px;
+  /* The breathing wave, bigger (owner, 2026-11-12): 132 x 32 in the 48 px capsule. */
+  width: 132px;
+  height: 32px;
   margin: 0 6px 0 10px;
 }
 .hud .scribe .line-voice {
@@ -3098,6 +3099,8 @@ html.win .undo-btn {
   grid-template-rows: auto 1fr auto;
 }
 .onb-band {
+  /* The band is part of the title area: holding it moves the window. */
+  pointer-events: auto;
   margin: 10px 10px 0;
   height: 64px;
   border-radius: 12px;
