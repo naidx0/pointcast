@@ -41,8 +41,9 @@ pub fn allowed() -> Vec<String> {
     crate::computer::tools::NAMES.iter().map(|n| format!("mcp__{SERVER}__{n}")).collect()
 }
 
-/// How a turn reaches Pointcast's server (its address and this install's token), set once by the app.
-type Serve = Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync>;
+/// How a turn reaches Pointcast's server (its address), set once by the app. The key a turn carries is its own grant's
+/// secret, never this install's token, so the token is not asked for here.
+type Serve = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
 static SERVE: OnceLock<Serve> = OnceLock::new();
 
 /// The app says how a turn reaches its server; until then no Claude conversation can act.
@@ -62,12 +63,23 @@ impl Computer {
     pub fn app() -> Option<Computer> {
         SERVE.get().map(|serve| Computer { desk: crate::computer::desk(), serve: serve.clone() })
     }
+
+    /// Hold the tools for one turn: a grant of its own, then the file at `file` that tells its helper where they are,
+    /// with that grant's secret as the key.
+    fn hold(&self, file: &Path) -> Result<Hold, Failure> {
+        let acting = self.desk.begin(crate::computer::MAX_GRANT);
+        let key = acting.secret().ok_or_else(|| Failure::Broken("Pointcast could not make a key for its tools: this computer gave it no randomness.".into()))?;
+        let url = (self.serve)().map_err(Failure::Broken)?;
+        write_servers(file, &url, &key).map_err(|e| Failure::Broken(format!("Pointcast could not write where its tools are for Claude Code: {e}")))?;
+        Ok(Hold { acting, file: file.to_owned() })
+    }
 }
 
-/// The file `--mcp-config` names for a turn that may act: Pointcast's server, with its address and token. Only this
-/// user can read it, it is written when a turn starts and deleted when it ends, and it is never logged.
-fn write_servers(f: &Path, url: &str, token: &str) -> std::io::Result<()> {
-    let body = json!({ "mcpServers": { SERVER: { "type": "http", "url": url, "headers": { "Authorization": format!("Bearer {token}") } } } });
+/// The file `--mcp-config` names for a turn that may act: Pointcast's server, with its address and the turn's grant
+/// secret as its key (never this install's token). Only this user can read it, it is written when a turn starts and
+/// deleted when it ends, and it is never logged.
+fn write_servers(f: &Path, url: &str, key: &str) -> std::io::Result<()> {
+    let body = json!({ "mcpServers": { SERVER: { "type": "http", "url": url, "headers": { "Authorization": format!("Bearer {key}") } } } });
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -81,7 +93,7 @@ fn write_servers(f: &Path, url: &str, token: &str) -> std::io::Result<()> {
 
 /// A turn's hold on the computer: its grant and its server file, both gone when it is dropped.
 struct Hold {
-    _acting: crate::computer::Acting,
+    acting: crate::computer::Acting,
     file: PathBuf,
 }
 
@@ -482,6 +494,22 @@ impl Shared {
         a.finish(Kind::Failed(why));
     }
 
+    /// End the helper while no turn is under way: the next question starts a new one and tells it the conversation so
+    /// far.
+    fn retire(&self) {
+        let proc = {
+            let mut s = self.inner.lock().unwrap();
+            if s.proc.is_none() {
+                return;
+            }
+            s.helper += 1;
+            s.tail = None;
+            s.proc.take()
+        };
+        self.stdin.lock().unwrap().take();
+        drop(proc);
+    }
+
     /// End the conversation: what was being answered ends as stopped, stdin closes, and the helper gets `grace` to
     /// leave before it and its tree are ended.
     fn shut(&self, grace: Duration) {
@@ -559,10 +587,11 @@ impl Chat for ClaudeChat {
         let hold = match &self.computer {
             None => None,
             Some((c, file)) => {
-                let acting = c.desk.begin(crate::computer::MAX_GRANT);
-                let (url, token) = (c.serve)().map_err(Failure::Broken)?;
-                write_servers(file, &url, &token).map_err(|e| Failure::Broken(format!("Pointcast could not write where its tools are for Claude Code: {e}")))?;
-                Some(Hold { _acting: acting, file: file.clone() })
+                let hold = c.hold(file)?;
+                // A helper started for an earlier turn was told that turn's key, which opens nothing now: it ends, and
+                // this turn's helper is told the new key and the conversation so far.
+                self.shared.retire();
+                Some(hold)
             }
         };
         let running = self.shared.inner.lock().unwrap().proc.is_some();
@@ -879,13 +908,23 @@ pub mod tests {
                     // Where the tools are, as this helper was told: the file's contents and who may read it.
                     let argv: Vec<String> = std::env::args().collect();
                     let file = argv.iter().position(|a| a == "--mcp-config").and_then(|i| argv.get(i + 1)).cloned().unwrap_or_default();
-                    let servers = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+                    let mut servers = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
                     #[cfg(unix)]
                     let mode = std::fs::metadata(&file).ok().map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777);
                     #[cfg(not(unix))]
                     let mode: Option<u32> = None;
+                    // The key itself is never written down: its shape, and a fingerprint that tells two keys apart.
+                    let mut key = Value::Null;
+                    if let Some(auth) = servers.as_mut().and_then(|v| v.pointer_mut("/mcpServers/pointcast/headers/Authorization")) {
+                        let said = auth.as_str().unwrap_or_default().to_owned();
+                        let hex = said.strip_prefix("Bearer ").is_some_and(|k| k.len() == 64 && k.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+                        *auth = json!(if hex { "Bearer <64 hex digits>" } else { "<not a 64-hex-digit bearer key>" });
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&said, &mut h);
+                        key = json!(std::hash::Hasher::finish(&h).to_string());
+                    }
                     if let Some(mut f) = log.as_ref().and_then(|f| std::fs::OpenOptions::new().create(true).append(true).open(f).ok()) {
-                        let _ = writeln!(f, "{}", json!({ "servers": servers, "mode": mode }));
+                        let _ = writeln!(f, "{}", json!({ "servers": servers, "mode": mode, "key": key }));
                     }
                     let q = v["message"]["content"].as_array().and_then(|c| c.last()).and_then(|q| q["text"].as_str()).unwrap_or_default().to_owned();
                     let tool = if q.contains("bash") { "Bash" } else { "mcp__pointcast__pointcast_elements" };
@@ -1196,14 +1235,23 @@ pub mod tests {
         assert!(Claude::new("unused".into()).caps(None).images);
     }
 
-    const DUMMY: &str = "dummy-token-for-the-tests-0123456789";
-
     /// A conversation that may act, through the stand-in, on a desk of its own with a fake Mac behind it.
     fn acting(mode: &str, name: &str) -> (Claude, PathBuf, &'static crate::computer::Desk) {
         let (c, log) = child(mode, name);
         let desk: &'static crate::computer::Desk = Box::leak(Box::new(crate::computer::Desk::new(Box::new(crate::computer::fake::mail()))));
-        let serve: Serve = Arc::new(|| Ok(("http://127.0.0.1:9/mcp".to_owned(), DUMMY.to_owned())));
+        let serve: Serve = Arc::new(|| Ok("http://127.0.0.1:9/mcp".to_owned()));
         (c.acting(Some(Computer { desk, serve })), log, desk)
+    }
+
+    /// What each helper was told of its server file, in order (the key as its shape and a fingerprint only).
+    fn told(log: &Path) -> Vec<Value> {
+        lines(log).into_iter().filter(|v| v.get("servers").is_some()).collect()
+    }
+
+    /// The key in the server file at `file`, read while its turn holds it. Never printed.
+    fn key_in(file: &Path) -> String {
+        let v: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        v["mcpServers"]["pointcast"]["headers"]["Authorization"].as_str().unwrap().strip_prefix("Bearer ").unwrap().to_owned()
     }
 
     #[test]
@@ -1249,18 +1297,29 @@ pub mod tests {
         assert_eq!(got.first(), Some(&Kind::Thinking), "a computer tool reads as working: {got:?}");
         assert_eq!((words(&got), got.last()), (WORDS.map(String::from).to_vec(), Some(&Kind::Done)), "and is not refused: {got:?}");
         assert!(!desk.granted() && !file.exists(), "the grant and the file go with the turn");
-        let all = lines(&log);
-        let told = all.iter().find(|v| v.get("servers").is_some()).expect("the helper read the file");
-        let want = json!({ "mcpServers": { "pointcast": { "type": "http", "url": "http://127.0.0.1:9/mcp", "headers": { "Authorization": format!("Bearer {DUMMY}") } } } });
-        assert_eq!(told["servers"], want);
+        let first = told(&log);
+        assert_eq!(first.len(), 1, "the helper read the file");
+        // The turn's own key: 32 random bytes as hex, the grant's secret (never this install's token, which a turn is
+        // not even given).
+        let want = json!({ "mcpServers": { "pointcast": { "type": "http", "url": "http://127.0.0.1:9/mcp", "headers": { "Authorization": "Bearer <64 hex digits>" } } } });
+        assert_eq!(first[0]["servers"], want);
         #[cfg(unix)]
-        assert_eq!(told["mode"], json!(0o600), "only this user can read it");
+        assert_eq!(first[0]["mode"], json!(0o600), "only this user can read it");
         let got = argv(&log);
         assert!(got[0].windows(2).any(|w| w[0] == "--allowedTools" && w[1] == allowed().join(",")), "{:?}", got[0]);
-        // The next turn holds the tools again, on the same helper.
+        // The next turn holds a new grant with a new key: the helper told the old key ends, and a new one is told the
+        // new key and the conversation so far.
         let pid = chat.pid();
         assert_eq!(answer(&mut chat, said("and type hello")).last(), Some(&Kind::Done));
-        assert_eq!((chat.pid(), desk.granted(), file.exists()), (pid, false, false));
+        assert!(chat.pid().is_some() && chat.pid() != pid, "a new helper for the new key");
+        assert!(!desk.granted() && !file.exists());
+        let both = told(&log);
+        assert_eq!((both.len(), argv(&log).len()), (2, 2));
+        assert_eq!(both[1]["servers"], want);
+        assert!(both[0]["key"].is_string() && both[0]["key"] != both[1]["key"], "each turn's key is its own");
+        let last = seen(&log).into_iter().filter(|v| v["type"] == "user").last().unwrap();
+        let text: String = last["message"]["content"].as_array().unwrap().iter().filter_map(|b| b["text"].as_str()).collect();
+        assert!(text.contains("open TextEdit") && text.contains("and type hello"), "the new helper is told the conversation: {text}");
     }
 
     #[test]
@@ -1273,9 +1332,12 @@ pub mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(20)).map(|e| e.kind), Ok(Kind::Thinking));
         first_word(&rx);
         assert!(desk.granted() && file.exists(), "held while the turn runs");
+        let key = key_in(&file);
+        assert!(desk.grants.by_secret(key.as_bytes()).is_some(), "the file's key is the live grant's secret");
         (chat.stopper())();
         assert!(!desk.granted() && !file.exists(), "gone at once");
-        let r = crate::computer::call(desk, "pointcast_apps", &json!({}));
+        assert!(desk.grants.by_secret(key.as_bytes()).is_none(), "and the key opens nothing after");
+        let r = crate::computer::call(desk, desk.grants.live_id().unwrap_or(0), "pointcast_apps", &json!({}));
         assert_eq!((r["isError"].clone(), r["structuredContent"]["status"].clone()), (json!(true), json!("refused")), "{r}");
         assert_eq!(collect(&rx), [Kind::Failed(Failure::Stopped)]);
     }
@@ -1306,7 +1368,7 @@ pub mod tests {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let addr = crate::mcp::spawn_stoppable("127.0.0.1:0", crate::mcp::Latest::default(), token.clone(), stop.clone()).unwrap();
         let url = format!("http://{addr}/mcp");
-        let serve: Serve = Arc::new(move || Ok((url.clone(), token.clone())));
+        let serve: Serve = Arc::new(move || Ok(url.clone()));
         let home = scratch("claude-real-acting");
         let claude = Claude::new(home).choosing(Some("sonnet".into()), Some("low".into())).acting(Some(Computer { desk, serve }));
         let mut chat = claude.start("", &[]).unwrap();

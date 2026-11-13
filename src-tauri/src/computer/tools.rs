@@ -141,8 +141,10 @@ enum End {
     Failed(String),
 }
 
-/// One call as `run` sees it: the tool, its arguments, and the person's yes when the call runs again after one.
+/// One call as `run` sees it: the grant it runs under, the tool, its arguments, and the person's yes when the call runs
+/// again after one.
 struct Cx<'a> {
+    grant: u64,
     name: &'a str,
     args: &'a Value,
     approval: std::cell::Cell<Option<Approval>>,
@@ -159,16 +161,17 @@ fn result(text: &str, data: Value, error: bool) -> Value {
     })
 }
 
-/// One computer tool call: the grant is asked first, then the guard, then the OS. Never panics into the server.
-pub fn call(desk: &Desk, name: &str, args: &Value) -> Value {
-    if !desk.granted() {
+/// One computer tool call under grant `grant`, the one whose secret the request carried: that grant is asked first (it
+/// must still be the live one), then the guard, then the OS. Never panics into the server.
+pub fn call(desk: &Desk, grant: u64, name: &str, args: &Value) -> Value {
+    if !desk.grants.holds(grant) {
         let why = format!("{name} works only during an Ask turn that lets the AI see and act.");
         desk.journal.push("", name, "", Outcome::Refused(why.clone()));
         return result(&why, json!({ "status": "refused", "reason": why }), true);
     }
     let mut app = String::new();
     let mut target = String::new();
-    let cx = |approval| Cx { name, args, approval: std::cell::Cell::new(approval) };
+    let cx = |approval| Cx { grant, name, args, approval: std::cell::Cell::new(approval) };
     let mut end = run(desk, &cx(None), &mut app, &mut target).unwrap_or_else(End::Failed);
     let mut yes = false;
     // The person can be asked: the call waits on a card in the panel, then runs again or ends as they said.
@@ -180,10 +183,10 @@ pub fn call(desk: &Desk, name: &str, args: &Value) -> Value {
             _ => break,
         };
         desk.journal.push(&app, name, &target, Outcome::NeedsConfirm(what.clone()));
-        let binding = Binding { app: app.clone(), tool: name.into(), target: target.clone(), args: args.clone() };
+        let binding = Binding { grant, app: app.clone(), tool: name.into(), target: target.clone(), args: args.clone() };
         let id = desk.confirms.open(&what, need, binding);
         desk.notify();
-        let waited = desk.confirms.wait(id, &|| desk.granted(), within);
+        let waited = desk.confirms.wait(id, within);
         desk.notify();
         let approval = match waited {
             Waited::Approved(a) => Some(a),
@@ -201,7 +204,10 @@ pub fn call(desk: &Desk, name: &str, args: &Value) -> Value {
                 break;
             }
         };
-        if !desk.granted() {
+        // Its own grant, not just a grant: a new turn that took over does not carry on this one's call.
+        if !desk.grants.holds(grant) {
+            // Its approval, if the person gave one, is let go with the rest of its grant's.
+            desk.confirms.sweep();
             end = End::Refused("The turn ended: nothing was done.".into());
             break;
         }
@@ -274,7 +280,7 @@ fn ask(desk: &Desk, cx: &Cx, kind: Kind, t: &Target, commits: bool, target: &str
         Verdict::Refuse(why) if guard::never(kind, t).is_none() && trust.tier(&t.app) < kind.needs() => Err(End::Short { why, need: kind.needs() }),
         Verdict::Refuse(why) => Err(End::Refused(why)),
         Verdict::NeedsConfirm(what) => {
-            let bound = Binding { app: t.app.clone(), tool: cx.name.into(), target: target.into(), args: cx.args.clone() };
+            let bound = Binding { grant: cx.grant, app: t.app.clone(), tool: cx.name.into(), target: target.into(), args: cx.args.clone() };
             let yes = cx.approval.take().is_some_and(|a| desk.confirms.spend(a, &bound));
             if yes { Ok(()) } else { Err(End::Confirm(what)) }
         }

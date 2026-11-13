@@ -6,9 +6,10 @@
 //! `pointcast_session` hand out the conversations with the assistant: a list, and one as markdown with its pictures
 //! as file links.
 //!
-//! While an Ask turn holds a computer grant (`computer::grant`), the computer tools (`pointcast_screen`,
-//! `pointcast_click` and the rest, see `computer/`) are listed and answered too; without one they are neither, so
-//! coding agents reading prompts never see them.
+//! The computer tools (`pointcast_screen`, `pointcast_click` and the rest, see `computer/`) are listed and answered
+//! only for the Ask turn that holds the live computer grant (`computer::grant`): its request carries that grant's own
+//! secret as its bearer key, and sees the computer tools and nothing else. This install's token never sees or calls
+//! them, so a coding agent the person connected can't act on the computer while a turn does.
 //!
 //! The session holds screenshots, so only a local MCP client may read it: every request must
 //! carry this install's token as `Authorization: Bearer <token>`. Anything a browser sends is
@@ -337,56 +338,31 @@ fn local_host(head: &str) -> bool {
     )
 }
 
-fn authorized(head: &str, token: &str) -> bool {
-    let Some((scheme, got)) = header(head, "authorization").and_then(|v| v.split_once(' ')) else {
-        return false;
-    };
-    let (a, b) = (got.trim().as_bytes(), token.as_bytes());
-    // Compare every byte, so the time taken does not say how much of a guess was right.
-    scheme.eq_ignore_ascii_case("bearer")
-        && a.len() == b.len()
-        && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+/// Who a request is from, by the bearer key it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// This install's token: a coding agent the person connected. The coding tools and the session, never the computer.
+    Agent,
+    /// The live computer grant's secret: the Ask turn holding grant `id`. The computer tools and nothing else.
+    Turn(u64),
+}
+
+/// The caller a request's `Authorization: Bearer` key names, or none. Both keys are compared in constant time.
+fn caller(head: &str, token: &str, grants: &crate::computer::Grants) -> Option<Caller> {
+    let (scheme, got) = header(head, "authorization")?.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let got = got.trim().as_bytes();
+    if crate::computer::same(got, token.as_bytes()) {
+        return Some(Caller::Agent);
+    }
+    grants.by_secret(got).map(Caller::Turn)
 }
 
 fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant) -> Result<(), String> {
     let req = read_request(&mut stream, deadline)?;
-    let head = req.split("\r\n\r\n").next().unwrap_or("");
-    let (method_line, body) = split_http(&req);
-    let (code, ctype, body) = if header(head, "origin").is_some() || !local_host(head) {
-        (403, "text/plain", "web pages cannot read Pointcast".to_string())
-    } else if !authorized(head, token) {
-        (
-            401,
-            "text/plain",
-            "missing or wrong token: copy the MCP setup again from Pointcast Settings".to_string(),
-        )
-    } else if method_line.starts_with("GET /v1/session")
-        || method_line.starts_with("GET /session")
-        || method_line.starts_with("GET / ")
-    {
-        match latest.get() {
-            Some(exp) => (
-                200,
-                "application/json",
-                serde_json::to_string_pretty(&exp).unwrap_or_else(|_| "{}".into()),
-            ),
-            None => (
-                404,
-                "application/json",
-                "{\"error\":\"no session yet\"}".into(),
-            ),
-        }
-    } else if method_line.starts_with("POST /mcp") || method_line.starts_with("POST /") {
-        let (code, reply) = rpc(body, latest);
-        (code, "application/json", reply)
-    } else if method_line.starts_with("GET /mcp") || method_line.starts_with("DELETE /mcp") {
-        // No server-sent event stream and no sessions to end.
-        (405, "text/plain", "method not allowed".into())
-    } else if method_line.starts_with("GET /health") {
-        (200, "text/plain", "ok".into())
-    } else {
-        (404, "text/plain", "not found".into())
-    };
+    let (code, ctype, body) = reply(&req, latest, token, crate::computer::desk());
     let reason = match code {
         200 => "OK",
         202 => "Accepted",
@@ -410,15 +386,60 @@ fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant
     write_by(&mut stream, resp.as_bytes(), deadline.max(Instant::now() + DEADLINE))
 }
 
+/// The status, content type and body for one whole request, with the computer tools of `desk`: the app's own, or a
+/// test's. A turn's key reaches the MCP endpoint only.
+fn reply(req: &str, latest: &Latest, token: &str, desk: &crate::computer::Desk) -> (u16, &'static str, String) {
+    let head = req.split("\r\n\r\n").next().unwrap_or("");
+    let (method_line, body) = split_http(req);
+    if header(head, "origin").is_some() || !local_host(head) {
+        return (403, "text/plain", "web pages cannot read Pointcast".to_string());
+    }
+    let Some(who) = caller(head, token, &desk.grants) else {
+        return (401, "text/plain", "missing or wrong token: copy the MCP setup again from Pointcast Settings".to_string());
+    };
+    let rpc_route = method_line.starts_with("POST /mcp") || method_line.starts_with("POST /");
+    if matches!(who, Caller::Turn(_)) && !rpc_route {
+        return (403, "text/plain", "this key reaches the computer tools only".to_string());
+    }
+    if method_line.starts_with("GET /v1/session")
+        || method_line.starts_with("GET /session")
+        || method_line.starts_with("GET / ")
+    {
+        match latest.get() {
+            Some(exp) => (
+                200,
+                "application/json",
+                serde_json::to_string_pretty(&exp).unwrap_or_else(|_| "{}".into()),
+            ),
+            None => (
+                404,
+                "application/json",
+                "{\"error\":\"no session yet\"}".into(),
+            ),
+        }
+    } else if rpc_route {
+        let (code, reply) = rpc_on(body, latest, desk, who);
+        (code, "application/json", reply)
+    } else if method_line.starts_with("GET /mcp") || method_line.starts_with("DELETE /mcp") {
+        // No server-sent event stream and no sessions to end.
+        (405, "text/plain", "method not allowed".into())
+    } else if method_line.starts_with("GET /health") {
+        (200, "text/plain", "ok".into())
+    } else {
+        (404, "text/plain", "not found".into())
+    }
+}
+
 fn split_http(req: &str) -> (&str, &str) {
     let method_line = req.lines().next().unwrap_or("");
     let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
     (method_line, body)
 }
 
-/// One JSON-RPC message in, the reply out ("" for a notification, which gets none).
+/// One JSON-RPC message in from a coding agent, the reply out ("" for a notification, which gets none).
+#[cfg(test)]
 fn mcp_rpc(body: &str, latest: &Latest) -> String {
-    rpc(body, latest).1
+    rpc_on(body, latest, crate::computer::desk(), Caller::Agent).1
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> String {
@@ -428,13 +449,9 @@ fn rpc_error(id: Value, code: i64, message: &str) -> String {
 /// The HTTP status and the JSON-RPC reply. A body that is not JSON (-32700) or not a request (-32600) is a 400 with a
 /// null id; a notification or a client's response is a 202 with no body; every request gets a 200 with a result or an
 /// error from the JSON-RPC and MCP specs (-32601 unknown method, -32602 bad params or unknown tool). A tool that runs
-/// but cannot do what was asked answers with an `isError` result the model reads.
-fn rpc(body: &str, latest: &Latest) -> (u16, String) {
-    rpc_on(body, latest, crate::computer::desk())
-}
-
-/// `rpc` with the computer tools of `desk`: the app's own, or a test's.
-fn rpc_on(body: &str, latest: &Latest, desk: &crate::computer::Desk) -> (u16, String) {
+/// but cannot do what was asked answers with an `isError` result the model reads. A coding agent (`Caller::Agent`) is
+/// served the coding tools only; the Ask turn holding the live grant (`Caller::Turn`) the computer tools of `desk` only.
+fn rpc_on(body: &str, latest: &Latest, desk: &crate::computer::Desk, who: Caller) -> (u16, String) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return (400, rpc_error(Value::Null, -32700, "parse error"));
     };
@@ -469,26 +486,23 @@ fn rpc_on(body: &str, latest: &Latest, desk: &crate::computer::Desk) -> (u16, St
             "serverInfo": { "name": "pointcast", "version": "0.1.0" }
         }),
         "ping" => json!({}),
-        "tools/list" | "list_tools" => {
-            let mut list = tools();
-            if desk.granted() {
-                if let (Some(all), Value::Array(more)) = (list.as_array_mut(), crate::computer::schemas()) {
-                    all.extend(more);
-                }
-            }
-            json!({ "tools": list })
-        }
+        "tools/list" | "list_tools" => match who {
+            Caller::Agent => json!({ "tools": tools() }),
+            // The turn's grant ended since its key was checked: nothing to list.
+            Caller::Turn(g) => json!({ "tools": if desk.grants.holds(g) { crate::computer::schemas() } else { json!([]) } }),
+        },
         "tools/call" | "call_tool" => {
             let Some(name) = v.pointer("/params/name").and_then(|x| x.as_str()) else {
                 return (200, rpc_error(id, -32602, "invalid params: tools/call needs a tool name"));
             };
             let computer = crate::computer::is_tool(name);
-            if computer && !desk.granted() {
-                // Refused as if it did not exist, and noted: only a live Ask turn opens these.
-                desk.journal.push("", name, "", crate::computer::Outcome::Refused("no grant".into()));
-                return (200, rpc_error(id, -32602, &format!("unknown tool: {name} (the computer tools exist only during an Ask turn that allows them)")));
+            if computer && who == Caller::Agent {
+                // Refused as if it did not exist, and noted: only the Ask turn holding the live grant opens these.
+                desk.journal.push("", name, "", crate::computer::Outcome::Refused("not the Ask turn's key".into()));
+                return (200, rpc_error(id, -32602, &format!("unknown tool: {name} (the computer tools exist only for an Ask turn that allows them)")));
             }
-            if !computer && !TOOL_NAMES.contains(&name) {
+            let known = if computer { matches!(who, Caller::Turn(_)) } else { who == Caller::Agent && TOOL_NAMES.contains(&name) };
+            if !known {
                 return (200, rpc_error(id, -32602, &format!("unknown tool: {}", cut(name, 80))));
             }
             let args = match v.pointer("/params/arguments") {
@@ -496,8 +510,8 @@ fn rpc_on(body: &str, latest: &Latest, desk: &crate::computer::Desk) -> (u16, St
                 Some(a @ Value::Object(_)) => a.clone(),
                 Some(_) => return (200, rpc_error(id, -32602, "invalid params: arguments must be an object")),
             };
-            if computer {
-                crate::computer::call(desk, name, &args)
+            if let (true, Caller::Turn(g)) = (computer, who) {
+                crate::computer::call(desk, g, name, &args)
             } else {
                 // A tool that cannot do what was asked answers with an error result the model reads, never a panic.
                 match call_tool(name, &args, latest) {
@@ -1201,47 +1215,118 @@ mod tests {
         assert_eq!(schema("pointcast_sessions")["properties"]["limit"]["type"], "integer");
     }
 
-    #[test]
-    fn computer_tools_are_listed_and_answered_only_while_a_grant_is_live() {
-        use crate::computer::{fake, Desk, Outcome, UNTRUSTED};
-        let desk = Desk::new(Box::new(fake::mail()));
-        let latest = Latest::default();
-        let ask = |method: &str, params: Value| -> Value {
-            let body = json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params }).to_string();
-            serde_json::from_str(&rpc_on(&body, &latest, &desk).1).unwrap()
-        };
-        let names = |r: &Value| -> Vec<String> { r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect() };
-        let coding = names(&ask("tools/list", json!({})));
-        assert_eq!(coding.len(), 7, "{coding:?}");
-        assert!(coding.iter().all(|n| !n.starts_with("pointcast_") || TOOL_NAMES.contains(&n.as_str())));
+    /// One whole request as a local MCP client sends it, with `key` as its bearer key.
+    fn wire(method_path: &str, key: &str, body: &str) -> String {
+        format!(
+            "{method_path} HTTP/1.1\r\nHost: 127.0.0.1:1\r\nContent-Type: application/json\r\nAuthorization: Bearer {key}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
 
-        // Without a grant: absent, and refused when called anyway.
+    /// A JSON-RPC request over `reply`, as the client holding `key`: the HTTP status and the JSON-RPC reply.
+    fn ask_as(desk: &crate::computer::Desk, latest: &Latest, key: &str, method: &str, params: Value) -> (u16, Value) {
+        let body = json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params }).to_string();
+        let (code, _, out) = reply(&wire("POST /mcp", key, &body), latest, TOKEN, desk);
+        (code, serde_json::from_str(&out).unwrap_or(Value::Null))
+    }
+
+    fn tool_names(r: &Value) -> Vec<String> {
+        r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn with_a_live_grant_only_its_secret_reaches_the_computer_tools_and_this_installs_token_never_does() {
+        use crate::computer::guard::{Tier, Trust};
+        use crate::computer::{fake, Desk, Outcome, UNTRUSTED};
+        let fake = fake::mail();
+        let did = fake.did.clone();
+        let desk = Desk::new(Box::new(fake));
+        desk.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        let latest = Latest::default();
+        let ask = |key: &str, method: &str, params: Value| ask_as(&desk, &latest, key, method, params);
+        let computer = crate::computer::tools::NAMES.map(String::from).to_vec();
+        let (code, r) = ask(TOKEN, "tools/list", json!({}));
+        let coding = tool_names(&r);
+        assert_eq!((code, coding.len()), (200, 7), "{coding:?}");
+        assert!(coding.iter().all(|n| TOOL_NAMES.contains(&n.as_str())), "{coding:?}");
+
+        // Without a grant: absent for the token, and refused when called anyway, and noted.
         for name in crate::computer::tools::NAMES {
-            assert!(!coding.contains(&name.to_string()), "{name}");
-            let r = ask("tools/call", json!({ "name": name, "arguments": {} }));
+            let (_, r) = ask(TOKEN, "tools/call", json!({ "name": name, "arguments": {} }));
             assert_eq!(r["error"]["code"], -32602, "{r}");
             assert!(r["error"]["message"].as_str().unwrap().contains("Ask turn"), "{r}");
         }
         assert_eq!(desk.journal.entries().len(), 10);
         assert!(desk.journal.entries().iter().all(|e| matches!(e.outcome, Outcome::Refused(_))));
 
-        // With one: listed after the coding tools, and answered with the untrusted line first.
+        // With a live grant: the token still neither lists nor calls any computer tool, and nothing happens.
         let grant = desk.grants.grant(std::time::Duration::from_secs(60));
-        let both = names(&ask("tools/list", json!({})));
-        assert_eq!(&both[..7], &coding[..]);
-        assert_eq!(&both[7..], crate::computer::tools::NAMES.map(String::from));
-        let r = ask("tools/call", json!({ "name": "pointcast_elements", "arguments": {} }));
-        assert!(r.get("error").is_none(), "{r}");
-        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with(UNTRUSTED), "{r}");
-        assert_eq!(r["result"]["structuredContent"]["status"], "done");
-        // The coding tools answer as before.
-        let latest_call = ask("tools/call", json!({ "name": "pointcast_latest", "arguments": {} }));
-        assert!(latest_call.get("error").is_none() && latest_call["result"]["isError"] == true, "{latest_call}");
+        let key = grant.secret().expect("the OS gave randomness");
+        assert_eq!(tool_names(&ask(TOKEN, "tools/list", json!({})).1), coding, "the token's list is the coding tools only");
+        let args = json!({ "id": "x", "text": "hi", "keys": "a", "direction": "up", "name": "Notes", "app": "Mail" });
+        for name in crate::computer::tools::NAMES {
+            let (code, r) = ask(TOKEN, "tools/call", json!({ "name": name, "arguments": args }));
+            assert_eq!((code, r["error"]["code"].clone()), (200, json!(-32602)), "{name}: {r}");
+            assert!(r.get("result").is_none(), "{name}: {r}");
+        }
+        assert!(did.lock().unwrap().is_empty(), "the token's calls did nothing");
+        let latest_call = ask(TOKEN, "tools/call", json!({ "name": "pointcast_latest", "arguments": {} })).1;
+        assert!(latest_call.get("error").is_none() && latest_call["result"]["isError"] == true, "the coding tools answer the token as before: {latest_call}");
 
-        // The turn ends: gone again.
+        // The grant's own secret: the ten computer tools and nothing else.
+        let (code, r) = ask(&key, "initialize", json!({ "protocolVersion": PROTOCOL }));
+        assert_eq!((code, r["result"]["protocolVersion"].as_str()), (200, Some(PROTOCOL)), "{r}");
+        assert_eq!(tool_names(&ask(&key, "tools/list", json!({})).1), computer);
+        let r = ask(&key, "tools/call", json!({ "name": "pointcast_elements", "arguments": {} })).1;
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with(UNTRUSTED), "{r}");
+        assert_eq!(r["result"]["structuredContent"]["status"], "done", "{r}");
+        let bold = r["result"]["structuredContent"]["elements"].as_array().unwrap().iter().find(|e| e["name"] == "Bold").unwrap()["id"].clone();
+        let r = ask(&key, "tools/call", json!({ "name": "pointcast_click", "arguments": { "id": bold } })).1;
+        assert_eq!(r["result"]["structuredContent"]["status"], "done", "{r}");
+        assert_eq!(*did.lock().unwrap(), ["press Bold"]);
+        let r = ask(&key, "tools/call", json!({ "name": "pointcast_latest", "arguments": {} })).1;
+        assert_eq!(r["error"]["code"], -32602, "the turn's key never reads the session: {r}");
+        for route in ["GET /v1/session", "GET /session", "GET / ", "GET /health"] {
+            let (code, _, _) = reply(&wire(route.trim_end(), &key, ""), &latest, TOKEN, &desk);
+            assert_eq!(code, 403, "{route}");
+        }
+
+        // The turn ends: its secret opens nothing, and the token still has the coding tools.
         drop(grant);
-        assert_eq!(names(&ask("tools/list", json!({}))), coding);
-        assert_eq!(ask("tools/call", json!({ "name": "pointcast_click", "arguments": { "id": "x" } }))["error"]["code"], -32602);
+        assert_eq!(ask(&key, "tools/list", json!({})).0, 401);
+        assert_eq!(ask(&key, "tools/call", json!({ "name": "pointcast_click", "arguments": { "id": bold } })).0, 401);
+        assert_eq!(tool_names(&ask(TOKEN, "tools/list", json!({})).1), coding);
+        assert_eq!(*did.lock().unwrap(), ["press Bold"]);
+    }
+
+    #[test]
+    fn an_earlier_grants_secret_is_refused_once_a_new_grant_takes_over() {
+        use crate::computer::{fake, Desk};
+        let fake = fake::mail();
+        let did = fake.did.clone();
+        let desk = Desk::new(Box::new(fake));
+        let latest = Latest::default();
+        let ask = |key: &str, method: &str, params: Value| ask_as(&desk, &latest, key, method, params);
+        let a = desk.grants.grant(std::time::Duration::from_secs(60));
+        let key_a = a.secret().unwrap();
+        assert_eq!(ask(&key_a, "tools/list", json!({})).0, 200);
+        let b = desk.grants.grant(std::time::Duration::from_secs(60));
+        let key_b = b.secret().unwrap();
+        assert!(key_a != key_b, "a new grant's secret is new");
+        for (method, params) in [("tools/list", json!({})), ("tools/call", json!({ "name": "pointcast_scroll", "arguments": { "direction": "down" } }))] {
+            let (code, r) = ask(&key_a, method, params);
+            assert_eq!((code, r), (401, Value::Null), "{method}: the old key is refused before anything is read");
+        }
+        assert!(did.lock().unwrap().is_empty());
+        for (i, wrong) in [key_b[..63].to_string(), format!("{key_b}0"), String::new(), key_b.to_uppercase()].iter().enumerate() {
+            assert_eq!(ask(wrong, "tools/list", json!({})).0, 401, "near miss {i}");
+        }
+        // The new key works, and still does once the old grant is dropped late.
+        drop(a);
+        let r = ask(&key_b, "tools/call", json!({ "name": "pointcast_scroll", "arguments": { "direction": "down" } })).1;
+        assert_eq!(r["result"]["structuredContent"]["status"], "done", "{r}");
+        assert_eq!(did.lock().unwrap().len(), 1);
+        drop(b);
     }
 
     #[test]
@@ -1254,11 +1339,11 @@ mod tests {
         desk.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
         desk.ask_for(std::time::Duration::from_millis(150));
         let latest = Latest::default();
+        let grant = desk.grants.grant(std::time::Duration::from_secs(60));
         let ask = |method: &str, params: Value| -> Value {
             let body = json!({ "jsonrpc": "2.0", "id": 4, "method": method, "params": params }).to_string();
-            serde_json::from_str(&rpc_on(&body, &latest, &desk).1).unwrap()
+            serde_json::from_str(&rpc_on(&body, &latest, &desk, Caller::Turn(grant.id())).1).unwrap()
         };
-        let _grant = desk.grants.grant(std::time::Duration::from_secs(60));
         let els = ask("tools/call", json!({ "name": "pointcast_elements", "arguments": {} }));
         let send = els["result"]["structuredContent"]["elements"].as_array().unwrap().iter().find(|e| e["name"] == "Send").unwrap()["id"].clone();
         // No method answers a card, and a yes written into the arguments is only more arguments.

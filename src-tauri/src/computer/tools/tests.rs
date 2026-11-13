@@ -23,6 +23,12 @@ fn status(r: &Value) -> String {
     r["structuredContent"]["status"].as_str().unwrap().to_string()
 }
 
+/// A call as the Ask turn's MCP client makes it, carrying the live grant's secret: under that grant, or under none
+/// when no grant is live.
+fn call(d: &Desk, name: &str, args: &Value) -> Value {
+    super::call(d, d.grants.live_id().unwrap_or(0), name, args)
+}
+
 #[test]
 fn the_ten_tools_have_object_schemas_that_say_screen_text_is_content() {
     let s = schemas();
@@ -245,7 +251,7 @@ fn no_screenshot_while_a_password_prompt_or_pointcast_is_in_front() {
 mod cards {
     use super::*;
     use crate::computer::confirm::{Binding, Confirms, Waited};
-    use crate::computer::{Answer, WITHIN};
+    use crate::computer::{Answer, Grants, Hooks, WITHIN};
 
     fn leaked(fake: Fake) -> (&'static Desk, Did) {
         let did = fake.did.clone();
@@ -264,22 +270,27 @@ mod cards {
         }
     }
 
-    fn binding(target: &str) -> Binding {
-        Binding { app: "Mail".into(), tool: "pointcast_click".into(), target: target.into(), args: json!({ "id": "abc" }) }
+    fn under(grant: u64, target: &str) -> Binding {
+        Binding { grant, app: "Mail".into(), tool: "pointcast_click".into(), target: target.into(), args: json!({ "id": "abc" }) }
+    }
+
+    /// A yes on a card for `b`: the approval it makes.
+    fn yes(c: &Confirms, b: Binding) -> crate::computer::confirm::Approval {
+        let id = c.open("This would click button \"Send\" in Mail.", None, b);
+        assert_eq!(c.answer(id, Answer::Allow, &|_, _| ()), Err("This asks for a yes: Do it or Cancel.".into()), "no tier to raise on a yes card");
+        assert_eq!(c.answer(id, Answer::Do, &|_, _| ()), Ok(None));
+        assert!(c.answer(id, Answer::Do, &|_, _| ()).is_err(), "answered once");
+        let Waited::Approved(a) = c.wait(id, Duration::from_secs(1)) else { panic!("approved") };
+        assert!(c.card().is_none(), "the card goes once answered");
+        a
     }
 
     #[test]
     fn an_approval_works_once_only_for_the_same_target_and_expires() {
-        let c = Confirms::default();
-        let yes = |c: &Confirms, b: Binding| {
-            let id = c.open("This would click button \"Send\" in Mail.", None, b);
-            assert_eq!(c.answer(id, Answer::Allow, &|_, _| ()), Err("This asks for a yes: Do it or Cancel.".into()), "no tier to raise on a yes card");
-            assert_eq!(c.answer(id, Answer::Do, &|_, _| ()), Ok(None));
-            assert!(c.answer(id, Answer::Do, &|_, _| ()).is_err(), "answered once");
-            let Waited::Approved(a) = c.wait(id, &|| true, Duration::from_secs(1)) else { panic!("approved") };
-            assert!(c.card().is_none(), "the card goes once answered");
-            a
-        };
+        let grants = Grants::default();
+        let g = grants.grant(Duration::from_secs(60));
+        let c = Confirms::new(grants.clone());
+        let binding = |target: &str| under(g.id(), target);
         let a = yes(&c, binding("button \"Send\""));
         let again = a.replayed();
         assert!(c.spend(a, &binding("button \"Send\"")), "the action it was made for");
@@ -296,10 +307,96 @@ mod cards {
         assert!(!c.spend(a, &binding("button \"Send\"")), "expired after a minute");
         // A card nobody answers, and one whose turn ends.
         let id = c.open("x", None, binding("button \"Send\""));
-        assert!(matches!(c.wait(id, &|| true, Duration::from_millis(30)), Waited::TimedOut));
+        assert!(matches!(c.wait(id, Duration::from_millis(30)), Waited::TimedOut));
         let id = c.open("x", None, binding("button \"Send\""));
-        assert!(matches!(c.wait(id, &|| false, Duration::from_secs(5)), Waited::Ended));
+        drop(g);
+        assert!(matches!(c.wait(id, Duration::from_secs(5)), Waited::Ended));
         assert!(c.card().is_none());
+    }
+
+    #[test]
+    fn an_approval_made_under_one_grant_opens_nothing_once_another_replaces_it() {
+        let grants = Grants::default();
+        let c = Confirms::new(grants.clone());
+        let a = grants.grant(Duration::from_secs(60));
+        let ok = yes(&c, under(a.id(), "button \"Send\""));
+        // Turn B takes over before the yes is spent: it opens nothing, under A's binding or under B's.
+        let b = grants.grant(Duration::from_secs(60));
+        assert!(!c.spend(ok.replayed(), &under(a.id(), "button \"Send\"")), "A's grant is over");
+        assert!(!c.spend(ok, &under(b.id(), "button \"Send\"")), "made under A, never B's");
+        // The sweep a new turn makes drops A's approvals and A's card at once.
+        let _kept = yes(&c, under(b.id(), "button \"Send\""));
+        let a2 = grants.grant(Duration::from_secs(60));
+        let _old = yes(&c, under(a2.id(), "button \"Send\""));
+        let id = c.open("x", None, under(a2.id(), "button \"Send\""));
+        let b2 = grants.grant(Duration::from_secs(60));
+        assert!(c.card().is_none(), "a card of a grant that is over is never shown");
+        assert_eq!(c.answer(id, Answer::Do, &|_, _| ()), Err("That question is no longer waiting.".into()), "nor answered");
+        c.sweep();
+        assert_eq!(c.approvals(), 0, "every approval of an earlier grant is gone");
+        assert!(matches!(c.wait(id, Duration::from_secs(5)), Waited::Ended));
+        drop((a, b, a2, b2));
+    }
+
+    #[test]
+    fn a_new_turn_cancels_the_card_an_earlier_turn_is_waiting_on() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        let first = d.begin(Duration::from_secs(60));
+        let send = id_of(d, "Send");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": send })));
+        let c = card(d);
+        let t = std::time::Instant::now();
+        let second = d.begin(Duration::from_secs(60));
+        assert!(d.confirms.card().is_none(), "the card goes when the new turn starts");
+        let r = waiting.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "the waiting call ends at once");
+        assert_eq!(status(&r), "refused", "{r}");
+        assert!(d.answer(c.id, Answer::Do).is_err(), "a yes after the new turn started counts for nothing");
+        // The earlier turn letting go late leaves the new turn's card alone.
+        let send = id_of(d, "Send");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": send })));
+        let c = card(d);
+        drop(first);
+        assert_eq!(d.confirms.card().map(|k| k.id), Some(c.id), "the new turn's card stays");
+        d.answer(c.id, Answer::Cancel).unwrap();
+        assert_eq!(status(&waiting.join().unwrap()), "declined");
+        drop(second);
+        assert!(done(&log).is_empty(), "Send was never pressed");
+    }
+
+    #[test]
+    fn a_yes_given_under_one_grant_does_nothing_when_another_takes_over_before_the_call_resumes() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        // Right after the person's yes wakes the waiting call (its notice, on its own thread), turn B takes over.
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let taken: &'static std::sync::Mutex<Vec<crate::computer::Grant>> = Box::leak(Box::default());
+        let trigger = armed.clone();
+        d.set_hooks(Hooks {
+            status: Box::new(move |s| {
+                let on_call = std::thread::current().name() == Some("the-call");
+                if on_call && s.card.is_none() && trigger.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    taken.lock().unwrap().push(d.grants.grant(Duration::from_secs(60)));
+                }
+            }),
+            stop: Box::new(|| ()),
+        });
+        d.ask_for(Duration::from_secs(10));
+        let a = d.grants.grant(Duration::from_secs(60));
+        let send = id_of(d, "Send");
+        let waiting = std::thread::Builder::new().name("the-call".into()).spawn(move || call(d, "pointcast_click", &json!({ "id": send }))).unwrap();
+        let c = card(d);
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        d.answer(c.id, Answer::Do).unwrap();
+        let r = waiting.join().unwrap();
+        assert!(!armed.load(std::sync::atomic::Ordering::SeqCst), "turn B took over between the yes and the resumed call");
+        assert_eq!(status(&r), "refused", "{r}");
+        assert!(first_text(&r).contains("The turn ended"), "{r}");
+        assert!(done(&log).is_empty(), "Send was never pressed under turn B");
+        assert!(!a.live() && d.granted());
+        assert_eq!(d.confirms.approvals(), 0, "the yes was not kept for later");
     }
 
     #[test]

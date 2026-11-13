@@ -23,7 +23,7 @@ mod windows;
 
 // What the Ask turn uses to open the tools and read back what they did.
 #[allow(unused_imports)]
-pub use grant::{Grant, Grants, MAX_GRANT};
+pub use grant::{same, Grant, Grants, MAX_GRANT};
 #[allow(unused_imports)]
 pub use journal::{Entry, Journal, Outcome};
 pub use tools::{call, is_tool, schemas};
@@ -214,11 +214,20 @@ pub struct Acting {
     alive: Arc<AtomicBool>,
 }
 
+impl Acting {
+    /// The key this turn's MCP client carries to reach the computer tools: its grant's secret. None when the OS gave
+    /// no randomness, and then nothing reaches them.
+    pub fn secret(&self) -> Option<String> {
+        self.grant.as_ref().and_then(Grant::secret)
+    }
+}
+
 impl Drop for Acting {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
         self.grant.take();
-        self.desk.confirms.end();
+        // This grant's cards and approvals go; a newer turn's, if one took over, stay.
+        self.desk.confirms.sweep();
         *self.desk.last_app.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.desk.notify();
     }
@@ -226,10 +235,11 @@ impl Drop for Acting {
 
 impl Desk {
     pub fn new(os: Box<dyn Desktop>) -> Desk {
+        let grants = Grants::default();
         Desk {
-            grants: Grants::default(),
+            confirms: confirm::Confirms::new(grants.clone()),
+            grants,
             journal: Journal::default(),
-            confirms: confirm::Confirms::default(),
             trust: RwLock::new(Trust::default()),
             os,
             hooks: RwLock::new(None),
@@ -286,6 +296,8 @@ impl Desk {
     pub fn begin(&'static self, ttl: Duration) -> Acting {
         *self.last_app.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let grant = self.grants.grant(ttl);
+        // An earlier turn's card and approvals end with its grant, at once.
+        self.confirms.sweep();
         let alive = Arc::new(AtomicBool::new(true));
         if self.hooks().is_some() {
             let (me, alive) = (self, alive.clone());
@@ -336,7 +348,7 @@ impl Desk {
         }
     }
 
-    /// Whether an Ask turn holds a live grant.
+    /// Whether an Ask turn holds a live grant (any turn's: a tool call asks for its own, `Grants::holds`).
     pub fn granted(&self) -> bool {
         self.grants.live()
     }
@@ -540,6 +552,8 @@ mod tests {
         let desk = Desk::new(platform());
         desk.set_trust(Trust::with([("TextEdit".to_string(), guard::Tier::Full)]));
         let g = desk.grants.grant(Duration::from_secs(120));
+        let grant = g.id();
+        let call = |desk: &Desk, name: &str, args: &serde_json::Value| call(desk, grant, name, args);
         let text = |r: &serde_json::Value| r["content"][0]["text"].as_str().unwrap_or("").to_string();
         let r = call(&desk, "pointcast_open_app", &json!({ "name": "TextEdit" }));
         println!("open_app:\n{}\n", text(&r));

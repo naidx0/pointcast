@@ -1660,13 +1660,13 @@ fn computer_answer(svc: tauri::State<'_, Arc<App>>, id: u64, answer: String) -> 
     Ok(())
 }
 
-/// What a Claude turn that may act is given to reach Pointcast's server: its address and this install's token. The
-/// server starts if it is not running (loopback only, behind the token).
-fn computer_server(svc: Arc<App>) -> Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync> {
+/// What a Claude turn that may act is given to reach Pointcast's server: its address. The turn's key is its own grant's
+/// secret, never this install's token. The server starts if it is not running (loopback only, behind the keys).
+fn computer_server(svc: Arc<App>) -> Arc<dyn Fn() -> Result<String, String> + Send + Sync> {
     Arc::new(move || {
         let bind = svc.settings.lock().unwrap().mcp_bind.clone();
         let addr = mcp_start(&svc, &bind).map_err(|e| format!("Pointcast's agent server did not start: {e}."))?;
-        Ok((format!("http://{addr}/mcp"), mcp::token(&mcp::token_path())?))
+        Ok(format!("http://{addr}/mcp"))
     })
 }
 

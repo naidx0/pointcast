@@ -7,6 +7,11 @@
 //! call runs again under the new tier, so an irreversible target still asks for its yes. **Cancel** tells the AI the
 //! person declined. Approvals are made here only, by `answer`, which only the panel's command calls: no MCP request
 //! reaches it, and `Approval` has no other constructor and cannot be copied.
+//!
+//! Every card and every approval belongs to the grant whose call made it (`Binding::grant`), and counts only while that
+//! grant is the live one: once it ends, runs out or a new turn's grant replaces it, its card is gone, its waiting call
+//! ends and its approvals open nothing, whatever the person presses after.
+use super::grant::Grants;
 use super::guard::Tier;
 use serde::Serialize;
 use serde_json::Value;
@@ -28,9 +33,10 @@ pub struct Card {
     pub raise: Option<&'static str>,
 }
 
-/// The one action a card is about.
+/// The one action a card is about, under the grant whose call asked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
+    pub grant: u64,
     pub app: String,
     pub tool: String,
     pub target: String,
@@ -88,10 +94,11 @@ struct Inner {
     approvals: Vec<(u128, Binding, Instant)>,
 }
 
-#[derive(Default)]
 pub struct Confirms {
     inner: Mutex<Inner>,
     cv: Condvar,
+    /// Which grant is live: a card or an approval counts only while the grant it was made under is.
+    grants: Grants,
 }
 
 fn token() -> u128 {
@@ -105,6 +112,11 @@ fn token() -> u128 {
 }
 
 impl Confirms {
+    /// Cards and approvals for the grants kept in `grants`.
+    pub(crate) fn new(grants: Grants) -> Confirms {
+        Confirms { inner: Mutex::default(), cv: Condvar::new(), grants }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -122,9 +134,9 @@ impl Confirms {
         id
     }
 
-    /// The card waiting for the person, if any.
+    /// The card waiting for the person, if any: never one whose grant is over.
     pub fn card(&self) -> Option<Card> {
-        self.lock().open.as_ref().filter(|o| o.decision.is_none()).map(|o| o.card.clone())
+        self.lock().open.as_ref().filter(|o| o.decision.is_none() && self.grants.holds(o.binding.grant)).map(|o| o.card.clone())
     }
 
     /// The person's answer to card `id`. Do makes the approval for exactly that card's action, good for `WITHIN`;
@@ -132,7 +144,8 @@ impl Confirms {
     /// `raise` is told the app and its new tier before the waiting call hears the answer.
     pub fn answer(&self, id: u64, a: Answer, raise: &dyn Fn(&str, Tier)) -> Result<Option<(String, Tier)>, String> {
         let mut g = self.lock();
-        let Some((need, binding)) = g.open.as_ref().filter(|o| o.card.id == id && o.decision.is_none()).map(|o| (o.need, o.binding.clone())) else {
+        let waiting = |o: &&Open| o.card.id == id && o.decision.is_none() && self.grants.holds(o.binding.grant);
+        let Some((need, binding)) = g.open.as_ref().filter(waiting).map(|o| (o.need, o.binding.clone())) else {
             return Err("That question is no longer waiting.".into());
         };
         let (decision, raised) = match (a, need) {
@@ -143,7 +156,7 @@ impl Confirms {
             (Answer::Do, None) => {
                 let t = token();
                 let now = Instant::now();
-                g.approvals.retain(|(_, _, until)| *until > now);
+                g.approvals.retain(|(_, b, until)| *until > now && self.grants.holds(b.grant));
                 g.approvals.push((t, binding, now + WITHIN));
                 (Decision::Do(Approval(t)), None)
             }
@@ -159,13 +172,18 @@ impl Confirms {
         Ok(raised)
     }
 
-    /// Wait for the answer to card `id`, while `live` holds and for at most `within`. The card goes when it ends.
-    pub(crate) fn wait(&self, id: u64, live: &dyn Fn() -> bool, within: Duration) -> Waited {
+    /// Wait for the answer to card `id`, while its grant is the live one and for at most `within`. The card goes when
+    /// it ends.
+    pub(crate) fn wait(&self, id: u64, within: Duration) -> Waited {
         let until = Instant::now() + within;
         let mut g = self.lock();
         loop {
-            let ours = g.open.as_ref().is_some_and(|o| o.card.id == id);
-            if !ours {
+            let Some(grant) = g.open.as_ref().filter(|o| o.card.id == id).map(|o| o.binding.grant) else {
+                return Waited::Ended;
+            };
+            // The grant is asked first: an answer given as its turn ended counts for nothing.
+            if !self.grants.holds(grant) {
+                g.open = None;
                 return Waited::Ended;
             }
             if g.open.as_ref().is_some_and(|o| o.decision.is_some()) {
@@ -176,10 +194,6 @@ impl Confirms {
                     Decision::Allow(t) => Waited::Raised(t),
                 };
             }
-            if !live() {
-                g.open = None;
-                return Waited::Ended;
-            }
             let now = Instant::now();
             if now >= until {
                 g.open = None;
@@ -189,19 +203,41 @@ impl Confirms {
         }
     }
 
-    /// Spend `a` on the action `b`: true once, for exactly the action it was made for, within `WITHIN` of the yes.
-    /// It is gone after this, whatever the answer.
+    /// Spend `a` on the action `b`: true once, for exactly the action it was made for, within `WITHIN` of the yes, and
+    /// only while the grant it was made under is still the live one. It is gone after this, whatever the answer.
     pub(crate) fn spend(&self, a: Approval, b: &Binding) -> bool {
         let mut g = self.lock();
         let Some(i) = g.approvals.iter().position(|(t, _, _)| *t == a.0) else { return false };
         let (_, bound, until) = g.approvals.remove(i);
-        bound == *b && Instant::now() < until
+        bound == *b && Instant::now() < until && self.grants.holds(bound.grant)
     }
 
-    /// The turn ended: the card goes, and its waiting call ends.
+    /// The stop key: every card and approval goes, and the waiting call ends.
     pub(crate) fn end(&self) {
-        self.lock().open = None;
+        let mut g = self.lock();
+        g.open = None;
+        g.approvals.clear();
+        drop(g);
         self.cv.notify_all();
+    }
+
+    /// A grant ended or another took its place: every card and approval of a grant that is not the live one goes now,
+    /// and a call waiting on such a card ends at once.
+    pub(crate) fn sweep(&self) {
+        let mut g = self.lock();
+        let now = Instant::now();
+        if g.open.as_ref().is_some_and(|o| !self.grants.holds(o.binding.grant)) {
+            g.open = None;
+        }
+        g.approvals.retain(|(_, b, until)| *until > now && self.grants.holds(b.grant));
+        drop(g);
+        self.cv.notify_all();
+    }
+
+    /// Approvals kept, spent or not: for the tests.
+    #[cfg(test)]
+    pub(crate) fn approvals(&self) -> usize {
+        self.lock().approvals.len()
     }
 
     #[cfg(test)]
