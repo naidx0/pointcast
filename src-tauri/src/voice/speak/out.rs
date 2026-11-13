@@ -121,6 +121,8 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
 struct Shared {
     buf: Mutex<Buf>,
     moved: Condvar,
+    /// After this long with nothing to play, the stream is closed (`QUIET`).
+    quiet: Duration,
 }
 
 /// This computer's speakers, as a `Sink`.
@@ -130,9 +132,16 @@ pub struct Speakers {
 
 impl Default for Speakers {
     fn default() -> Self {
-        let shared = Arc::new(Shared { buf: Mutex::default(), moved: Condvar::new() });
+        Speakers::start(open, QUIET)
+    }
+}
+
+impl Speakers {
+    /// Speakers whose streams `open` opens (the device's, or a test's), closed after `quiet` of nothing to play.
+    fn start<S: 'static>(open: impl Fn(Arc<Shared>) -> Result<(S, u32), String> + Send + 'static, quiet: Duration) -> Speakers {
+        let shared = Arc::new(Shared { buf: Mutex::default(), moved: Condvar::new(), quiet });
         let worker = shared.clone();
-        std::thread::Builder::new().name("speak-out".into()).spawn(move || worker.run()).expect("the speaker thread starts");
+        std::thread::Builder::new().name("speak-out".into()).spawn(move || worker.run(open)).expect("the speaker thread starts");
         Speakers { shared }
     }
 }
@@ -195,8 +204,8 @@ impl Speakers {
 }
 
 impl Shared {
-    fn run(self: Arc<Self>) {
-        let mut stream: Option<cpal::Stream> = None;
+    fn run<S>(self: Arc<Self>, open: impl Fn(Arc<Shared>) -> Result<(S, u32), String>) {
+        let mut stream: Option<S> = None;
         let mut quiet_since = Instant::now();
         let mut b = self.buf.lock().unwrap();
         loop {
@@ -205,11 +214,13 @@ impl Shared {
             }
             if let Some(why) = b.broke.take() {
                 eprintln!("[speak] the speakers stopped: {why}");
-                stream = None;
+                // Dropped with `buf` unlocked: closing the stream waits for its callback, which takes `buf`.
+                let gone = stream.take();
                 b.rate = None;
                 b.samples.clear();
                 let ended: Vec<Done> = b.ends.drain(..).map(|(_, d)| d).collect();
                 drop(b);
+                drop(gone);
                 ended.into_iter().for_each(|d| d());
                 b = self.buf.lock().unwrap();
                 continue;
@@ -253,11 +264,15 @@ impl Shared {
             let busy = !b.samples.is_empty() || !b.ends.is_empty();
             if busy {
                 quiet_since = Instant::now();
-            } else if stream.is_some() && quiet_since.elapsed() >= QUIET {
-                stream = None;
+            } else if stream.is_some() && quiet_since.elapsed() >= self.quiet {
                 b.rate = None;
+                let gone = stream.take();
+                drop(b);
+                drop(gone);
+                b = self.buf.lock().unwrap();
+                continue;
             }
-            let wait = if busy { Duration::from_millis(5) } else { QUIET };
+            let wait = if busy { Duration::from_millis(5) } else { self.quiet };
             b = self.moved.wait_timeout(b, wait).unwrap().0;
         }
     }
@@ -391,6 +406,51 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         println!("waking the device took {} ms", t.elapsed().as_millis());
+    }
+
+    /// A stream whose drop waits, as cpal's does, for the audio callback, which takes `buf`.
+    struct Fake {
+        shared: Arc<Shared>,
+        under_lock: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            let t = Instant::now();
+            while self.shared.buf.try_lock().is_err() {
+                if t.elapsed() > Duration::from_millis(200) {
+                    // The real stream would wait for its callback here for ever.
+                    self.under_lock.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn the_stream_is_closed_with_the_buffer_unlocked_when_it_breaks_and_when_it_goes_quiet() {
+        let (under_lock, dropped) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (u, d) = (under_lock.clone(), dropped.clone());
+        let s = Speakers::start(move |shared| Ok((Fake { shared, under_lock: u.clone(), dropped: d.clone() }, 24_000)), Duration::from_millis(50));
+        let until = |f: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !f() && t.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            f()
+        };
+        s.wake();
+        assert!(until(&|| s.awake()), "a wake opens the stream");
+        s.shared.buf.lock().unwrap().broke = Some("a test's broken stream".into());
+        s.shared.moved.notify_all();
+        assert!(until(&|| dropped.load(Ordering::SeqCst) == 1), "a broken stream is closed");
+        s.wake();
+        assert!(until(&|| s.awake()), "and opened again");
+        assert!(until(&|| dropped.load(Ordering::SeqCst) == 2), "a quiet stream is closed");
+        assert_eq!(under_lock.load(Ordering::SeqCst), 0, "a stream was dropped while the buffer its callback takes was locked");
     }
 
     #[test]
