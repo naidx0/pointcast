@@ -1445,7 +1445,8 @@ mod on_this_computer {
             match acp::Acp::new(a, home.join(a.id)).start("", &[]) {
                 Ok(mut chat) => {
                     use super::super::Chat;
-                    println!("{} models [{}] efforts [{}] (set by {:?} / {:?})", a.id, said(&chat.options.models), said(&chat.options.efforts), chat.options.model_id, chat.options.effort_id);
+                    let options = chat.options();
+                    println!("{} models [{}] efforts [{}] (set by {:?} / {:?})", a.id, said(&options.models), said(&options.efforts), options.model_id, options.effort_id);
                     chat.close();
                 }
                 Err(f) => println!("{}: no session ({f:?})", a.id),

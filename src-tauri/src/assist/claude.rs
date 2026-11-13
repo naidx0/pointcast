@@ -484,6 +484,10 @@ impl Shared {
                 if let Some(u) = usage_of(&v["usage"]) {
                     a.tell(Kind::Usage(u));
                 }
+                // The model that answered, as Claude Code reports it: an alias is resolved to its id here.
+                if let Some(m) = v["modelUsage"].as_object().and_then(|o| o.keys().next()) {
+                    a.tell(Kind::Model(m.clone()));
+                }
                 let Some(a) = s.active.take() else { return };
                 s.keep(&a);
                 drop(s);
@@ -867,6 +871,10 @@ impl Provider for Claude {
     /// Every conversation has a helper of its own, so `once` shares nothing with an open one either.
     fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
         self.start(system, earlier).map(|c| Box::new(c) as Box<dyn Chat>)
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.clone()
     }
 }
 

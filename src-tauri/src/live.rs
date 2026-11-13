@@ -148,6 +148,9 @@ pub struct Snapshot {
     /// What the AI did on the computer for the turn in the fields above, once it ended, one line each.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acts: Vec<String>,
+    /// One quiet line under the turn's answer when something about it is worth a word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Why a question went without a picture of the screen.
@@ -185,6 +188,9 @@ pub struct Past {
     /// What the AI did on the computer while it answered, one line each.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acts: Vec<String>,
+    /// One quiet line under the answer when something about it is worth a word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(skip)]
     id: String,
 }
@@ -406,6 +412,13 @@ pub struct Live {
 pub type Words = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// What the AI did on the computer, one line each, as the panel lists it under the answer.
+/// Two model names count as the same when one says the other: a picked alias ("sonnet") is the id it resolves to
+/// ("claude-sonnet-5-5"), and a near id spelled the same way longer or shorter is the same model.
+fn same_model(chose: &str, got: &str) -> bool {
+    let (a, b) = (chose.to_lowercase(), got.to_lowercase());
+    a == b || a.contains(&b) || b.contains(&a)
+}
+
 fn lines(acts: &[crate::computer::Entry]) -> Vec<String> {
     acts.iter().filter_map(crate::computer::Entry::line).collect()
 }
@@ -991,6 +1004,7 @@ impl Live {
         g.snap.no_picture = None;
         g.snap.thinking = false;
         g.snap.acts.clear();
+        g.snap.note = None;
         g.picture = None;
     }
 
@@ -1000,7 +1014,7 @@ impl Live {
         let Some(a) = self.sessions.answer(&session, &turn) else { return };
         let n = g.snap.session.turns;
         g.snap.turns.retain(|p| p.id != turn);
-        let past = Past { n, question: g.snap.words.clone(), answer: a.text, picture: g.snap.picture.clone(), stopped: a.stopped, error: a.error, at_ms: a.times.press_ms, acts: lines(&a.acts), id: turn };
+        let past = Past { n, question: g.snap.words.clone(), answer: a.text, picture: g.snap.picture.clone(), stopped: a.stopped, error: a.error, at_ms: a.times.press_ms, acts: lines(&a.acts), note: a.note.clone(), id: turn };
         g.snap.turns.push(past);
         g.snap.turns.sort_by_key(|p| p.n);
     }
@@ -1039,7 +1053,7 @@ impl Live {
                 small(&bytes, p.w, p.h, p.label.clone(), p.marked)
             });
             let question = sessions::question(&a.sent.text).to_owned();
-            Some(Past { n: i as u32 + 1, question, answer: a.text.clone(), picture, stopped: a.stopped, error: a.error.clone(), at_ms: a.times.press_ms, acts: lines(&a.acts), id: k.meta.id.clone() })
+            Some(Past { n: i as u32 + 1, question, answer: a.text.clone(), picture, stopped: a.stopped, error: a.error.clone(), at_ms: a.times.press_ms, acts: lines(&a.acts), note: a.note.clone(), id: k.meta.id.clone() })
         };
         kept.iter().enumerate().filter_map(turn).collect()
     }
@@ -1400,6 +1414,8 @@ impl Live {
     fn send(&self, run: u64, provider: &Arc<dyn Provider>, kept: Kept, turn_no: u64, chat: Option<Box<dyn Chat>>, before: Before) {
         let now = || (self.deps.now)();
         let Kept { session: sid, turn: tid, parts, mut answer } = kept;
+        // The model it was asked with, for the warning when another one answers.
+        answer.model = provider.model();
         let keep = |a: &Answer| {
             let _ = self.sessions.write_answer(&sid, &tid, a, now());
         };
@@ -1521,7 +1537,8 @@ impl Live {
                             pending.push_str(&words);
                         }
                         Kind::Usage(u) => answer.usage = Some(Used { input: u.input, cached: u.cached, output: u.output }),
-                        Kind::Limits(_) => {}
+                        Kind::Model(m) if !m.is_empty() => answer.answered_by = Some(m),
+                        Kind::Model(_) | Kind::Limits(_) => {}
                         Kind::Done => break None,
                         Kind::Failed(f) => break Some(line(&f)).filter(|_| f != Failure::Stopped).or(Some(String::new())),
                     }
@@ -1543,6 +1560,12 @@ impl Live {
         }
         answer.times.done_ms = now();
         answer.acts = (self.deps.acts)();
+        // The model that answered is not the one picked: the answer stands, and the person is told in one line.
+        if let (Some(chose), Some(got)) = (answer.model.as_deref(), answer.answered_by.as_deref()) {
+            if !same_model(chose, got) {
+                answer.note = Some(format!("Answered by {got}, not the {chose} you picked."));
+            }
+        }
         // An empty line is the person's own stop: the answer is kept as far as it came, with no error.
         match end {
             None => {}
@@ -1564,6 +1587,7 @@ impl Live {
         g.halt = false;
         g.snap.thinking = false;
         g.snap.acts = lines(&answer.acts);
+        g.snap.note = answer.note.clone();
         g.used = Some(Instant::now());
         match &answer.error {
             Some(why) => {
@@ -1627,6 +1651,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc::Sender;
+
+    #[test]
+    fn a_picked_alias_is_the_id_it_resolves_to_but_a_whole_other_model_is_not() {
+        assert!(same_model("sonnet", "claude-sonnet-5-5") && same_model("claude-sonnet-5-5", "claude-sonnet-5-5"));
+        assert!(same_model("GPT-5.2-CODEX", "gpt-5.2-codex"));
+        assert!(!same_model("claude-opus-5-5", "claude-sonnet-5-5") && !same_model("gpt-5.1", "gpt-5.2"));
+    }
 
     #[derive(Default)]
     struct FakeVoice {

@@ -635,6 +635,10 @@ impl Shared {
                 }
                 let (Some(mut a), q, known) = (s.active.take(), s.next.take(), s.limits) else { return };
                 s.keep(&mut a);
+                // The model that answered, when the turn says it; the panel warns when it is not the one picked.
+                if let Some(m) = turn["model"].as_str() {
+                    a.tell(Kind::Model(m.to_owned()));
+                }
                 drop(s);
                 // The computer first, before a limit's reset time is asked for.
                 a.lease.take();
@@ -1186,6 +1190,10 @@ impl Provider for Codex {
     fn models(&self) -> Vec<super::catalog::Model> {
         let models = self.models.lock().unwrap();
         models.iter().filter_map(model_of).collect()
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.clone()
     }
 }
 

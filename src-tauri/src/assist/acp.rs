@@ -291,6 +291,8 @@ struct Inner {
     dead: bool,
     /// The conversation so far, which a session started for a turn that may act is told.
     history: Vec<Turn>,
+    /// What the session last offered, `config_option_update`s after `session/new` counted.
+    offered: Option<Options>,
 }
 
 impl Inner {
@@ -473,6 +475,16 @@ impl Shared {
                 drop(s);
                 self.stop_for(Failure::Refused, false);
             }
+            // The agent changed an option of its own (a model picked in its own window): what it last offered, and
+            // the model this answer is named by, follow what it says.
+            Some("config_option_update") => {
+                let now = options_of(u);
+                let model = now.models.iter().find(|c| c.default).map(|c| c.id.clone());
+                s.offered = Some(now);
+                if let (Some(m), Some(a)) = (model, s.active.as_mut()) {
+                    a.tell(Kind::Model(m));
+                }
+            }
             _ => {}
         }
     }
@@ -604,8 +616,8 @@ pub struct AcpChat {
     shared: Arc<Shared>,
     /// Whether the agent said it reads pictures.
     pub pictures: bool,
-    /// The models and efforts its `session/new` offered, before anything was set.
-    pub options: Options,
+    /// What `session/new` offered at the greeting, before a session's own offers replace it (`options`).
+    seed: Options,
     /// What goes before the first question: the fence, the instructions and what a resumed conversation said.
     preamble: Vec<Part>,
     /// The conversation may act (and the agent can carry Pointcast's server): each turn holds a grant and runs in a
@@ -657,12 +669,13 @@ impl AcpChat {
                     let mut s = shared.inner.lock().unwrap();
                     s.session = session;
                     s.history = earlier.to_vec();
+                    s.offered = Some(options.clone());
                 }
                 let preamble = if computer.is_some() { Vec::new() } else { preamble_of(NO_TOOLS, system, earlier, pictures) };
                 Ok(AcpChat {
                     shared,
                     pictures,
-                    options,
+                    seed: options,
                     preamble,
                     computer,
                     cwd: cwd.to_owned(),
@@ -709,11 +722,14 @@ impl Chat for AcpChat {
                     s.history.clone()
                 };
                 let (session, offered) = session_in(&self.shared, &self.cwd, servers_of(&lease), self.model.as_deref(), self.effort.as_deref())?;
-                self.options = Options { http: Some(true), ..offered };
-                if let (Some(f), Ok(b)) = (&self.cache, serde_json::to_vec(&self.options)) {
+                let options = Options { http: Some(true), ..offered };
+                if let (Some(f), Ok(b)) = (&self.cache, serde_json::to_vec(&options)) {
                     let _ = std::fs::write(f, b);
                 }
-                self.shared.inner.lock().unwrap().session = session;
+                let mut s = self.shared.inner.lock().unwrap();
+                s.session = session;
+                s.offered = Some(options);
+                drop(s);
                 self.preamble = preamble_of(super::claude::ACTING, &self.system, &earlier, self.pictures);
                 Some(lease)
             }
@@ -740,7 +756,12 @@ impl Chat for AcpChat {
             self.shared.stop_for(Failure::Stopped, true);
             return Ok(id);
         }
+        // The model this turn's session was left with answers it: the panel warns when it is not the one picked.
+        let model = s.offered.as_ref().and_then(|o| o.models.iter().find(|c| c.default)).map(|c| c.id.clone());
         s.active = Some(Active::new(id, out, call, session, lease));
+        if let (Some(a), Some(m)) = (s.active.as_mut(), model) {
+            a.tell(Kind::Model(m));
+        }
         drop(s);
         if self.shared.post_as(call, "session/prompt", params).is_err() {
             let mut s = self.shared.inner.lock().unwrap();
@@ -764,6 +785,15 @@ impl Chat for AcpChat {
     /// The preamble without its fence (the instructions, not anything said before).
     fn context(&self) -> Vec<Part> {
         self.preamble.iter().skip(1).cloned().collect()
+    }
+}
+
+impl AcpChat {
+    /// What the session last offered, `config_option_update`s after `session/new` counted; the greeting's offer until
+    /// one is.
+    pub fn options(&self) -> Options {
+        let s = self.shared.inner.lock().unwrap();
+        Options { http: self.seed.http, ..s.offered.clone().unwrap_or_else(|| self.seed.clone()) }
     }
 }
 
@@ -852,7 +882,7 @@ impl Acp {
         // act has no session yet: its first turn's session writes it.
         chat.cache = Some(options_file(&self.home));
         if chat.computer.is_none() {
-            if let Ok(b) = serde_json::to_vec(&chat.options) {
+            if let Ok(b) = serde_json::to_vec(&chat.options()) {
                 let _ = std::fs::write(options_file(&self.home), b);
             }
         }
@@ -878,6 +908,10 @@ impl Provider for Acp {
 
     fn open(&self, system: &str, earlier: &[Turn]) -> Result<Box<dyn Chat>, Failure> {
         self.start(system, earlier).map(|c| Box::new(c) as Box<dyn Chat>)
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.clone().filter(|m| m != DEFAULT)
     }
 }
 
@@ -1145,7 +1179,7 @@ pub mod tests {
             let mut chat = a.start("", &[]).unwrap();
             assert_eq!(words(&answer(&mut chat, said("hi"))), WORDS);
             chat.close();
-            (chat.options.clone(), cached(&a.home))
+            (chat.options(), cached(&a.home))
         };
         // Through the real child, with what it was sent read back from its log.
         let (options, kept) = agent("options", "acp-options", Some("flash-1"), Some("high"));
@@ -1190,8 +1224,8 @@ pub mod tests {
         let log = seen.clone();
         std::thread::spawn(move || serve("old-models", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
         let chat = AcpChat::over(our_in, our_out, None, "Copilot", Path::new(CWD), Start { system: "", earlier: &[], model: Some("fast-1"), effort: Some("high"), computer: None }).unwrap();
-        assert_eq!(ids(&chat.options.models), [("auto", "Auto", true), ("fast-1", "Fast 1", false)]);
-        assert!(chat.options.efforts.is_empty());
+        assert_eq!(ids(&chat.options().models), [("auto", "Auto", true), ("fast-1", "Fast 1", false)]);
+        assert!(chat.options().efforts.is_empty());
         assert_eq!(sent(&seen, "session/set_model").iter().map(|m| m["params"].clone()).collect::<Vec<_>>(), [json!({ "sessionId": SESSION, "modelId": "fast-1" })]);
         assert!(sent(&seen, "session/set_config_option").is_empty());
         // An agent that offers nothing has nothing to pick.
@@ -1366,7 +1400,7 @@ pub mod tests {
     fn a_turn_that_may_act_gets_a_session_of_its_own_given_pointcast_over_http_and_only_its_tool_permissions_pass() {
         let (mut chat, seen, desk) = acting("acting");
         assert_eq!(sent(&seen, "session/new").len(), 0, "no session before the turn");
-        assert!(!desk.granted() && chat.options.http == Some(true));
+        assert!(!desk.granted() && chat.options().http == Some(true));
         let got = answer(&mut chat, said("open TextEdit"));
         assert_eq!(got.first(), Some(&Kind::Thinking), "a computer tool reads as working: {got:?}");
         assert_eq!((words(&got), got.last()), (WORDS.map(String::from).to_vec(), Some(&Kind::Done)), "and is not refused: {got:?}");
@@ -1426,7 +1460,7 @@ pub mod tests {
     #[test]
     fn an_agent_that_cannot_take_a_server_over_http_is_asked_as_if_the_setting_were_off() {
         let (mut chat, seen, desk) = acting("ok");
-        assert_eq!(chat.options.http, Some(false), "the AI page says it can't act yet");
+        assert_eq!(chat.options().http, Some(false), "the AI page says it can't act yet");
         assert_eq!(answer(&mut chat, said("open TextEdit")).last(), Some(&Kind::Done));
         assert!(!desk.granted());
         assert_eq!(sent(&seen, "session/new")[0]["params"], json!({ "cwd": CWD, "mcpServers": [] }));

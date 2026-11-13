@@ -103,6 +103,8 @@ pub enum Kind {
     Delta(String),
     /// The model is working before its first words, so a wait reads as thinking and not as stuck.
     Thinking,
+    /// The model the provider says is answering, when it says so; the panel warns when it is not the one picked.
+    Model(String),
     Usage(Usage),
     Limits(Limits),
     Done,
@@ -181,6 +183,10 @@ pub trait Provider: Send + Sync {
     /// The files the AI's own app adds to every question, once known (Codex: the person's own instructions file).
     fn adds(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// The model the person picked for this route; none leaves the provider's own.
+    fn model(&self) -> Option<String> {
+        None
     }
     /// Who is signed in, as the AI's own app said at its last greeting (Codex's `account/read`); none before one.
     fn account(&self) -> Option<codex::Account> {

@@ -110,7 +110,14 @@ pub struct Answer {
     /// The answer as it streamed, in markdown.
     pub text: String,
     pub provider: String,
+    /// The model it was asked with, as the person picked it; none leaves the provider's own.
     pub model: Option<String>,
+    /// The model that answered, as the provider reported it: an alias is resolved to its id here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<String>,
+    /// One line under the answer when something about it is worth a word (the answering model was not the one picked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(flatten)]
     pub times: Times,
     /// The person stopped it; `text` is what had arrived.

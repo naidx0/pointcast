@@ -23,6 +23,8 @@ export type LiveTurn = {
   at_ms: number;
   /** What the AI did on the computer while it answered, one plain line each ("Clicked button "Send" in Mail"). */
   acts?: string[];
+  /** One quiet line under the answer when something about it is worth a word. */
+  note?: string | null;
 };
 
 /** The payload of `live://state` and the reply of `live_state`. */
@@ -57,6 +59,8 @@ export type LiveSnapshot = {
   answer?: string;
   /** What the AI did on the computer for the turn in the fields above, once it ended. */
   acts?: string[];
+  /** One quiet line under the answer: the model that answered was not the one picked. */
+  note?: string | null;
 };
 
 export type NoPicture = "not_allowed" | "failed";
@@ -434,7 +438,7 @@ export function liveView(m: LiveModel, now: number): LiveView {
         return { ...base, phase: "shown", line: "none", tone: "quiet", complete: true, note: m.sent ? "Stopped" : "Not sent", announce: "Stopped" };
       // Stopped before any answer came: nothing is ready, and nothing is said to have been sent unless it was.
       if (!m.text) return endedView(base, m.sent);
-      return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, announce: "Answer ready" };
+      return { ...base, phase: "shown", line: "rest", tone: "quiet", complete: true, note: s.note ?? null, announce: "Answer ready" };
     case "discarded":
       return endedView(base, false);
     case "error": {
