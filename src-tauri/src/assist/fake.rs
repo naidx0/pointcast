@@ -31,6 +31,8 @@ pub const INSTRUCTIONS: &str = "/home/someone/.codex/AGENTS.md";
 pub const SIGN_IN_PAGE: &str = "https://auth.example.test/start";
 /// The MCP servers the person's own Codex is set up with, in the `servers` modes.
 pub const SERVERS: [&str; 2] = ["notes", "code.repl 2"];
+/// The name Pointcast's own server goes by in a thread that may act.
+pub const ACTING_SERVER: &str = "pointcast_turn";
 /// What one of those servers is given in its environment: never Pointcast's to keep or send.
 pub const SERVER_SECRET: &str = "planted-server-secret";
 
@@ -82,7 +84,9 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
         let _ = writeln!(o, "{v}");
         let _ = o.flush();
     });
-    let thread = format!("thread-{}-{}", std::process::id(), THREADS.fetch_add(1, Ordering::SeqCst) + 1);
+    let new_thread = || format!("thread-{}-{}", std::process::id(), THREADS.fetch_add(1, Ordering::SeqCst) + 1);
+    let mut thread = new_thread();
+    let mut threads = 0u32;
     let running = Arc::new(AtomicBool::new(false));
     let (mut ready, mut turns, mut owed) = (false, 0u32, 0usize);
     let mut turn = String::new();
@@ -152,6 +156,11 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
             }
             "account/rateLimits/read" => reply(json!({ "rateLimits": limits(if mode == "limit" { 100 } else { 12 }) })),
             "thread/start" => {
+                // Each thread after the first has an id of its own.
+                threads += 1;
+                if threads > 1 {
+                    thread = new_thread();
+                }
                 let provider = if mode == "foreign" { "elsewhere" } else { "openai" };
                 let model = m["params"]["model"].as_str().unwrap_or(CONFIG_MODEL).to_owned();
                 reply(json!({ "thread": { "id": thread }, "model": model, "modelProvider": provider, "instructionSources": [INSTRUCTIONS] }));
@@ -204,6 +213,34 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                     "tool" => {
                         running.store(true, Ordering::SeqCst);
                         note(&say, "item/started", json!({ "threadId": thread, "turnId": turn, "item": { "type": "commandExecution", "id": "cmd-1", "command": "ls" } }));
+                    }
+                    // A turn that may act: what it is asked says which tool it reaches for.
+                    "acting" => {
+                        let asked = m["params"]["input"].as_array().and_then(|i| i.last()).and_then(|q| q["text"].as_str()).unwrap_or_default().to_owned();
+                        let item = |server: &str, tool: &str| note(&say, "item/started", json!({ "threadId": thread, "turnId": turn, "item": { "type": "mcpToolCall", "id": "mcp-1", "server": server, "tool": tool, "status": "inProgress", "arguments": {} } }));
+                        running.store(true, Ordering::SeqCst);
+                        if asked.contains("bash") {
+                            note(&say, "item/started", json!({ "threadId": thread, "turnId": turn, "item": { "type": "commandExecution", "id": "cmd-1", "command": "ls" } }));
+                        } else if asked.contains("notes") {
+                            item(SERVERS[0], "search");
+                        } else if asked.contains("slowly") {
+                            item(ACTING_SERVER, "pointcast_type");
+                            delta(&say, &thread, &turn, WORDS[0]);
+                        } else {
+                            item(ACTING_SERVER, "pointcast_apps");
+                            // Codex asks before a tool runs, in the words of 0.167.2: only a computer tool on Pointcast's
+                            // server, in this thread, may pass.
+                            let ask = |id: u64, server: &str, in_thread: &str, tool: &str| {
+                                let message = format!("Allow the {server} MCP server to run tool \"{tool}\"?");
+                                say(json!({ "id": id, "method": "mcpServer/elicitation/request", "params": { "threadId": in_thread, "turnId": turn, "serverName": server, "mode": "form", "message": message, "requestedSchema": { "type": "object", "properties": {} }, "_meta": { "codex_approval_kind": "mcp_tool_call" } } }));
+                            };
+                            ask(910, ACTING_SERVER, &thread, "pointcast_click");
+                            ask(911, SERVERS[0], &thread, "pointcast_click");
+                            ask(912, ACTING_SERVER, &thread, "shell");
+                            ask(913, ACTING_SERVER, "thread-earlier", "pointcast_click");
+                            say(json!({ "id": 914, "method": "item/commandExecution/requestApproval", "params": { "threadId": thread, "turnId": turn, "itemId": "ask" } }));
+                            owed = 5;
+                        }
                     }
                     "whole" => {
                         note(&say, "item/completed", json!({ "threadId": thread, "turnId": turn, "completedAtMs": 1, "item": { "type": "agentMessage", "id": "msg-whole", "text": WORDS.concat() } }));

@@ -7,7 +7,8 @@
 
 use super::child::{self, Launch, Proc, Tail};
 use super::jsonl::{CallError, Client, Incoming, RpcError};
-use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Limits, Part, Provider, Turn, TurnId, Usage, Window};
+use super::claude::{Computer, Lease};
+use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Limits, Part, Provider, Role, Turn, TurnId, Usage, Window};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use super::catalog::Choice;
@@ -41,6 +42,11 @@ const ACTS: &[&str] = &["commandExecution", "fileChange", "mcpToolCall", "dynami
 /// The provider a question must go to for what the person agreed to stay true.
 const OPENAI: &str = "openai";
 
+/// The name Pointcast's own MCP server goes by in a thread that may act. Not "pointcast": the person may have given
+/// that name to the same server in their own Codex config (with this install's token, for coding), and the thread's
+/// entry would be laid over theirs.
+pub const SERVER: &str = "pointcast_turn";
+
 const NO_TOOLS: &str = "You are answering a person's question inside Pointcast, a study tool. No tools exist here: you cannot run commands, read or change files, search the web or call any tool, so never try. Answer only from the words and pictures of the conversation.";
 
 const START_WITHIN: Duration = Duration::from_secs(30);
@@ -66,9 +72,18 @@ fn servers_of(read: &Value) -> Vec<String> {
     names
 }
 
+/// Where a thread that may act finds Pointcast's server: its address, and the turn's grant secret as the key.
+#[derive(Clone, Copy)]
+struct Tools<'a> {
+    url: &'a str,
+    key: &'a str,
+}
+
 /// The parameters of `thread/start`: the fence around the conversation. `servers` are the MCP servers the person's
-/// Codex is set up with: each is switched off for this thread by name.
-fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String]) -> Value {
+/// Codex is set up with: each is switched off for this thread by name. A thread that may act (`tools`) also gets
+/// Pointcast's own server with only the ten computer tools, and is told what acting asks of it in place of the fence;
+/// every other switch stays as it is, so shell and file tools stay off.
+fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String], tools: Option<Tools>) -> Value {
     // Checked against Codex 0.164.0: its generated schema takes `config` here as a free table and names
     // `model_provider` and `web_search` among the keys of a config; every name in `FEATURES_OFF` is in
     // `codex features list`. UNCONFIRMED, since no schema lists them and no real app-server has been asked: that
@@ -78,7 +93,14 @@ fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String
     // so their servers still start. So each one is named with `enabled = false`, which the same laying-over carries
     // onto the person's entry. Measured the same day: with the empty table the person's server was reported
     // starting; with it named `enabled = false` (nested, as here, or as a dotted key) no start was reported.
-    let off: serde_json::Map<String, Value> = servers.iter().map(|name| (name.clone(), json!({ "enabled": false }))).collect();
+    let mut off: serde_json::Map<String, Value> = servers.iter().map(|name| (name.clone(), json!({ "enabled": false }))).collect();
+    // Read in the strings of Codex 0.167.2 (its `RawMcpServerConfig`): an HTTP server is `url` with `http_headers`, and
+    // `enabled_tools` lists the only tools of it the model sees. UNCONFIRMED until the hand-run turn: that a thread's
+    // `config` carries them as the person's config.toml would.
+    if let Some(t) = tools {
+        let names = crate::computer::tools::NAMES;
+        off.insert(SERVER.into(), json!({ "enabled": true, "url": t.url, "http_headers": { "Authorization": format!("Bearer {}", t.key) }, "enabled_tools": names }));
+    }
     let mut config = serde_json::Map::new();
     config.insert("mcp_servers".into(), Value::Object(off));
     config.insert("model_provider".into(), json!(OPENAI));
@@ -88,7 +110,8 @@ fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String
     for f in FEATURES_OFF {
         config.insert(format!("features.{f}"), json!(false));
     }
-    let instructions = if system.trim().is_empty() { NO_TOOLS.to_owned() } else { format!("{NO_TOOLS}\n\n{}", system.trim()) };
+    let fence = if tools.is_some() { super::claude::ACTING } else { NO_TOOLS };
+    let instructions = if system.trim().is_empty() { fence.to_owned() } else { format!("{fence}\n\n{}", system.trim()) };
     let mut p = json!({
         "ephemeral": true,
         "sandbox": "read-only",
@@ -134,6 +157,25 @@ fn decline(method: &str) -> Reply {
         "account/chatgptAuthTokens/refresh" => Reply::Error(-32000, "Pointcast does not hold or refresh tokens."),
         _ => Reply::Error(-32601, "Method not found"),
     }
+}
+
+/// The tool an approval Codex asks for would run, when it asks about an MCP tool call: by name in its `_meta`, else as
+/// its message names it (`Allow … to run tool "<name>"?`, the words in the strings of Codex 0.167.2). UNCONFIRMED until
+/// the hand-run turn: which of the two a real approval carries.
+fn tool_asked(p: &Value) -> Option<&str> {
+    let meta = &p["_meta"];
+    if meta["codex_approval_kind"].as_str().is_some_and(|k| k != "mcp_tool_call") {
+        return None;
+    }
+    ["tool_name", "toolName", "tool"].iter().find_map(|k| meta[*k].as_str()).or_else(|| {
+        let (_, rest) = p["message"].as_str()?.split_once("run tool \"")?;
+        rest.split_once('"').map(|(name, _)| name)
+    })
+}
+
+/// Whether an MCP tool call is one of the ten computer tools, on Pointcast's own server.
+fn pointcast_tool(item: &Value) -> bool {
+    item["server"].as_str() == Some(SERVER) && item["tool"].as_str().is_some_and(crate::computer::is_tool)
 }
 
 /// What a failed turn's error means for the person. A limit's reset time is read afterwards.
@@ -258,11 +300,36 @@ struct Active {
     thought: bool,
     streamed: HashSet<String>,
     error: Option<Value>,
+    /// The thread it runs in: a turn that may act has one of its own.
+    thread: String,
+    /// The turn's hold on the computer tools, when it may act: let go before the turn says how it ended.
+    lease: Option<Lease>,
+    /// The answer so far, for a thread started later to be told; `kept` once it has been.
+    said: String,
+    kept: bool,
 }
 
 impl Active {
     fn tell(&self, kind: Kind) {
         let _ = self.out.send(Event { turn: self.id, kind });
+    }
+
+    /// Say a word of the answer, and keep it for a thread started later.
+    fn say(&mut self, words: &str) {
+        if !self.kept {
+            self.said.push_str(words);
+        }
+        self.tell(Kind::Delta(words.to_owned()));
+    }
+
+    fn new(id: TurnId, out: Sender<Event>, start: u64, thread: String, lease: Option<Lease>) -> Active {
+        Active { id, out, start, turn: None, stopping: None, thought: false, streamed: HashSet::new(), error: None, thread, lease, said: String::new(), kept: false }
+    }
+
+    /// The turn ends as `kind`: the computer is let go first.
+    fn end(mut self, kind: Kind) {
+        self.lease.take();
+        self.tell(kind);
     }
 }
 
@@ -271,6 +338,8 @@ struct Queued {
     id: TurnId,
     out: Sender<Event>,
     params: Value,
+    thread: String,
+    lease: Option<Lease>,
 }
 
 #[derive(Default)]
@@ -285,6 +354,18 @@ struct Inner {
     over: HashSet<String>,
     /// The MCP servers of the person's that Codex said it started or had ready, although each was switched off.
     servers: Vec<String>,
+    /// The conversation so far, which a thread started for a turn that may act is told.
+    history: Vec<Turn>,
+}
+
+impl Inner {
+    /// Keep what `a` has answered, once, for a thread started later.
+    fn keep(&mut self, a: &mut Active) {
+        if !a.kept && !a.said.is_empty() {
+            self.history.push(Turn { role: Role::Assistant, parts: vec![Part::Text(a.said.clone())] });
+        }
+        a.kept = true;
+    }
 }
 
 struct Shared {
@@ -342,11 +423,23 @@ impl Shared {
         let _ = self.post_as(self.rpc.reserve(), "turn/interrupt", json!({ "threadId": thread, "turnId": turn }));
     }
 
+    /// Whether an approval Codex asks for passes: only a call of one of the ten computer tools on Pointcast's own
+    /// server, asked in the thread of the turn under way, which holds the tools and is not being stopped.
+    fn approves(&self, method: &str, p: &Value) -> bool {
+        if method != "mcpServer/elicitation/request" || p["serverName"].as_str() != Some(SERVER) {
+            return false;
+        }
+        let s = self.inner.lock().unwrap();
+        let holds = s.active.as_ref().is_some_and(|a| a.lease.is_some() && a.stopping.is_none() && p["threadId"].as_str() == Some(a.thread.as_str()));
+        holds && tool_asked(p).is_some_and(crate::computer::is_tool)
+    }
+
     fn run(self: Arc<Self>, incoming: Receiver<Incoming>) {
         for m in incoming {
             match m {
-                Incoming::Request { id, method, .. } => {
-                    let _ = match decline(&method) {
+                Incoming::Request { id, method, params } => {
+                    let reply = if self.approves(&method, &params) { Reply::Result(json!({ "action": "accept", "content": {} })) } else { decline(&method) };
+                    let _ = match reply {
                         Reply::Result(v) => self.rpc.answer(&id, v),
                         Reply::Error(code, why) => self.rpc.refuse(&id, code, why),
                     };
@@ -373,9 +466,11 @@ impl Shared {
         }
         let why = stopped(&self.last_words());
         if let Some(a) = a {
-            a.tell(Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(why.clone()))));
+            let kind = Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(why.clone())));
+            a.end(kind);
         }
         if let Some(q) = q {
+            drop(q.lease);
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Broken(why)) });
         }
     }
@@ -386,12 +481,12 @@ impl Shared {
         let start = self.rpc.reserve();
         {
             let mut s = self.inner.lock().unwrap();
-            s.active = Some(Active { id: q.id, out: q.out, start, turn: None, stopping: None, thought: false, streamed: HashSet::new(), error: None });
+            s.active = Some(Active::new(q.id, q.out, start, q.thread, q.lease));
         }
         if self.post_as(start, "turn/start", q.params).is_err() {
             let a = self.inner.lock().unwrap().active.take_if(|a| a.start == start);
             if let Some(a) = a {
-                a.tell(Kind::Failed(Failure::Broken(stopped(&self.last_words()))));
+                a.end(Kind::Failed(Failure::Broken(stopped(&self.last_words()))));
             }
         }
     }
@@ -403,10 +498,11 @@ impl Shared {
         }
         match result {
             Ok(v) => {
-                let thread = s.thread.clone();
                 let turn = v["turn"]["id"].as_str().unwrap_or_default().to_owned();
+                let mut thread = String::new();
                 let stop = s.active.as_mut().is_some_and(|a| {
                     a.turn = Some(turn.clone());
+                    thread = a.thread.clone();
                     a.stopping.is_some()
                 });
                 drop(s);
@@ -419,7 +515,8 @@ impl Shared {
                 let (a, q) = (s.active.take(), s.next.take());
                 drop(s);
                 if let Some(a) = a {
-                    a.tell(Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(format!("Codex did not take the question: {}", e.message)))));
+                    let kind = Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(format!("Codex did not take the question: {}", e.message))));
+                    a.end(kind);
                 }
                 self.send_next(q);
             }
@@ -441,7 +538,8 @@ impl Shared {
         // the answer (a tool it offers still ends the turn when called), but it is said with what was sent.
         if method == "mcpServer/startupStatus/updated" {
             let name = p["name"].as_str().unwrap_or_default();
-            if matches!(p["status"].as_str(), Some("starting" | "ready")) && !name.is_empty() {
+            // Pointcast's own server, in a thread that may act, is not one of the person's.
+            if matches!(p["status"].as_str(), Some("starting" | "ready")) && !name.is_empty() && name != SERVER {
                 let mut s = self.inner.lock().unwrap();
                 if !s.servers.iter().any(|n| n == name) {
                     s.servers.push(name.to_owned());
@@ -478,7 +576,7 @@ impl Shared {
             "item/agentMessage/delta" if !quiet => {
                 if let Some(d) = p["delta"].as_str() {
                     a.streamed.insert(p["itemId"].as_str().unwrap_or_default().to_owned());
-                    a.tell(Kind::Delta(d.to_owned()));
+                    a.say(d);
                 }
             }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" if !quiet && !a.thought => {
@@ -487,7 +585,13 @@ impl Shared {
             }
             "item/started" if !quiet => {
                 let kind = p["item"]["type"].as_str().unwrap_or_default();
-                if ACTS.contains(&kind) {
+                // A computer tool, in a turn that holds the tools: Codex is working, which keeps the panel's wait alive.
+                if kind == "mcpToolCall" && a.lease.is_some() && pointcast_tool(&p["item"]) {
+                    if !a.thought {
+                        a.thought = true;
+                        a.tell(Kind::Thinking);
+                    }
+                } else if ACTS.contains(&kind) {
                     drop(s);
                     self.stop(Failure::Refused);
                 } else if kind == "reasoning" && !a.thought {
@@ -500,7 +604,7 @@ impl Shared {
                 let item = &p["item"];
                 let text = item["text"].as_str().unwrap_or_default();
                 if item["type"].as_str() == Some("agentMessage") && !text.is_empty() && a.streamed.insert(item["id"].as_str().unwrap_or_default().to_owned()) {
-                    a.tell(Kind::Delta(text.to_owned()));
+                    a.say(text);
                 }
             }
             "thread/tokenUsage/updated" => {
@@ -529,8 +633,11 @@ impl Shared {
                     let t = t.to_owned();
                     s.over.insert(t);
                 }
-                let (Some(a), q, known) = (s.active.take(), s.next.take(), s.limits) else { return };
+                let (Some(mut a), q, known) = (s.active.take(), s.next.take(), s.limits) else { return };
+                s.keep(&mut a);
                 drop(s);
+                // The computer first, before a limit's reset time is asked for.
+                a.lease.take();
                 let end = match end {
                     Kind::Failed(Failure::Limit { .. }) => {
                         let read = self.call("account/rateLimits/read", Value::Null, LIMITS_WITHIN).ok().map(|v| limits_of(&v["rateLimits"]));
@@ -538,7 +645,7 @@ impl Shared {
                     }
                     e => e,
                 };
-                a.tell(end);
+                a.end(end);
                 self.send_next(q);
             }
             _ => {}
@@ -553,14 +660,16 @@ impl Shared {
         if let Some(q) = q {
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Stopped) });
         }
-        let thread = s.thread.clone();
         let Some(a) = s.active.as_mut() else { return };
         if a.stopping.is_some() {
             return;
         }
         a.stopping = Some(why);
-        let (id, turn) = (a.id, a.turn.clone());
+        // The computer first, at once: a tool call after a stop is refused.
+        let lease = a.lease.take();
+        let (id, turn, thread) = (a.id, a.turn.clone(), a.thread.clone());
         drop(s);
+        drop(lease);
         if let Some(t) = turn {
             self.interrupt(&thread, &t);
         }
@@ -589,9 +698,11 @@ impl Shared {
                 p.end();
             }
             if let Some(a) = a {
-                a.tell(Kind::Failed(a.stopping.clone().unwrap_or(Failure::Stopped)));
+                let kind = Kind::Failed(a.stopping.clone().unwrap_or(Failure::Stopped));
+                a.end(kind);
             }
             if let Some(q) = q {
+                drop(q.lease);
                 let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Broken("Codex would not stop, so Pointcast ended it. Ask again.".into())) });
             }
         });
@@ -610,9 +721,10 @@ impl Shared {
             (s.active.take(), s.next.take())
         };
         if let Some(a) = a {
-            a.tell(Kind::Failed(Failure::Stopped));
+            a.end(Kind::Failed(Failure::Stopped));
         }
         if let Some(q) = q {
+            drop(q.lease);
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Stopped) });
         }
         self.rpc.hang_up();
@@ -638,6 +750,12 @@ pub struct CodexChat {
     /// The files Codex itself adds to every conversation, as its `thread/start` named them (the person's own Codex
     /// instructions file). Pointcast cannot leave them out, so it says that they go along.
     pub adds: Vec<String>,
+    /// The conversation may act: each turn holds a grant and runs in a thread of its own, told that grant's key.
+    computer: Option<Computer>,
+    /// What each thread is started with: the folder, the instructions and the person's servers to switch off.
+    cwd: PathBuf,
+    system: String,
+    servers: Vec<String>,
 }
 
 /// What a conversation is started with.
@@ -670,7 +788,21 @@ impl CodexChat {
             Ok((account, models))
         };
         match greet() {
-            Ok((account, models)) => Ok(CodexChat { shared, account, models, model: None, effort: None, speed: None, pictures: true, context: Vec::new(), adds: Vec::new() }),
+            Ok((account, models)) => Ok(CodexChat {
+                shared,
+                account,
+                models,
+                model: None,
+                effort: None,
+                speed: None,
+                pictures: true,
+                context: Vec::new(),
+                adds: Vec::new(),
+                computer: None,
+                cwd: PathBuf::new(),
+                system: String::new(),
+                servers: Vec::new(),
+            }),
             Err(f) => {
                 shared.shut(Duration::ZERO);
                 Err(f)
@@ -694,9 +826,23 @@ impl CodexChat {
         // is written, and only the names are kept. A Codex that does not answer starts the thread with none named; a
         // server that starts then is still said (`noted`).
         let read = self.shared.call("config/read", json!({ "includeLayers": false, "cwd": setup.cwd.to_string_lossy() }), ANSWER_WITHIN);
-        let servers = read.as_ref().map(servers_of).unwrap_or_default();
-        let started = self.shared.call("thread/start", thread_start(setup.cwd, setup.system, Some(&id), &servers), ANSWER_WITHIN)?;
+        self.servers = read.as_ref().map(servers_of).unwrap_or_default();
+        (self.cwd, self.system) = (setup.cwd.to_owned(), setup.system.to_owned());
         self.model = Some(id);
+        self.shared.inner.lock().unwrap().history = setup.earlier.to_vec();
+        // One that may act starts its thread with its first turn, once that turn holds the tools: the thread is told
+        // the turn's key as it starts.
+        if self.computer.is_some() {
+            return Ok(());
+        }
+        self.thread_with(None)
+    }
+
+    /// Start a thread of this conversation's own, the one each turn from now on is asked in: with Pointcast's server
+    /// and the turn's key when it may act (`tools`).
+    fn thread_with(&mut self, tools: Option<Tools>) -> Result<(), Failure> {
+        let model = self.model.clone().unwrap_or_default();
+        let started = self.shared.call("thread/start", thread_start(&self.cwd, &self.system, Some(&model), &self.servers, tools), ANSWER_WITHIN)?;
         self.adds = started["instructionSources"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect();
         // The person agreed to a question going to OpenAI. A config that points Codex elsewhere must not make that false.
         if let Some(other) = started["modelProvider"].as_str().filter(|p| *p != OPENAI) {
@@ -736,6 +882,30 @@ impl Chat for CodexChat {
         if !self.pictures && has_picture(&turn.parts) {
             return Err(Failure::NoPictures);
         }
+        // A turn that may act holds the tools from before its thread can list them until it ends. An earlier turn's
+        // thread was told that turn's key, which opens nothing now: this turn gets a thread of its own, told the new key
+        // and the conversation so far (with what an answer still coming has said).
+        let lease = match &self.computer {
+            None => None,
+            Some(c) => {
+                let lease = c.lease()?;
+                let earlier = {
+                    let mut s = self.shared.inner.lock().unwrap();
+                    if s.dead {
+                        return Err(Failure::Broken("Codex is not running.".into()));
+                    }
+                    let mut a = s.active.take();
+                    if let Some(a) = a.as_mut() {
+                        s.keep(a);
+                    }
+                    s.active = a;
+                    s.history.clone()
+                };
+                self.context = replay(&earlier, if self.pictures { KEEP_PICTURES } else { 0 });
+                self.thread_with(Some(Tools { url: &lease.url, key: &lease.key }))?;
+                Some(lease)
+            }
+        };
         let mut input = input_of(&self.context);
         input.extend(input_of(&turn.parts));
         let start = self.shared.rpc.reserve();
@@ -743,7 +913,8 @@ impl Chat for CodexChat {
         if s.dead || s.thread.is_empty() {
             return Err(Failure::Broken("Codex is not running.".into()));
         }
-        let mut params = json!({ "threadId": s.thread, "input": input });
+        let thread = s.thread.clone();
+        let mut params = json!({ "threadId": thread, "input": input });
         if let Some(m) = &self.model {
             params["model"] = json!(m);
         }
@@ -756,20 +927,23 @@ impl Chat for CodexChat {
         s.serial += 1;
         let id = TurnId(s.serial);
         self.context.clear();
+        s.history.push(turn);
         if s.active.is_some() {
             // An answer still comes: stop it, and send this turn once Codex says that one has ended.
-            if let Some(old) = s.next.replace(Queued { id, out, params }) {
+            if let Some(old) = s.next.replace(Queued { id, out, params, thread, lease }) {
                 let _ = old.out.send(Event { turn: old.id, kind: Kind::Failed(Failure::Stopped) });
             }
             drop(s);
             self.shared.stop_for(Failure::Stopped, true);
             return Ok(id);
         }
-        s.active = Some(Active { id, out, start, turn: None, stopping: None, thought: false, streamed: HashSet::new(), error: None });
+        s.active = Some(Active::new(id, out, start, thread, lease));
         drop(s);
         if self.shared.post_as(start, "turn/start", params).is_err() {
             // If the line's end was seen first, the turn has already been failed there, once.
-            if self.shared.inner.lock().unwrap().active.take_if(|a| a.start == start).is_some() {
+            let mut s = self.shared.inner.lock().unwrap();
+            if s.active.take_if(|a| a.start == start).is_some() {
+                s.history.pop();
                 return Err(Failure::Broken(stopped(&self.shared.last_words())));
             }
         }
@@ -870,11 +1044,24 @@ pub struct Codex {
     adds: Mutex<Vec<String>>,
     /// Who the last greeting said is signed in.
     account: Mutex<Option<Account>>,
+    /// Each turn may see and act through this; none keeps the fence of today.
+    pub computer: Option<Computer>,
 }
 
 impl Codex {
     pub fn new(home: PathBuf) -> Codex {
-        Codex { home, model: None, effort: Some("low".into()), speed: None, launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default(), account: Mutex::default() }
+        Codex {
+            home,
+            model: None,
+            effort: Some("low".into()),
+            speed: None,
+            launch: None,
+            warmed: Mutex::default(),
+            models: Mutex::default(),
+            adds: Mutex::default(),
+            account: Mutex::default(),
+            computer: None,
+        }
     }
 
     /// Run `launch` in place of the `codex` found on this computer.
@@ -936,6 +1123,7 @@ impl Codex {
             None => self.connect()?,
         };
         let cwd = empty_folder(&self.home)?;
+        chat.computer = self.computer.clone();
         chat.begin(&Setup { cwd: &cwd, system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref(), speed: self.speed.as_deref() })?;
         *self.adds.lock().unwrap() = chat.adds.clone();
         Ok(chat)
@@ -1638,4 +1826,142 @@ pub mod tests {
         assert_eq!(all_pages(|_| None), Vec::<Value>::new(), "no answer: no models");
     }
 
+    // Computer use: "Let the AI see and act".
+
+    /// The `thread/start` of a conversation that may not act, byte for byte as it was before computer use existed.
+    const GOLDEN: &str = r#"{"approvalPolicy":"untrusted","config":{"features.apps":false,"features.browser_use":false,"features.computer_use":false,"features.goals":false,"features.hooks":false,"features.image_generation":false,"features.memories":false,"features.multi_agent":false,"features.plugins":false,"features.shell_tool":false,"features.skill_search":false,"features.sleep_tool":false,"features.tool_suggest":false,"features.unified_exec":false,"features.view_image":false,"mcp_servers":{"code.repl 2":{"enabled":false},"notes":{"enabled":false}},"model_provider":"openai","notify":[],"project_doc_max_bytes":0,"web_search":"disabled"},"cwd":"/pointcast/empty","developerInstructions":"You are answering a person's question inside Pointcast, a study tool. No tools exist here: you cannot run commands, read or change files, search the web or call any tool, so never try. Answer only from the words and pictures of the conversation.\n\nBe brief.","ephemeral":true,"model":"fake-model","sandbox":"read-only"}"#;
+
+    fn person() -> Vec<String> {
+        vec!["code.repl 2".to_string(), "notes".to_string()]
+    }
+
+    #[test]
+    fn with_computer_use_off_thread_start_is_byte_for_byte_what_it_was() {
+        assert_eq!(thread_start(Path::new(CWD), "Be brief.", Some("fake-model"), &person(), None).to_string(), GOLDEN);
+        assert!(Codex::new("unused".into()).computer.is_none(), "off unless the setting is on");
+    }
+
+    #[test]
+    fn with_computer_use_on_the_thread_gets_pointcast_with_only_the_ten_tools_and_the_acting_prompt_and_nothing_else_changes() {
+        let off = thread_start(Path::new(CWD), "Be brief.", Some("fake-model"), &person(), None);
+        let on = thread_start(Path::new(CWD), "Be brief.", Some("fake-model"), &person(), Some(Tools { url: "http://127.0.0.1:9/mcp", key: "k3y" }));
+        let names = crate::computer::tools::NAMES;
+        assert_eq!(
+            on["config"]["mcp_servers"],
+            json!({ "code.repl 2": { "enabled": false }, "notes": { "enabled": false }, "pointcast_turn": { "enabled": true, "url": "http://127.0.0.1:9/mcp", "http_headers": { "Authorization": "Bearer k3y" }, "enabled_tools": names } }),
+            "the person's servers stay off and Pointcast's carries the turn's key and the ten tools only"
+        );
+        let told = on["developerInstructions"].as_str().unwrap();
+        assert!(told.starts_with(super::super::claude::ACTING) && told.ends_with("\n\nBe brief.") && !told.contains("No tools exist"), "{told}");
+        // Everything else is the fence of today: shell, files, the web and the person's servers stay off.
+        let (mut a, mut b) = (off.clone(), on.clone());
+        for v in [&mut a, &mut b] {
+            v["config"].as_object_mut().unwrap().remove("mcp_servers");
+            v.as_object_mut().unwrap().remove("developerInstructions");
+        }
+        assert_eq!(a, b);
+        for f in ["shell_tool", "unified_exec", "apps", "computer_use", "browser_use"] {
+            assert_eq!(on["config"][format!("features.{f}")], false, "{f}");
+        }
+    }
+
+    /// A desk of its own and a server address for a conversation that may act.
+    pub fn computer() -> (Computer, &'static crate::computer::Desk) {
+        let desk: &'static crate::computer::Desk = Box::leak(Box::new(crate::computer::Desk::new(Box::new(crate::computer::fake::mail()))));
+        (Computer { desk, serve: Arc::new(|| Ok("http://127.0.0.1:9/mcp".to_owned())) }, desk)
+    }
+
+    /// A conversation with the stand-in in `mode`, that may act.
+    fn acting(mode: &'static str) -> (CodexChat, Seen, &'static crate::computer::Desk) {
+        let (chat, seen) = link(mode);
+        let mut chat = chat.ok().expect("the stand-in greets");
+        let (c, desk) = computer();
+        chat.computer = Some(c);
+        chat.begin(&Setup { cwd: Path::new(CWD), system: "Be brief.", earlier: &[], model: None, effort: Some("low"), speed: None }).unwrap();
+        (chat, seen, desk)
+    }
+
+    /// The key each thread that may act was given, in order. Never printed.
+    fn keys(seen: &Seen) -> Vec<String> {
+        let auth = |t: &Value| t["config"]["mcp_servers"][SERVER]["http_headers"]["Authorization"].as_str().map(|a| a.trim_start_matches("Bearer ").to_owned());
+        sent(seen, "thread/start").iter().filter_map(auth).collect()
+    }
+
+    /// What Pointcast answered the request `id` of the stand-in.
+    fn answered(seen: &Seen, id: u64) -> Value {
+        let all = seen.lock().unwrap().clone();
+        all.into_iter().find(|m| m.get("method").is_none() && m["id"] == id).unwrap_or_else(|| panic!("{id} was answered"))
+    }
+
+    #[test]
+    fn a_turn_that_may_act_runs_in_a_thread_of_its_own_with_its_key_and_only_pointcast_tool_approvals_pass() {
+        let (mut chat, seen, desk) = acting("acting");
+        assert!(sent(&seen, "thread/start").is_empty() && !desk.granted(), "no thread and no grant before the turn");
+        let got = answer(&mut chat, said("open TextEdit"));
+        assert_eq!(got.first(), Some(&Kind::Thinking), "a computer tool reads as working: {got:?}");
+        assert_eq!((words(&got).concat(), got.last()), (fake::WORDS.concat(), Some(&Kind::Done)), "and is not refused");
+        assert!(!desk.granted(), "the grant goes with the turn");
+        assert_eq!(methods(&seen)[4..7], ["config/read", "thread/start", "turn/start"]);
+        let first = keys(&seen);
+        assert!(first.len() == 1 && first[0].len() == 64 && first[0].bytes().all(|c| c.is_ascii_hexdigit()), "the grant's secret, 32 bytes as hex");
+        assert!(sent(&seen, "thread/start")[0]["developerInstructions"].as_str().unwrap().starts_with(super::super::claude::ACTING));
+        assert_eq!(sent(&seen, "turn/start")[0]["threadId"], json!(chat.thread()));
+        // Only a computer tool, on Pointcast's server, in the turn's own thread: everything else is declined.
+        assert_eq!(answered(&seen, 910)["result"], json!({ "action": "accept", "content": {} }));
+        for id in [911, 912, 913] {
+            assert_eq!(answered(&seen, id)["result"], json!({ "action": "decline" }), "{id}");
+        }
+        assert_eq!(answered(&seen, 914)["result"], json!({ "decision": "decline" }));
+        assert!(chat.adds().iter().all(|a| !a.contains(SERVER)), "Pointcast's own server is not said as one of the person's");
+
+        // The next turn: a new grant and a new thread told its new key and the conversation so far.
+        let first_thread = chat.thread();
+        assert_eq!(answer(&mut chat, said("and type hello")).last(), Some(&Kind::Done));
+        let both = keys(&seen);
+        assert_eq!(both.len(), 2);
+        assert_ne!(both[0], both[1], "each turn's key is its own");
+        assert_ne!(chat.thread(), first_thread, "a thread of its own");
+        let turns = sent(&seen, "turn/start");
+        assert_eq!(turns[1]["threadId"], json!(chat.thread()));
+        let text: String = turns[1]["input"].as_array().unwrap().iter().filter_map(|i| i["text"].as_str()).collect();
+        assert!(text.contains("open TextEdit") && text.contains(&fake::WORDS.concat()) && text.ends_with("and type hello"), "told the conversation: {text}");
+    }
+
+    #[test]
+    fn a_stale_key_opens_nothing_once_a_new_turn_holds_the_tools_and_a_stop_drops_the_grant_at_once() {
+        let (mut chat, seen, desk) = acting("acting");
+        assert_eq!(answer(&mut chat, said("open TextEdit")).last(), Some(&Kind::Done));
+        let (tx, rx) = channel();
+        chat.ask(said("type slowly"), tx).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).map(|e| e.kind), Ok(Kind::Thinking));
+        first_word(&rx);
+        let k = keys(&seen);
+        assert!(desk.granted());
+        assert!(desk.grants.by_secret(k[0].as_bytes()).is_none(), "the first turn's key is refused");
+        assert!(desk.grants.by_secret(k[1].as_bytes()).is_some(), "the turn under way holds its own");
+        (chat.stopper())();
+        assert!(!desk.granted() && desk.grants.by_secret(k[1].as_bytes()).is_none(), "a stop drops the grant at once");
+        let r = crate::computer::call(desk, desk.grants.live_id().unwrap_or(0), "pointcast_apps", &json!({}));
+        assert_eq!(r["structuredContent"]["status"], json!("refused"), "{r}");
+        assert_eq!(collect(&rx), [Kind::Failed(Failure::Stopped)]);
+    }
+
+    #[test]
+    fn in_a_turn_that_may_act_any_other_tool_still_ends_it_as_refused() {
+        for asked in ["run bash", "search my notes"] {
+            let (mut chat, _seen, desk) = acting("acting");
+            assert_eq!(answer(&mut chat, said(asked)), [Kind::Failed(Failure::Refused)], "{asked}");
+            assert!(!desk.granted());
+        }
+    }
+
+    #[test]
+    fn with_computer_use_off_a_pointcast_tool_is_refused_and_its_approval_declined() {
+        let (mut chat, seen) = wire("acting");
+        let got = answer(&mut chat, said("open TextEdit"));
+        assert_eq!((words(&got).len(), endings(&got), got.last()), (0, 1, Some(&Kind::Failed(Failure::Refused))), "{got:?}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(answered(&seen, 910)["result"], json!({ "action": "decline" }));
+        assert!(keys(&seen).is_empty());
+    }
 }
