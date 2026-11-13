@@ -21,6 +21,7 @@ export function Line({
   pitch = 19,
   lead,
   look = "pen",
+  layers = BREATH_LAYERS.length,
 }: {
   mode: LineMode;
   height: number;
@@ -37,8 +38,10 @@ export function Line({
   lead?: number;
   /** Listening: the pen's trace (the dictation capsule), or the breathing wave (the Ask panel). */
   look?: "pen" | "breath";
+  /** The breathing wave: how many of its layers (the dictation capsule is small and draws two). */
+  layers?: number;
 }) {
-  if (mode === "listen" && look === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} />;
+  if (mode === "listen" && look === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} layers={layers} />;
   if (mode === "think") return <Loops className={className} tone={tone} height={height} n={loops} pitch={pitch} lead={lead} />;
   return <Voice className={className} tone={tone} height={height} levels={levels} dx={dx} tip={tip} still={mode === "rest"} />;
 }
@@ -134,7 +137,8 @@ function Voice({
 
 /** The Ask panel's voice: three soft waves layered (line.ts breathStep, breathPath), faded at both ends, each travelling
  * its own way. Drawn straight into the SVG every frame; still and flat with reduced motion or without a level. */
-function BreathWave({ className, tone, height, levels }: { className: string; tone: LineTone; height: number; levels?: LevelSource }) {
+function BreathWave({ className, tone, height, levels, layers }: { className: string; tone: LineTone; height: number; levels?: LevelSource; layers: number }) {
+  const shown = BREATH_LAYERS.slice(0, Math.max(1, layers));
   const ref = useRef<HTMLDivElement>(null);
   const paths = useRef<(SVGPathElement | null)[]>([]);
   const fade = `breath-fade-${useId().replace(/:/g, "")}`;
@@ -153,7 +157,7 @@ function BreathWave({ className, tone, height, levels }: { className: string; to
     if (!w) return;
     const box = { w, h: height };
     const s = st.current;
-    const paint = () => BREATH_LAYERS.forEach((_, i) => paths.current[i]?.setAttribute("d", breathPath(box, s.b, i)));
+    const paint = () => shown.forEach((_, i) => paths.current[i]?.setAttribute("d", breathPath(box, s.b, i)));
     paint();
     if (!levels || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const off = levels((x) => (s.raw = x));
@@ -174,7 +178,7 @@ function BreathWave({ className, tone, height, levels }: { className: string; to
       off();
       cancelAnimationFrame(raf);
     };
-  }, [w, height, levels]);
+  }, [w, height, levels, shown.length]);
   return (
     <div className={`line-voice line-breath ${className}`} ref={ref} aria-hidden="true">
       {w ? (
@@ -191,7 +195,7 @@ function BreathWave({ className, tone, height, levels }: { className: string; to
             </mask>
           </defs>
           <g mask={`url(#${fade})`}>
-            {BREATH_LAYERS.map((l, i) => (
+            {shown.map((l, i) => (
               <path key={i} ref={(el) => void (paths.current[i] = el)} style={{ opacity: l.alpha, strokeWidth: l.width }} />
             ))}
           </g>

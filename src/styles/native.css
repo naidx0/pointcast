@@ -3085,6 +3085,12 @@ html.win .undo-btn {
     animation: none;
   }
 }
+/* Reduce Transparency: the quiet wash goes; the onboarding band stays, as art, not as a see-through layer. */
+@media (prefers-reduced-transparency: reduce) {
+  .backdrop.wash {
+    display: none;
+  }
+}
 
 /* Onboarding: the art is a framed band at the top, the page is the window's own surface; nothing floats on the art.
    Tall on the welcome, a slim ribbon on the steps after it. */

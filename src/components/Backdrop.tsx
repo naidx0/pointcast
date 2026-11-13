@@ -25,9 +25,22 @@ export function Backdrop({ kind, className = "", onMouseDown }: { kind: "band" |
   const shade: Shade = kind === "wash" ? "light" : theme;
   const art = useMemo(() => svgUrl(glacierSvg(shade)), [shade]);
   const grain = useMemo(() => `url("${svgUrl(grainSvg())}")`, []);
+  // The drift rests while the window is in the background (reference study: never move behind the person's work).
+  const [awake, setAwake] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const on = () => setAwake(document.hasFocus() && !document.hidden);
+    window.addEventListener("focus", on);
+    window.addEventListener("blur", on);
+    document.addEventListener("visibilitychange", on);
+    return () => {
+      window.removeEventListener("focus", on);
+      window.removeEventListener("blur", on);
+      document.removeEventListener("visibilitychange", on);
+    };
+  }, []);
   return (
     <div className={`backdrop ${kind} ${className}`} aria-hidden="true" onMouseDown={onMouseDown} style={onMouseDown ? { pointerEvents: "auto" } : undefined}>
-      <img className="backdrop-art" src={art} alt="" draggable={false} decoding="async" style={{ pointerEvents: "none" }} />
+      <img className="backdrop-art" src={art} alt="" draggable={false} decoding="async" style={{ pointerEvents: "none", animationPlayState: awake ? "running" : "paused" }} />
       <div className="backdrop-grain" style={{ backgroundImage: grain, pointerEvents: "none" }} />
     </div>
   );

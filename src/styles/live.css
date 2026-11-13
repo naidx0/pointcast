@@ -288,6 +288,9 @@ html.win .live-hb:not(.stop) {
 }
 .live-inner {
   padding: 10px var(--pad) 20px;
+  /* Widened past about 720 px the panel keeps a readable measure: the column stops at 680 and stays centred. */
+  max-width: calc(680px + 2 * var(--pad));
+  margin: 0 auto;
 }
 
 /* —— A conversation: each earlier turn one quiet line on a hairline; the newest turn open below them —— */
