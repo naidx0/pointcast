@@ -1,6 +1,7 @@
 //! Where Pointcast's floating windows go and how they sit above other apps, per OS.
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Manager, Monitor, WebviewWindow};
+use std::sync::Mutex;
+use tauri::{AppHandle, Listener, Manager, Monitor, WebviewWindow};
 
 /// Whether the HUD and overlay are kept out of captures; applied to each as it is built.
 static PROTECT: AtomicBool = AtomicBool::new(true);
@@ -16,6 +17,7 @@ fn ensure_with(app: &AppHandle, label: &str, init: Option<String>) -> Option<Web
     if let Some(w) = app.get_webview_window(label) {
         return Some(w);
     }
+    listen_for_puts(app);
     let cfg = app.config().app.windows.iter().find(|w| w.label == label)?.clone();
     let mut b = tauri::WebviewWindowBuilder::from_config(app, &cfg).ok()?;
     if own_title_bar(label, std::env::consts::OS) {
@@ -215,12 +217,102 @@ pub fn hud_first(st: &crate::session::UiState) -> String {
     format!("window.__POINTCAST_HUD__ = {};", serde_json::to_string(st).unwrap_or_else(|_| "null".into()))
 }
 
+/// Where the person last put the HUD (its top-left) and the answer panel (its top-right: it widens from its left edge),
+/// in each OS's own placing units: points on macOS, physical pixels of the one desktop on Windows. Kept while Pointcast
+/// runs, as long as the spot is on a screen; `None` until the person moves the window.
+static HUD_HAND: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+static PANEL_HAND: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// The page says it has come to rest where the person dragged it (api.ts startWindowDrag, `remember`).
+const PUT_EVENT: &str = "pointcast://put";
+
+fn listen_for_puts(app: &AppHandle) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let h = app.clone();
+        app.listen_any(PUT_EVENT, move |e| {
+            if let Ok(label) = serde_json::from_str::<String>(e.payload()) {
+                note_put(&h, &label);
+            }
+        });
+    });
+}
+
+/// Remember where window `label` is now, as the spot the person chose.
+fn note_put(app: &AppHandle, label: &str) {
+    let Some(w) = app.get_webview_window(label) else { return };
+    let (Ok(p), Ok(z)) = (w.outer_position(), w.outer_size()) else { return };
+    let k = native_k(w.scale_factor().unwrap_or(1.0));
+    let (x, y, wide) = (p.x as f64 / k, p.y as f64 / k, z.width as f64 / k);
+    match label {
+        "indicator" => *HUD_HAND.lock().unwrap() = Some((x, y)),
+        PANEL => *PANEL_HAND.lock().unwrap() = Some((x + wide, y)),
+        _ => {}
+    }
+}
+
+/// What a physical pixel is divided by to get the placing unit: the scale on macOS (points), 1 on Windows.
+fn native_k(scale: f64) -> f64 {
+    if cfg!(target_os = "macos") {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// A screen's work area in placing units.
+fn native_area(m: &Monitor) -> (f64, f64, f64, f64) {
+    let (wa, k) = (m.work_area(), native_k(m.scale_factor()));
+    (wa.position.x as f64 / k, wa.position.y as f64 / k, wa.size.width as f64 / k, wa.size.height as f64 / k)
+}
+
+/// Put window `w` at (x, y) in placing units.
+fn put_native(w: &WebviewWindow, x: f64, y: f64) {
+    if cfg!(target_os = "macos") {
+        let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+    } else {
+        let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+    }
+}
+
+/// The screen (index into `areas`) that holds point `p`, if any.
+pub fn screen_holding(p: (f64, f64), areas: &[(f64, f64, f64, f64)]) -> Option<usize> {
+    areas.iter().position(|&(x, y, w, h)| p.0 >= x && p.0 < x + w && p.1 >= y && p.1 < y + h)
+}
+
+/// A window of `size` with its top-left at `at`, moved only as far as it takes to lie inside `area`.
+pub fn kept_inside(at: (f64, f64), size: (f64, f64), area: (f64, f64, f64, f64)) -> (f64, f64) {
+    let (x, y, w, h) = area;
+    (at.0.min(x + w - size.0).max(x), at.1.min(y + h - size.1).max(y))
+}
+
+/// Where the HUD goes when the person put it at `hand` (top-left): there, whole on the screen that holds its centre;
+/// `None` when its centre is on no screen (a screen was unplugged), and it goes back to the bottom centre.
+pub fn hud_kept(hand: (f64, f64), size: (f64, f64), areas: &[(f64, f64, f64, f64)]) -> Option<(f64, f64)> {
+    let i = screen_holding((hand.0 + size.0 / 2.0, hand.1 + size.1 / 2.0), areas)?;
+    Some(kept_inside(hand, size, areas[i]))
+}
+
 /// Show the recording HUD for state `st` without taking focus from the app being talked about.
 pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
     let Some(w) = ensure_with(app, "indicator", Some(hud_first(st))) else {
         return;
     };
-    if let (Some(m), Ok(size)) = (pointer_monitor(app), w.outer_size()) {
+    // Where the person put the HUD, while that is on a screen; else the bottom centre of the pointer's screen.
+    let kept = w.outer_size().ok().and_then(|z| {
+        let hand = (*HUD_HAND.lock().unwrap())?;
+        let k = native_k(w.scale_factor().unwrap_or(1.0));
+        let size = (z.width as f64 / k, z.height as f64 / k);
+        let areas: Vec<_> = app.available_monitors().ok()?.iter().map(native_area).collect();
+        let at = hud_kept(hand, size, &areas);
+        if at.is_none() {
+            *HUD_HAND.lock().unwrap() = None;
+        }
+        at
+    });
+    if let Some((x, y)) = kept {
+        put_native(&w, x, y);
+    } else if let (Some(m), Ok(size)) = (pointer_monitor(app), w.outer_size()) {
         let wa = m.work_area();
         let s = m.scale_factor();
         let (x, y) = hud_spot(
@@ -316,28 +408,64 @@ pub fn panel_width(now: f64) -> f64 {
     }
 }
 
-/// The panel's page set a new height: keep it docked at the top right of its screen. AppKit keeps a window's bottom
-/// edge where it was when it is resized, so on a Mac the panel would otherwise grow upward.
-pub fn redock_panel(w: &tauri::Window) {
-    let Ok(Some(m)) = w.current_monitor() else { return };
-    let (wa, s) = (m.work_area(), m.scale_factor());
-    let (wide, high) = w.inner_size().map(|z| (z.width as f64 / s, z.height as f64 / s)).unwrap_or((0.0, 0.0));
-    place_panel(w, panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, panel_width(wide), PANEL_MARGIN, high), s);
+/// The panel `high` logical pixels tall where the person put it, `hand` being its top-right corner in logical pixels of
+/// the screen `area` (physical pixels at `scale`): its width and height as `panel_fit` gives them, its top and right
+/// edges where they were put, moved only as far as it takes to stay whole on that screen.
+pub fn panel_kept(area: (i32, i32, u32, u32), scale: f64, width: f64, margin: f64, high: f64, hand: (f64, f64)) -> (f64, f64, f64, f64) {
+    let (_, _, wide, high) = panel_fit(area, scale, width, margin, high);
+    let at = |v: f64| v / scale;
+    let a = (at(area.0 as f64), at(area.1 as f64), at(area.2 as f64), at(area.3 as f64));
+    let (x, y) = kept_inside((hand.0 - wide, hand.1), (wide, high), a);
+    (x, y, wide, high)
 }
 
-/// Show the answer panel at the right edge of the pointer's screen, without taking focus from the app being asked about.
-/// On screen it keeps the height its page last asked for, within that screen; one that opens starts `PANEL_START` tall.
+/// Where the panel goes at `wide` x `high` logical pixels, and the scale of the screen it goes on: where the person put
+/// it while that spot is on a screen (`screens`), else docked at the top right of `dock`.
+fn panel_place(screens: &[Monitor], dock: &Monitor, wide: f64, high: f64) -> ((f64, f64, f64, f64), f64) {
+    let rect = |m: &Monitor| {
+        let wa = m.work_area();
+        (wa.position.x, wa.position.y, wa.size.width, wa.size.height)
+    };
+    let mut hand = PANEL_HAND.lock().unwrap();
+    if let Some((r, t)) = *hand {
+        let areas: Vec<_> = screens.iter().map(native_area).collect();
+        if let Some(i) = screen_holding((r - 1.0, t + 1.0), &areas) {
+            let (m, s) = (&screens[i], screens[i].scale_factor());
+            // Placing units to this screen's logical pixels: already points on macOS.
+            let k = if cfg!(target_os = "macos") { 1.0 } else { s };
+            return (panel_kept(rect(m), s, panel_width(wide), PANEL_MARGIN, high, (r / k, t / k)), s);
+        }
+        *hand = None;
+    }
+    let s = dock.scale_factor();
+    (panel_fit(rect(dock), s, panel_width(wide), PANEL_MARGIN, high), s)
+}
+
+/// The panel's page set a new height: keep its top and right edges where they are (docked at the top right of its
+/// screen, or where the person put it). AppKit keeps a window's bottom edge where it was when it is resized, so on a Mac
+/// the panel would otherwise grow upward.
+pub fn redock_panel(w: &tauri::Window) {
+    let Ok(Some(m)) = w.current_monitor() else { return };
+    let s = m.scale_factor();
+    let (wide, high) = w.inner_size().map(|z| (z.width as f64 / s, z.height as f64 / s)).unwrap_or((0.0, 0.0));
+    let screens = w.available_monitors().unwrap_or_default();
+    let (spot, s) = panel_place(&screens, &m, wide, high);
+    place_panel(w, spot, s);
+}
+
+/// Show the answer panel where the person put it, else at the right edge of the pointer's screen, without taking focus
+/// from the app being asked about. On screen it keeps the height its page last asked for, within that screen; one that
+/// opens starts `PANEL_START` tall.
 pub fn show_panel(app: &AppHandle) {
     let Some(w) = ensure(app, PANEL) else {
         return;
     };
     if let Some(m) = pointer_monitor(app) {
-        let wa = m.work_area();
-        let s = m.scale_factor();
-        let own = w.scale_factor().unwrap_or(s);
+        let own = w.scale_factor().unwrap_or(m.scale_factor());
         let (wide, high) = w.inner_size().map(|z| (z.width as f64 / own, z.height as f64 / own)).unwrap_or((0.0, 0.0));
         let high = opening_height(w.is_visible().unwrap_or(false), high);
-        let spot = panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, panel_width(wide), PANEL_MARGIN, high);
+        let screens = app.available_monitors().unwrap_or_default();
+        let (spot, s) = panel_place(&screens, &m, wide, high);
         place_panel(&w.as_ref().window(), spot, s);
     }
     if !cfg!(target_os = "macos") {
@@ -904,5 +1032,48 @@ mod tests {
         at((0, 50, 3024, 1888), 2.0, (392, 64), 1.0, (560.0, 877.0));
         // Windows: a 100 % HUD to a 150 % screen keeps its logical size there.
         at((1920, 0, 2560, 1400), 1.5, (300, 52), 1.0, (1280.0 + 703.0 + 1.0 / 3.0, 853.0 + 1.0 / 3.0));
+    }
+
+    #[test]
+    fn a_hud_the_person_moved_stays_where_it_was_put_unless_that_is_off_every_screen() {
+        // Two screens side by side: 1512x944 at (0, 25) and 1920x1055 at (1512, 25), in placing units.
+        let screens = [(0.0, 25.0, 1512.0, 944.0), (1512.0, 25.0, 1920.0, 1055.0)];
+        let size = (432.0, 64.0);
+        // Put near the top of the second screen: it stays exactly there.
+        assert_eq!(hud_kept((2000.0, 100.0), size, &screens), Some((2000.0, 100.0)));
+        // Put half over the right edge of the second screen: it stays on it, pulled just inside.
+        assert_eq!(hud_kept((3100.0, 500.0), size, &screens), Some((3432.0 - 432.0, 500.0)));
+        // Its centre on no screen (that screen was unplugged, or above every screen): it goes back to its usual place.
+        assert_eq!(hud_kept((4000.0, 500.0), size, &screens), None);
+        assert_eq!(hud_kept((100.0, -200.0), size, &screens), None);
+        // Its centre on the first screen while it sticks into the second: it stays whole on the first.
+        assert_eq!(hud_kept((1200.0, 300.0), size, &screens), Some((1512.0 - 432.0, 300.0)));
+        assert_eq!(screen_holding((1512.0, 30.0), &screens), Some(1));
+        assert_eq!(screen_holding((1511.9, 30.0), &screens), Some(0));
+    }
+
+    #[test]
+    fn a_panel_the_person_moved_keeps_its_top_right_corner_as_it_grows_and_stays_whole_on_its_screen() {
+        let near = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| [a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3].iter().all(|d| d.abs() < 1e-6);
+        let area = (0, 40, 1920, 1040);
+        // Put with its top-right corner at (900, 200): taller and taller, the corner stays.
+        for high in [120.0, 300.0, 600.0] {
+            let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, high, (900.0, 200.0));
+            assert!(near(got, (400.0, 200.0, 500.0, high)), "{got:?}");
+        }
+        // Wider (the corner grip pulls its left edge): the right edge stays where it was put.
+        let got = panel_kept(area, 1.0, 700.0, PANEL_MARGIN, 300.0, (900.0, 200.0));
+        assert!(near(got, (200.0, 200.0, 700.0, 300.0)), "{got:?}");
+        // Taller than the room below it: it rises only as far as it must to stay whole on the screen.
+        let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 1000.0, (900.0, 200.0));
+        assert!(near(got, (400.0, 40.0 + 1040.0 - 1000.0, 500.0, 1000.0)), "{got:?}");
+        // Put so its left edge would cross the screen's: pulled just inside.
+        let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0, (200.0, 200.0));
+        assert!(near(got, (0.0, 200.0, 500.0, 300.0)), "{got:?}");
+        // A Retina screen: the corner is in points, the area in physical pixels at scale 2.
+        let got = panel_kept((0, 50, 3024, 1888), 2.0, PANEL_WIDTH, PANEL_MARGIN, 300.0, (1000.0, 100.0));
+        assert!(near(got, (500.0, 100.0, 500.0, 300.0)), "{got:?}");
+        // Never moved: docked at the top right as before.
+        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0), (1408.0, 52.0, 500.0, 300.0)));
     }
 }
