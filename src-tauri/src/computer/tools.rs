@@ -277,8 +277,14 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
     let end = |r: Result<(), End>| r.err();
     match name {
         "pointcast_screen" => {
-            *app = os.front().map(|a| a.name).unwrap_or_default();
             *target = "screen".into();
+            // The same guard as the element tools: no picture while an OS password prompt, an elevated app or
+            // Pointcast itself is in front, or when the front app can't be named.
+            let front = os.front().map_err(|e| format!("No screenshot: the front app can't be told ({e})."))?;
+            *app = front.name.clone();
+            if let Some(e) = end(ask(desk, Kind::See, &target_of(&front, "", None), false)) {
+                return Ok(e);
+            }
             let p = os.screen()?;
             let (ax, ay, aw, ah) = p.area;
             let text = format!(

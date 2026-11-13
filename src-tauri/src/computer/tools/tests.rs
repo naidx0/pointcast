@@ -228,3 +228,16 @@ fn the_screen_comes_as_text_then_an_image_block() {
     assert!(first_text(&r).contains("(0 + px * 100 / 200, 0 + py * 50 / 100)"), "{r}");
     assert!(r["structuredContent"].get("image").is_none());
 }
+
+#[test]
+fn no_screenshot_while_a_password_prompt_or_pointcast_is_in_front() {
+    for front in ["SecurityAgent", "Pointcast"] {
+        let mut fake = mail();
+        fake.tree.app.name = front.into();
+        let (d, _log) = desk(fake);
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let r = call(&d, "pointcast_screen", &json!({}));
+        assert_eq!(status(&r), "refused", "{front}: {r}");
+        assert_eq!(r["content"].as_array().unwrap().len(), 1, "{front}: no picture goes out: {r}");
+    }
+}
