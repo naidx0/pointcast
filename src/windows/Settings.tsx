@@ -1,3 +1,4 @@
+import { useWaveStyle, waveStyleSet, WAVE_LABELS, WAVE_STYLES } from "../lib/wave";
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
@@ -1568,6 +1569,7 @@ function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refr
           </div>
           <LevelMeter level={check.level} />
         </div>
+        <WaveRow />
       </div>
       {pc ? (
         <>
@@ -1650,6 +1652,16 @@ function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refr
 }
 
 /** The live input level as one bar of fixed size: it moves without moving anything around it. */
+/** The wave that moves while you speak, in the capsule and in Ask. */
+function WaveRow() {
+  const style = useWaveStyle();
+  return (
+    <Row label="Wave" sub="What moves while you speak.">
+      <Seg label="Wave" value={style} options={WAVE_STYLES.map((w) => [w, WAVE_LABELS[w]] as const)} set={(w) => void waveStyleSet(w)} />
+    </Row>
+  );
+}
+
 function LevelMeter({ level }: { level: number }) {
   return (
     <div className="level" aria-label="Microphone level" role="meter" aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.round(level * 100) / 100}>
