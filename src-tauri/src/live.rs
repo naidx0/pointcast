@@ -48,6 +48,9 @@ pub const NOT_MARKING: &str = "No picture is being marked up.";
 /// A new question joins the session the panel closed on when that was less than this long ago.
 pub const JOIN: Duration = Duration::from_secs(10 * 60);
 
+/// The last turns a session with a summary replays: the summary stands in for the ones before them.
+const RECENT: usize = 4;
+
 const SYSTEM: &str = "You are the study assistant in Pointcast. The person asks a question out loud about what is on \
 their screen, and a picture of it may be attached. Answer plainly and briefly, in markdown. You cannot run tools, \
 open files or see anything but the pictures you are sent. When a picture has numbered marks on it, refer to them by \
@@ -1066,6 +1069,22 @@ impl Live {
         kept.iter().enumerate().filter_map(turn).collect()
     }
 
+    /// A session's summary as the turn it leads when it stands in for earlier turns.
+    fn summary_turn(s: &crate::summary::Summary) -> Turn {
+        let mut text = String::from("This session goes on from an earlier one. A summary of it so far:");
+        for (head, list) in [("\nKey points:", &s.key_points), ("\nOpen questions:", &s.open_questions)] {
+            if list.is_empty() {
+                continue;
+            }
+            text.push_str(head);
+            for p in list {
+                text.push_str("\n- ");
+                text.push_str(&p.text);
+            }
+        }
+        Turn { role: Role::Person, parts: vec![Part::Text(text)] }
+    }
+
     /// The turns read from disk become the panel's turns before the current one: never the current one itself, and
     /// never losing one that joined them while the disk was read.
     fn lay(&self, g: &mut Inner, read: Vec<Past>) {
@@ -1241,8 +1260,15 @@ impl Live {
         let Ok((_, kept)) = self.sessions.read(session) else {
             return Before::default();
         };
+        let all: Vec<_> = kept.into_iter().filter(|k| Some(k.meta.id.as_str()) != except).collect();
+        // With a summary kept, a long session starts from it: the summary leads, then the last turns.
+        let summary = if all.len() > RECENT { self.sessions.dir(session).ok().and_then(|d| crate::summary::load_dir(&d)) } else { None };
+        let turns = if summary.is_some() { all[all.len() - RECENT..].to_vec() } else { all };
         let mut b = Before::default();
-        for k in kept.into_iter().filter(|k| Some(k.meta.id.as_str()) != except) {
+        if let Some(s) = &summary {
+            b.turns.push(Self::summary_turn(s));
+        }
+        for k in turns {
             let Some(a) = k.answer else { continue };
             let mut parts = vec![Part::Text(a.sent.text.clone())];
             for p in &a.sent.pictures {
@@ -3413,5 +3439,47 @@ mod tests {
         assert_eq!(none.live.take_picture(), Err(NO_PROVIDER.into()));
         assert_eq!((none.grabs.load(Ordering::SeqCst), none.live.snapshot().next_picture), (0, None));
         none.end();
+    }
+
+    #[test]
+    fn a_kept_summary_stands_in_for_the_turns_before_the_recent_ones() {
+        let r = rig("summary-resume", None, FIRST_WAIT);
+        let sessions = r.live.sessions();
+        // Six turns on disk, as a session reads them back.
+        let mut sid = String::new();
+        for i in 1..=6u64 {
+            let items = [Item::Speech { t_ms: i, end_ms: i, text: format!("question {i}") }];
+            let q = crate::sessions::Question { items: &items, created_ms: i, duration_ms: 0, audio: None, pictures: &[] };
+            let a = sessions::Answer { text: format!("answer {i}"), sent: sessions::Sent { text: format!("question {i}"), ..Default::default() }, ..Default::default() };
+            sid = sessions.save_turn((!sid.is_empty()).then_some(sid.as_str()), q, a, "", i).unwrap().session.id;
+        }
+        // Its summary kept beside it.
+        let dir = sessions.dir(&sid).unwrap();
+        let told = crate::summary::Told { id: sid.clone(), title: String::new(), dir: dir.clone(), turns: vec![] };
+        let s = crate::summary::Summary {
+            title: "The session".into(),
+            key_points: vec![crate::summary::Point { text: "the first point".into(), turn: 1, from: crate::summary::From::Question, quote: "question 1".into() }],
+            ..Default::default()
+        };
+        crate::summary::save(&told, &s).unwrap();
+        // What is replayed: the summary leads, then only the recent turns, which still carry their ids.
+        let b = r.live.earlier(&sid, None);
+        let texts: Vec<&str> = b.turns.iter().filter_map(|t| t.parts.first()).map(|p| match p { Part::Text(t) => t.as_str(), _ => "" }).collect();
+        assert_eq!(texts.len(), 1 + RECENT * 2);
+        assert!(texts[0].contains("A summary of it so far") && texts[0].contains("the first point"), "{}", texts[0]);
+        assert!(texts[1].contains("question 3") && texts.last().unwrap().contains("answer 6"));
+        assert_eq!(b.ids.len(), RECENT);
+        // A short session with a summary still replays all of it: the summary adds nothing new.
+        let mut short = String::new();
+        for i in 1..=2u64 {
+            let items = [Item::Speech { t_ms: i, end_ms: i, text: format!("q {i}") }];
+            let q = crate::sessions::Question { items: &items, created_ms: 100 + i, duration_ms: 0, audio: None, pictures: &[] };
+            short = sessions.save_turn((!short.is_empty()).then_some(short.as_str()), q, Default::default(), "", i).unwrap().session.id;
+        }
+        let dir = sessions.dir(&short).unwrap();
+        crate::summary::save(&crate::summary::Told { id: short.clone(), title: String::new(), dir, turns: vec![] }, &s).unwrap();
+        let b = r.live.earlier(&short, None);
+        assert_eq!(b.turns.len(), 2, "two questions, and answers with text were none");
+        r.end();
     }
 }

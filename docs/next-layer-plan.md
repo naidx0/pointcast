@@ -1,6 +1,6 @@
 # Pointcast: the next layer
 
-Status (local/assistant-polish, 2026-11): **S1 and S2 are built.** S5–S7 exist in substance — see/act tools behind a per-turn grant, per-app trust tiers, confirm cards, plans, action journal, pointer ring and a stop key. S3, S4 and S8 remain, as written below.
+Status (local/assistant-polish, 2026-11): **S1–S4 are built.** S5–S7 exist in substance — see/act tools behind a per-turn grant, per-app trust tiers, confirm cards, plans, action journal, pointer ring and a stop key. S8 remains, as written below.
 
 **End state.** You talk and point, and Pointcast answers or does the task on your Mac or Windows PC. It works through whichever AI you already pay for, with the model and effort you chose. Every Ask and dictation is on Home. It remembers what matters across sessions, and it never acts on your computer beyond what you allowed.
 
@@ -79,9 +79,9 @@ Each slice ships on its own and has its own gate.
 - **Uses:** session summaries now, and memory (S4) next.
 - **Gate:** a test that the summary call uses the summariser's model and effort, not Ask's. A hand-run on this Mac.
 
-### S4. Memory you can see — **mostly built**
+### S4. Memory you can see — **built**
 
-- **Session memory:** each finished session leaves a summary (S3), and the next Ask in that session starts from it plus the last turns. *(Summaries exist but are started by hand; starting a new Ask from a session's summary is not yet.)*
+- **Session memory:** **built.** Each finished session leaves a summary (S3), and reopening a session replays that summary plus the last few turns (`RECENT = 4` in `live.rs`) instead of every historical turn.
 - **Long-term memory:** one local file, `memory.md` in Pointcast's data folder. **Built** (`memory.rs`):
   - About 200 lines at most: facts you said to remember and facts the AI was asked to remember (marked `remember:`), which wait as proposals. Proposed facts are kept only once you accept them, with one click. *(Summariser-proposed facts are not yet — proposals come only from "remember…".)*
   - Given to every AI the same way, as untrusted reference text inside the system prompt.

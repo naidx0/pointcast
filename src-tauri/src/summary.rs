@@ -304,7 +304,12 @@ pub fn save(session: &Told, summary: &Summary) -> Result<(), String> {
 
 /// The session's newest summary, when it has one.
 pub fn load(session: &Told) -> Option<Summary> {
-    std::fs::read(session.dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    load_dir(&session.dir)
+}
+
+/// The summary kept in session folder `dir`, without reading the session itself.
+pub fn load_dir(dir: &Path) -> Option<Summary> {
+    std::fs::read(dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 /// "9 points, every quote found in the session; 1 left out, its quote was not": the line a summary shows about its

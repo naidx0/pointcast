@@ -179,7 +179,8 @@ impl Sessions {
     }
 
     /// Ids come from the UI: only a plain folder name under the sessions folder is accepted.
-    fn dir(&self, id: &str) -> Result<PathBuf, String> {
+    /// The session's own folder; none is no session.
+    pub fn dir(&self, id: &str) -> Result<PathBuf, String> {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err("no such session".into());
         }
