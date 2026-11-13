@@ -126,9 +126,11 @@ Each slice ships on its own and has its own gate.
 - **Model:** the session's own model; the planner may be a stronger model than the summariser.
 - **Gate:** a 10-task benchmark on both OSes (open, find, fill, save, attach). Success rate and median time recorded. Every irreversible step confirmed.
 
-### S8. Native integrations
+### S8. Native integrations — **started**
 
-- **What:** before reaching for the screen, use an app's own MCP server or API when Pointcast knows one (mail, calendar, browser over CDP, Finder/Explorer file operations). This is faster and more reliable, and the screen stays the fallback.
+- **What:** before reaching for the screen, use an app's own API when Pointcast knows one (mail, calendar, browser over CDP, Finder/Explorer file operations). This is faster and more reliable, and the screen stays the fallback.
+- **Built:** `pointcast_files` — list, reveal, move, mkdir and Trash straight on the filesystem instead of driving Finder. Paths resolve inside ~ only, canonicalized against symlink escapes; credentials/config folders, `.git` internals, Pointcast's own data folder and the home folder itself are off limits. Acts run under the file manager's trust tier and plan rules; trashing reads as can't-be-undone so it waits for the person (`trash` crate).
+- **Not yet:** mail, calendar, browser-over-CDP.
 - **Gate:** the same tasks as S7, faster with integrations than without.
 
 ## Out of scope for this plan (the stated edge)

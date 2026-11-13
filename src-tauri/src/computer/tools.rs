@@ -4,9 +4,10 @@ use super::confirm::{Approval, Binding, Waited};
 use super::guard::{self, Kind, Target, Tier, Verdict};
 use super::{ids, worth, Combo, Desk, Desktop, Limits, Modifier, Node, Outcome, Tree, AppRef, DEFAULT_LIMITS, UNTRUSTED};
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const NAMES: [&str; 12] = [
+pub const NAMES: [&str; 13] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -17,6 +18,7 @@ pub const NAMES: [&str; 12] = [
     "pointcast_scroll",
     "pointcast_open_app",
     "pointcast_focus",
+    "pointcast_files",
     "pointcast_plan",
     "pointcast_plan_step",
 ];
@@ -73,6 +75,166 @@ fn lands_in(os: &dyn Desktop, cleared: &AppRef) -> Result<(), End> {
     match keyboard(os, cleared)? {
         a if a.pid == cleared.pid => Ok(()),
         a => Err(End::Refused(format!("{} isn't in front, so nothing was typed. {} is in front.", cleared.name, a.name))),
+    }
+}
+
+/// The file manager's name on this OS: what a file act counts as acting in, for trust tiers and plans.
+#[cfg(target_os = "macos")]
+fn files_app() -> &'static str {
+    "Finder"
+}
+#[cfg(target_os = "windows")]
+fn files_app() -> &'static str {
+    "Explorer"
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn files_app() -> &'static str {
+    "Files"
+}
+
+/// Path parts an AI never touches, whatever the action: credential and sign-in folders, app config, and
+/// version-control internals whose removal can't be undone. Compared lowercase, per component.
+const FILE_BLOCKED: &[&str] = &[
+    ".ssh", ".gnupg", ".aws", ".azure", ".config", ".docker", ".kube", ".password-store", ".netrc", ".git",
+    ".svn", "keychains",
+];
+
+/// The path `raw` names, checked to sit inside `home` and outside the places an AI must not touch: `data`
+/// (Pointcast's own files) and the blocked components. The deepest existing ancestor is canonicalized so a symlink
+/// can't carry it out of home.
+fn under_home(raw: &str, home: &Path, data: &Path) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    let expanded = if let Some(rest) = raw.strip_prefix('~') {
+        home.join(rest.trim_start_matches('/'))
+    } else {
+        PathBuf::from(raw)
+    };
+    if !expanded.is_absolute() {
+        return Err(format!("\"{raw}\" isn't absolute: give the full path or start it with ~."));
+    }
+    // The deepest ancestor that exists is made real, then the rest hangs off it.
+    let mut real = expanded.clone();
+    let mut rest = vec![];
+    while !real.exists() {
+        match real.file_name() {
+            Some(name) => rest.push(name.to_os_string()),
+            None => return Err(format!("\"{raw}\" isn't a path inside the home folder.")),
+        }
+        real.pop();
+    }
+    let real = real.canonicalize().map_err(|e| format!("{raw}: {e}"))?;
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if !real.starts_with(&home) {
+        return Err(format!("{real:?} is outside the home folder: files work inside ~ only."));
+    }
+    let data = data.canonicalize().unwrap_or_else(|_| data.to_path_buf());
+    if real.starts_with(&data) || rest.iter().rev().fold(real.clone(), |p, c| p.join(c)).starts_with(&data) {
+        return Err("Pointcast's own files are off limits.".into());
+    }
+    let mut p = real;
+    for c in rest.iter().rev() {
+        p = p.join(c);
+    }
+    for c in p.components() {
+        let w = c.as_os_str().to_string_lossy().to_lowercase();
+        if FILE_BLOCKED.contains(&w.as_str()) || w.starts_with(".env") {
+            return Err(format!("{p:?} sits in a place kept for the person alone: credentials, config and version-control internals are off limits."));
+        }
+    }
+    Ok(p)
+}
+
+/// One file action after the guard cleared it. `p` is already inside home; `to` is `move`'s resolved destination.
+fn files_op(action: &str, p: &Path, to: Option<&Path>, limit: usize) -> Result<End, String> {
+    let show = |p: &Path| p.display().to_string();
+    match action {
+        "list" => {
+            if !p.exists() {
+                return Err(format!("{} isn't there.", show(p)));
+            }
+            if p.is_file() {
+                let m = p.metadata().map_err(|e| e.to_string())?;
+                return Ok(End::Done {
+                    text: format!("{} is a file of {} bytes.", show(p), m.len()),
+                    how: "listed".into(),
+                    data: json!({ "path": show(p), "kind": "file", "bytes": m.len() }),
+                });
+            }
+            let mut files = vec![];
+            let mut dirs = vec![];
+            for e in std::fs::read_dir(p).map_err(|e| format!("{} can't be listed: {e}", show(p)))? {
+                let Ok(e) = e else { continue };
+                let name = e.file_name().to_string_lossy().into_owned();
+                let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                (if dir { &mut dirs } else { &mut files }).push(json!({ "name": name, "kind": if dir { "folder" } else { "file" }, "bytes": e.metadata().map(|m| m.len()).unwrap_or(0) }));
+            }
+            let by_name = |a: &Value, b: &Value| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase());
+            dirs.sort_by(by_name);
+            files.sort_by(by_name);
+            let all: Vec<_> = dirs.into_iter().chain(files).collect();
+            let shown: Vec<_> = all.iter().take(limit).cloned().collect();
+            let lines: Vec<String> = shown
+                .iter()
+                .map(|e| {
+                    if e["kind"] == "folder" {
+                        format!("{}/", e["name"].as_str().unwrap())
+                    } else {
+                        format!("{}  {} B", e["name"].as_str().unwrap(), e["bytes"])
+                    }
+                })
+                .collect();
+            Ok(End::Done {
+                text: format!("{}: {} item(s){}\n{}", show(p), all.len(), if all.len() > limit { format!(", first {limit}") } else { String::new() }, lines.join("\n")),
+                how: format!("{} listed", shown.len().min(all.len())),
+                data: json!({ "path": show(p), "items": shown, "count": all.len() }),
+            })
+        }
+        "reveal" => {
+            if !p.exists() {
+                return Err(format!("{} isn't there.", show(p)));
+            }
+            #[cfg(target_os = "macos")]
+            std::process::Command::new("/usr/bin/open").arg("-R").arg(p).output().map_err(|e| e.to_string())?;
+            #[cfg(target_os = "windows")]
+            std::process::Command::new("explorer").arg(format!("/select,{}", show(p))).output().map_err(|e| e.to_string())?;
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            return Err("reveal works on macOS and Windows.".into());
+            Ok(End::Done { text: format!("{} is selected in {}.", show(p), files_app()), how: "revealed".into(), data: json!({ "path": show(p) }) })
+        }
+        "mkdir" => {
+            if p.exists() {
+                return if p.is_dir() {
+                    Ok(End::Done { text: format!("{} is already a folder.", show(p)), how: "already there".into(), data: json!({ "path": show(p) }) })
+                } else {
+                    Err(format!("{} is already a file, not a folder.", show(p)))
+                };
+            }
+            std::fs::create_dir_all(p).map_err(|e| format!("{} can't be made: {e}", show(p)))?;
+            Ok(End::Done { text: format!("Made the folder {}.", show(p)), how: "made".into(), data: json!({ "path": show(p) }) })
+        }
+        "move" => {
+            if !p.exists() {
+                return Err(format!("{} isn't there.", show(p)));
+            }
+            let to = to.ok_or("move needs \"to\": the new path, or a folder to move into.")?;
+            let dest = if to.is_dir() { to.join(p.file_name().unwrap_or_default()) } else { to.to_path_buf() };
+            if dest.starts_with(p) {
+                return Err(format!("{} can't be moved inside itself.", show(p)));
+            }
+            if dest.exists() {
+                return Err(format!("{} is already there.", show(&dest)));
+            }
+            std::fs::rename(p, &dest).map_err(|e| format!("{} can't be moved to {}: {e}", show(p), show(&dest)))?;
+            Ok(End::Done { text: format!("Moved {} to {}.", show(p), show(&dest)), how: "moved".into(), data: json!({ "from": show(p), "to": show(&dest) }) })
+        }
+        "trash" => {
+            if !p.exists() {
+                return Err(format!("{} isn't there.", show(p)));
+            }
+            trash::delete(p).map_err(|e| format!("{} can't be trashed: {e}", show(p)))?;
+            Ok(End::Done { text: format!("{} is in the Trash (Finder's Put Back brings it back).", show(p)), how: "trashed".into(), data: json!({ "path": show(p) }) })
+        }
+        _ => Err(format!("No file action \"{action}\": list, reveal, move, mkdir or trash.")),
     }
 }
 
@@ -170,6 +332,20 @@ pub fn schemas() -> Value {
                 "type": "object",
                 "properties": { "app": { "type": "string" }, "window": { "type": "string" } },
                 "required": ["app"]
+            }
+        },
+        {
+            "name": "pointcast_files",
+            "description": format!("Files and folders directly, faster than driving the file manager's screen: list a folder, reveal an item, move or rename, make a folder, or send to the Trash. Works inside the person's home folder only; credential and config folders are off limits; trashing waits for the person. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "reveal", "move", "mkdir", "trash"] },
+                    "path": { "type": "string", "description": "Absolute path, or one starting with ~, inside the person's home folder." },
+                    "to": { "type": "string", "description": "For move: the new absolute path, or a folder to move into." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": LIST_MAX, "default": LIST }
+                },
+                "required": ["action", "path"]
             }
         },
         {
@@ -555,6 +731,46 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 return Err(format!("{} didn't come to the front.", found.app.name));
             }
             return Ok(End::Done { text: format!("{} is in front.", found.app.name), how: "focused".into(), data: json!({}) });
+        }
+        "pointcast_files" => {
+            let action = text(args, "action").ok_or("pointcast_files needs an action: list, reveal, move, mkdir or trash.")?;
+            let raw = text(args, "path").ok_or("pointcast_files needs a path.")?;
+            let limit = int(args, "limit").map_or(LIST, |l| l.clamp(1, LIST_MAX as i64) as usize);
+            let home = dirs::home_dir().ok_or("The home folder can't be told.")?;
+            let p = match under_home(raw, &home, &crate::settings::data_dir()) {
+                Ok(p) => p,
+                Err(e) => return Ok(End::Refused(e)),
+            };
+            let base = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+            let (kind, what) = match action {
+                "list" => (Kind::See, format!("folder \"{base}\"")),
+                "reveal" => (Kind::Focus, format!("file \"{base}\"")),
+                "mkdir" => (Kind::Click, format!("folder \"{base}\" to be made")),
+                "move" => (Kind::Click, format!("file \"{base}\" to be moved")),
+                // Named this way on purpose: "trash" is on the guard's can't-be-undone list, so this waits for the person.
+                "trash" => (Kind::Click, format!("Move \"{base}\" to the Trash")),
+                _ => return Err(format!("No file action \"{action}\": list, reveal, move, mkdir or trash.")),
+            };
+            if matches!(action, "move" | "trash") && p == home.canonicalize().unwrap_or_else(|_| home.clone()) {
+                return Ok(End::Refused("The home folder itself is off limits.".into()));
+            }
+            *app = files_app().into();
+            *target = what.clone();
+            let t = Target { app: files_app().into(), role: "file".into(), name: what, ..Default::default() };
+            if let Some(e) = end(ask(desk, cx, kind, &t, false, target)) {
+                return Ok(e);
+            }
+            let to = match action {
+                "move" => match text(args, "to") {
+                    Some(raw) => match under_home(raw, &home, &crate::settings::data_dir()) {
+                        Ok(to) => Some(to),
+                        Err(e) => return Ok(End::Refused(e)),
+                    },
+                    None => return Err("move needs \"to\": the new path, or a folder to move into.".into()),
+                },
+                _ => None,
+            };
+            return files_op(action, &p, to.as_deref(), limit);
         }
         _ => {}
     }

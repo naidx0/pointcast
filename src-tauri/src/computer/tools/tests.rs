@@ -30,7 +30,7 @@ fn call(d: &Desk, name: &str, args: &Value) -> Value {
 }
 
 #[test]
-fn the_ten_tools_have_object_schemas_that_say_screen_text_is_content() {
+fn the_tools_have_object_schemas_that_say_screen_text_is_content() {
     let s = schemas();
     let tools = s.as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -46,6 +46,7 @@ fn the_ten_tools_have_object_schemas_that_say_screen_text_is_content() {
     assert_eq!(req("pointcast_scroll"), json!(["direction"]));
     assert_eq!(req("pointcast_open_app"), json!(["name"]));
     assert_eq!(req("pointcast_focus"), json!(["app"]));
+    assert_eq!(req("pointcast_files"), json!(["action", "path"]));
     assert!(NAMES.iter().all(|n| is_tool(n)) && !is_tool("pointcast_latest"));
 }
 
@@ -827,4 +828,87 @@ fn focus_says_done_when_the_app_really_comes_forward_and_keys_then_go() {
     assert_eq!(status(&r), "done", "{r}");
     assert_eq!(status(&call(&d, "pointcast_key", &json!({ "keys": "cmd+n" }))), "done");
     assert_eq!(done(&log), ["focus Mail None", "key [Cmd]+n"]);
+}
+
+#[test]
+fn file_paths_resolve_only_inside_home_and_away_from_kept_places() {
+    let home = std::env::temp_dir().join(format!("pc-files-home-{}", std::process::id()));
+    let data = home.join("appdata");
+    std::fs::create_dir_all(data.join("sub")).unwrap();
+    std::fs::create_dir_all(home.join("dev/repo/.git")).unwrap();
+    let ok = |raw: &str| under_home(raw, &home, &data).map(|p| p.canonicalize().unwrap_or(p));
+    let want = home.canonicalize().unwrap();
+    assert_eq!(ok("~").unwrap(), want, "tilde is home");
+    assert_eq!(ok(&format!("{}/dev/repo", home.display())).unwrap(), want.join("dev/repo"));
+    assert_eq!(ok(&format!("~/dev/../dev", )).unwrap(), want.join("dev"), "a dot-dot inside home stays inside home");
+    for raw in [
+        "relative/path",
+        "/etc/hosts",
+        "/usr/bin",
+        &format!("{}/.ssh/id_rsa", home.display()),
+        &format!("{}/.config/gh/hosts.yml", home.display()),
+        &format!("{}/.env.local", home.display()),
+        &format!("{}/dev/repo/.git/HEAD", home.display()),
+        &format!("{}/appdata/sub", home.display()),
+        &format!("{}/dev/../..", home.display()),
+    ] {
+        assert!(under_home(raw, &home, &data).is_err(), "{raw} must be refused");
+    }
+    // A path not there yet still resolves for mkdir: the existing parent is what is checked.
+    assert!(under_home(&format!("{}/dev/new-folder", home.display()), &home, &data).is_ok());
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn file_ops_list_move_and_mkdir_work_on_the_real_filesystem() {
+    let root = std::env::temp_dir().join(format!("pc-files-ops-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let nested = root.join("a/b");
+    let r = files_op("mkdir", &nested, None, 10).unwrap();
+    assert!(matches!(r, End::Done { .. }) && nested.is_dir());
+    let f = root.join("a/f.txt");
+    std::fs::write(&f, "hi").unwrap();
+    let End::Done { text, data, .. } = files_op("list", &root.join("a"), None, 10).unwrap() else { panic!() };
+    assert!(text.contains("b/") && text.contains("f.txt"), "{text}");
+    assert_eq!(data["count"], 2);
+    // Move to a new name, then into a folder that exists.
+    let moved = root.join("a/moved.txt");
+    assert!(files_op("move", &f, Some(&moved), 10).is_ok() && moved.exists() && !f.exists());
+    assert!(files_op("move", &moved, Some(&nested), 10).is_ok() && nested.join("moved.txt").exists());
+    // Honest failures.
+    for (action, p, to) in [
+        ("list", root.join("missing").as_path(), None),
+        ("move", nested.as_path(), Some(nested.join("inside").as_path())),
+        ("move", nested.join("moved.txt").as_path(), Some(nested.join("moved.txt").as_path())),
+        ("mkdir", nested.join("moved.txt").as_path(), None),
+        ("wonder", root.as_path(), None),
+    ] {
+        let p = p.to_path_buf();
+        assert!(files_op(action, &p, to.as_deref(), 10).is_err(), "{action} {p:?}");
+    }
+    // A real trashing: the file leaves the folder.
+    let gone = root.join("bye.txt");
+    std::fs::write(&gone, "x").unwrap();
+    assert!(files_op("trash", &gone, None, 10).is_ok() && !gone.exists());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn file_acts_go_through_the_guard_and_trashing_waits_for_the_person() {
+    let (d, _log) = desk(mail());
+    let _g = d.grants.grant(Duration::from_secs(60));
+    d.set_trust(Trust::with([("Finder".to_string(), Tier::Full)]));
+    // Outside home is refused before the OS is asked, whatever the tier.
+    let r = call(&d, "pointcast_files", &json!({ "action": "list", "path": "/etc" }));
+    assert_eq!(status(&r), "refused");
+    // Listing home itself is a look, allowed at any tier.
+    let r = call(&d, "pointcast_files", &json!({ "action": "list", "path": "~" }));
+    assert_eq!(status(&r), "done", "{r}");
+    // "Move x to the Trash" reads as can't-be-undone: with no one to ask in tests, it waits.
+    let r = call(&d, "pointcast_files", &json!({ "action": "trash", "path": "~/pointcast-test-missing-file" }));
+    assert_eq!(status(&r), "needs_confirm", "{r}");
+    // A view-tier Finder may be listed but not moved in.
+    d.set_trust(Trust::with([("Finder".to_string(), Tier::View)]));
+    assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "move", "path": "~/x", "to": "~/y" }))), "refused");
+    assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "list", "path": "~" }))), "done");
 }

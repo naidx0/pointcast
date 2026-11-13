@@ -48,6 +48,7 @@ mouse_position = "0.1.4"
 getrandom = "0.2"
 # RNNoise in pure Rust (BSD-3-Clause): the speech front end's noise suppression.
 nnnoiseless = { version = "0.5.2", default-features = false }
+trash = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
