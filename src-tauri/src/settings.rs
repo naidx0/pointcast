@@ -232,6 +232,11 @@ pub struct Settings {
     /// How fast answers are read: 1 is normal, from 0.5 to 2.
     #[serde(default = "default_speak_rate")]
     pub speak_rate: f32,
+    /// "Keep history": how many dictations history keeps (100, 500 or 1000); 0 keeps every one. Files saved before
+    /// this was a setting load with 100, the number history always kept. Lowering it removes nothing until the next
+    /// dictation is saved, which prunes down to it.
+    #[serde(default = "default_history_keep")]
+    pub history_keep: usize,
 }
 
 /// What was chosen for one AI; none of a field is that AI's own start.
@@ -268,6 +273,9 @@ fn default_free_minutes() -> u32 {
 }
 fn default_speak_rate() -> f32 {
     1.0
+}
+fn default_history_keep() -> usize {
+    crate::history::KEEP
 }
 fn default_mcp() -> String {
     "127.0.0.1:47821".into()
@@ -327,6 +335,7 @@ impl Default for Settings {
             speak_answers: false,
             speak_voice: None,
             speak_rate: default_speak_rate(),
+            history_keep: default_history_keep(),
         }
     }
 }
@@ -409,6 +418,10 @@ impl Settings {
             Some("breath") => "breath",
             _ => "aurora",
         }
+    }
+    /// How many history entries are kept: `history_keep`, with 0 (Forever) as no limit.
+    pub fn history_entries(&self) -> usize {
+        if self.history_keep == 0 { usize::MAX } else { self.history_keep }
     }
     pub fn hidden_list(&self) -> Vec<String> {
         self.hidden
@@ -611,6 +624,19 @@ mod tests {
         // A choice already saved is kept.
         let off: Settings = serde_json::from_str(r#"{"start_at_login":false,"check_updates":false}"#).unwrap();
         assert!(!off.start_at_login && !off.check_updates);
+    }
+
+    #[test]
+    fn history_keeps_a_hundred_unless_told_otherwise_and_old_files_load_with_a_hundred() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert_eq!((old.history_keep, old.history_entries()), (100, 100));
+        assert_eq!(Settings::default().history_entries(), 100);
+        let pick = |n: usize| -> Settings { serde_json::from_str(&format!(r#"{{"history_keep":{n}}}"#)).unwrap() };
+        assert_eq!(pick(500).history_entries(), 500);
+        assert_eq!(pick(1000).history_entries(), 1000);
+        assert_eq!(pick(0).history_entries(), usize::MAX, "Forever keeps every entry");
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&pick(500)).unwrap()).unwrap();
+        assert_eq!(back.history_keep, 500);
     }
 
     #[test]

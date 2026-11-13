@@ -8,7 +8,7 @@ use crate::prompt::{self, Item, SessionExport};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Entries kept; older ones are removed as new ones arrive.
+/// Entries kept unless Settings says otherwise (`Settings::history_keep`); older ones are removed as new ones arrive.
 pub const KEEP: usize = 100;
 
 /// The newest entries keep their recording's audio; older ones lose it as new ones arrive.
@@ -92,19 +92,30 @@ pub struct Run {
 
 pub struct Store {
     root: PathBuf,
-    /// How many entries are kept, and how many of the newest keep their audio.
-    keep: usize,
+    /// How many entries are kept, and how many of the newest keep their audio. No number is the person's "Keep history"
+    /// setting, read from `<root>/settings.json` at each prune, so a change applies at the next save without a restart.
+    keep: Option<usize>,
     keep_audio: usize,
 }
 
 impl Store {
     pub fn new(data_dir: &Path) -> Self {
-        Self::with_keep(data_dir, KEEP, KEEP_AUDIO)
+        Store { root: data_dir.to_path_buf(), keep: None, keep_audio: KEEP_AUDIO }
     }
 
     /// A store that keeps `entries` entries and the audio of its newest `audio`: a session keeps every turn.
     pub fn with_keep(root: &Path, entries: usize, audio: usize) -> Self {
-        Store { root: root.to_path_buf(), keep: entries, keep_audio: audio }
+        Store { root: root.to_path_buf(), keep: Some(entries), keep_audio: audio }
+    }
+
+    /// How many entries this store keeps now: its own number, or the saved setting (100 when there is none).
+    fn keep(&self) -> usize {
+        self.keep.unwrap_or_else(|| {
+            std::fs::read(self.root.join("settings.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<crate::settings::Settings>(&b).ok())
+                .map_or(KEEP, |s| s.history_entries())
+        })
     }
 
     /// Where entry `id` is, when there is one.
@@ -152,7 +163,7 @@ impl Store {
         write_entry(&tmp, items, &meta)?;
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&tmp, &dir).map_err(|e| e.to_string())?;
-        self.prune(self.keep);
+        self.prune(self.keep());
         self.prune_audio(self.keep_audio);
         Ok(meta)
     }
@@ -922,6 +933,45 @@ mod tests {
         assert_eq!(l.len(), KEEP);
         assert!(l.windows(2).all(|w| w[0].created_ms > w[1].created_ms));
         assert_eq!(l[0].created_ms, 1_793_000_000_000 + (KEEP as u64 + 2) * 1000);
+    }
+
+    #[test]
+    fn history_keeps_as_many_entries_as_the_setting_says_and_forever_keeps_all() {
+        let d = std::env::temp_dir().join(format!("pc-hist-setting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let at = |name: &str, setting: Option<&str>| -> Store {
+            let root = d.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            if let Some(json) = setting {
+                std::fs::write(root.join("settings.json"), json).unwrap();
+            }
+            Store::new(&root)
+        };
+        let fill = |s: &Store, from: u64, n: u64| {
+            for i in from..from + n {
+                s.save(&items()[..1], 1_793_000_000_000 + i * 1000, 10).unwrap();
+            }
+        };
+        // Each choice is the number a prune keeps; no file or an old one is 100.
+        assert_eq!(at("none", None).keep(), 100);
+        assert_eq!(at("old", Some(r#"{"onboarded":true}"#)).keep(), 100);
+        assert_eq!(at("five", Some(r#"{"history_keep":500}"#)).keep(), 500);
+        assert_eq!(at("thousand", Some(r#"{"history_keep":1000}"#)).keep(), 1000);
+        assert_eq!(at("forever", Some(r#"{"history_keep":0}"#)).keep(), usize::MAX);
+        // Pruning follows the number: an old file keeps 100, Forever removes nothing.
+        let old = at("old", None);
+        fill(&old, 0, 103);
+        assert_eq!(old.list().len(), 100, "an old file keeps 100");
+        let forever = at("forever", None);
+        fill(&forever, 0, 130);
+        assert_eq!(forever.list().len(), 130, "Forever removes nothing");
+        // Lowering the setting removes nothing until the next save prunes, and then down to the new number.
+        std::fs::write(d.join("forever").join("settings.json"), r#"{"history_keep":100}"#).unwrap();
+        assert_eq!(forever.list().len(), 130, "nothing goes when the setting changes");
+        fill(&forever, 1000, 1);
+        assert_eq!(forever.list().len(), 100, "the next save prunes to the new number");
+        assert_eq!(forever.list()[0].created_ms, 1_793_000_000_000 + 1000 * 1000, "the newest stay");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
