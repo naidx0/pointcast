@@ -97,6 +97,7 @@ import {
   type RouteView,
 } from "@/lib/assist";
 import { Backdrop } from "@/components/Backdrop";
+import { Line, type LevelSource } from "@/components/Line";
 import { TitleBar, dragWindow, useFrameless } from "@/components/WinBar";
 
 const PANES = [
@@ -323,9 +324,14 @@ function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
         <Row label="Play sounds" sub="A soft cue when a recording starts and stops.">
           <Toggle label="Play sounds" on={cfg.sounds} set={(v) => patch({ sounds: v })} />
         </Row>
-        <Row label="Appearance">
+      </div>
+      <h2 className="group-title" style={{ marginTop: 24 }}>
+        Appearance
+      </h2>
+      <div className="group">
+        <Row label="Theme">
           <Seg
-            label="Appearance"
+            label="Theme"
             value={theme}
             options={[
               ["system", "Auto"],
@@ -338,6 +344,7 @@ function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
             }}
           />
         </Row>
+        <WaveRow />
       </div>
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Updates
@@ -347,7 +354,7 @@ function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
         Permissions
       </h2>
       {perms ? <PermissionRows perms={perms} setPerms={setPerms} reset /> : null}
-      <History />
+      <History cfg={cfg} patch={patch} />
       <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
         <button type="button" className="btn" onClick={() => windowOpen("onboarding").catch(() => undefined)}>
           Open Setup Assistant…
@@ -443,7 +450,16 @@ function Updates({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
   );
 }
 
-function History() {
+const KEEP_HISTORY = [
+  [100, "100"],
+  [500, "500"],
+  [1000, "1,000"],
+  [0, "Forever"],
+] as const;
+
+function History({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const saved = (cfg as { history_keep?: number }).history_keep;
+  const [keep, setKeep] = useState<number>(KEEP_HISTORY.some(([n]) => n === saved) ? (saved as number) : 100);
   const [count, setCount] = useState<number | null>(null);
   const [sure, setSure] = useState(false);
   const load = () => {
@@ -462,7 +478,7 @@ function History() {
       <div className="group">
         <Row
           label={count == null ? "History" : `${count} ${count === 1 ? "prompt" : "prompts"} kept`}
-          sub="Your newest 100 prompts stay on this computer, so a closed window or a crash loses nothing."
+          sub={`Your ${keep === 0 ? "" : `newest ${keep.toLocaleString("en-US")} `}prompts stay on this computer, so a closed window or a crash loses nothing.`}
         >
           <button type="button" className="btn" onClick={() => windowOpen("result").catch(() => undefined)}>
             Show History
@@ -481,6 +497,24 @@ function History() {
           >
             {sure ? "Click Again to Clear" : "Clear…"}
           </button>
+        </Row>
+        <Row
+          label="Keep history"
+          sub={
+            keep === 0
+              ? "Every prompt stays until you clear it."
+              : "A smaller number removes nothing now: the oldest prompts go when you next dictate."
+          }
+        >
+          <Seg
+            label="Keep history"
+            value={keep}
+            options={KEEP_HISTORY}
+            set={(n) => {
+              setKeep(n);
+              patch({ history_keep: n });
+            }}
+          />
         </Row>
       </div>
     </>
@@ -1613,7 +1647,6 @@ function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refr
           </div>
           <LevelMeter level={check.level} />
         </div>
-        <WaveRow />
       </div>
       {pc ? (
         <>
@@ -1700,11 +1733,24 @@ function Speech({ cfg: real, patch, refresh }: { cfg: Config; patch: Patch; refr
 function WaveRow() {
   const style = useWaveStyle();
   return (
-    <Row label="Wave" sub="What moves while you speak.">
-      <Seg label="Wave" value={style} options={WAVE_STYLES.map((w) => [w, WAVE_LABELS[w]] as const)} set={(w) => void waveStyleSet(w)} />
+    <Row label="Voice wave" sub="What moves while you speak.">
+      <div className="wave-preview" aria-hidden="true">
+        <Line mode="listen" look={style} layers={2} height={26} tip="ink" levels={previewLevels} />
+      </div>
+      <Seg label="Voice wave" value={style} options={WAVE_STYLES.map((w) => [w, WAVE_LABELS[w]] as const)} set={(w) => void waveStyleSet(w)} />
     </Row>
   );
 }
+
+/** A gentle made-up voice for the wave preview: a slow swell with a little flutter, so the chosen wave moves. */
+const previewLevels: LevelSource = (set) => {
+  const t0 = performance.now();
+  const id = setInterval(() => {
+    const t = (performance.now() - t0) / 1000;
+    set(0.28 + 0.2 * Math.max(0, Math.sin(t * 1.6)) + 0.06 * Math.sin(t * 7.3));
+  }, 50);
+  return () => clearInterval(id);
+};
 
 function LevelMeter({ level }: { level: number }) {
   return (
