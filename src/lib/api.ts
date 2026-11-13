@@ -24,7 +24,7 @@ import {
 import { previewSent } from "./conversation";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
 import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
-import { previewVoices, type SpeakVoice } from "./talkback";
+import { previewVoices, type KokoroProgress, type SpeakVoice } from "./talkback";
 import { CUSTOM, checkingAssist, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -528,6 +528,10 @@ export const speakSample = (voice: string | null, rate: number) => (inTauri ? in
 export const speakStop = () => (inTauri ? invoke<void>("speak_stop") : Promise.resolve());
 /** Whether an answer is being read aloud, each time that changes. */
 export const onSpeaking = (fn: (speaking: boolean) => void) => on<{ speaking: boolean }>("speak://state")((p) => fn(p.speaking));
+/** Each step of the natural voice's download (choosing a Kokoro voice, or Hear it with one, starts it). */
+export const onKokoroProgress = on<KokoroProgress>("kokoro://progress");
+/** The natural voice's download under way, if one is: for a Settings window opened in the middle of it. */
+export const speakFetching = (): Promise<KokoroProgress | null> => (inTauri ? invoke<KokoroProgress | null>("speak_fetching") : Promise.resolve(null));
 
 /** Subscribe in an effect; returns the cleanup. */
 export function subscribe(...subs: Promise<UnlistenFn>[]) {
