@@ -30,6 +30,12 @@ it listens again, with no key presses. It runs free and offline on macOS and Win
 
 **First slice:** T1, now.
 
+**T2 runtime (2026-11-13).** Kokoro runs in the app through the sherpa-onnx 2.0 C API that speech already downloads and pins per OS (macOS arm64, Windows x64): no new engine, no native build step, no helper process, nothing installed system-wide, Apache-2.0 throughout.
+Not `sherpa-rs` (links a second sherpa into every build, ~30 MB, beside the downloaded one); not the prebuilt CLI (a process per sentence reloads the 326 MB model); not `ort` with espeak-ng (GPL-3.0, which the MIT app cannot link; sherpa-onnx 2.0 dropped it for that reason).
+Without espeak, words become phonemes in Pointcast from the model's own lexicon (`voice/kokoro/g2p.rs`): numbers, acronyms, compounds and unknown words are said, never dropped.
+Model: `kokoro-multi-lang-v1_0` at full precision, pinned by URL and SHA-256: a 350 MB download (plus the 9 MB runtime if speech has not fetched it), 366 MB kept. Its int8 version (132 MB) made audio slower than it plays on an Apple M5.
+First audio on this Mac (M5, warm voice, speakers awake): 394 ms from a sentence to the device; a sentence plays while the next is made, and a long one starts after its first clause.
+
 ## The stated edge
 
 - Out of scope: cloud voices, voice cloning, phone numbers or real telephony, and singing or sound effects.

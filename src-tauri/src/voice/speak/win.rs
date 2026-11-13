@@ -93,7 +93,7 @@ impl Speaker for Win {
             for i in 0..all.Size()? {
                 let v = all.GetAt(i)?;
                 let name = v.DisplayName()?.to_string();
-                found.push(VoiceInfo { id: v.Id()?.to_string(), natural: name.contains("Natural"), name, lang: v.Language()?.to_string() });
+                found.push(VoiceInfo { id: v.Id()?.to_string(), natural: name.contains("Natural"), name, lang: v.Language()?.to_string(), download: None });
             }
             Ok((found, SpeechSynthesizer::DefaultVoice()?.Language()?.to_string()))
         })();

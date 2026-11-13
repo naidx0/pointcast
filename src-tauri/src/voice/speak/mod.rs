@@ -1,10 +1,13 @@
 //! Answers read aloud. An Ask answer is cut into sentences as it streams in (`split`), and each one is said by a voice
 //! of this computer as soon as it is complete, one after another (`Talk`): the Mac's AVSpeechSynthesizer (`mac`),
-//! Windows' SpeechSynthesizer (`win`). Nothing leaves the computer. Speech stops at once when the person asks again,
-//! talks over it, presses Esc or closes the panel (`Reader`).
+//! Windows' SpeechSynthesizer (`win`), or the natural voice Kokoro, downloaded once and run here (`natural`, `out`,
+//! `voice::kokoro`); `Voices` picks between them. Nothing leaves the computer. Speech stops at once when the person
+//! asks again, talks over it, presses Esc or closes the panel (`Reader`).
 
 #[cfg(target_os = "macos")]
 mod mac;
+pub mod natural;
+pub mod out;
 pub mod split;
 #[cfg(windows)]
 mod win;
@@ -13,7 +16,8 @@ use crate::live::{Out, State};
 use crate::voice::audio;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// A voice installed on this computer.
@@ -26,6 +30,9 @@ pub struct VoiceInfo {
     pub lang: String,
     /// A Premium or Enhanced voice: one of the natural-sounding ones.
     pub natural: bool,
+    /// Bytes to download before it can speak; none when it is on this computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download: Option<u64>,
 }
 
 /// How a sentence is said.
@@ -46,6 +53,9 @@ impl Default for How {
 /// Called once, when a sentence has been said or cut short.
 pub type Done = Box<dyn FnOnce() + Send>;
 
+/// Called once, when a voice's download has ended: whether the voice can speak now.
+pub type Fetched = Box<dyn FnOnce(bool) + Send>;
+
 /// A voice of the system that says one sentence at a time.
 pub trait Speaker: Send + Sync {
     /// Start saying `sentence` and return. `done` is called once, when it has been said or cut short; `Err` means it
@@ -55,6 +65,99 @@ pub trait Speaker: Send + Sync {
     fn stop(&self);
     /// The voices installed, natural ones first; `Err` says why there are none here.
     fn voices(&self) -> Result<Vec<VoiceInfo>, String>;
+    /// `sentence` will be said next: a voice that makes its audio first can start on it now.
+    fn prepare(&self, _sentence: &str, _how: &How) {}
+    /// Get `how`'s voice ready to speak soon. True when it is on this computer (it loads what it needs now). False
+    /// when it has to be downloaded first; with `fetch`, the download starts (once) and `fetch` hears when it ends.
+    fn ready(&self, _how: &How, _fetch: Option<Fetched>) -> bool {
+        true
+    }
+}
+
+/// The system's voices and, beside them, the natural voice (Kokoro). A Kokoro voice, or no choice once Kokoro is
+/// downloaded, is said by Kokoro; a Kokoro voice not downloaded yet falls back to the system's voice meanwhile.
+pub struct Voices {
+    system: Arc<dyn Speaker>,
+    natural: Option<natural::Natural>,
+}
+
+/// Who says a sentence.
+enum Pick {
+    System(How),
+    Natural(String),
+}
+
+impl Voices {
+    pub fn new(system: Arc<dyn Speaker>, natural: Option<natural::Natural>) -> Voices {
+        Voices { system, natural }
+    }
+
+    fn pick(&self, how: &How) -> Pick {
+        let Some(n) = &self.natural else { return Pick::System(how.clone()) };
+        let synth = n.synth();
+        match &how.voice {
+            Some(v) if synth.owns(v) && synth.installed() => Pick::Natural(v.clone()),
+            Some(v) if synth.owns(v) => Pick::System(How { voice: None, rate: how.rate }),
+            None if synth.installed() => Pick::Natural(synth.default_voice()),
+            _ => Pick::System(how.clone()),
+        }
+    }
+}
+
+impl Speaker for Voices {
+    fn speak(&self, sentence: &str, how: &How, done: Done) -> Result<(), String> {
+        match (self.pick(how), &self.natural) {
+            (Pick::Natural(v), Some(n)) => {
+                n.speak(sentence, &v, how.rate, done);
+                Ok(())
+            }
+            (Pick::System(h), _) => self.system.speak(sentence, &h, done),
+            (Pick::Natural(_), None) => self.system.speak(sentence, how, done),
+        }
+    }
+
+    fn stop(&self) {
+        if let Some(n) = &self.natural {
+            n.stop();
+        }
+        self.system.stop();
+    }
+
+    /// The natural voices first, then the system's. Without a system voice (Linux), its reason.
+    fn voices(&self) -> Result<Vec<VoiceInfo>, String> {
+        let system = self.system.voices()?;
+        let mut all = self.natural.as_ref().map(|n| n.synth().voices()).unwrap_or_default();
+        all.extend(system);
+        Ok(all)
+    }
+
+    fn prepare(&self, sentence: &str, how: &How) {
+        match (self.pick(how), &self.natural) {
+            (Pick::Natural(v), Some(n)) => n.prepare(sentence, &v, how.rate),
+            (Pick::System(h), _) => self.system.prepare(sentence, &h),
+            _ => {}
+        }
+    }
+
+    fn ready(&self, how: &How, fetch: Option<Fetched>) -> bool {
+        let Some(n) = &self.natural else { return self.system.ready(how, fetch) };
+        let synth = n.synth();
+        match &how.voice {
+            Some(v) if synth.owns(v) && !synth.installed() => {
+                if let Some(f) = fetch {
+                    synth.fetch(f);
+                }
+                false
+            }
+            _ => match self.pick(how) {
+                Pick::Natural(v) => {
+                    n.warm(&v);
+                    true
+                }
+                Pick::System(h) => self.system.ready(&h, fetch),
+            },
+        }
+    }
 }
 
 /// This computer's own voice.
@@ -141,10 +244,16 @@ impl Talk {
 
     /// Say `sentence` after those already waiting.
     pub fn say(&self, sentence: String, how: How) {
-        let mut q = self.shared.queue.lock().unwrap();
-        q.waiting.push_back((sentence, how));
-        self.shared.tell(&mut q);
-        self.shared.moved.notify_all();
+        self.shared.say(sentence, how);
+    }
+
+    /// A handle that says sentences while this queue lives, for a sentence said later (after a download).
+    fn sayer(&self) -> Weak<Shared> {
+        Arc::downgrade(&self.shared)
+    }
+
+    fn speaker(&self) -> &Arc<dyn Speaker> {
+        &self.shared.speaker
     }
 
     /// Clear the queue and cut the sentence being said, at once.
@@ -190,6 +299,20 @@ impl Drop for Talk {
 }
 
 impl Shared {
+    fn say(&self, sentence: String, how: How) {
+        let next = {
+            let mut q = self.queue.lock().unwrap();
+            q.waiting.push_back((sentence, how));
+            self.tell(&mut q);
+            self.moved.notify_all();
+            // The one after the sentence being said: the voice can make it now.
+            (q.speaking && q.waiting.len() == 1).then(|| q.waiting[0].clone())
+        };
+        if let Some((s, h)) = next {
+            self.speaker.prepare(&s, &h);
+        }
+    }
+
     /// Tell whether anything is being said or waits, when that changed.
     fn tell(&self, q: &mut Queue) {
         let busy = q.speaking || !q.waiting.is_empty();
@@ -203,7 +326,7 @@ impl Shared {
         let (tx, rx) = mpsc::channel::<u64>();
         let mut n = 0u64;
         loop {
-            let (sentence, how, stops) = {
+            let (sentence, how, stops, next) = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
                     if q.closed {
@@ -211,7 +334,7 @@ impl Shared {
                     }
                     if let Some((s, h)) = q.waiting.pop_front() {
                         q.speaking = true;
-                        break (s, h, q.stops);
+                        break (s, h, q.stops, q.waiting.front().cloned());
                     }
                     q = self.moved.wait(q).unwrap();
                 }
@@ -221,7 +344,12 @@ impl Shared {
             match self.speaker.speak(&sentence, &how, Box::new(move || {
                 let _ = said.send(id);
             })) {
-                Ok(()) => self.wait(&rx, id, stops),
+                Ok(()) => {
+                    if let Some((s, h)) = next {
+                        self.speaker.prepare(&s, &h);
+                    }
+                    self.wait(&rx, id, stops)
+                }
                 Err(why) => eprintln!("[speak] {why}"),
             }
             let mut q = self.queue.lock().unwrap();
@@ -294,6 +422,8 @@ pub struct Reader {
     /// How answers are said; none when reading aloud is off. Read at each new answer.
     how: Box<dyn Fn() -> Option<How> + Send + Sync>,
     now: Mutex<Answer>,
+    /// Counts stops: a sample waiting for its voice's download is said only if nothing stopped it since.
+    stops: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -313,7 +443,7 @@ impl Reader {
         how: impl Fn() -> Option<How> + Send + Sync + 'static,
         told: impl Fn(bool) + Send + Sync + 'static,
     ) -> Reader {
-        Reader { talk: Talk::new(speaker, told), how: Box::new(how), now: Mutex::default() }
+        Reader { talk: Talk::new(speaker, told), how: Box::new(how), now: Mutex::default(), stops: Arc::default() }
     }
 
     /// What the Ask loop tells the panel. A question sent starts a new answer and stops the old one; its words are
@@ -342,6 +472,10 @@ impl Reader {
     fn begin(&self, turn: u64) {
         self.talk.stop();
         let how = (self.how)();
+        // The answer is on its way: a natural voice loads meanwhile.
+        if let Some(h) = &how {
+            self.talk.speaker().ready(h, None);
+        }
         let mut a = self.now.lock().unwrap();
         (a.turn, a.how, a.split) = (Some(turn), how, split::Splitter::default());
     }
@@ -373,6 +507,7 @@ impl Reader {
             let mut a = self.now.lock().unwrap();
             (a.turn, a.how, a.split) = (None, None, split::Splitter::default());
         }
+        self.stops.fetch_add(1, Ordering::SeqCst);
         self.talk.stop();
     }
 
@@ -384,10 +519,24 @@ impl Reader {
         }
     }
 
-    /// Say the sample line the way `how` says, in place of anything being read.
+    /// Say the sample line the way `how` says, in place of anything being read. A voice that has to be downloaded
+    /// first is, and says it once it is (unless something stopped speech meanwhile).
     pub fn sample(&self, how: How) {
         self.stop();
-        self.talk.say(SAMPLE.into(), how);
+        let (stops, at, talk, later) = (self.stops.clone(), self.stops.load(Ordering::SeqCst), self.talk.sayer(), how.clone());
+        let then: Fetched = Box::new(move |ok| {
+            if let Some(talk) = talk.upgrade().filter(|_| ok && stops.load(Ordering::SeqCst) == at) {
+                talk.say(SAMPLE.into(), later);
+            }
+        });
+        if self.talk.speaker().ready(&how, Some(then)) {
+            self.talk.say(SAMPLE.into(), how);
+        }
+    }
+
+    /// The person chose `how`'s voice: one to download starts downloading, one on this computer loads.
+    pub fn ready(&self, how: &How) -> bool {
+        self.talk.speaker().ready(how, Some(Box::new(|_| {})))
     }
 
     pub fn voices(&self) -> Result<Vec<VoiceInfo>, String> {
@@ -713,12 +862,12 @@ mod tests {
 
     #[test]
     fn voices_list_natural_ones_first_then_the_systems_language_then_by_name() {
-        let v = |name: &str, lang: &str, natural: bool| VoiceInfo { id: name.into(), name: name.into(), lang: lang.into(), natural };
+        let v = |name: &str, lang: &str, natural: bool| VoiceInfo { id: name.into(), name: name.into(), lang: lang.into(), natural, download: None };
         let got = ranked(vec![v("Zed", "en-GB", false), v("Amélie", "fr-FR", false), v("Ava", "en-US", true), v("Alex", "en-US", false), v("Kyoko", "ja-JP", true)], "en-US");
         let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["Ava", "Kyoko", "Alex", "Zed", "Amélie"]);
         // With no natural voice, the Mac's novelty and older robotic voices come after its standard ones.
-        let mac = |id: &str, name: &str| VoiceInfo { id: id.into(), name: name.into(), lang: "en-US".into(), natural: false };
+        let mac = |id: &str, name: &str| VoiceInfo { id: id.into(), name: name.into(), lang: "en-US".into(), natural: false, download: None };
         let got = ranked(
             vec![
                 mac("com.apple.speech.synthesis.voice.Albert", "Albert"),
@@ -730,6 +879,119 @@ mod tests {
         );
         let names: Vec<&str> = got.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["Samantha", "Eddy", "Albert", "Bells"]);
+    }
+
+    mod natural_voice {
+        use super::super::natural::fake::{FakeSink, FakeSynth};
+        use super::super::natural::Natural;
+        use super::*;
+
+        fn voices(installed: bool) -> (Arc<Fake>, Arc<FakeSynth>, Arc<FakeSink>, Arc<Voices>) {
+            let (system, synth, sink) = (Arc::new(Fake::auto()), Arc::new(FakeSynth::new(5, installed)), Arc::new(FakeSink::new(5)));
+            let v = Arc::new(Voices::new(system.clone(), Some(Natural::new(synth.clone(), sink.clone()))));
+            (system, synth, sink, v)
+        }
+
+        fn kokoro() -> How {
+            How { voice: Some("kokoro:af_heart".into()), rate: 1.0 }
+        }
+
+        fn wait(ok: impl Fn() -> bool) -> bool {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(2) {
+                if ok() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            false
+        }
+
+        #[test]
+        fn the_natural_voices_come_first_with_their_download_size_until_downloaded() {
+            let (_, synth, _, v) = voices(false);
+            let listed = v.voices().unwrap();
+            assert_eq!((listed[0].id.as_str(), listed[0].download), ("kokoro:af_heart", Some(1000)));
+            synth.fetched(true);
+            assert_eq!(v.voices().unwrap()[0].download, None);
+        }
+
+        #[test]
+        fn a_natural_voice_not_downloaded_yet_reads_answers_in_the_system_voice_meanwhile() {
+            let (system, synth, sink, v) = voices(false);
+            let r = Reader::new(v, move || Some(kokoro()), |_| {});
+            r.hear(&state(State::Sending, 1));
+            r.hear(&delta(1, "One. Two."));
+            r.hear(&state(State::Shown, 1));
+            assert!(system.wait_started(2));
+            assert!(r.talk.wait_idle(Duration::from_secs(1)));
+            assert!(sink.events("start").is_empty() && synth.events("make").is_empty());
+            assert!(synth.fetches.lock().unwrap().is_empty(), "an answer never starts a download");
+            // Once downloaded, answers are read in it.
+            synth.fetched(true);
+            r.hear(&state(State::Sending, 2));
+            r.hear(&delta(2, "Three."));
+            r.hear(&state(State::Shown, 2));
+            assert!(wait(|| sink.events("end").len() == 1));
+            assert_eq!(system.started().len(), 2);
+        }
+
+        #[test]
+        fn hear_it_with_a_voice_to_download_downloads_it_then_says_the_sample_in_it() {
+            let (system, synth, sink, v) = voices(false);
+            let r = Reader::new(v, || None, |_| {});
+            r.sample(kokoro());
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(system.started().is_empty() && sink.events("start").is_empty(), "nothing said before the download");
+            assert_eq!(synth.fetches.lock().unwrap().len(), 1, "the download started");
+            synth.fetched(true);
+            assert!(wait(|| sink.events("end").len() == 1), "said once it is here");
+            assert_eq!(synth.events("make")[0].0, SAMPLE);
+        }
+
+        #[test]
+        fn a_stop_while_downloading_means_the_sample_is_not_said_after_and_a_failed_download_says_nothing() {
+            let (system, synth, sink, v) = voices(false);
+            let r = Reader::new(v, || None, |_| {});
+            r.sample(kokoro());
+            r.stop();
+            synth.fetched(true);
+            std::thread::sleep(Duration::from_millis(80));
+            assert!(sink.events("start").is_empty());
+            let (system2, synth2, sink2, v2) = voices(false);
+            let r2 = Reader::new(v2, || None, |_| {});
+            r2.sample(kokoro());
+            synth2.fetched(false);
+            std::thread::sleep(Duration::from_millis(80));
+            assert!(sink2.events("start").is_empty() && system2.started().is_empty() && system.started().is_empty());
+        }
+
+        #[test]
+        fn with_no_voice_chosen_the_system_voice_speaks_until_kokoro_is_here_then_kokoro_does() {
+            let (system, synth, sink, v) = voices(false);
+            let talk = Talk::new(v.clone(), |_| {});
+            talk.say("One.".into(), How::default());
+            assert!(system.wait_started(1));
+            synth.fetched(true);
+            talk.say("Two.".into(), How::default());
+            assert!(wait(|| sink.events("end").len() == 1));
+            assert_eq!(synth.events("make")[0].0, "Two.");
+            // A system voice chosen by name stays the system's.
+            talk.say("Three.".into(), How { voice: Some("com.apple.voice.premium.en-US.Zoe".into()), rate: 1.0 });
+            assert!(system.wait_started(2));
+        }
+
+        #[test]
+        fn choosing_a_voice_downloads_it_once_and_choosing_one_that_is_here_loads_it() {
+            let (_, synth, _, v) = voices(false);
+            let r = Reader::new(v, || None, |_| {});
+            assert!(!r.ready(&kokoro()));
+            assert_eq!(synth.fetches.lock().unwrap().len(), 1);
+            synth.fetched(true);
+            assert!(r.ready(&kokoro()));
+            assert!(wait(|| !synth.events("load").is_empty()));
+            assert!(r.ready(&How { voice: Some("com.apple.voice.compact.en-US.Samantha".into()), rate: 1.0 }), "a system voice is always ready");
+        }
     }
 
     #[test]

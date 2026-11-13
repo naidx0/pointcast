@@ -231,6 +231,7 @@ impl Speaker for Mac {
                     name: string(msg_send![v, name]),
                     lang: string(msg_send![v, language]),
                     natural: quality >= ENHANCED,
+                    download: None,
                 });
             }
             let here = string(msg_send![class!(AVSpeechSynthesisVoice), currentLanguageCode]);

@@ -346,7 +346,7 @@ fn loader_path(lib: &Path) -> std::path::PathBuf {
     lib.components().collect()
 }
 
-fn open(lib: &Path) -> Result<libloading::Library, String> {
+pub(crate) fn open(lib: &Path) -> Result<libloading::Library, String> {
     let lib = &loader_path(lib);
     #[cfg(windows)]
     unsafe {

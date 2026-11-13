@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod engine;
+pub mod kokoro;
 pub mod machine;
 pub mod models;
 pub mod ptt;

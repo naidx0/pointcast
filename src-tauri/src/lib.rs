@@ -369,12 +369,18 @@ fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Hel
     )
 }
 
-/// Answers read aloud with the system's voice, the way the settings say; `speak://state` says when speech starts and
-/// when it has all ended.
+/// Answers read aloud with the system's voice or the natural one (Kokoro), the way the settings say; `speak://state`
+/// says when speech starts and when it has all ended, `kokoro://progress` how the natural voice's download goes.
 fn reader_for(app: &AppHandle, svc: &Arc<App>) -> Arc<voice::speak::Reader> {
     let (handle, svc) = (app.clone(), svc.clone());
+    let fetching = app.clone();
+    let kokoro = voice::kokoro::Kokoro::new(voice::models::speech_dir(), move |p| {
+        let _ = fetching.emit("kokoro://progress", p);
+    });
+    app.manage(kokoro.clone());
+    let natural = voice::speak::natural::Natural::new(Arc::new(kokoro), Arc::new(voice::speak::out::Speakers::default()));
     Arc::new(voice::speak::Reader::new(
-        voice::speak::system(),
+        Arc::new(voice::speak::Voices::new(voice::speak::system(), Some(natural))),
         move || {
             let s = svc.settings.lock().unwrap();
             s.speak_answers.then(|| voice::speak::How { voice: s.speak_voice.clone(), rate: s.speak_rate })
@@ -408,6 +414,19 @@ fn speak_sample(reader: tauri::State<'_, Arc<voice::speak::Reader>>, voice: Opti
 #[tauri::command]
 fn speak_stop(reader: tauri::State<'_, Arc<voice::speak::Reader>>) {
     reader.stop();
+}
+
+/// The natural voice's download under way, for a Settings window opened in the middle of it.
+#[tauri::command]
+fn speak_fetching(kokoro: tauri::State<'_, voice::kokoro::Kokoro>) -> Option<voice::models::Progress> {
+    kokoro.progress()
+}
+
+/// A voice chosen in Settings: a natural one not downloaded yet starts downloading, one on this computer loads.
+fn speak_voice_chosen(app: &AppHandle, s: &settings::Settings) {
+    if let Some(r) = app.try_state::<Arc<voice::speak::Reader>>() {
+        r.ready(&voice::speak::How { voice: s.speak_voice.clone(), rate: s.speak_rate });
+    }
 }
 
 /// Start a summary of session `id` with the chosen AI; `summary://state` says where it stands.
@@ -1178,6 +1197,9 @@ fn settings_patch(
     // Reading aloud turned off stops what is being read.
     if cur.speak_answers && !next.speak_answers {
         speak_stop_now(&app);
+    }
+    if cur.speak_voice != next.speak_voice {
+        speak_voice_chosen(&app, &next);
     }
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
@@ -2375,6 +2397,7 @@ pub fn run() {
             speak_voices,
             speak_sample,
             speak_stop,
+            speak_fetching,
             sessions_list,
             sessions_open,
             sessions_new,
