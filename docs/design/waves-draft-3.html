@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aurora, refined</title>
+<style>
+  :root { --bg: #0d1226; --ink: rgba(255,255,255,0.92); --quiet: rgba(255,255,255,0.55); --line: rgba(255,255,255,0.1); }
+  :root[data-theme="light"] { --bg: #eef3ff; --ink: rgba(10,16,40,0.9); --quiet: rgba(10,16,40,0.55); --line: rgba(10,16,40,0.1); }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 24px 16px 56px; min-height: 100vh;
+    background: radial-gradient(120% 80% at 85% -10%, rgba(47,91,255,0.35), transparent 60%), radial-gradient(90% 70% at -10% 110%, rgba(138,176,255,0.18), transparent 60%), var(--bg); }
+  :root[data-theme="light"] body { background: radial-gradient(120% 80% at 85% -10%, rgba(43,85,240,0.22), transparent 60%), radial-gradient(90% 70% at -10% 110%, rgba(173,196,255,0.5), transparent 60%), var(--bg); }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .lead { color: var(--quiet); margin: 0 0 16px; max-width: 660px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+  .controls button { font: inherit; height: 28px; padding: 0 12px; border-radius: 999px; border: 0.5px solid var(--line); background: rgba(127,127,127,0.12); color: var(--ink); cursor: pointer; }
+  .controls button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: transparent; }
+  .sep { width: 1px; background: var(--line); margin: 4px 6px; }
+  .grid { display: grid; gap: 14px; }
+  .card { border-radius: 14px; padding: 16px 18px; background: rgba(255,255,255,0.04); box-shadow: inset 0 0 0 0.5px var(--line); }
+  :root[data-theme="light"] .card { background: rgba(255,255,255,0.55); }
+  .card header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .card b { font-weight: 600; } .card header span { color: var(--quiet); font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  /* The capsule is dark in every theme, as in the app; its wave is white. */
+  .capsule { width: 132px; height: 32px; border-radius: 999px; display: grid; place-items: center; background: rgba(22,22,26,0.82); box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.14), 0 6px 18px rgba(0,0,0,0.35); }
+  .capsule canvas { width: 108px; height: 24px; display: block; }
+  .ask { flex: 1; min-width: 260px; height: 48px; border-radius: 12px; display: flex; align-items: center; padding: 0 14px; background: rgba(18,22,40,0.5); box-shadow: inset 0 0 0 0.5px var(--line); }
+  :root[data-theme="light"] .ask { background: rgba(255,255,255,0.6); }
+  .ask canvas { width: 100%; height: 40px; display: block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Aurora, refined</h1>
+  <p class="lead">Aurora in the voice box's own colours: white on the dark capsule, the page's ink in the Ask row. Each version is drawn smooth at full resolution, with a crisp core and a real soft glow instead of a blurred canvas. Silk is here in the same colours for comparison.</p>
+  <div class="controls">
+    <button data-v="silent">Silent</button>
+    <button data-v="talk" aria-pressed="true">Talking</button>
+    <button data-v="loud">Loud</button>
+    <button id="mic">Use my mic</button>
+    <span class="sep"></span>
+    <button data-s="0.25">Very slow</button>
+    <button data-s="0.5" aria-pressed="true">Slow</button>
+    <button data-s="1">Real speed</button>
+    <span class="sep"></span>
+    <button id="theme">Light</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+let PHASE = 0;
+const STYLES = [
+  { id: "glow", name: "Aurora · Glow", note: "three soft lenses that pass through each other, each with a fine bright core" },
+  { id: "veil", name: "Aurora · Veil", note: "the same lenses as pure light: no edges at all, densest in the middle" },
+  { id: "ribbon", name: "Aurora · Ribbon", note: "one clean silk ribbon in front, two faint aurora lenses breathing behind it" },
+  { id: "silk", name: "Silk", note: "for comparison, in the same colours" },
+];
+
+let mode = "talk", micLevel = null, env = 0, target = 0, nextAt = 0;
+function sim(t) {
+  if (mode === "silent") return 0;
+  if (t > nextAt) {
+    const pause = Math.random() < 0.18;
+    target = pause ? 0 : mode === "loud" ? 0.7 + Math.random() * 0.3 : 0.25 + Math.random() * 0.45;
+    nextAt = t + (pause ? 260 + Math.random() * 420 : 90 + Math.random() * 170);
+  }
+  return target;
+}
+const press = (sel, b) => document.querySelectorAll(sel).forEach((x) => x.setAttribute("aria-pressed", x === b));
+document.querySelectorAll("[data-v]").forEach((b) => (b.onclick = () => { mode = b.dataset.v; micLevel = null; press("[data-v]", b); document.getElementById("mic").setAttribute("aria-pressed", "false"); }));
+let speed = 0.5;
+document.querySelectorAll("[data-s]").forEach((b) => (b.onclick = () => { speed = +b.dataset.s; press("[data-s]", b); }));
+document.getElementById("theme").onclick = (e) => {
+  const light = document.documentElement.dataset.theme !== "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  e.target.textContent = light ? "Dark" : "Light";
+};
+document.getElementById("mic").onclick = async (e) => {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext(), an = ctx.createAnalyser(); an.fftSize = 1024;
+    ctx.createMediaStreamSource(s).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    (function read() { an.getFloatTimeDomainData(buf); let r = 0; for (const x of buf) r += x * x; micLevel = Math.min(1, Math.sqrt(r / buf.length) * 7); requestAnimationFrame(read); })();
+    press("[data-v]", null); e.target.setAttribute("aria-pressed", "true");
+  } catch { e.target.textContent = "Mic not allowed here"; }
+};
+
+// The ink of the surface a wave sits on: white on the dark capsule, the page's ink in the Ask row.
+const inkOf = (onCapsule) => (onCapsule || document.documentElement.dataset.theme !== "light" ? [255, 255, 255] : [16, 20, 36]);
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const taper = (u) => Math.sin(Math.PI * u);
+
+// Smooth motion shared by every version: travelling waves under a wandering swell, zero at both ends.
+function waveAt(u, t, amp, f = 1, sp = 1) {
+  const p = PHASE * sp; // accumulated each frame, so a change in loudness changes speed, never jumps
+  const w = 0.62 * Math.sin(2 * Math.PI * 1.25 * f * u + p) + 0.38 * Math.sin(2 * Math.PI * 2.07 * f * u - p * 0.61 + 1.3 * f);
+  const c = 0.5 + 0.17 * Math.sin(t * 0.53 + f), wide = 0.36 + 0.09 * Math.sin(t * 0.29 + f);
+  return Math.tanh(1.8 * amp * w * Math.exp(-(((u - c) / wide) ** 2)) * taper(u));
+}
+// A lens: its centre line and its half-thickness at u, both always smooth and zero-thickness at the ends.
+function lens(u, t, amp, f, sp, k) {
+  const centre = 0.5 * waveAt(u, t, amp, f, sp);
+  const swell = Math.exp(-(((u - (0.5 + 0.2 * Math.sin(t * 0.41 * f + k))) / (0.3 + 0.08 * Math.sin(t * 0.33 + k))) ** 2));
+  const th = Math.tanh((0.1 + 1.6 * amp) * swell * taper(u) ** 1.1 * (0.72 + 0.28 * Math.sin(2 * Math.PI * f * u + t * sp * 1.3 + k)));
+  // Never past the edge: the lens and its centre share the half-height.
+  return [centre, Math.max(0, Math.min(th, 0.96 - Math.abs(centre)))];
+}
+// A closed smooth outline through points, using midpoints so there are no corners at any size.
+function smooth(g, pts, move = true) {
+  if (move) g.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2;
+    g.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+  }
+  g.lineTo(...pts[pts.length - 1]);
+}
+function lensPath(g, w, h, t, amp, f, sp, k) {
+  const mid = h / 2, H = mid - 1.5, n = Math.ceil(w), top = [], bot = [], core = [];
+  for (let j = 0; j <= n; j++) {
+    const u = j / n, [c, th] = lens(u, t, amp, f, sp, k);
+    top.push([u * w, mid + H * (c - th)]); bot.push([u * w, mid + H * (c + th)]); core.push([u * w, mid + H * c]);
+  }
+  g.beginPath(); smooth(g, top); smooth(g, bot.reverse(), false); g.closePath();
+  return core;
+}
+const BANDS = [
+  { f: 1, sp: 1, k: 0, a: 0.34 },
+  { f: 1.618, sp: -1.37, k: 2.1, a: 0.24 },
+  { f: 2.414, sp: 1.83, k: 4.2, a: 0.16 },
+];
+
+const DRAW = {
+  glow(g, w, h, t, a, ink) {
+    const amp = Math.max(a, 0.12);
+    g.globalCompositeOperation = "lighter";
+    for (const b of BANDS) {
+      const core = lensPath(g, w, h, t, amp, b.f, b.sp, b.k);
+      g.shadowColor = rgba(ink, b.a * 1.4); g.shadowBlur = 8; g.fillStyle = rgba(ink, b.a); g.fill(); g.shadowBlur = 0;
+      g.beginPath(); smooth(g, core); g.lineWidth = 1; g.strokeStyle = rgba(ink, Math.min(1, b.a * 2.4)); g.stroke();
+    }
+    g.globalCompositeOperation = "source-over";
+  },
+  veil(g, w, h, t, a, ink) {
+    const amp = Math.max(a, 0.12), mid = h / 2;
+    g.globalCompositeOperation = "lighter";
+    for (const b of BANDS) {
+      lensPath(g, w, h, t, amp, b.f, b.sp, b.k);
+      const gr = g.createLinearGradient(0, 0, 0, h);
+      gr.addColorStop(0, rgba(ink, 0)); gr.addColorStop(0.5, rgba(ink, b.a * 1.9)); gr.addColorStop(1, rgba(ink, 0));
+      g.shadowColor = rgba(ink, b.a); g.shadowBlur = 12; g.fillStyle = gr; g.fill(); g.shadowBlur = 0;
+    }
+    g.globalCompositeOperation = "source-over";
+  },
+  ribbon(g, w, h, t, a, ink) {
+    const amp = Math.max(a, 0.12);
+    g.globalCompositeOperation = "lighter";
+    for (const b of BANDS.slice(1)) { lensPath(g, w, h, t, amp, b.f, b.sp, b.k); g.shadowColor = rgba(ink, b.a); g.shadowBlur = 10; g.fillStyle = rgba(ink, b.a * 0.7); g.fill(); g.shadowBlur = 0; }
+    g.globalCompositeOperation = "source-over";
+    silk(g, w, h, t, a, ink, 0.95);
+  },
+  silk(g, w, h, t, a, ink) { silk(g, w, h, t, a, ink, 0.92); },
+};
+function silk(g, w, h, t, a, ink, alpha) {
+  const mid = h / 2, n = Math.ceil(w), top = [], bot = [];
+  for (let j = 0; j <= n; j++) {
+    const u = j / n, y = mid - (mid - 2) * 0.75 * waveAt(u, t, Math.max(a, 0.1));
+    const th = (0.55 + (mid - 3) * 0.5 * a * (0.5 + 0.5 * Math.abs(waveAt(u, t * 0.7, 1, 1.618, -1.37)))) * taper(u) ** 0.8;
+    top.push([u * w, y - th]); bot.push([u * w, y + th]);
+  }
+  g.beginPath(); smooth(g, top); smooth(g, bot.reverse(), false); g.closePath();
+  g.fillStyle = rgba(ink, alpha); g.fill();
+}
+
+const grid = document.getElementById("grid"), views = [];
+for (const st of STYLES) {
+  const card = document.createElement("section");
+  card.className = "card";
+  card.innerHTML = `<header><b>${st.name}</b><span>${st.note}</span></header><div class="row"><div class="capsule"><canvas></canvas></div><div class="ask"><canvas></canvas></div></div>`;
+  grid.append(card);
+  card.querySelectorAll("canvas").forEach((c, i) => views.push({ c, draw: DRAW[st.id], capsule: i === 0 }));
+}
+const fade = (g, w, h) => { g.globalCompositeOperation = "destination-in"; const m = g.createLinearGradient(0, 0, w, 0); m.addColorStop(0, "rgba(0,0,0,0)"); m.addColorStop(0.1, "#000"); m.addColorStop(0.9, "#000"); m.addColorStop(1, "rgba(0,0,0,0)"); g.fillStyle = m; g.fillRect(0, 0, w, h); g.globalCompositeOperation = "source-over"; };
+let clock = 0, last = performance.now();
+function frame(real) {
+  const dt = Math.min(100, real - last) * speed; last = real; clock += dt;
+  const want = Math.max(0.14, micLevel ?? sim(clock));
+  env += (want - env) * (1 - Math.exp(-dt / (want > env ? 60 : 260)));
+  PHASE += (dt / 1000) * (1.8 + 4.2 * env);
+  const t = clock / 1000;
+  for (const v of views) {
+    const dpr = Math.max(2, devicePixelRatio || 1), w = v.c.clientWidth, h = v.c.clientHeight;
+    if (v.c.width !== Math.round(w * dpr)) { v.c.width = Math.round(w * dpr); v.c.height = Math.round(h * dpr); }
+    const g = v.c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const ink = inkOf(v.capsule);
+    // On a light page "lighter" would vanish: the Ask row there mixes normally.
+    if (!v.capsule && ink[0] < 128) { const real = g.globalCompositeOperation; Object.defineProperty(g, "globalCompositeOperation", { set() {}, get: () => "source-over", configurable: true }); v.draw(g, w, h, t, env, ink); delete g.globalCompositeOperation; }
+    else v.draw(g, w, h, t, env, ink);
+    fade(g, w, h);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

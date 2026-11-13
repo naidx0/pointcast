@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice wave, round two</title>
+<style>
+  :root { --bg: #0d1226; --ink: rgba(255,255,255,0.92); --quiet: rgba(255,255,255,0.55); --line: rgba(255,255,255,0.1); }
+  :root[data-theme="light"] { --bg: #eef3ff; --ink: rgba(10,16,40,0.9); --quiet: rgba(10,16,40,0.55); --line: rgba(10,16,40,0.1); }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 24px 16px 56px; min-height: 100vh;
+    background: radial-gradient(120% 80% at 85% -10%, rgba(47,91,255,0.35), transparent 60%), radial-gradient(90% 70% at -10% 110%, rgba(138,176,255,0.18), transparent 60%), var(--bg); }
+  :root[data-theme="light"] body { background: radial-gradient(120% 80% at 85% -10%, rgba(43,85,240,0.22), transparent 60%), radial-gradient(90% 70% at -10% 110%, rgba(173,196,255,0.5), transparent 60%), var(--bg); }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .lead { color: var(--quiet); margin: 0 0 16px; max-width: 640px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+  .controls button { font: inherit; height: 28px; padding: 0 12px; border-radius: 999px; border: 0.5px solid var(--line); background: rgba(127,127,127,0.12); color: var(--ink); cursor: pointer; }
+  .controls button[aria-pressed="true"] { background: #2f5bff; color: #fff; border-color: transparent; }
+  .sep { width: 1px; background: var(--line); margin: 4px 6px; }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .card { border-radius: 14px; padding: 16px 18px; background: rgba(255,255,255,0.04); box-shadow: inset 0 0 0 0.5px var(--line); }
+  :root[data-theme="light"] .card { background: rgba(255,255,255,0.55); }
+  .card header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .card b { font-weight: 600; } .card header span { color: var(--quiet); font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  /* The mic capsule at its real size. */
+  .capsule { width: 132px; height: 32px; border-radius: 999px; display: grid; place-items: center; background: rgba(18,22,40,0.72); box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.14), 0 6px 18px rgba(0,0,0,0.35); }
+  :root[data-theme="light"] .capsule { background: rgba(255,255,255,0.8); box-shadow: inset 0 0 0 0.5px rgba(10,16,40,0.1), 0 6px 18px rgba(30,50,120,0.15); }
+  .capsule canvas { width: 108px; height: 24px; display: block; }
+  /* The Ask panel's listening row. */
+  .ask { flex: 1; min-width: 260px; height: 48px; border-radius: 12px; display: flex; align-items: center; padding: 0 14px; background: rgba(18,22,40,0.5); box-shadow: inset 0 0 0 0.5px var(--line); }
+  :root[data-theme="light"] .ask { background: rgba(255,255,255,0.6); }
+  .ask canvas { width: 100%; height: 40px; display: block; }
+  .pick { margin-left: auto; font-size: 12px; color: var(--quiet); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Voice wave, round two</h1>
+  <p class="lead">Six cleaner takes on the listening wave, each at the mic's real size (132 × 32) and in the Ask row. All of them settle to a quiet idle, rise with your voice and never clip. Try the simulated voice, or your own mic.</p>
+  <div class="controls">
+    <button data-v="silent">Silent</button>
+    <button data-v="talk" aria-pressed="true">Talking</button>
+    <button data-v="loud">Loud</button>
+    <button id="mic">Use my mic</button>
+    <span class="sep"></span>
+    <button id="theme">Light</button>
+    <span class="sep"></span>
+    <button data-s="0.25">Very slow</button>
+    <button data-s="0.5" aria-pressed="true">Slow</button>
+    <button data-s="1">Real speed</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+let PHASE = 0;
+const STYLES = [
+  { id: "silk", name: "Silk", note: "one ribbon that thickens with your voice and tapers to a hairline at both ends" },
+  { id: "aurora", name: "Aurora", note: "two soft glowing bands that pass through each other, with no outlines" },
+  { id: "pearls", name: "Pearls", note: "a row of dots that stretch into pills where you're loudest" },
+  { id: "thread", name: "Thread", note: "a single hairline with a bright pulse running along it" },
+  { id: "current", name: "Current", note: "tiny particles flowing along the wave, denser when you speak" },
+  { id: "echo", name: "Echo", note: "one line, with its last moments fading behind it like an afterimage" },
+];
+
+// —— The voice: a simulated speech envelope, or the real mic. ——
+let mode = "talk", micLevel = null, env = 0.0, target = 0, nextAt = 0;
+function sim(t) {
+  if (mode === "silent") return 0;
+  if (t > nextAt) {
+    const pause = Math.random() < 0.18;
+    target = pause ? 0 : (mode === "loud" ? 0.7 + Math.random() * 0.3 : 0.25 + Math.random() * 0.45);
+    nextAt = t + (pause ? 260 + Math.random() * 420 : 90 + Math.random() * 170);
+  }
+  return target;
+}
+document.getElementById("mic").onclick = async (e) => {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext(), an = ctx.createAnalyser(); an.fftSize = 1024;
+    ctx.createMediaStreamSource(s).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    (function read() { an.getFloatTimeDomainData(buf); let r = 0; for (const x of buf) r += x * x; micLevel = Math.min(1, Math.sqrt(r / buf.length) * 7); requestAnimationFrame(read); })();
+    e.target.setAttribute("aria-pressed", "true");
+    document.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", "false"));
+  } catch { e.target.textContent = "Mic not allowed here"; }
+};
+document.querySelectorAll("[data-v]").forEach((b) => (b.onclick = () => {
+  mode = b.dataset.v; micLevel = null;
+  document.querySelectorAll("[data-v]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  document.getElementById("mic").setAttribute("aria-pressed", "false");
+}));
+document.getElementById("theme").onclick = (e) => {
+  const light = document.documentElement.dataset.theme !== "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  e.target.textContent = light ? "Dark" : "Light";
+};
+const isLight = () => document.documentElement.dataset.theme === "light";
+const accent = () => (isLight() ? [43, 85, 240] : [138, 176, 255]);
+const deep = () => (isLight() ? [26, 52, 170] : [47, 91, 255]);
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+// The shared motion: travelling waves under a wandering swell, zero at both ends (as the shipped wave does).
+function waveAt(u, t, amp, f = 1, sp = 1, k = 1) {
+  const p = PHASE * sp; // accumulated each frame, so a change in loudness changes speed, never jumps
+  const w = 0.62 * Math.sin(2 * Math.PI * 1.25 * f * u + p) + 0.38 * Math.sin(2 * Math.PI * 2.07 * f * u - p * 0.61 + 1.3 * f);
+  const c = 0.5 + 0.17 * Math.sin(t * 0.53 + f), wide = 0.36 + 0.09 * Math.sin(t * 0.29 + f);
+  const swell = Math.exp(-(((u - c) / wide) ** 2));
+  return Math.tanh(1.8 * amp * k * w * swell * Math.sin(Math.PI * u));
+}
+const taper = (u) => Math.sin(Math.PI * u) ** 0.8;
+
+const DRAW = {
+  silk(g, w, h, t, a) {
+    const mid = h / 2, n = Math.ceil(w / 2), top = [], bot = [];
+    for (let j = 0; j <= n; j++) {
+      const u = j / n, x = u * w;
+      const y = mid - (mid - 2) * 0.75 * waveAt(u, t, a);
+      const th = (0.6 + (mid - 3) * 0.55 * a * (0.5 + 0.5 * Math.abs(waveAt(u, t * 0.7, 1, 1.618, -1.37)))) * taper(u);
+      top.push([x, y - th]); bot.push([x, y + th]);
+    }
+    const gr = g.createLinearGradient(0, 0, w, 0);
+    gr.addColorStop(0, rgba(accent(), 0)); gr.addColorStop(0.2, rgba(accent(), 0.95)); gr.addColorStop(0.5, rgba(deep(), 1)); gr.addColorStop(0.8, rgba(accent(), 0.95)); gr.addColorStop(1, rgba(accent(), 0));
+    g.beginPath(); top.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); bot.reverse().forEach(([x, y]) => g.lineTo(x, y)); g.closePath();
+    g.fillStyle = gr; g.fill();
+  },
+  aurora(g, w, h, t, a) {
+    const mid = h / 2, n = Math.ceil(w / 3);
+    g.globalCompositeOperation = isLight() ? "multiply" : "lighter";
+    [[accent(), 1, 1, 1, 0.5], [deep(), 1.618, -1.37, 0.8, 0.42], [[120, 200, 255], 2.414, 1.83, 0.6, 0.3]].forEach(([c, f, sp, k, al]) => {
+      g.beginPath();
+      for (let j = 0; j <= n; j++) { const u = j / n; g.lineTo(u * w, mid - (mid - 2) * waveAt(u, t, Math.max(a, 0.12), f, sp, k)); }
+      for (let j = n; j >= 0; j--) { const u = j / n; g.lineTo(u * w, mid + (mid - 2) * 0.35 * waveAt(u, t + 1.7, Math.max(a, 0.12), f, sp, k)); }
+      g.closePath(); g.fillStyle = rgba(c, al); g.filter = "blur(1.5px)"; g.fill(); g.filter = "none";
+    });
+    g.globalCompositeOperation = "source-over";
+  },
+  pearls(g, w, h, t, a) {
+    const count = w < 150 ? 13 : 31, mid = h / 2, gap = w / count, r = Math.min(gap * 0.22, 2.4);
+    for (let i = 0; i < count; i++) {
+      const u = (i + 0.5) / count;
+      const lift = Math.abs(waveAt(u, t, a)) * 0.8 + 0.2 * a * taper(u);
+      const half = Math.max(r, (mid - 2) * Math.min(1, lift));
+      const x = u * w, al = 0.35 + 0.65 * Math.min(1, lift * 1.6);
+      g.fillStyle = rgba(i % 2 ? accent() : deep(), al * taper(u) ** 0.3);
+      g.beginPath(); g.roundRect(x - r, mid - half, r * 2, half * 2, r); g.fill();
+    }
+  },
+  thread(g, w, h, t, a) {
+    const mid = h / 2, n = Math.ceil(w / 2), pts = [];
+    for (let j = 0; j <= n; j++) { const u = j / n; pts.push([u * w, mid - (mid - 3) * waveAt(u, t, Math.max(a, 0.1))]); }
+    g.lineWidth = 1.4; g.lineCap = "round"; g.strokeStyle = rgba(accent(), 0.55);
+    g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.stroke();
+    const head = ((t * (0.35 + 0.9 * a)) % 1.4) - 0.2;
+    for (let j = 1; j <= n; j++) {
+      const u = j / n, d = Math.abs(u - head);
+      if (d > 0.18) continue;
+      g.strokeStyle = rgba(isLight() ? deep() : [255, 255, 255], (1 - d / 0.18) * 0.95 * taper(u));
+      g.lineWidth = 2; g.beginPath(); g.moveTo(...pts[j - 1]); g.lineTo(...pts[j]); g.stroke();
+    }
+  },
+  current(g, w, h, t, a, s) {
+    const mid = h / 2;
+    s.p ??= Array.from({ length: w < 150 ? 40 : 120 }, () => ({ u: Math.random(), o: Math.random() * 2 - 1, v: 0.6 + Math.random() * 0.8 }));
+    for (const q of s.p) {
+      q.u += (0.0016 + 0.006 * a) * q.v * speed; if (q.u > 1) { q.u = 0; q.o = Math.random() * 2 - 1; }
+      const y = mid - (mid - 3) * waveAt(q.u, t, Math.max(a, 0.12)) + q.o * (1 + 3.5 * a) * taper(q.u);
+      g.fillStyle = rgba(q.v > 1.1 ? deep() : accent(), (0.35 + 0.6 * a) * taper(q.u));
+      g.beginPath(); g.arc(q.u * w, y, 0.7 + 0.9 * a * q.v, 0, 7); g.fill();
+    }
+  },
+  echo(g, w, h, t, a, s) {
+    const mid = h / 2, n = Math.ceil(w / 2);
+    s.trail ??= [];
+    const pts = [];
+    for (let j = 0; j <= n; j++) { const u = j / n; pts.push([u * w, mid - (mid - 3) * waveAt(u, t, Math.max(a, 0.1))]); }
+    s.trail.unshift(pts); if (s.trail.length > 7) s.trail.pop();
+    s.trail.forEach((ps, k) => {
+      g.strokeStyle = rgba(k ? accent() : deep(), k ? 0.32 * (1 - k / 7) : 1);
+      g.lineWidth = k ? 1 : 1.8; g.beginPath();
+      ps.forEach(([x, y], i) => (i ? g.lineTo(x, y + k * 0.6) : g.moveTo(x, y + k * 0.6))); g.stroke();
+    });
+  },
+};
+
+// —— Build the cards and run one clock for all of them. ——
+const grid = document.getElementById("grid"), views = [];
+for (const st of STYLES) {
+  const card = document.createElement("section");
+  card.className = "card";
+  card.innerHTML = `<header><b>${st.name}</b><span>${st.note}</span></header><div class="row"><div class="capsule"><canvas></canvas></div><div class="ask"><canvas></canvas></div></div>`;
+  grid.append(card);
+  card.querySelectorAll("canvas").forEach((c) => views.push({ c, draw: DRAW[st.id], state: {} }));
+}
+const fade = (g, w) => { g.globalCompositeOperation = "destination-in"; const m = g.createLinearGradient(0, 0, w, 0); m.addColorStop(0, "rgba(0,0,0,0)"); m.addColorStop(0.08, "#000"); m.addColorStop(0.92, "#000"); m.addColorStop(1, "rgba(0,0,0,0)"); g.fillStyle = m; g.fillRect(0, 0, w, 999); g.globalCompositeOperation = "source-over"; };
+// A slowed clock: everything (the waves, the simulated voice, the smoothing) runs on it, so slow is the same motion, slower.
+let speed = 0.5, clock = 0, last = performance.now();
+document.querySelectorAll("[data-s]").forEach((b) => (b.onclick = () => {
+  speed = +b.dataset.s;
+  document.querySelectorAll("[data-s]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+}));
+function frame(real) {
+  const dt = Math.min(100, real - last) * speed; last = real; clock += dt;
+  const now = clock;
+  const want = Math.max(0.14, micLevel ?? sim(now));
+  env += (want - env) * (1 - Math.exp(-dt / (want > env ? 60 : 260)));
+  PHASE += (dt / 1000) * (1.8 + 4.2 * env);
+  const t = now / 1000;
+  for (const v of views) {
+    const dpr = devicePixelRatio || 1, w = v.c.clientWidth, h = v.c.clientHeight;
+    if (v.c.width !== Math.round(w * dpr)) { v.c.width = Math.round(w * dpr); v.c.height = Math.round(h * dpr); }
+    const g = v.c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    v.state.speed = speed; v.draw(g, w, h, t, env, v.state); fade(g, w);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
