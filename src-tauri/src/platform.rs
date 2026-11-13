@@ -219,9 +219,66 @@ pub fn hud_first(st: &crate::session::UiState) -> String {
 
 /// Where the person last put the HUD (its top-left) and the answer panel (its top-right: it widens from its left edge),
 /// in each OS's own placing units: points on macOS, physical pixels of the one desktop on Windows. Kept while Pointcast
-/// runs, as long as the spot is on a screen; `None` until the person moves the window.
+/// runs and across launches, as long as the spot is on a screen; `None` until the person moves the window.
 static HUD_HAND: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 static PANEL_HAND: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// The chosen spots, kept across launches as `data_dir/spots.json`.
+fn spots_path() -> std::path::PathBuf {
+    crate::settings::data_dir().join("spots.json")
+}
+
+/// `hud` and `panel` as the file's text: each a `[x, y]` pair under its name; a spot never chosen is left out.
+fn spots_json(hud: Option<(f64, f64)>, panel: Option<(f64, f64)>) -> String {
+    let mut v = serde_json::Map::new();
+    if let Some((x, y)) = hud {
+        v.insert("hud".into(), serde_json::json!([x, y]));
+    }
+    if let Some((x, y)) = panel {
+        v.insert("panel".into(), serde_json::json!([x, y]));
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| "{}".into())
+}
+
+/// The spots `text` saved, each an `[x, y]` pair; anything else reads as never chosen.
+fn spots_read(text: &str) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    let pt = |k: &str| {
+        let a = v.get(k)?.as_array()?;
+        Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
+    };
+    (pt("hud"), pt("panel"))
+}
+
+/// The spots from the last launch, read once.
+fn load_hands() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(text) = std::fs::read_to_string(spots_path()) else {
+            return;
+        };
+        let (hud, panel) = spots_read(&text);
+        if let Some(p) = hud {
+            *HUD_HAND.lock().unwrap() = Some(p);
+        }
+        if let Some(p) = panel {
+            *PANEL_HAND.lock().unwrap() = Some(p);
+        }
+    });
+}
+
+/// Write the chosen spots back, so the next launch opens where the person put them.
+fn save_hands() {
+    let (hud, panel) = (*HUD_HAND.lock().unwrap(), *PANEL_HAND.lock().unwrap());
+    let path = spots_path();
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, spots_json(hud, panel)).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
 
 /// The page says it has come to rest where the person dragged it (api.ts startWindowDrag, `remember`).
 const PUT_EVENT: &str = "pointcast://put";
@@ -238,16 +295,20 @@ fn listen_for_puts(app: &AppHandle) {
     });
 }
 
-/// Remember where window `label` is now, as the spot the person chose.
+/// Remember where window `label` is now, as the spot the person chose, for this launch and the next.
 fn note_put(app: &AppHandle, label: &str) {
     let Some(w) = app.get_webview_window(label) else { return };
     let (Ok(p), Ok(z)) = (w.outer_position(), w.outer_size()) else { return };
     let k = native_k(w.scale_factor().unwrap_or(1.0));
     let (x, y, wide) = (p.x as f64 / k, p.y as f64 / k, z.width as f64 / k);
+    let mut wrote = true;
     match label {
         "indicator" => *HUD_HAND.lock().unwrap() = Some((x, y)),
         PANEL => *PANEL_HAND.lock().unwrap() = Some((x + wide, y)),
-        _ => {}
+        _ => wrote = false,
+    }
+    if wrote {
+        save_hands();
     }
 }
 
@@ -298,6 +359,7 @@ pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
     let Some(w) = ensure_with(app, "indicator", Some(hud_first(st))) else {
         return;
     };
+    load_hands();
     // Where the person put the HUD, while that is on a screen; else the bottom centre of the pointer's screen.
     let kept = w.outer_size().ok().and_then(|z| {
         let hand = (*HUD_HAND.lock().unwrap())?;
@@ -426,6 +488,7 @@ fn panel_place(screens: &[Monitor], dock: &Monitor, wide: f64, high: f64) -> ((f
         let wa = m.work_area();
         (wa.position.x, wa.position.y, wa.size.width, wa.size.height)
     };
+    load_hands();
     let mut hand = PANEL_HAND.lock().unwrap();
     if let Some((r, t)) = *hand {
         let areas: Vec<_> = screens.iter().map(native_area).collect();
@@ -1075,5 +1138,17 @@ mod tests {
         assert!(near(got, (360.0, 100.0, 640.0, 300.0)), "{got:?}");
         // Never moved: docked at the top right as before.
         assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0), (1268.0, 52.0, 640.0, 300.0)));
+    }
+
+    #[test]
+    fn the_spots_the_person_chose_survive_a_launch_and_a_damaged_file_forgets_nothing_it_never_had() {
+        let text = spots_json(Some((100.5, 40.0)), Some((1408.0, 12.0)));
+        assert_eq!(spots_read(&text), (Some((100.5, 40.0)), Some((1408.0, 12.0))));
+        // A spot never chosen is left out of the file.
+        assert_eq!(spots_read(&spots_json(None, Some((12.0, 34.0)))), (None, Some((12.0, 34.0))));
+        // Missing keys, wrong shapes and non-JSON each read as never chosen.
+        for text in ["{}", "{\"hud\": \"no\"}", "not json", ""] {
+            assert_eq!(spots_read(text), (None, None), "{text}");
+        }
     }
 }
