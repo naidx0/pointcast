@@ -1207,6 +1207,40 @@ html.win .home-recent button {
 .home-recent .t svg {
   flex: none;
 }
+/* Memory's facts and proposals, in the AI page's Memory row. */
+.mem-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+.mem-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 3px 0;
+}
+.mem-list li > span {
+  flex: 1;
+  min-width: 0;
+}
+.mem-list .proposed > span {
+  color: var(--label-2);
+  font-style: italic;
+}
+.mem-list .link {
+  flex: none;
+}
+.mem-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+.mem-add .field {
+  flex: 1;
+  min-width: 0;
+}
+
 .home-recent .t.empty,
 .home-recent .t svg,
 .home-recent .kind,

@@ -50,7 +50,9 @@ pub const JOIN: Duration = Duration::from_secs(10 * 60);
 
 const SYSTEM: &str = "You are the study assistant in Pointcast. The person asks a question out loud about what is on \
 their screen, and a picture of it may be attached. Answer plainly and briefly, in markdown. You cannot run tools, \
-open files or see anything but the pictures you are sent. When a picture has numbered marks on it, refer to them by their number.";
+open files or see anything but the pictures you are sent. When a picture has numbered marks on it, refer to them by \
+their number. When the person asks you to remember something for next time, end the answer with one line per fact, \
+each starting \"remember:\".";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -319,6 +321,10 @@ pub struct Deps {
     pub acts: Box<dyn Fn() -> Vec<crate::computer::Entry> + Send + Sync>,
     /// Usage counts a turn's question and the words of its answer (`stats::Stats::ask`).
     pub asked: Box<dyn Fn(u64) + Send + Sync>,
+    /// What the person asked to remember, as instructions' last lines (`memory::block`); empty is nothing added.
+    pub memory: Box<dyn Fn() -> String + Send + Sync>,
+    /// A fact the AI was asked to remember, to propose (`memory::propose`).
+    pub remember: Box<dyn Fn(String) + Send + Sync>,
 }
 
 /// A question that is kept and on its way, or that failed and can be asked again: what is sent, and its answer so far.
@@ -1432,7 +1438,8 @@ impl Live {
         // Opening can take a while (a helper starts): never under the lock.
         let opened = match chat {
             Some(c) => Ok(c),
-            None => provider.open(SYSTEM, &before.turns),
+            // What is remembered goes to every AI the same way, as instructions' last lines.
+            None => provider.open(&format!("{SYSTEM}{}", (self.deps.memory)()), &before.turns),
         };
         let mut chat = match opened {
             Ok(c) => c,
@@ -1562,6 +1569,12 @@ impl Live {
         }
         answer.times.done_ms = now();
         answer.acts = (self.deps.acts)();
+        // `remember:` lines name facts to keep in mind: they come off the answer and wait for a yes in Memory.
+        let (text, remembered) = crate::memory::take_remembered(&answer.text);
+        answer.text = text;
+        for f in remembered {
+            (self.deps.remember)(f);
+        }
         // Usage counts Ask too: the question once, and the words its answer came to.
         (self.deps.asked)(answer.text.split_whitespace().count() as u64);
         // The model that answered is not the one picked: the answer stands, and the person is told in one line.
@@ -1845,6 +1858,8 @@ mod tests {
                 if q.is_empty() { Vec::new() } else { q.remove(0) }
             }),
             asked: Box::new(|_| {}),
+            memory: Box::new(String::new),
+            remember: Box::new(|_| {}),
         };
         Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, clock, dir, acts }
     }

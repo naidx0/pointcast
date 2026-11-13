@@ -31,9 +31,16 @@ import {
   historyOpen,
   historyRecent,
   onHistoryChanged,
+  onMemoryChanged,
   type HistoryMeta,
   inTauri,
   loginGet,
+  memoryAccept,
+  memoryAdd,
+  memoryClear,
+  memoryRemove,
+  memoryView,
+  type MemoryView,
   loginSet,
   mcpCopySetup,
   onPaneAsk,
@@ -211,7 +218,7 @@ export function Settings() {
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
-            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={(chosen) => <SeeAndAct cfg={cfg} patch={patch} chosen={chosen} />} />
+            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={(chosen) => <SeeAndAct cfg={cfg} patch={patch} chosen={chosen} />} memory={<Memory cfg={cfg} patch={patch} />} />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -817,7 +824,7 @@ const plain = (e: unknown) => String(e).replace(/^Error: */, "");
 
 /** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
  * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
-function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: (chosen: Route | null) => ReactNode }) {
+function Ai({ talk, seeAndAct, memory }: { talk?: ReactNode; seeAndAct?: (chosen: Route | null) => ReactNode; memory?: ReactNode }) {
   const [a, setA] = useState<Assist | null>(null);
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -1035,6 +1042,7 @@ function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: (chosen: Route 
           </Row>
         ) : null}
         {seeAndAct?.(chosen)}
+        {memory}
         <Row
           label="Only on this computer"
           sub={
@@ -1161,6 +1169,88 @@ function SeeAndAct({ cfg, patch, chosen }: { cfg: Config; patch: Patch; chosen: 
       }
     >
       <Toggle label="Let the AI see and act" on={on} set={(v) => patch({ computer_use: v })} />
+    </Row>
+  );
+}
+
+/** Memory: the facts the person asked to keep, kept in memory.md and given to every AI as plain reference; the
+ * proposals an AI was asked to remember, which are never facts until a yes. Off sends nothing and keeps the file
+ * only as a file. */
+function Memory({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const [v, setV] = useState<MemoryView | null>(null);
+  const [line, setLine] = useState("");
+  const load = () =>
+    memoryView()
+      .then(setV)
+      .catch(() => undefined);
+  useEffect(() => {
+    load();
+    return subscribe(onMemoryChanged(load));
+  }, []);
+  const then = (p: Promise<void>) => p.then(load).catch(() => undefined);
+  const on = cfg.memory ?? true;
+  const facts = v?.facts ?? [];
+  const proposed = v?.proposed ?? [];
+  const add = () => {
+    const f = line.trim();
+    if (f) then(memoryAdd(f)).then(() => setLine(""));
+  };
+  return (
+    <Row
+      label="Memory"
+      sub={
+        <>
+          {on
+            ? "What you ask it to remember is kept in a file on this computer and goes to every AI as plain reference."
+            : "Off: nothing is kept or sent. The file stays, unread."}
+          {facts.length || proposed.length ? (
+            <ul className="mem-list">
+              {facts.map((f, i) => (
+                <li key={`f${i}`}>
+                  <span>{f}</span>
+                  <button type="button" className="link" onClick={() => then(memoryRemove(false, i))}>
+                    Forget
+                  </button>
+                </li>
+              ))}
+              {proposed.map((f, i) => (
+                <li key={`p${i}`} className="proposed">
+                  <span>{f}</span>
+                  <button type="button" className="link" onClick={() => then(memoryAccept(i))}>
+                    Keep
+                  </button>
+                  <button type="button" className="link" onClick={() => then(memoryRemove(true, i))}>
+                    Dismiss
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {on ? (
+            <span className="mem-add">
+              <input
+                type="text"
+                className="field"
+                aria-label="Something to remember"
+                placeholder="Something to remember…"
+                value={line}
+                onChange={(e) => setLine(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && add()}
+              />
+              <button type="button" className="btn plain" disabled={!line.trim()} onClick={add}>
+                Keep
+              </button>
+              {facts.length || proposed.length ? (
+                <button type="button" className="btn plain" onClick={() => then(memoryClear())}>
+                  Forget all
+                </button>
+              ) : null}
+            </span>
+          ) : null}
+        </>
+      }
+    >
+      <Toggle label="Memory" on={on} set={(v) => patch({ memory: v })} />
     </Row>
   );
 }

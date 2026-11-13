@@ -11,6 +11,7 @@ mod history;
 mod image_ops;
 mod keyframes;
 mod live;
+mod memory;
 mod login;
 mod mcp;
 mod overlay;
@@ -335,7 +336,8 @@ impl live::Taken for AskTaken {
 /// The Ask loop as the app runs it: the recording path for its words, one frame of the screen for its picture, and
 /// the panel for what it says.
 fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<live::Live> {
-    let (handle, shots, tidy, chooser, counter) = (app.clone(), svc.clone(), svc.clone(), svc.clone(), svc.clone());
+    let (handle, shots, tidy, chooser, counter, keeper) = (app.clone(), svc.clone(), svc.clone(), svc.clone(), svc.clone(), svc.clone());
+    let h_memory = handle.clone();
     live::Live::new(
         live::Deps {
             voice: Arc::new(live::AppVoice(svc.clone())),
@@ -373,6 +375,14 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             acts: Box::new(|| computer::journal().take()),
             // Usage counts Ask too: the question, and the words of the answer kept for it.
             asked: Box::new(move |w| counter.stats.ask(w, now_ms())),
+            // What the person asked to remember goes to every AI as plain reference; off sends nothing.
+            memory: Box::new(move || if keeper.settings.lock().unwrap().memory { memory::block(&memory::read(&settings::data_dir())) } else { String::new() }),
+            // A fact the AI was asked to remember waits for a yes in Settings › AI › Memory.
+            remember: Box::new(move |fact| {
+                if memory::propose(&settings::data_dir(), &fact).is_ok() {
+                    let _ = h_memory.emit("memory://changed", ());
+                }
+            }),
         },
         &settings::data_dir(),
     )
@@ -589,6 +599,36 @@ async fn summary_stop(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) 
 #[tauri::command]
 async fn summary_get(maker: tauri::State<'_, Arc<summary::Maker>>, id: String) -> Result<Option<summary::Summary>, String> {
     maker.get(&id)
+}
+
+/// The facts kept in memory and the proposals waiting on a yes, for the Memory view.
+#[tauri::command]
+fn memory_view() -> memory::View {
+    memory::read(&settings::data_dir())
+}
+
+/// A fact the person typed joins the kept facts.
+#[tauri::command]
+fn memory_add(line: String) -> Result<(), String> {
+    memory::add(&settings::data_dir(), &line)
+}
+
+/// A proposal an AI was asked to remember becomes a kept fact on the person's yes.
+#[tauri::command]
+fn memory_accept(i: usize) -> Result<(), String> {
+    memory::accept(&settings::data_dir(), i)
+}
+
+/// A proposal dismissed or a fact forgotten, by its place in the view.
+#[tauri::command]
+fn memory_remove(proposed: bool, i: usize) -> Result<(), String> {
+    memory::remove(&settings::data_dir(), proposed, i)
+}
+
+/// Everything forgotten, facts and proposals: the file goes away.
+#[tauri::command]
+fn memory_clear() -> Result<(), String> {
+    memory::clear(&settings::data_dir())
 }
 
 #[tauri::command]
@@ -1267,6 +1307,7 @@ fn settings_view(svc: &App) -> Value {
     v["ask_hotkey"] = json!(s.ask_chord().label());
     // Let the AI see and act: the switch, and each app's tier the person chose.
     v["computer_use"] = json!(s.computer_use);
+    v["memory"] = json!(s.memory);
     v["computer_trust"] = json!(s.computer_trust);
     v["keep_audio"] = json!(s.keep_audio);
     v["history_keep"] = json!(s.history_keep);
@@ -2652,6 +2693,11 @@ pub fn run() {
             summary_make,
             summary_stop,
             summary_get,
+            memory_view,
+            memory_add,
+            memory_accept,
+            memory_remove,
+            memory_clear,
             assist_providers,
             assist_models,
             assist_choose,

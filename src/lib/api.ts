@@ -190,6 +190,8 @@ export type Config = {
   /** Let the AI see and act (off by default), and each app's tier the person chose: view, click or full. */
   computer_use?: boolean;
   computer_trust?: Record<string, string>;
+  /** Keep the facts the person asked to remember in memory.md and give them to every AI. On when absent. */
+  memory?: boolean;
   /** The voice answers are read in, by the system's id for it; null is the system's own choice. */
   speak_voice?: string | null;
   /** How fast answers are read, 1 being normal. Treated as 1 when absent. */
@@ -686,6 +688,21 @@ export const summaryGet = (id: string): Promise<Summary | null> =>
   (inTauri ? invoke<unknown>(SUMMARY.get, { id }) : pvLater(120, () => summaryPv.kept.get(id) ?? null)).then(normalizeSummary);
 /** The raw payload: read with summaryReduce in summary.ts. */
 export const onSummaryState = (fn: Sink<unknown>) => (inTauri ? listen<unknown>(SUMMARY.state, (e) => fn(e.payload)) : pvOn(summaryPv.sinks)(fn));
+
+/** The facts kept in memory and the proposals waiting on a yes. */
+export type MemoryView = { facts: string[]; proposed: string[] };
+const emptyMemory: MemoryView = { facts: [], proposed: [] };
+const normMemory = (v: unknown): MemoryView => {
+  const r = v as MemoryView;
+  return Array.isArray(r?.facts) && Array.isArray(r?.proposed) ? r : emptyMemory;
+};
+export const memoryView = (): Promise<MemoryView> => (inTauri ? invoke<unknown>("memory_view") : pvLater(40, () => emptyMemory)).then(normMemory);
+export const memoryAdd = (line: string) => (inTauri ? invoke<void>("memory_add", { line }) : Promise.resolve());
+export const memoryAccept = (i: number) => (inTauri ? invoke<void>("memory_accept", { i }) : Promise.resolve());
+export const memoryRemove = (proposed: boolean, i: number) => (inTauri ? invoke<void>("memory_remove", { proposed, i }) : Promise.resolve());
+export const memoryClear = () => (inTauri ? invoke<void>("memory_clear") : Promise.resolve());
+/** Memory changed while Settings was open (a proposal landed): `memory://changed`. */
+export const onMemoryChanged = (fn: () => void) => (inTauri ? listen("memory://changed", fn) : Promise.resolve(() => {}));
 
 export const sessionsList = (): Promise<SessionMeta[]> => (inTauri ? invoke<unknown>(SESSIONS.list) : Promise.resolve(pvSessions())).then(normalizeSessions);
 export const sessionsSearch = (q: string): Promise<SessionMeta[]> =>

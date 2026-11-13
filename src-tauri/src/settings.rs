@@ -228,6 +228,10 @@ pub struct Settings {
     /// Read Ask's answers aloud as they stream in, with a voice of this computer. Off until the person turns it on.
     #[serde(default)]
     pub speak_answers: bool,
+    /// Keep the facts the person asked to remember in `memory.md` and give them to every AI as plain reference.
+    /// On until it is turned off; off sends nothing and keeps the file only as a file, never read into a question.
+    #[serde(default = "yes")]
+    pub memory: bool,
     /// The voice answers are read in, by the system's id for it; none is the system's choice for its language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speak_voice: Option<String>,
@@ -336,6 +340,7 @@ impl Default for Settings {
             computer_use: false,
             computer_trust: Default::default(),
             speak_answers: false,
+            memory: true,
             speak_voice: None,
             speak_rate: default_speak_rate(),
             history_keep: default_history_keep(),
