@@ -1,5 +1,5 @@
 import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Phone, PhoneOff, Plus, ScrollText, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, MousePointer2, PenLine, Phone, PhoneOff, Plus, ScrollText, Square, Volume2, VolumeX, X } from "lucide-react";
 import {
   callEsc,
   callState,
@@ -282,6 +282,7 @@ export function Live() {
   // An answer being read aloud: the first Esc only silences it.
   const [speaking, setSpeaking] = useState(false);
   useEffect(() => subscribe(onSpeaking(setSpeaking)), []);
+  const { cfg, patch } = useConfig();
 
   // A call: talk, it answers aloud, it listens again. Esc is the call's while one runs.
   const [call, setCall] = useState<CallView>(() => (preview && !inTauri ? previewCall(new URLSearchParams(location.search)) : NO_CALL));
@@ -576,6 +577,9 @@ export function Live() {
             Summary
           </PressButton>
         ) : null}
+        <PressButton className="live-hb" title="New ask" aria-label="New ask" act={() => void sessionsNew(true).catch(noop)}>
+          <Plus size={16} strokeWidth={1.5} />
+        </PressButton>
         <PressButton
           className={`live-hb${sheet ? " on" : ""}`}
           title="Sessions"
@@ -586,6 +590,8 @@ export function Live() {
           <MessagesSquare size={16} strokeWidth={1.5} />
         </PressButton>
         <CallButton active={call.active} />
+        <SpeakButton on={!!cfg?.speak_answers} speaking={speaking} patch={patch} />
+        <ActButton on={!!cfg?.computer_use} patch={patch} />
         <StopButton stop={v.stop} />
       </header>
       <div className="live-body drag-self" ref={body} onScroll={onScroll}>
@@ -736,6 +742,49 @@ function CallButton({ active }: { active: boolean }) {
   );
 }
 
+/** Read answers aloud: the speaker turns the setting on and off right here; while one is being said, it cuts it. */
+function SpeakButton({ on, speaking, patch }: { on: boolean; speaking: boolean; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
+  return (
+    <PressButton
+      className={`live-hb live-speakbtn${on ? " on" : ""}`}
+      title={
+        speaking
+          ? "Stop reading this answer"
+          : on
+            ? "Answers are read aloud — click to turn that off"
+            : "Read answers aloud — the voice is picked in Settings"
+      }
+      aria-label={speaking ? "Stop reading" : on ? "Turn read-aloud off" : "Read answers aloud"}
+      aria-pressed={on}
+      act={() => {
+        if (speaking) {
+          speakStop().catch(noop);
+        } else {
+          void patch({ speak_answers: !on });
+        }
+      }}
+    >
+      {on ? <Volume2 size={15} strokeWidth={1.5} /> : <VolumeX size={15} strokeWidth={1.5} />}
+    </PressButton>
+  );
+}
+
+/** Let the AI see and act: the pointer switch turns computer use on and off; a turn under way keeps its own grant,
+ * so this takes hold from the next question. Trust tiers per app stay in Settings. */
+function ActButton({ on, patch }: { on: boolean; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
+  return (
+    <PressButton
+      className={`live-hb live-actbtn${on ? " on" : ""}`}
+      title={on ? "The AI may see your screen and act in apps — click to turn that off" : "Let the AI see your screen and act in apps"}
+      aria-label={on ? "Turn see-and-act off" : "Let the AI see and act"}
+      aria-pressed={on}
+      act={() => void patch({ computer_use: !on })}
+    >
+      <MousePointer2 size={15} strokeWidth={1.5} />
+    </PressButton>
+  );
+}
+
 /** Stop while anything is under way, Close otherwise: always visible, never only on hover. Esc does the same. */
 function StopButton({ stop }: { stop: boolean }) {
   return (
@@ -757,16 +806,24 @@ function StopButton({ stop }: { stop: boolean }) {
  * conversation, under the session's title. */
 function Question({ text, now = false }: { text: string; now?: boolean }) {
   const [open, setOpen] = useState(false);
+  const [copied, copy] = useCopied();
   if (!text) return <span className="live-question" />;
   return (
-    <PressButton
-      className={`live-question${now ? " now" : ""}${open ? " open" : ""}`}
-      title={open ? undefined : text}
-      aria-expanded={open}
-      act={() => setOpen((o) => !o)}
-    >
-      {text}
-    </PressButton>
+    <span className="live-qrow">
+      <PressButton
+        className={`live-question${now ? " now" : ""}${open ? " open" : ""}`}
+        title={open ? undefined : text}
+        aria-expanded={open}
+        act={() => setOpen((o) => !o)}
+      >
+        {text}
+      </PressButton>
+      {open ? (
+        <PressButton className="live-copy live-qcopy" title="Copy the question" aria-label={copied ? "Copied" : "Copy the question"} act={() => copy(text)}>
+          {copied ? <Check size={13} strokeWidth={1.75} /> : <Copy size={13} strokeWidth={1.5} />}
+        </PressButton>
+      ) : null}
+    </span>
   );
 }
 

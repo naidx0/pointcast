@@ -641,6 +641,26 @@ mod tests {
         Reader::new(fake.clone(), move || on.then(How::default), |_| {})
     }
 
+    /// The whole read-aloud chain on this Mac's own voice: Sending begins, a delta is cut into a sentence, Shown
+    /// flushes the last words — and the Mac really says them. Proves silence in the app means the setting or the
+    /// wire, never the voice.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_answer_streamed_through_the_reader_is_said_by_the_real_voice() {
+        let mac = Arc::new(super::mac::Mac::default());
+        let seen = mac.clone();
+        let reader = Reader::new(Arc::new(Voices::new(mac, None)), || Some(How::default()), |_| {});
+        reader.hear(&state(State::Sending, 1));
+        reader.hear(&delta(1, "One short sentence."));
+        reader.hear(&state(State::Shown, 1));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while seen.begun().0 == 0 {
+            assert!(std::time::Instant::now() < until, "the real voice never started");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        reader.stop();
+    }
+
     #[test]
     fn sentences_are_said_one_after_another_and_busy_is_told_at_the_start_and_the_end() {
         let fake = Arc::new(Fake::default());

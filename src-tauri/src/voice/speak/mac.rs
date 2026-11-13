@@ -264,6 +264,17 @@ unsafe fn string(ns: *mut AnyObject) -> String {
 mod tests {
     use super::av_rate;
 
+    /// The real voice path on this Mac: a sentence goes to AVSpeechSynthesizer and its `done` comes back through the
+    /// watcher, no run loop needed (delegates need one; `isSpeaking` does not).
+    #[test]
+    fn a_sentence_is_really_said_and_its_done_comes_back() {
+        use super::{How, Mac, Speaker};
+        let m = Mac::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.speak("Testing the voice.", &How::default(), Box::new(move || { let _ = tx.send(()); })).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(15)).expect("the sentence was said");
+    }
+
     #[test]
     fn the_rate_maps_to_avspeech_with_normal_at_its_middle_and_never_past_its_ends() {
         assert_eq!(av_rate(1.0), 0.5);

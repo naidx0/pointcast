@@ -282,6 +282,21 @@ html.win .live-hb:not(.stop) {
   min-height: 20px;
   padding: 0;
 }
+/* The open question's row: the text flexes, its Copy sits beside it. */
+.live-qrow {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 4px;
+}
+.live-qrow .live-question {
+  flex: 1;
+}
+.live-qcopy {
+  flex: none;
+  margin-top: 2px;
+}
 
 /* —— Body —— */
 .live-body {
