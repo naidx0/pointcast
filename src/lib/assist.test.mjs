@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  actLine,
   BASE_ERRORS,
   CODEX_INSTALL,
   CUSTOM,
@@ -511,4 +512,13 @@ test("Claude says who is signed in and on which plan, as ChatGPT does", () => {
   const out = routeView({ ...claude, plan: undefined, email: undefined }, none);
   assert.equal(out.account, null, "nothing said, nothing shown");
   assert.equal(normalizeAssist({ providers: [], checking: true }).checking, true, "a round of checks is shown while it is out");
+});
+
+test("the see-and-act line says what acting means with the AI chosen, or that it can't act yet", () => {
+  assert.match(actLine({ name: "Codex", acts: true }), /^Codex clicks and types in apps you allow, while you watch\. .*Esc stops it\.$/);
+  assert.equal(actLine({ name: "GitHub Copilot", acts: false }), "GitHub Copilot can't act yet.");
+  assert.equal(actLine({ name: "Ollama on this computer", acts: false }), "Ollama can't act yet.");
+  assert.match(actLine(null), /^The AI clicks and types/);
+  const n = normalizeAssist({ chosen: null, providers: [{ id: "copilot", name: "GitHub Copilot", kind: "agent", acts: false }, { id: "claude-code", name: "Claude", kind: "agent" }, { id: "codex", name: "Codex", kind: "plan", acts: true }] });
+  assert.deepEqual(n.providers.map((p) => p.acts), [false, true, true], "what the engine says, and Claude only from an older one");
 });

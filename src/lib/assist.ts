@@ -46,6 +46,8 @@ export type Route = {
   adds: string[];
   /** Its readiness is known (signed in as its own app says, a key saved, a server answering), not assumed. */
   sure: boolean;
+  /** It can see and act when "Let the AI see and act" is on (Claude, Codex, and an agent that can carry a server). */
+  acts: boolean;
 };
 
 /** The reply of `assist_providers`. */
@@ -137,6 +139,8 @@ export function normalizeAssist(x: unknown): Assist {
       email: str(p.email).trim() || null,
       adds: (Array.isArray(p.adds) ? p.adds : []).filter((f) => typeof f === "string" && f.trim()),
       sure: p.sure === true,
+      // An older engine says nothing: only Claude acted then.
+      acts: typeof p.acts === "boolean" ? p.acts : str(p.id) === "claude-code",
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
   return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, speed: str(v.speed) || null, offline_only: v.offline_only === true, providers, ...(v.checking === true ? { checking: true } : {}) };
@@ -212,6 +216,14 @@ const app = (p: Pick<Route, "id" | "name">) => (p.id === "lmstudio" ? "LM Studio
 /** A route's name as the page says it: "Ollama on this computer" is "Ollama" under This computer, where the rest goes
  * without saying. */
 export const shortName = (p: Pick<Route, "name">) => p.name.replace(/ on this computer$/i, "") || p.name;
+
+/** The line under "Let the AI see and act": what acting means with the AI chosen, or that it can't act yet. */
+export function actLine(r: Pick<Route, "name" | "acts"> | null): string {
+  const who = r ? shortName(r) : "The AI";
+  return r && !r.acts
+    ? `${who} can't act yet.`
+    : `${who} clicks and types in apps you allow, while you watch. It asks before anything that can't be undone. Esc stops it.`;
+}
 
 /** A ChatGPT plan in plain words: "free" is "Free", "plus" is "Plus". */
 const planName = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase();
@@ -545,6 +557,7 @@ export function previewAssist(kind: string): Assist {
     adds: id === "codex" ? ["AGENTS.md"] : [],
     // An installed agent that cannot say whether anyone is signed in (Gemini here) is usable but not sure.
     sure: state === "ready" && (k !== "agent" || id === "claude-code"),
+    acts: k === "plan" || k === "agent",
   });
   const missing = (cli: string) => `${cli} is not installed on this computer. Choose Install.`;
   const a: Assist = {

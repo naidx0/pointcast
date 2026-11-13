@@ -73,6 +73,7 @@ import {
   CODEX_SIGN_OUT,
   CUSTOM,
   askReady,
+  actLine,
   chosenRoute,
   consentText,
   customCheck,
@@ -206,7 +207,7 @@ export function Settings() {
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
-            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={<SeeAndAct cfg={cfg} patch={patch} />} />
+            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={(chosen) => <SeeAndAct cfg={cfg} patch={patch} chosen={chosen} />} />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -757,7 +758,7 @@ const plain = (e: unknown) => String(e).replace(/^Error: */, "");
 
 /** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
  * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
-function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: ReactNode }) {
+function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: (chosen: Route | null) => ReactNode }) {
   const [a, setA] = useState<Assist | null>(null);
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -974,7 +975,7 @@ function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: ReactNode }) {
             <Seg label="Speed" value={speed.value} options={speed.options} set={(v) => run("speed", () => assistSpeed(v))} />
           </Row>
         ) : null}
-        {seeAndAct}
+        {seeAndAct?.(chosen)}
         <Row
           label="Only on this computer"
           sub={
@@ -1076,9 +1077,9 @@ function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: ReactNode }) {
 }
 
 /** Talk back: Ask's answers read aloud with a voice of this computer, as they come in. */
-/** Let the AI see and act: off until the person turns it on, one plain sentence of what that means, and the apps they
- * allowed from the panel's card, which they can forget. */
-function SeeAndAct({ cfg, patch }: { cfg: Config; patch: Patch }) {
+/** Let the AI see and act: off until the person turns it on, one plain sentence of what that means with the AI chosen
+ * (or that it can't act yet), and the apps they allowed from the panel's card, which they can forget. */
+function SeeAndAct({ cfg, patch, chosen }: { cfg: Config; patch: Patch; chosen: Route | null }) {
   const on = !!cfg.computer_use;
   const apps = Object.entries(cfg.computer_trust ?? {});
   const word = (t: string) => (t === "full" ? "click and type" : t === "click" ? "click" : "look only");
@@ -1087,7 +1088,7 @@ function SeeAndAct({ cfg, patch }: { cfg: Config; patch: Patch }) {
       label="Let the AI see and act"
       sub={
         <>
-          Claude clicks and types in apps you allow, while you watch. It asks before anything that can't be undone. Esc stops it.
+          {actLine(chosen)}
           {apps.length ? (
             <>
               {" "}
