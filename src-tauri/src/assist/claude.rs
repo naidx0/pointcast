@@ -1494,6 +1494,106 @@ pub mod tests {
         assert!(journal.iter().any(|e| e.tool == "pointcast_type" && matches!(e.outcome, crate::computer::Outcome::Done(_))), "it typed");
     }
 
+    /// A real Claude task of several steps on this Mac: it shows a plan first, the test presses Start through the same
+    /// call the panel's button makes, as the person would, and the steps are ticked as they end. Run by hand, once.
+    #[test]
+    #[ignore = "a real Claude task that plans, then drives TextEdit; run by hand"]
+    #[cfg(target_os = "macos")]
+    fn on_this_mac_a_real_claude_task_plans_then_acts_and_ticks_its_steps() {
+        use crate::computer::guard::{Tier, Trust};
+        use crate::computer::plan::{Plan, State};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let desk = crate::computer::desk();
+        desk.set_trust(Trust::with([("TextEdit".to_string(), Tier::Full)]));
+        desk.ask_for(crate::computer::WITHIN);
+        let before = crate::computer::textedit_windows(desk);
+        let mut raw = [0u8; 32];
+        getrandom::getrandom(&mut raw).unwrap();
+        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let addr = crate::mcp::spawn_stoppable("127.0.0.1:0", crate::mcp::Latest::default(), token.clone(), stop.clone()).unwrap();
+        let url = format!("http://{addr}/mcp");
+        let serve: Serve = Arc::new(move || Ok(url.clone()));
+        let home = scratch("claude-real-plan");
+        let claude = Claude::new(home).choosing(Some("sonnet".into()), Some("low".into())).acting(Some(Computer { desk, serve }));
+        // The person: Start on the plan once it shows; a card for typing or a key in TextEdit gets Do it. Every change
+        // to the plan the panel would show is kept, in order.
+        let over = Arc::new(AtomicBool::new(false));
+        let seen: Arc<Mutex<Vec<Plan>>> = Arc::default();
+        let person = {
+            let (over, seen) = (over.clone(), seen.clone());
+            std::thread::spawn(move || {
+                while !over.load(Ordering::SeqCst) {
+                    if let Some(p) = desk.status().plan {
+                        let mut s = seen.lock().unwrap();
+                        if s.last() != Some(&p) {
+                            s.push(p.clone());
+                        }
+                        drop(s);
+                        if p.state == State::Proposed {
+                            std::thread::sleep(Duration::from_millis(400));
+                            println!("START pressed on plan {}: {:?}", p.id, desk.start_plan(p.id, true));
+                        }
+                    }
+                    if let Some(c) = desk.confirms.card() {
+                        let ours = c.app == "TextEdit" && c.raise.is_none() && matches!(c.tool.as_str(), "pointcast_type" | "pointcast_key");
+                        println!("CARD: {} ({}) -> {}", c.what, c.tool, if ours { "Do it" } else { "left to time out" });
+                        if ours {
+                            let _ = desk.answer(c.id, crate::computer::Answer::Do);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+        let mut chat = claude.start("", &[]).unwrap();
+        let (tx, rx) = channel();
+        let t = Instant::now();
+        chat.ask(said("Open TextEdit, make a new document, type a three-item shopping list, then select all the text"), tx).unwrap();
+        let mut got = Vec::new();
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(240)) {
+            let end = e.kind.ends();
+            got.push(e.kind);
+            if end {
+                break;
+            }
+        }
+        over.store(true, Ordering::SeqCst);
+        person.join().unwrap();
+        let answer: String = words(&got).concat();
+        println!("\nTURN ({:.1} s): {:?}", t.elapsed().as_secs_f32(), got.last());
+        println!("ANSWER: {answer}");
+        let seen = seen.lock().unwrap().clone();
+        println!("PLAN AS THE PANEL SAW IT, change by change:");
+        for p in &seen {
+            let marks: Vec<String> = p.steps.iter().map(|s| format!("{:?}{}", s.status, s.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default())).collect();
+            println!("  plan {} {:?} in {:?}: {marks:?}", p.id, p.state, p.apps);
+        }
+        if let Some(p) = seen.first() {
+            println!("STEPS SHOWN:");
+            for (i, s) in p.steps.iter().enumerate() {
+                println!("  {}. {}", i + 1, s.text);
+            }
+        }
+        println!("GRANT LIVE AFTER THE TURN: {}", desk.granted());
+        println!("JOURNAL:");
+        let journal = crate::computer::journal().take();
+        for e in &journal {
+            println!("  {} | {} | {} | {:?}", e.app, e.tool, e.target, e.outcome);
+        }
+        chat.close();
+        std::thread::sleep(Duration::from_millis(800));
+        println!("CLEAN-UP: {:?}", crate::computer::discard_new_textedit(desk, &before));
+        crate::mcp::stop_at(addr, &stop);
+        assert_eq!(got.last(), Some(&Kind::Done));
+        let first = journal.iter().position(|e| e.tool == "pointcast_plan").expect("it planned");
+        let act = |e: &crate::computer::Entry| e.line().is_some();
+        assert!(!journal[..first].iter().any(act), "nothing acted before the plan");
+        assert!(seen.iter().any(|p| p.state == State::Started), "the person's Start reached it");
+        assert!(journal.iter().any(|e| e.tool == "pointcast_plan_step" && matches!(e.outcome, crate::computer::Outcome::Done(_))), "a step was ticked");
+        assert!(journal.iter().any(|e| e.tool == "pointcast_type" && matches!(e.outcome, crate::computer::Outcome::Done(_))), "it typed");
+    }
+
     #[test]
     fn who_is_signed_in_is_the_plan_and_the_address_only() {
         let said = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@b.c","orgId":"x","orgName":"Org","subscriptionType":"pro"}"#;

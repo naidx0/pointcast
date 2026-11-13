@@ -490,12 +490,28 @@ pub(crate) mod fake;
 /// clean-up. A document with anything else in it is left alone.
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) fn discard_textedit(desk: &Desk, text: &str) -> Vec<String> {
+    discard_textedit_if(desk, &|tree| tree.nodes.iter().any(|n| n.raw_role == "AXTextArea" && n.value.as_deref().is_some_and(|v| v.trim() == text)))
+}
+
+/// The titles of TextEdit's windows now: what a hand-run test notes before it starts, to close only what it made.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn textedit_windows(desk: &Desk) -> Vec<String> {
+    desk.os.apps().unwrap_or_default().into_iter().filter(|a| a.app.name == "TextEdit").flat_map(|a| a.windows.into_iter().map(|w| w.title)).collect()
+}
+
+/// Close, without saving, the untitled TextEdit documents in front that were not open `before`: the clean-up of a
+/// hand-run task whose text the AI chose.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn discard_new_textedit(desk: &Desk, before: &[String]) -> Vec<String> {
+    discard_textedit_if(desk, &|tree| !before.contains(&tree.window))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn discard_textedit_if(desk: &Desk, more: &dyn Fn(&Tree) -> bool) -> Vec<String> {
     let mut said = vec![];
     for _ in 0..3 {
         let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
-        let ours = tree.app.name == "TextEdit"
-            && tree.window.starts_with("Untitled")
-            && tree.nodes.iter().any(|n| n.raw_role == "AXTextArea" && n.value.as_deref().is_some_and(|v| v.trim() == text));
+        let ours = tree.app.name == "TextEdit" && tree.window.starts_with("Untitled") && more(&tree);
         if !ours {
             said.push(format!("front: {} {:?}", tree.app.name, tree.window));
             break;
