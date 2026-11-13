@@ -2,6 +2,7 @@
 // a window (src/lib/home.test.mjs). The usage numbers and the grid come from usage.ts.
 
 import type { HistoryMeta } from "./api";
+import type { SessionMeta } from "./sessions";
 
 /** Home's one-time "New: Prompt with your screen" card: for someone who finished setup before Ask existed and has not
  * seen it introduced. Dismissed, it is remembered in the settings (`ask_intro_seen`). */

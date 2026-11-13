@@ -2,7 +2,7 @@
 // time, how many recordings a day, when in the week they were made, the streak. Pure, so node --test reads it without
 // a window (src/lib/usage.test.mjs).
 
-export type UsageDay = { r: number; w: number; speech_ms: number; wall_ms: number; p: number };
+export type UsageDay = { r: number; w: number; speech_ms: number; wall_ms: number; p: number; q?: number; aw?: number };
 
 /** The counts as the app keeps them. Days are local ("2026-11-11"); `grid` is recordings by weekday (Monday first),
  * then by hour. `streak` is the run the app counted as recordings came in, ending on `last_day`; the pane reads the
@@ -10,7 +10,7 @@ export type UsageDay = { r: number; w: number; speech_ms: number; wall_ms: numbe
 export type Usage = {
   v: number;
   since_ms: number;
-  total: { recordings: number; words: number; speech_ms: number; wall_ms: number; pictures: number };
+  total: { recordings: number; words: number; speech_ms: number; wall_ms: number; pictures: number; questions: number; answer_words: number };
   days: Record<string, UsageDay>;
   hours: { r: number; w: number }[];
   weekdays: { r: number; w: number }[];
@@ -54,7 +54,7 @@ export type UsageView = {
   since: string;
 };
 
-type Sum = { recordings: number; words: number; speech_ms: number; wall_ms: number; pictures: number };
+type Sum = { recordings: number; words: number; speech_ms: number; wall_ms: number; pictures: number; questions: number; answer_words: number };
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -68,7 +68,7 @@ export function lastDays(today: Date, n: number): string[] {
 
 /** What was counted over the `n` days that end today. */
 export function over(u: Usage, today: Date, n: number): Sum {
-  const s: Sum = { recordings: 0, words: 0, speech_ms: 0, wall_ms: 0, pictures: 0 };
+  const s: Sum = { recordings: 0, words: 0, speech_ms: 0, wall_ms: 0, pictures: 0, questions: 0, answer_words: 0 };
   for (const k of lastDays(today, n)) {
     const d = u.days[k];
     if (!d) continue;
@@ -77,6 +77,8 @@ export function over(u: Usage, today: Date, n: number): Sum {
     s.speech_ms += d.speech_ms;
     s.wall_ms += d.wall_ms;
     s.pictures += d.p;
+    s.questions += d.q ?? 0;
+    s.answer_words += d.aw ?? 0;
   }
   return s;
 }
@@ -171,6 +173,9 @@ export function usageView(u: Usage, today: Date, range: Range, locale?: string):
   const saved = clockParts(savedMinutes(s));
   if (saved.length) figures.push({ label: "Saved", parts: saved, title: SAVED_NOTE });
   if (s.pictures > 0) figures.push({ label: "Pictures", parts: [{ n: grouped(s.pictures) }] });
+  // Ask counts too: the questions asked, and the words their answers came to.
+  if (s.questions > 0) figures.push({ label: "Questions", parts: [{ n: grouped(s.questions) }] });
+  if (s.answer_words > 0) figures.push({ label: "Answers read", parts: [{ n: grouped(s.answer_words) }], title: "Words across the answers" });
 
   const [week, month] = [perDay(u, today, 7), perDay(u, today, 30)];
   const rate = month <= 0 ? null : week > 0 ? `${aDay(week)} this week, ${tenth(month)} over 30 days.` : `${aDay(month)} over the last 30 days.`;
@@ -199,7 +204,7 @@ export function emptyUsage(since_ms: number): Usage {
   return {
     v: 1,
     since_ms,
-    total: { recordings: 0, words: 0, speech_ms: 0, wall_ms: 0, pictures: 0 },
+    total: { recordings: 0, words: 0, speech_ms: 0, wall_ms: 0, pictures: 0, questions: 0, answer_words: 0 },
     days: {},
     hours: Array.from({ length: 24 }, () => ({ r: 0, w: 0 })),
     weekdays: Array.from({ length: 7 }, () => ({ r: 0, w: 0 })),
@@ -230,7 +235,11 @@ export function readUsage(raw: unknown, now_ms: number): Usage {
     list(u.grid, 7, (row) => list(row, 24, num)) &&
     nums(u.streak, ["current", "longest"]) &&
     typeof u.streak.last_day === "string";
-  return sound ? u : emptyUsage(now_ms);
+  if (!sound) return emptyUsage(now_ms);
+  // Counts written before Ask was counted have neither field; they read as zero.
+  u.total.questions ??= 0;
+  u.total.answer_words ??= 0;
+  return u;
 }
 
 /** Browser preview: ten weeks of a person who dictates most working days, the same every time for a given day. */

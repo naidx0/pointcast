@@ -317,6 +317,8 @@ pub struct Deps {
     pub tidy: Box<dyn Fn() -> bool + Send + Sync>,
     /// What the AI did on the computer since this was last asked, taken (`computer::journal().take()`).
     pub acts: Box<dyn Fn() -> Vec<crate::computer::Entry> + Send + Sync>,
+    /// Usage counts a turn's question and the words of its answer (`stats::Stats::ask`).
+    pub asked: Box<dyn Fn(u64) + Send + Sync>,
 }
 
 /// A question that is kept and on its way, or that failed and can be asked again: what is sent, and its answer so far.
@@ -1560,6 +1562,8 @@ impl Live {
         }
         answer.times.done_ms = now();
         answer.acts = (self.deps.acts)();
+        // Usage counts Ask too: the question once, and the words its answer came to.
+        (self.deps.asked)(answer.text.split_whitespace().count() as u64);
         // The model that answered is not the one picked: the answer stands, and the person is told in one line.
         if let (Some(chose), Some(got)) = (answer.model.as_deref(), answer.answered_by.as_deref()) {
             if !same_model(chose, got) {
@@ -1840,6 +1844,7 @@ mod tests {
                 let mut q = taken.lock().unwrap();
                 if q.is_empty() { Vec::new() } else { q.remove(0) }
             }),
+            asked: Box::new(|_| {}),
         };
         Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, clock, dir, acts }
     }

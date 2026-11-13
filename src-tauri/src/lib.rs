@@ -335,7 +335,7 @@ impl live::Taken for AskTaken {
 /// The Ask loop as the app runs it: the recording path for its words, one frame of the screen for its picture, and
 /// the panel for what it says.
 fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -> Arc<live::Live> {
-    let (handle, shots, tidy, chooser) = (app.clone(), svc.clone(), svc.clone(), svc.clone());
+    let (handle, shots, tidy, chooser, counter) = (app.clone(), svc.clone(), svc.clone(), svc.clone(), svc.clone());
     live::Live::new(
         live::Deps {
             voice: Arc::new(live::AppVoice(svc.clone())),
@@ -371,6 +371,8 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             now: Box::new(now_ms),
             tidy: Box::new(move || tidy.settings.lock().unwrap().tidy),
             acts: Box::new(|| computer::journal().take()),
+            // Usage counts Ask too: the question, and the words of the answer kept for it.
+            asked: Box::new(move |w| counter.stats.ask(w, now_ms())),
         },
         &settings::data_dir(),
     )

@@ -25,9 +25,14 @@ pub struct Total {
     pub speech_ms: u64,
     pub wall_ms: u64,
     pub pictures: u64,
+    /// Ask turns: one per question asked, and the words their answers came to.
+    #[serde(default)]
+    pub questions: u64,
+    #[serde(default)]
+    pub answer_words: u64,
 }
 
-/// One local day: recordings, words, time speaking, time recording, pictures.
+/// One local day: recordings, words, time speaking, time recording, pictures; questions and their answers' words.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Day {
     pub r: u64,
@@ -35,6 +40,10 @@ pub struct Day {
     pub speech_ms: u64,
     pub wall_ms: u64,
     pub p: u64,
+    #[serde(default)]
+    pub q: u64,
+    #[serde(default)]
+    pub aw: u64,
 }
 
 /// Recordings and words in one hour of the day, or on one day of the week.
@@ -187,6 +196,19 @@ impl Data {
         }
     }
 
+    /// An Ask turn ended with an answer kept: the question counts once, and its answer's words on its day.
+    fn ask(&mut self, answer_words: u64, ms: u64, offset_s: i32) {
+        let (day, ..) = local(ms, offset_s);
+        self.total.questions += 1;
+        self.total.answer_words += answer_words;
+        let d = self.days.entry(day).or_default();
+        d.q += 1;
+        d.aw += answer_words;
+        while self.days.len() > KEEP_DAYS {
+            self.days.pop_first();
+        }
+    }
+
     /// A recording was made on `day`, which is already among the days.
     fn streak_on(&mut self, day: &str) {
         let gap = date(&self.streak.last_day).zip(date(day)).map(|(a, b)| (b - a).num_days());
@@ -243,6 +265,14 @@ impl Stats {
         let _one = self.lock.lock().unwrap();
         let mut d = self.load().0;
         d.add(&m.id, self.entry(&m.id), m.created_ms, m.duration_ms, (self.offset)(m.created_ms));
+        self.write(&d);
+    }
+
+    /// An Ask turn ended: its question, and the words of the answer kept for it. Never an error.
+    pub fn ask(&self, answer_words: u64, ms: u64) {
+        let _one = self.lock.lock().unwrap();
+        let mut d = self.load().0;
+        d.ask(answer_words, ms, (self.offset)(ms));
         self.write(&d);
     }
 
@@ -497,8 +527,8 @@ mod tests {
         let before = d.clone();
         let better = Counts { words: 9, speech_ms: 2_500, pictures: 2 };
         d.replace("a", better);
-        assert_eq!(d.total, Total { recordings: 2, words: 12, speech_ms: 3_500, wall_ms: 8_000, pictures: 2 });
-        assert_eq!(d.days["2026-11-09"], Day { r: 2, w: 12, speech_ms: 3_500, wall_ms: 8_000, p: 2 });
+        assert_eq!(d.total, Total { recordings: 2, words: 12, speech_ms: 3_500, wall_ms: 8_000, pictures: 2, ..Total::default() });
+        assert_eq!(d.days["2026-11-09"], Day { r: 2, w: 12, speech_ms: 3_500, wall_ms: 8_000, p: 2, ..Day::default() });
         assert_eq!((d.hours[10].clone(), d.hours[14].clone()), (Slot { r: 1, w: 9 }, Slot { r: 1, w: 3 }));
         assert_eq!((d.weekdays[0].clone(), d.grid[0][10], d.grid[0][14]), (Slot { r: 2, w: 12 }, 1, 1));
         assert_eq!(d.recent["a"], Recent { w: 9, speech_ms: 2_500, p: 2, day: "2026-11-09".into(), h: 10 });
@@ -523,6 +553,19 @@ mod tests {
         d.add("a", words(50), nov(10), 60_000, 0);
         assert_eq!(d, once);
         assert_eq!((d.total.recordings, d.total.words, d.recent.len()), (1, 5, 1));
+    }
+
+    #[test]
+    fn a_question_counts_on_its_day_and_in_the_totals() {
+        let mut d = Data::new(0);
+        d.ask(120, nov(9) + 10 * HOUR, 0);
+        d.ask(0, nov(11) + 9 * HOUR, 0);
+        assert_eq!((d.total.questions, d.total.answer_words), (2, 120));
+        assert_eq!((d.days["2026-11-09"].q, d.days["2026-11-09"].aw), (1, 120));
+        assert_eq!((d.days["2026-11-11"].q, d.days["2026-11-11"].aw), (1, 0));
+        // A question counts against no dictation figure, and adds no recordings.
+        assert_eq!((d.total.recordings, d.total.words, d.total.wall_ms, d.days["2026-11-09"].r), (0, 0, 0, 0));
+        assert_eq!(d.streak, Streak::default(), "a day with a question and no recording is no streak day");
     }
 
     /// Five recordings over four days, with and without pictures and unclear speech.
@@ -594,7 +637,7 @@ mod tests {
             assert_eq!(store.items(&m.id).unwrap().len(), 3, "the words and the picture are in History");
             let kept: Data = serde_json::from_slice(&std::fs::read(d.join(FILE)).unwrap()).unwrap();
             assert!(kept.sound());
-            assert_eq!(kept.total, Total { recordings: 1, words: 11, speech_ms: 1_700, wall_ms: wall, pictures: 1 });
+            assert_eq!(kept.total, Total { recordings: 1, words: 11, speech_ms: 1_700, wall_ms: wall, pictures: 1, ..Total::default() });
             assert_eq!(stats.get(), kept);
         }
         assert!(!d.join("stats.tmp").exists());
@@ -636,7 +679,7 @@ mod tests {
         }
         assert_eq!(d.days.len(), KEEP_DAYS);
         assert_eq!(d.days.keys().next().unwrap(), "2026-11-06", "the five oldest days are gone");
-        assert_eq!(d.total, Total { recordings: n, words: n * 10, speech_ms: n * 4_000, wall_ms: n * 5_000, pictures: n });
+        assert_eq!(d.total, Total { recordings: n, words: n * 10, speech_ms: n * 4_000, wall_ms: n * 5_000, pictures: n, ..Total::default() });
         assert_eq!(d.days.values().map(|x| x.w).sum::<u64>(), KEEP_DAYS as u64 * 10);
         assert_eq!(d.hours[9], Slot { r: n, w: n * 10 });
         assert_eq!(d.streak.current, n, "a streak longer than the days kept is still counted");
@@ -669,6 +712,6 @@ mod tests {
         assert_eq!(stats.get().total, Total::default());
         let m = store.save(&[said(0, 500, "a new one")], nov(8), 600).unwrap();
         stats.count(&m);
-        assert_eq!(stats.get().total, Total { recordings: 1, words: 3, speech_ms: 500, wall_ms: 600, pictures: 0 });
+        assert_eq!(stats.get().total, Total { recordings: 1, words: 3, speech_ms: 500, wall_ms: 600, pictures: 0, ..Total::default() });
     }
 }

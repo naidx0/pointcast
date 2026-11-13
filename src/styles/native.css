@@ -1172,7 +1172,7 @@ html.win .home-recent li + li::before {
 }
 .home-recent button {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px 72px;
+  grid-template-columns: minmax(0, 1fr) 84px 120px 72px;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -1209,6 +1209,7 @@ html.win .home-recent button {
 }
 .home-recent .t.empty,
 .home-recent .t svg,
+.home-recent .kind,
 .home-recent .len,
 .home-recent .when {
   color: var(--label-2);

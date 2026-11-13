@@ -69,7 +69,7 @@ test("this week is the last seven local days and nothing older", () => {
     "2026-11-05": day(1, 100, 60_000, 70_000, 2),
     "2026-11-04": day(9, 9_000, 900_000, 990_000, 9),
   });
-  assert.deepEqual(over(u, TODAY, 7), { recordings: 3, words: 400, speech_ms: 180_000, wall_ms: 220_000, pictures: 3 });
+  assert.deepEqual(over(u, TODAY, 7), { recordings: 3, words: 400, speech_ms: 180_000, wall_ms: 220_000, pictures: 3, questions: 0, answer_words: 0 });
   assert.equal(over(u, TODAY, 8).recordings, 12);
   assert.equal(over(u, new Date(2026, 10, 20), 7).recordings, 0);
 });
@@ -281,7 +281,7 @@ test("each hour of the grid says its weekday, hour and exact count", () => {
 test("the preview's totals are the sum of its days, and it has a streak and a week to show", () => {
   const u = previewUsage(TODAY);
   const sum = (f) => Object.values(u.days).reduce((a, d) => a + f(d), 0);
-  assert.deepEqual(u.total, { recordings: sum((d) => d.r), words: sum((d) => d.w), speech_ms: sum((d) => d.speech_ms), wall_ms: sum((d) => d.wall_ms), pictures: sum((d) => d.p) });
+  assert.deepEqual(u.total, { recordings: sum((d) => d.r), words: sum((d) => d.w), speech_ms: sum((d) => d.speech_ms), wall_ms: sum((d) => d.wall_ms), pictures: sum((d) => d.p), questions: sum((d) => d.q ?? 0), answer_words: sum((d) => d.aw ?? 0) });
   assert.equal(u.grid.flat().reduce((a, b) => a + b, 0), u.total.recordings);
   assert.deepEqual(previewUsage(TODAY), u, "the same every time");
   const v = usageView(u, TODAY, "week", "en-GB");

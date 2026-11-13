@@ -30,6 +30,8 @@ import {
   historyList,
   historyOpen,
   historyRecent,
+  onHistoryChanged,
+  type HistoryMeta,
   inTauri,
   loginGet,
   loginSet,
@@ -67,8 +69,9 @@ import { RATES, defaultLabel, fetchLine, nearestRate, voiceGroups, voiceLabel, t
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
-import { askNews, recentRows, type RecentRow } from "@/lib/home";
-import { RECENT_SESSIONS, sessionRows, type SessionRow } from "@/lib/sessions";
+import { askNews } from "@/lib/home";
+import { RECENT_SESSIONS, sessionRows, type SessionMeta, type SessionRow } from "@/lib/sessions";
+import { timelineRows } from "@/lib/timeline";
 import {
   CODEX_SIGN_OUT,
   CUSTOM,
@@ -533,7 +536,8 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
   // "New: Prompt with your screen", once, for someone who finished setup before Ask existed; Got it remembers it.
   const [news, setNews] = useState(() => askNews(cfg));
   const [counts, setCounts] = useState<Counts | null>(null);
-  const [recent, setRecent] = useState<RecentRow[]>([]);
+  const [hist, setHist] = useState<HistoryMeta[]>([]);
+  const [sess, setSess] = useState<SessionMeta[]>([]);
   const [range, setRange] = useState<Range>("week");
   const [sure, setSure] = useState(false);
   // The AI that answers Ask, by its short name; "" when none is chosen, null until the engine says.
@@ -544,7 +548,10 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
   useEffect(() => {
     const load = () =>
       sessionsList()
-        .then((l) => setAsks(sessionRows(l, new Date(), { n: RECENT_SESSIONS })))
+        .then((l) => {
+          setSess(l);
+          setAsks(sessionRows(l, new Date(), { n: RECENT_SESSIONS }));
+        })
         .catch(() => undefined);
     load();
     let was = "";
@@ -571,12 +578,25 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
     statsGet()
       .catch(() => null)
       .then((u) => setCounts(readUsage(u, Date.now())));
-    historyRecent()
-      .then((e) => setRecent(recentRows(e, new Date())))
-      .catch(() => undefined);
+  }, []);
+  // Dictations land while Home is open: read again on history://changed, and on focus.
+  useEffect(() => {
+    const load = () =>
+      historyRecent()
+        .then(setHist)
+        .catch(() => undefined);
+    load();
+    const off = subscribe(onHistoryChanged(load));
+    window.addEventListener("focus", load);
+    return () => {
+      off();
+      window.removeEventListener("focus", load);
+    };
   }, []);
   if (!counts) return null;
   const v = usageView(counts, new Date(), range);
+  // One timeline of dictations and Ask sessions, newest first (S1).
+  const timeline = timelineRows(hist, sess, new Date());
   const days = weekdayNames("short");
   const saved = v.figures.some((f) => f.label === "Saved");
   const show = (id: string | null) => {
@@ -741,7 +761,7 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
           </div>
         </section>
       )}
-      {recent.length ? (
+      {timeline.length ? (
         <section>
           <div className="home-sec">
             <h2 className="home-title">Recent</h2>
@@ -750,15 +770,20 @@ function Home({ cfg, go, patch }: { cfg: Config; go: (p: Pane) => void; patch: P
             </button>
           </div>
           <ul className="home-recent">
-            {recent.map((r) => (
-              <li key={r.id}>
-                <button type="button" aria-label={r.label} onClick={() => show(r.id)}>
+            {timeline.map((r) => (
+              <li key={`${r.kind}:${r.id}`}>
+                <button
+                  type="button"
+                  aria-label={r.label}
+                  onClick={() => (r.kind === "ask" ? sessionsOpen(r.id).catch(() => undefined) : show(r.id))}
+                >
                   <span className={r.empty ? "t empty" : "t"}>
                     <span>{r.text}</span>
                     {r.pictures ? <Image size={13} strokeWidth={1.75} aria-hidden="true" /> : null}
                   </span>
+                  <span className="kind">{r.kind === "ask" ? `Ask${r.provider ? ` · ${r.provider}` : ""}` : "Dictated"}</span>
                   <span className="when">{r.when}</span>
-                  <span className="len">{r.length}</span>
+                  <span className="len">{r.meta}</span>
                 </button>
               </li>
             ))}
