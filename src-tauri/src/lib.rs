@@ -863,6 +863,14 @@ async fn sessions_export(svc: tauri::State<'_, Arc<App>>, live: tauri::State<'_,
     live.sessions().export(&id, &root, now_ms()).map(|dir| dir.to_string_lossy().into_owned())
 }
 
+/// The session as markdown on the clipboard: how a session continues in the AI's own app today.
+#[tauri::command]
+async fn sessions_copy(live: tauri::State<'_, Arc<live::Live>>, id: String) -> Result<(), String> {
+    let (_session, md, _pictures) = live.sessions().markdown(&id)?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_text(&md).map_err(|e| e.to_string())
+}
+
 fn begin(app: &AppHandle, svc: &Arc<App>) -> Result<(), String> {
     // The installer closes Pointcast: a recording started now would stop mid-sentence.
     if update::installing() {
@@ -2691,6 +2699,7 @@ pub fn run() {
             sessions_delete,
             sessions_search,
             sessions_export,
+            sessions_copy,
             summary_make,
             summary_stop,
             summary_get,

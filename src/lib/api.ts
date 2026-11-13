@@ -629,6 +629,8 @@ export const SESSIONS = {
   search: "sessions_search",
   /** command { id } → the folder it was saved to (pictures may be .jpg) */
   export: "sessions_export",
+  /** command { id }: the session's markdown goes on the clipboard */
+  copy: "sessions_copy",
 } as const;
 
 /** A session's summary: the one adapter. Every engine name the summary view uses is here. */
@@ -720,6 +722,8 @@ export const sessionsExport = (id: string): Promise<string> =>
     : Promise.resolve(
         `${location.search.includes("skin=mac") || location.search.includes("os=mac") ? "/Users/you" : "C:/Users/you"}/Documents/Pointcast/Ask/${pvSessions().find((s) => s.id === id)?.title ?? id}`,
       );
+/** The session as markdown on the clipboard: how it continues in the AI's own app today. */
+export const sessionsCopy = (id: string) => (inTauri ? invoke<void>(SESSIONS.copy, { id }) : Promise.resolve());
 
 // —— Home's "All sessions" opens the panel on its session list. The panel may not be built yet, so the ask goes through
 // storage, as Settings' pane does: read once as the panel opens, or as a storage event when it is open. ——

@@ -32,6 +32,7 @@ import {
   onSummaryState,
   preview,
   sessionsDelete,
+  sessionsCopy,
   sessionsExport,
   sessionsList,
   sessionsNew,
@@ -1133,6 +1134,12 @@ function ThisSession({
   const [sure, setSure] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [copied, copy] = useCopied();
+  const [copiedT, setCopiedT] = useState(false);
+  useEffect(() => {
+    if (!copiedT) return;
+    const id = setTimeout(() => setCopiedT(false), 1500);
+    return () => clearTimeout(id);
+  }, [copiedT]);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (editing) input.current?.select();
@@ -1202,6 +1209,20 @@ function ThisSession({
           }
         >
           Export
+        </PressButton>
+        <PressButton
+          className="live-text"
+          aria-label={copiedT ? "Copied" : "Copy the session as markdown, to continue it in the AI's own app"}
+          act={() =>
+            void sessionsCopy(id)
+              .then(() => {
+                setCopiedT(true);
+                setNote("Transcript copied — paste it in the AI's own app to continue there.");
+              })
+              .catch((e) => setNote(plain(e)))
+          }
+        >
+          {copiedT ? "Copied" : "Copy transcript"}
         </PressButton>
         <PressButton
           className={`live-text${sure ? " danger" : ""}`}
