@@ -204,6 +204,9 @@ fn written(w: &str) -> Option<String> {
     // An ordinal: 1st, 22nd, 103rd, 4th.
     for suffix in ["st", "nd", "rd", "th"] {
         if let Some(n) = digits.strip_suffix(suffix).filter(|n| n.chars().all(|c| c.is_ascii_digit())) {
+            if n.len() > 15 {
+                return None;
+            }
             return Some(format!("{sign}{}", ordinal(&cardinal(n.parse().ok()?))));
         }
     }
@@ -262,7 +265,8 @@ pub fn cardinal(n: u64) -> String {
     if n == 0 {
         return "zero".into();
     }
-    let scales = [(1_000_000_000_000, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand")];
+    // Up to quintillions: every u64 is said (u64::MAX is about 18 quintillion).
+    let scales = [(1_000_000_000_000_000_000, "quintillion"), (1_000_000_000_000_000, "quadrillion"), (1_000_000_000_000, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand")];
     let (mut n, mut w) = (n, Vec::new());
     for (size, name) in scales {
         if n >= size {
@@ -621,6 +625,17 @@ mod tests {
         assert_eq!(written("abc"), None);
         let l = lex();
         assert_eq!(phonemes(&l, "21st, 5%."), "twˈɛnti fˈɜɹst, fˈIv pəɹsˈɛnt.");
+    }
+
+    #[test]
+    fn huge_numbers_and_ordinals_never_panic() {
+        assert_eq!(cardinal(2_000_000_000_000_000), "two quadrillion");
+        assert!(cardinal(u64::MAX).starts_with("eighteen quintillion "), "{}", cardinal(u64::MAX));
+        assert_eq!(written("2000000000000000th"), None, "past what is said in words, like a long plain number");
+        assert_eq!(written("99999999999999999999th"), None);
+        assert_eq!(written("999999999999999th").unwrap(), "nine hundred ninety nine trillion nine hundred ninety nine billion nine hundred ninety nine million nine hundred ninety nine thousand nine hundred ninety ninth");
+        let l = lex();
+        assert!(!phonemes(&l, "the 2000000000000000th time").is_empty());
     }
 
     #[test]
