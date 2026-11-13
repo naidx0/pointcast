@@ -3251,14 +3251,19 @@ html[data-theme="dark"] .main-wash {
   opacity: 0.19;
 }
 /* Settings › General › Appearance: a short live sample of the chosen voice wave beside its choice. */
+/* Drawn in a small capsule like the real one: dark glass, white ink, never the accent. */
 .wave-preview {
-  width: 120px;
-  height: 26px;
+  width: 132px;
+  height: 32px;
   flex: none;
   display: flex;
   align-items: center;
-  color: var(--accent, #2b55f0);
-  --line-ink: var(--accent, #2b55f0);
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(22, 22, 26, 0.86);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.92);
+  --line-ink: rgba(255, 255, 255, 0.92);
 }
 .wave-preview > * {
   width: 100%;

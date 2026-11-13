@@ -1242,6 +1242,7 @@ fn settings_view(svc: &App) -> Value {
     v["computer_use"] = json!(s.computer_use);
     v["computer_trust"] = json!(s.computer_trust);
     v["keep_audio"] = json!(s.keep_audio);
+    v["history_keep"] = json!(s.history_keep);
     v["picture_paths"] = json!(s.picture_paths);
     v["wave_style"] = json!(s.wave());
     v["voice_boost"] = json!(s.voice_boost);
