@@ -24,23 +24,19 @@
   - stale macOS permissions after an update ("Reset and ask again");
   - one drag rule for every window, and windows stay where they were put.
 
-## In flight when this was written
+## Voice review fixes (merged)
 
-- Branch `local/voice-fixes` in `~/dev/pointcast-voicefix`: five review findings in call mode and speech.
-  1. A double-click on Call starts a ghost call that keeps the mic open (HIGH).
-  2. The speaker can deadlock when its stream closes (MEDIUM).
-  3. g2p panics on huge ordinals (MEDIUM-LOW).
-  4. `run()` has no teardown if it panics.
-  5. A call-end race.
-- **If the session died:**
-  - check `git -C ~/dev/pointcast-voicefix log --oneline ea0f25d..`;
-  - re-run `cargo test --lib` (with `CARGO_TARGET_DIR=~/dev/pointcast/src-tauri/target`);
-  - fast-forward merge into `local/assistant-polish`;
-  - rebuild with `npx tauri build --bundles app`.
+Four of the five review findings are fixed, test-locked and merged; the last item, the call-end race, was folded into the first fix. 813 Rust tests pass.
+
+- A second Call click while the microphone opens cancels the start. A call's end, even after a panic, only clears its own state.
+- The speaker closes its stream with the buffer unlocked, so closing never deadlocks.
+- Huge ordinals and numbers never panic the natural voice.
+- A sentence that panics while it is being made is skipped, and the voice goes on to the next one.
+- **Not finished:** the guard against a duplicate Silero download, and the cap on the VAD buffer. The work in progress is saved as `docs/voice-fixes-wip-vad.patch` (not applied, not tested).
 
 ## Next
 
-1. Merge the voice fixes, then rebuild the app. It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
+1. Rebuild the app (the voice fixes are merged). It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
 2. The owner tries a real call, a computer-use task and Kokoro on this Mac.
 3. On the owner's yes: push to main.
    - The Windows code has never been compiled; CI is the first compile.
