@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeybo
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share } from "lucide-react";
+import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share, Volume2 } from "lucide-react";
 import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField, askPress } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
@@ -42,6 +42,8 @@ import {
   onUpdateChecked,
   onUpdateFailed,
   relaunch,
+  speakSample,
+  speakVoices,
   statsGet,
   statsReset,
   onLiveState,
@@ -58,6 +60,7 @@ import {
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { computerView, micStatus } from "@/lib/hardware";
+import { RATES, nearestRate, voiceGroups, voiceLabel, type SpeakVoice } from "@/lib/talkback";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
@@ -200,7 +203,7 @@ export function Settings() {
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
-            <Ai />
+            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -751,7 +754,7 @@ const plain = (e: unknown) => String(e).replace(/^Error: */, "");
 
 /** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
  * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
-function Ai() {
+function Ai({ talk }: { talk?: ReactNode }) {
   const [a, setA] = useState<Assist | null>(null);
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -981,6 +984,7 @@ function Ai() {
           <Toggle label="Only on this computer" on={a.offline_only} set={offline} />
         </Row>
       </div>
+      {talk}
       {groups(a).map((g, i) => (
         <Fragment key={g.kind}>
           <div className="group-title ai-group-title">
@@ -1063,6 +1067,66 @@ function Ai() {
           cancel={() => setConsent(null)}
         />
       ) : null}
+    </>
+  );
+}
+
+/** Talk back: Ask's answers read aloud with a voice of this computer, as they come in. */
+function TalkBack({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const [voices, setVoices] = useState<SpeakVoice[] | null>(null);
+  const [why, setWhy] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    speakVoices().then(
+      (v) => live && setVoices(v),
+      (e) => live && setWhy(plain(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const on = !!cfg.speak_answers && !why;
+  const voice = cfg.speak_voice ?? "";
+  const rate = nearestRate(cfg.speak_rate);
+  const here = navigator.language || "en";
+  const missing = !!voice && !!voices && !voices.some((v) => v.id === voice);
+  const more = platform() === "mac" ? "Add natural voices in System Settings › Accessibility." : "Add voices in Settings › Time & language › Speech.";
+  return (
+    <>
+      <h2 className="group-title">Talk back</h2>
+      <div className="group">
+        <Row label="Read answers aloud" sub={why ?? "Spoken as they come in. Press Esc or start talking to stop."}>
+          {why ? null : <Toggle label="Read answers aloud" on={on} set={(v) => patch({ speak_answers: v })} />}
+        </Row>
+        {on ? (
+          <>
+            <Row label="Voice" sub={more}>
+              <div className="talk-voice">
+                <select className="field" aria-label="Voice" value={voice} disabled={!voices} onChange={(e) => patch({ speak_voice: e.target.value || null })}>
+                  <option value="">System default</option>
+                  {missing ? <option value={voice}>Saved voice (not on this computer)</option> : null}
+                  {voiceGroups(voices ?? [], here).map((g) => (
+                    <optgroup key={g.title} label={g.title}>
+                      {g.voices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {voiceLabel(v, here)}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <button type="button" className="btn plain talk-hear" onClick={() => speakSample(cfg.speak_voice ?? null, rate).catch(() => undefined)}>
+                  <Volume2 size={14} strokeWidth={1.8} />
+                  Hear it
+                </button>
+              </div>
+            </Row>
+            <Row label="Speed">
+              <Seg label="Speed" value={rate} options={RATES} set={(r) => patch({ speak_rate: r })} />
+            </Row>
+          </>
+        ) : null}
+      </div>
     </>
   );
 }

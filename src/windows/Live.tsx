@@ -20,6 +20,7 @@ import {
   onLiveDelta,
   onLiveLevel,
   onLiveState,
+  onSpeaking,
   onSummaryState,
   preview,
   sessionsDelete,
@@ -29,6 +30,7 @@ import {
   sessionsOpen,
   sessionsRename,
   sessionsSearch,
+  speakStop,
   startWindowDrag,
   subscribe,
   summaryGet,
@@ -247,9 +249,13 @@ export function Live() {
     return () => clearTimeout(id);
   }, [v.hide, m.snap.turn]);
 
+  // An answer being read aloud: the first Esc only silences it.
+  const [speaking, setSpeaking] = useState(false);
+  useEffect(() => subscribe(onSpeaking(setSpeaking)), []);
+
   // Esc always works: it makes the picture small again, closes the session list, the summary or the Sent view, stops
-  // what is under way, or closes. Delete takes the picture out; M marks it up. Ctrl+K (Cmd+K) goes to the follow-up
-  // field. The field keeps its own Esc.
+  // reading aloud, stops what is under way, or closes. Delete takes the picture out; M marks it up. Ctrl+K (Cmd+K)
+  // goes to the follow-up field. The field keeps its own Esc.
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
@@ -259,6 +265,7 @@ export function Live() {
         else if (sheet) setSheet(false);
         else if (sumOpen) setSumOpen(false);
         else if (sentOf != null) setSentOf(null);
+        else if (speaking) speakStop().catch(noop);
         else (v.stop ? liveStop() : liveClose()).catch(noop);
       } else if ((e.key === "Delete" || e.key === "Backspace") && (v.canDrop || (showField && !!v.next)) && !typing(e.target)) {
         e.preventDefault();
@@ -273,7 +280,7 @@ export function Live() {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [big, sheet, sumOpen, sentOf, showField, v.stop, v.canDrop, canMark, !!v.next]);
+  }, [big, sheet, sumOpen, sentOf, speaking, showField, v.stop, v.canDrop, canMark, !!v.next]);
 
   // Nothing animates while the window is hidden.
   useEffect(() => {
@@ -650,7 +657,10 @@ function StopButton({ stop }: { stop: boolean }) {
       className={`live-hb${stop ? " stop" : ""}`}
       title={stop ? "Stop (Esc)" : "Close (Esc)"}
       aria-label={stop ? "Stop" : "Close"}
-      act={() => void (stop ? liveStop() : liveClose()).catch(noop)}
+      act={() => {
+        speakStop().catch(noop);
+        void (stop ? liveStop() : liveClose()).catch(noop);
+      }}
     >
       {stop ? <Square size={8} fill="currentColor" strokeWidth={0} /> : <X size={16} strokeWidth={1.5} />}
     </PressButton>

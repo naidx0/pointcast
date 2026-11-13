@@ -1421,6 +1421,27 @@ html.win .home-foot .btn {
   flex-wrap: wrap;
   row-gap: 8px;
 }
+
+/* —— Talk back: the voice select with its Hear it beside it, on one line. —— */
+.talk-voice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.talk-voice .field {
+  width: auto;
+  min-width: 150px;
+  max-width: 220px;
+}
+.talk-hear {
+  gap: 5px;
+  white-space: nowrap;
+  color: var(--accent);
+}
+html.win .talk-hear {
+  color: var(--accent);
+}
 .ai-inuse {
   display: inline-flex;
   align-items: center;

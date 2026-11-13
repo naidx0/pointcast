@@ -24,6 +24,7 @@ import {
 import { previewSent } from "./conversation";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
 import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
+import { previewVoices, type SpeakVoice } from "./talkback";
 import { CUSTOM, checkingAssist, normalizeAssist, normalizeModels, previewApply, previewAssist, previewModels, type Assist, type AssistModel } from "./assist";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -182,6 +183,12 @@ export type Config = {
   auto_gpu?: boolean;
   /** Minutes after the speech model's last use before it is freed from memory; 0 keeps it loaded. Treated as 1 when absent. */
   free_memory_minutes?: number;
+  /** Read Ask's answers aloud as they stream in. Off when absent. */
+  speak_answers?: boolean;
+  /** The voice answers are read in, by the system's id for it; null is the system's own choice. */
+  speak_voice?: string | null;
+  /** How fast answers are read, 1 being normal. Treated as 1 when absent. */
+  speak_rate?: number;
   gpu_upgrade?: GpuUpgrade;
   start_at_login: boolean;
   check_updates: boolean;
@@ -512,6 +519,15 @@ export const onMicPeak = on<number>("mic://peak");
 export const onUpdateChecked = on<string | null>("update://checked");
 export const onUpdateFailed = on<string>("update://failed");
 export const onSettingsPane = on<string>("settings://pane");
+
+/** Talk back: the voices this computer has, natural ones first. */
+export const speakVoices = (): Promise<SpeakVoice[]> => (inTauri ? invoke<SpeakVoice[]>("speak_voices") : Promise.resolve(previewVoices));
+/** Say the sample line in `voice` at `rate`, whether or not answers are read aloud. */
+export const speakSample = (voice: string | null, rate: number) => (inTauri ? invoke<void>("speak_sample", { voice, rate }) : Promise.resolve());
+/** Stop reading aloud, at once. */
+export const speakStop = () => (inTauri ? invoke<void>("speak_stop") : Promise.resolve());
+/** Whether an answer is being read aloud, each time that changes. */
+export const onSpeaking = (fn: (speaking: boolean) => void) => on<{ speaking: boolean }>("speak://state")((p) => fn(p.speaking));
 
 /** Subscribe in an effect; returns the cleanup. */
 export function subscribe(...subs: Promise<UnlistenFn>[]) {
