@@ -166,6 +166,8 @@ pub struct Row {
     /// Its readiness is known, not assumed: signed in as its own app says, a key saved, a server answering. An agent
     /// that is installed but cannot say whether anyone is signed in until it is asked is usable and not sure.
     pub sure: bool,
+    /// It can see and act when "Let the AI see and act" is on.
+    pub acts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -519,7 +521,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                     Way::Agent => r.id == CLAUDE_CODE && line.ends_with(claude::SIGNED_IN),
                     Way::Key | Way::Local => true,
                 };
-            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: route_efforts(r.id, look), typed: r.id == CLAUDE_CODE, pick: pick_of(s, r.id), adds, plan, email, sure }
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: route_efforts(r.id, look), typed: r.id == CLAUDE_CODE, pick: pick_of(s, r.id), adds, plan, email, sure, acts: acts(r, look) }
         })
         .collect();
     let start = (s.assist_provider.as_deref() == Some(codex::ID)).then(|| "low".to_owned());
@@ -742,8 +744,21 @@ pub struct Picked {
     pub effort: Option<String>,
     /// The speed chosen (Codex's service tier); none is standard.
     pub speed: Option<String>,
-    /// "Let the AI see and act" is on and the route can (Claude through Claude Code, for now).
+    /// "Let the AI see and act" is on and the route can: Claude through Claude Code, Codex, or an ACP agent (which
+    /// carries Pointcast's server only when its own `initialize` says it can).
     pub computer: bool,
+}
+
+/// Whether a turn through route `id` can be given Pointcast's computer tools: Claude Code, Codex and the ACP agents
+/// can carry an MCP server; a key or a model on this computer cannot.
+fn may_act(id: &str) -> bool {
+    id == CLAUDE_CODE || id == codex::ID || acp::agent(id).is_some()
+}
+
+/// Whether the AI page can say route `r` acts: an ACP agent only until its `initialize` said it cannot carry an MCP
+/// server over HTTP.
+fn acts(r: &Route, look: &Look) -> bool {
+    may_act(r.id) && look.agent_options.iter().find(|(id, _)| *id == r.id).is_none_or(|(_, o)| o.http != Some(false))
 }
 
 /// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
@@ -765,7 +780,7 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
         model.get_or_insert_with(|| super::claude::MODEL_START.to_owned());
         effort.get_or_insert_with(|| super::claude::EFFORT_START.to_owned());
     }
-    Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s), computer: s.computer_use && r.id == CLAUDE_CODE })
+    Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s), computer: s.computer_use && may_act(r.id) })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -775,7 +790,10 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
     match r.way {
         Way::Plan => Ok(Arc::new(codex_for(p, home))),
         Way::Agent => match acp::agent(r.id) {
-            Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)).choosing(p.model.clone(), p.effort.clone()))),
+            Some(a) => {
+                let computer = if p.computer { super::claude::Computer::app() } else { None };
+                Ok(Arc::new(acp::Acp::new(a, home.join(a.id)).choosing(p.model.clone(), p.effort.clone()).acting(computer)))
+            }
             // Claude through Claude Code. A `Picked` that names it exists only with the owner's OK: `picked` refuses
             // it before, and so nothing is made.
             None => {
@@ -797,6 +815,7 @@ pub fn codex_for(p: &Picked, home: &Path) -> Codex {
         c.effort = Some(e.clone());
     }
     c.speed = p.speed.clone();
+    c.computer = if p.computer { super::claude::Computer::app() } else { None };
     c
 }
 
@@ -1357,6 +1376,21 @@ mod tests {
         choose(&mut s, "openai", Some("m".into()), true, 1).unwrap();
         assert_eq!(forget(&mut s, &keys, "openai"), Ok(()));
         assert!(s.assist_provider.is_none() && s.assist_consent.is_empty());
+    }
+
+    #[test]
+    fn claude_codex_and_the_acp_agents_may_act_and_an_agent_that_said_it_cannot_carry_a_server_is_said_to_not_act_yet() {
+        let id = |r: &str| route(r).unwrap();
+        let mut look = Look::default();
+        for r in [CLAUDE_CODE, codex::ID, "gemini-cli", "copilot", "opencode"] {
+            assert!(may_act(r) && acts(id(r), &look), "{r}");
+        }
+        for r in ["openai", "ollama", CUSTOM, anthropic::ID] {
+            assert!(!may_act(r) && !acts(id(r), &look), "{r}");
+        }
+        look.agent_options = vec![("copilot", acp::Options { http: Some(false), ..Default::default() }), ("gemini-cli", acp::Options { http: Some(true), ..Default::default() })];
+        assert!(!acts(id("copilot"), &look), "its initialize said no");
+        assert!(acts(id("gemini-cli"), &look) && acts(id("opencode"), &look), "said yes, or not greeted yet");
     }
 }
 

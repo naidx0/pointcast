@@ -8,10 +8,12 @@
 use super::child::{self, Launch, Proc, Tail};
 use super::jsonl::{CallError, Client, Incoming, RpcError};
 use super::catalog::Choice;
-use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Mime, Part, Provider, State, Turn, TurnId};
+use super::claude::{Computer, Lease};
+use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Mime, Part, Provider, Role, State, Turn, TurnId};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -61,6 +63,10 @@ pub struct Options {
     /// The config ids they are set by; a model without one is set by `session/set_model`.
     pub model_id: Option<String>,
     pub effort_id: Option<String>,
+    /// Whether its `initialize` said it takes an MCP server over HTTP (`mcpCapabilities.http`), which is how it is
+    /// given Pointcast's computer tools; none before it was greeted.
+    #[serde(default)]
+    pub http: Option<bool>,
 }
 
 /// A select's options, groups flattened and each value once, labelled by its name.
@@ -167,6 +173,45 @@ fn reject(params: &Value) -> Value {
     }
 }
 
+/// The answer to a permission for one of Pointcast's computer tools: its allow-once option, else a rejection. Never
+/// "always": each call is asked about again.
+fn allow(params: &Value) -> Value {
+    let options = params["options"].as_array().cloned().unwrap_or_default();
+    match options.iter().find(|o| o["kind"].as_str() == Some("allow_once")).and_then(|o| o["optionId"].as_str()) {
+        Some(id) => json!({ "outcome": { "outcome": "selected", "optionId": id } }),
+        None => reject(params),
+    }
+}
+
+/// The name Pointcast's own MCP server goes by in a session that may act. Not "pointcast": the agent's own settings may
+/// give that name to the same server (with this install's token, for coding).
+pub const SERVER: &str = super::codex::SERVER;
+
+/// Whether a tool call an agent reports or asks permission for is one of the ten computer tools on Pointcast's own
+/// server. ACP has no field for a tool's name, so each agent says it its own way: an agent's own tool (a shell, an edit,
+/// a fetch) is told apart by its `kind`, and Pointcast's tool by a name the agent gives an MCP tool, as its title (whole,
+/// or before " (") or the start of its id (before "-"), or in its `_meta`. UNCONFIRMED, since no agent here has been
+/// given a server: which of these each agent uses.
+fn pointcast_call(call: &Value) -> bool {
+    if !matches!(call["kind"].as_str(), None | Some("other")) {
+        return false;
+    }
+    let forms = |n: &str| [n.to_owned(), format!("{SERVER}__{n}"), format!("mcp__{SERVER}__{n}"), format!("{SERVER}_{n}"), format!("{SERVER}/{n}"), format!("{SERVER}.{n}")];
+    // Whether `said` is one of those names whole, or followed by `after`.
+    let names = |said: &str, after: Option<&str>| {
+        let fits = |f: &str| said == f || after.is_some_and(|a| said.strip_prefix(f).is_some_and(|rest| rest.starts_with(a)));
+        crate::computer::tools::NAMES.iter().any(|n| forms(n).iter().any(|f| fits(f)))
+    };
+    let meta = &call["_meta"];
+    let in_meta = [&meta["toolName"], &meta["tool_name"], &meta["claudeCode"]["toolName"]].iter().filter_map(|v| v.as_str()).any(|t| names(t, None));
+    in_meta || call["title"].as_str().is_some_and(|t| names(t, Some(" ("))) || call["toolCallId"].as_str().is_some_and(|t| names(t, Some("-")))
+}
+
+/// Pointcast's server as `session/new` carries it: over HTTP, with the turn's grant secret as the key.
+fn servers_of(lease: &Lease) -> Value {
+    json!([{ "type": "http", "name": SERVER, "url": lease.url, "headers": [{ "name": "Authorization", "value": format!("Bearer {}", lease.key) }] }])
+}
+
 /// What an error the agent answered with means for the person.
 fn failure_of(e: &RpcError) -> Failure {
     let low = e.message.to_lowercase();
@@ -201,11 +246,30 @@ struct Active {
     /// It was cancelled: nothing more of it is shown, and this is how it ends.
     stopping: Option<Failure>,
     thought: bool,
+    /// The session it runs in: a turn that may act has one of its own.
+    session: String,
+    /// The turn's hold on the computer tools, when it may act: let go before the turn says how it ended.
+    lease: Option<Lease>,
+    /// The ids of the calls of Pointcast's tools the agent made in this turn.
+    tools: HashSet<String>,
+    /// The answer so far, for a session started later to be told; `kept` once it has been.
+    said: String,
+    kept: bool,
 }
 
 impl Active {
+    fn new(id: TurnId, out: Sender<Event>, call: u64, session: String, lease: Option<Lease>) -> Active {
+        Active { id, out, call, stopping: None, thought: false, session, lease, tools: HashSet::new(), said: String::new(), kept: false }
+    }
+
     fn tell(&self, kind: Kind) {
         let _ = self.out.send(Event { turn: self.id, kind });
+    }
+
+    /// The turn ends as `kind`: the computer is let go first.
+    fn end(mut self, kind: Kind) {
+        self.lease.take();
+        self.tell(kind);
     }
 }
 
@@ -214,6 +278,8 @@ struct Queued {
     id: TurnId,
     out: Sender<Event>,
     params: Value,
+    session: String,
+    lease: Option<Lease>,
 }
 
 #[derive(Default)]
@@ -223,6 +289,18 @@ struct Inner {
     next: Option<Queued>,
     serial: u64,
     dead: bool,
+    /// The conversation so far, which a session started for a turn that may act is told.
+    history: Vec<Turn>,
+}
+
+impl Inner {
+    /// Keep what `a` has answered, once, for a session started later.
+    fn keep(&mut self, a: &mut Active) {
+        if !a.kept && !a.said.is_empty() {
+            self.history.push(Turn { role: Role::Assistant, parts: vec![Part::Text(a.said.clone())] });
+        }
+        a.kept = true;
+    }
 }
 
 struct Shared {
@@ -269,18 +347,35 @@ impl Shared {
             match m {
                 Incoming::Request { id, method, params } => {
                     let _ = if method == "session/request_permission" {
-                        self.rpc.answer(&id, reject(&params))
+                        self.rpc.answer(&id, if self.permits(&params) { allow(&params) } else { reject(&params) })
                     } else {
                         self.rpc.refuse(&id, -32601, "Pointcast offers no files, terminal or tools.")
                     };
                 }
-                Incoming::Notification { method, params } if method == "session/update" => self.updated(&params["update"]),
+                Incoming::Notification { method, params } if method == "session/update" => self.updated(params["sessionId"].as_str(), &params["update"]),
                 Incoming::Notification { .. } => {}
                 Incoming::Reply { id, result } => self.replied(id, result),
                 Incoming::Closed => break,
             }
         }
         self.gone();
+    }
+
+    /// Whether a permission the agent asks for passes: only for a call of one of Pointcast's computer tools, asked in the
+    /// session of the turn under way, which holds the tools and is not being cancelled.
+    fn permits(&self, p: &Value) -> bool {
+        let mut s = self.inner.lock().unwrap();
+        let Some(a) = s.active.as_mut() else { return false };
+        if a.lease.is_none() || a.stopping.is_some() || p["sessionId"].as_str() != Some(a.session.as_str()) {
+            return false;
+        }
+        let call = &p["toolCall"];
+        let id = call["toolCallId"].as_str().unwrap_or_default();
+        let ours = (!id.is_empty() && a.tools.contains(id)) || pointcast_call(call);
+        if ours && !id.is_empty() {
+            a.tools.insert(id.to_owned());
+        }
+        ours
     }
 
     /// The agent is gone: whatever was being answered, or waited to be, fails with what it said last.
@@ -295,9 +390,11 @@ impl Shared {
         }
         let why = stopped(self.name, &self.last_words());
         if let Some(a) = a {
-            a.tell(Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(why.clone()))));
+            let kind = Kind::Failed(a.stopping.clone().unwrap_or(Failure::Broken(why.clone())));
+            a.end(kind);
         }
         if let Some(q) = q {
+            drop(q.lease);
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Broken(why)) });
         }
     }
@@ -305,11 +402,11 @@ impl Shared {
     fn send_next(&self, q: Option<Queued>) {
         let Some(q) = q else { return };
         let call = self.rpc.reserve();
-        self.inner.lock().unwrap().active = Some(Active { id: q.id, out: q.out, call, stopping: None, thought: false });
+        self.inner.lock().unwrap().active = Some(Active::new(q.id, q.out, call, q.session, q.lease));
         if self.post_as(call, "session/prompt", q.params).is_err() {
             let a = self.inner.lock().unwrap().active.take_if(|a| a.call == call);
             if let Some(a) = a {
-                a.tell(Kind::Failed(Failure::Broken(stopped(self.name, &self.last_words()))));
+                a.end(Kind::Failed(Failure::Broken(stopped(self.name, &self.last_words()))));
             }
         }
     }
@@ -320,7 +417,11 @@ impl Shared {
             if !s.active.as_ref().is_some_and(|a| a.call == id) {
                 return;
             }
-            (s.active.take(), s.next.take())
+            let mut a = s.active.take();
+            if let Some(a) = a.as_mut() {
+                s.keep(a);
+            }
+            (a, s.next.take())
         };
         let Some(a) = a else { return };
         let end = match (a.stopping.clone(), result) {
@@ -332,19 +433,23 @@ impl Shared {
             },
             (None, Err(e)) => Kind::Failed(failure_of(&e)),
         };
-        a.tell(end);
+        a.end(end);
         self.send_next(q);
     }
 
-    fn updated(self: &Arc<Self>, u: &Value) {
+    fn updated(self: &Arc<Self>, session: Option<&str>, u: &Value) {
         let mut s = self.inner.lock().unwrap();
         let Some(a) = s.active.as_mut() else { return };
-        if a.stopping.is_some() {
+        // A word of an earlier session is not this turn's.
+        if a.stopping.is_some() || session.is_some_and(|id| id != a.session) {
             return;
         }
         match u["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    if !a.kept {
+                        a.said.push_str(t);
+                    }
                     a.tell(Kind::Delta(t.to_owned()));
                 }
             }
@@ -352,7 +457,18 @@ impl Shared {
                 a.thought = true;
                 a.tell(Kind::Thinking);
             }
-            // The agent began to act on the computer: cancel the turn, which ends refused.
+            // One of Pointcast's computer tools, in a turn that holds them: the agent is working, which keeps the panel's
+            // wait alive.
+            Some("tool_call" | "tool_call_update") if a.lease.is_some() && (u["toolCallId"].as_str().is_some_and(|id| a.tools.contains(id)) || pointcast_call(u)) => {
+                if let Some(id) = u["toolCallId"].as_str().filter(|id| !id.is_empty()) {
+                    a.tools.insert(id.to_owned());
+                }
+                if !a.thought {
+                    a.thought = true;
+                    a.tell(Kind::Thinking);
+                }
+            }
+            // The agent began to act on the computer any other way: cancel the turn, which ends refused.
             Some("tool_call" | "tool_call_update") => {
                 drop(s);
                 self.stop_for(Failure::Refused, false);
@@ -369,14 +485,16 @@ impl Shared {
         if let Some(q) = q {
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Stopped) });
         }
-        let session = s.session.clone();
         let Some(a) = s.active.as_mut() else { return };
         if a.stopping.is_some() {
             return;
         }
         a.stopping = Some(why);
-        let id = a.id;
+        // The computer first, at once: a tool call after a stop is refused.
+        let lease = a.lease.take();
+        let (id, session) = (a.id, a.session.clone());
         drop(s);
+        drop(lease);
         self.cancel_turn(&session);
         let me = self.clone();
         std::thread::spawn(move || {
@@ -403,9 +521,11 @@ impl Shared {
                 p.end();
             }
             if let Some(a) = a {
-                a.tell(Kind::Failed(a.stopping.clone().unwrap_or(Failure::Stopped)));
+                let kind = Kind::Failed(a.stopping.clone().unwrap_or(Failure::Stopped));
+                a.end(kind);
             }
             if let Some(q) = q {
+                drop(q.lease);
                 let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Broken(format!("{} would not stop, so Pointcast ended it. Ask again.", me.name))) });
             }
         });
@@ -420,9 +540,10 @@ impl Shared {
             (s.active.take(), s.next.take())
         };
         if let Some(a) = a {
-            a.tell(Kind::Failed(Failure::Stopped));
+            a.end(Kind::Failed(Failure::Stopped));
         }
         if let Some(q) = q {
+            drop(q.lease);
             let _ = q.out.send(Event { turn: q.id, kind: Kind::Failed(Failure::Stopped) });
         }
         self.rpc.hang_up();
@@ -440,6 +561,42 @@ pub struct Start<'a> {
     pub earlier: &'a [Turn],
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// The conversation may see and act, when the agent can carry Pointcast's server; none keeps the fence of today.
+    pub computer: Option<Computer>,
+}
+
+/// Start a session in `cwd` with the MCP servers `servers`, and set the model, then the effort, each only when chosen,
+/// offered by this session and not what it started with. Its id, and what it offered before anything was set.
+fn session_in(shared: &Shared, cwd: &Path, servers: Value, model: Option<&str>, effort: Option<&str>) -> Result<(String, Options), Failure> {
+    let made = shared.call("session/new", json!({ "cwd": cwd.to_string_lossy(), "mcpServers": servers }), ANSWER_WITHIN)?;
+    let session = made["sessionId"].as_str().unwrap_or_default().to_owned();
+    if session.is_empty() {
+        return Err(Failure::Broken(format!("{} started no conversation.", shared.name)));
+    }
+    let offered = options_of(&made);
+    let mut now = offered.clone();
+    if let Some(m) = model.filter(|m| *m != DEFAULT && now.models.iter().any(|c| c.id == *m && !c.default)) {
+        let set = match &now.model_id {
+            Some(id) => shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": m }), ANSWER_WITHIN)?,
+            None => shared.call("session/set_model", json!({ "sessionId": session, "modelId": m }), ANSWER_WITHIN)?,
+        };
+        // A model can change which efforts there are: the agent's answer says them all again.
+        if set["configOptions"].is_array() {
+            now = options_of(&set);
+        }
+    }
+    if let (Some(e), Some(id)) = (effort.filter(|e| *e != DEFAULT && now.efforts.iter().any(|c| c.id == *e && !c.default)), &now.effort_id) {
+        shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": e }), ANSWER_WITHIN)?;
+    }
+    Ok((session, offered))
+}
+
+/// What goes before a session's first question: `fence` with the instructions, then what was said before.
+fn preamble_of(fence: &str, system: &str, earlier: &[Turn], pictures: bool) -> Vec<Part> {
+    let fence = if system.trim().is_empty() { fence.to_owned() } else { format!("{fence}\n\n{}", system.trim()) };
+    let mut preamble = vec![Part::Text(fence)];
+    preamble.extend(replay(earlier, if pictures { KEEP_PICTURES } else { 0 }));
+    preamble
 }
 
 /// A conversation with an ACP agent: greeted, with a session of its own.
@@ -451,6 +608,16 @@ pub struct AcpChat {
     pub options: Options,
     /// What goes before the first question: the fence, the instructions and what a resumed conversation said.
     preamble: Vec<Part>,
+    /// The conversation may act (and the agent can carry Pointcast's server): each turn holds a grant and runs in a
+    /// session of its own, given that grant's key.
+    computer: Option<Computer>,
+    /// What each session that may act is started with.
+    cwd: PathBuf,
+    system: String,
+    model: Option<String>,
+    effort: Option<String>,
+    /// Where the options a session offered are kept for Settings, once one has started.
+    cache: Option<PathBuf>,
 }
 
 impl AcpChat {
@@ -463,45 +630,47 @@ impl AcpChat {
         cwd: &Path,
         start: Start,
     ) -> Result<AcpChat, Failure> {
-        let Start { system, earlier, model, effort } = start;
+        let Start { system, earlier, model, effort, computer } = start;
         let (rpc, incoming) = Client::rpc2(reader, writer);
         let tail = proc.as_ref().map(Proc::tail);
         let shared = Arc::new(Shared { rpc, name, inner: Mutex::default(), proc: Mutex::new(proc), tail });
         let pump = shared.clone();
         std::thread::spawn(move || pump.run(incoming));
-        let greet = || -> Result<(bool, String, Options), Failure> {
+        let greet = || -> Result<(bool, String, Options, Option<Computer>), Failure> {
             let hello = shared.call("initialize", initialize(), START_WITHIN)?;
             let pictures = hello["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true);
-            let made = shared.call("session/new", json!({ "cwd": cwd.to_string_lossy(), "mcpServers": [] }), ANSWER_WITHIN)?;
-            let session = made["sessionId"].as_str().unwrap_or_default().to_owned();
-            if session.is_empty() {
-                return Err(Failure::Broken(format!("{name} started no conversation.")));
+            // Pointcast's server goes over HTTP, so only an agent that says it takes one can be given it. One that does
+            // not answers as if the setting were off, and the AI page says it can't act yet.
+            let http = hello["agentCapabilities"]["mcpCapabilities"]["http"].as_bool() == Some(true);
+            let computer = computer.filter(|_| http);
+            // One that may act starts its session with its first turn, once that turn holds the tools: the session is
+            // given the turn's key as it starts.
+            if computer.is_some() {
+                return Ok((pictures, String::new(), Options { http: Some(http), ..Options::default() }, computer));
             }
-            // The model, then the effort, each only when chosen, offered by this session and not what it started with.
-            let offered = options_of(&made);
-            let mut now = offered.clone();
-            if let Some(m) = model.filter(|m| *m != DEFAULT && now.models.iter().any(|c| c.id == *m && !c.default)) {
-                let set = match &now.model_id {
-                    Some(id) => shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": m }), ANSWER_WITHIN)?,
-                    None => shared.call("session/set_model", json!({ "sessionId": session, "modelId": m }), ANSWER_WITHIN)?,
-                };
-                // A model can change which efforts there are: the agent's answer says them all again.
-                if set["configOptions"].is_array() {
-                    now = options_of(&set);
-                }
-            }
-            if let (Some(e), Some(id)) = (effort.filter(|e| *e != DEFAULT && now.efforts.iter().any(|c| c.id == *e && !c.default)), &now.effort_id) {
-                shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": e }), ANSWER_WITHIN)?;
-            }
-            Ok((pictures, session, offered))
+            let (session, offered) = session_in(&shared, cwd, json!([]), model, effort)?;
+            Ok((pictures, session, Options { http: Some(http), ..offered }, None))
         };
         match greet() {
-            Ok((pictures, session, options)) => {
-                shared.inner.lock().unwrap().session = session;
-                let fence = if system.trim().is_empty() { NO_TOOLS.to_owned() } else { format!("{NO_TOOLS}\n\n{}", system.trim()) };
-                let mut preamble = vec![Part::Text(fence)];
-                preamble.extend(replay(earlier, if pictures { KEEP_PICTURES } else { 0 }));
-                Ok(AcpChat { shared, pictures, options, preamble })
+            Ok((pictures, session, options, computer)) => {
+                {
+                    let mut s = shared.inner.lock().unwrap();
+                    s.session = session;
+                    s.history = earlier.to_vec();
+                }
+                let preamble = if computer.is_some() { Vec::new() } else { preamble_of(NO_TOOLS, system, earlier, pictures) };
+                Ok(AcpChat {
+                    shared,
+                    pictures,
+                    options,
+                    preamble,
+                    computer,
+                    cwd: cwd.to_owned(),
+                    system: system.to_owned(),
+                    model: model.map(str::to_owned),
+                    effort: effort.map(str::to_owned),
+                    cache: None,
+                })
             }
             Err(f) => {
                 shared.shut(Duration::ZERO);
@@ -520,6 +689,35 @@ impl Chat for AcpChat {
         if !self.pictures && has_picture(&turn.parts) {
             return Err(Failure::NoPictures);
         }
+        // A turn that may act holds the tools from before its session can list them until it ends. An earlier turn's
+        // session was given that turn's key, which opens nothing now: this turn gets a session of its own, given the new
+        // key and told the conversation so far (with what an answer still coming has said).
+        let lease = match &self.computer {
+            None => None,
+            Some(c) => {
+                let lease = c.lease()?;
+                let earlier = {
+                    let mut s = self.shared.inner.lock().unwrap();
+                    if s.dead {
+                        return Err(Failure::Broken(format!("{} is not running.", self.shared.name)));
+                    }
+                    let mut a = s.active.take();
+                    if let Some(a) = a.as_mut() {
+                        s.keep(a);
+                    }
+                    s.active = a;
+                    s.history.clone()
+                };
+                let (session, offered) = session_in(&self.shared, &self.cwd, servers_of(&lease), self.model.as_deref(), self.effort.as_deref())?;
+                self.options = Options { http: Some(true), ..offered };
+                if let (Some(f), Ok(b)) = (&self.cache, serde_json::to_vec(&self.options)) {
+                    let _ = std::fs::write(f, b);
+                }
+                self.shared.inner.lock().unwrap().session = session;
+                self.preamble = preamble_of(super::claude::ACTING, &self.system, &earlier, self.pictures);
+                Some(lease)
+            }
+        };
         let mut prompt = blocks(&self.preamble)?;
         prompt.extend(blocks(&turn.parts)?);
         let call = self.shared.rpc.reserve();
@@ -527,23 +725,29 @@ impl Chat for AcpChat {
         if s.dead || s.session.is_empty() {
             return Err(Failure::Broken(format!("{} is not running.", self.shared.name)));
         }
-        let params = json!({ "sessionId": s.session, "prompt": prompt });
+        let session = s.session.clone();
+        let params = json!({ "sessionId": session, "prompt": prompt });
         s.serial += 1;
         let id = TurnId(s.serial);
         self.preamble.clear();
+        s.history.push(turn);
         if s.active.is_some() {
             // An answer still comes: cancel it, and send this turn once the agent says that one has ended.
-            if let Some(old) = s.next.replace(Queued { id, out, params }) {
+            if let Some(old) = s.next.replace(Queued { id, out, params, session, lease }) {
                 let _ = old.out.send(Event { turn: old.id, kind: Kind::Failed(Failure::Stopped) });
             }
             drop(s);
             self.shared.stop_for(Failure::Stopped, true);
             return Ok(id);
         }
-        s.active = Some(Active { id, out, call, stopping: None, thought: false });
+        s.active = Some(Active::new(id, out, call, session, lease));
         drop(s);
-        if self.shared.post_as(call, "session/prompt", params).is_err() && self.shared.inner.lock().unwrap().active.take_if(|a| a.call == call).is_some() {
-            return Err(Failure::Broken(stopped(self.shared.name, &self.shared.last_words())));
+        if self.shared.post_as(call, "session/prompt", params).is_err() {
+            let mut s = self.shared.inner.lock().unwrap();
+            if s.active.take_if(|a| a.call == call).is_some() {
+                s.history.pop();
+                return Err(Failure::Broken(stopped(self.shared.name, &self.shared.last_words())));
+            }
         }
         Ok(id)
     }
@@ -611,11 +815,18 @@ pub struct Acp {
     /// The model and effort the person chose; none leaves the agent's own.
     model: Option<String>,
     effort: Option<String>,
+    /// Each turn may see and act through this, when the agent can carry Pointcast's server; none keeps the fence.
+    computer: Option<Computer>,
 }
 
 impl Acp {
     pub fn new(agent: &'static Agent, home: PathBuf) -> Acp {
-        Acp { agent, home, launch: None, pictures: Mutex::default(), model: None, effort: None }
+        Acp { agent, home, launch: None, pictures: Mutex::default(), model: None, effort: None, computer: None }
+    }
+
+    /// The same, letting each turn see and act through `computer`; none keeps the fence of today.
+    pub fn acting(self, computer: Option<Computer>) -> Acp {
+        Acp { computer, ..self }
     }
 
     /// The same, with the model and effort the person chose.
@@ -634,11 +845,16 @@ impl Acp {
         let pidfile = self.home.join(format!("{}.pid", self.agent.id));
         child::reap_stale(&pidfile);
         let (proc, stdin, stdout) = Proc::start(&launch, &cwd, Some(&pidfile)).map_err(|e| Failure::Broken(format!("{} did not start: {e}", self.agent.name)))?;
-        let chat = AcpChat::over(stdout, stdin, Some(proc), self.agent.name, &cwd, Start { system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref() })?;
+        let start = Start { system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref(), computer: self.computer.clone() };
+        let mut chat = AcpChat::over(stdout, stdin, Some(proc), self.agent.name, &cwd, start)?;
         *self.pictures.lock().unwrap() = Some(chat.pictures);
-        // Kept for Settings; a cache that cannot be written only means the pane waits for the next session.
-        if let Ok(b) = serde_json::to_vec(&chat.options) {
-            let _ = std::fs::write(options_file(&self.home), b);
+        // Kept for Settings; a cache that cannot be written only means the pane waits for the next session. One that may
+        // act has no session yet: its first turn's session writes it.
+        chat.cache = Some(options_file(&self.home));
+        if chat.computer.is_none() {
+            if let Ok(b) = serde_json::to_vec(&chat.options) {
+                let _ = std::fs::write(options_file(&self.home), b);
+            }
         }
         Ok(chat)
     }
@@ -700,11 +916,38 @@ pub mod tests {
     }
 
     fn update(say: &dyn Fn(Value), kind: &str, more: Value) {
+        update_in(say, SESSION, kind, more)
+    }
+
+    fn update_in(say: &dyn Fn(Value), session: &str, kind: &str, more: Value) {
         let mut u = json!({ "sessionUpdate": kind });
         for (k, v) in more.as_object().cloned().unwrap_or_default() {
             u[k] = v;
         }
-        say(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": SESSION, "update": u } }));
+        say(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": u } }));
+    }
+
+    /// The tool calls and permissions of a turn that may act, in "acting" mode, as what it is asked says. A permission
+    /// is asked by its id here; the turn ends once every one is answered (`finish`).
+    fn act(say: &dyn Fn(Value), session: &str, asked: &str) -> (Vec<u64>, bool) {
+        let options = json!([{ "optionId": "yes", "name": "Allow", "kind": "allow_once" }, { "optionId": "always", "name": "Always", "kind": "allow_always" }, { "optionId": "no", "name": "Reject", "kind": "reject_once" }]);
+        let permit = |id: u64, in_session: &str, call: Value| say(json!({ "jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": { "sessionId": in_session, "toolCall": call, "options": options } }));
+        if asked.contains("bash") {
+            update_in(say, session, "tool_call", json!({ "toolCallId": "shell-1", "title": "ls", "kind": "execute", "status": "pending" }));
+            return (Vec::new(), false);
+        }
+        let ours = json!({ "toolCallId": "pointcast_apps-1", "title": "pointcast_apps (pointcast_turn MCP Server)", "kind": "other", "status": "pending" });
+        update_in(say, session, "tool_call", ours);
+        if asked.contains("slowly") {
+            update_in(say, session, "agent_message_chunk", json!({ "content": { "type": "text", "text": WORDS[0] } }));
+            return (Vec::new(), false);
+        }
+        permit(920, session, json!({ "toolCallId": "pointcast_apps-1" }));
+        permit(921, session, json!({ "toolCallId": "shell-2", "title": "pointcast_click (pointcast_turn MCP Server)", "kind": "execute" }));
+        permit(922, session, json!({ "toolCallId": "other-1", "title": "rm -rf ~", "kind": "other" }));
+        permit(923, "sess-earlier", json!({ "toolCallId": "pointcast_click-9", "title": "pointcast_click", "kind": "other" }));
+        update_in(say, session, "tool_call_update", json!({ "toolCallId": "pointcast_apps-1", "status": "completed" }));
+        (vec![920, 921, 922, 923], true)
     }
 
     fn chunk(say: &dyn Fn(Value), kind: &str, text: &str) {
@@ -724,6 +967,9 @@ pub mod tests {
         // Pointcast has answered every request the stand-in made of it.
         let mut asked: Vec<u64> = Vec::new();
         let mut cancelled = false;
+        // In "acting" mode: the session made last, and a turn that ends once its permissions are answered.
+        let (mut sessions, mut session) = (0u32, SESSION.to_owned());
+        let mut finish: Option<Value> = None;
         for line in input.lines() {
             let Ok(line) = line else { break };
             let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
@@ -734,8 +980,16 @@ pub mod tests {
             }
             let reply = |result: Value| say(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
             match m["method"].as_str() {
+                Some("initialize") if mode == "acting" => {
+                    reply(json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": false, "promptCapabilities": { "image": true }, "mcpCapabilities": { "http": true, "sse": false } }, "authMethods": [] }))
+                }
                 Some("initialize") => {
                     reply(json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": false, "promptCapabilities": { "image": mode != "noimage" } }, "authMethods": [] }))
+                }
+                Some("session/new") if mode == "acting" => {
+                    sessions += 1;
+                    session = format!("sess-{sessions}");
+                    reply(json!({ "sessionId": session }));
                 }
                 Some("session/new") if mode == "signedout" => say(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Authentication required" } })),
                 Some("session/new") if mode == "options" => reply(json!({ "sessionId": SESSION, "configOptions": OPTIONS.clone() })),
@@ -744,6 +998,16 @@ pub mod tests {
                 Some("session/set_config_option") => reply(json!({ "configOptions": OPTIONS.clone() })),
                 Some("session/set_model") => reply(json!({})),
                 Some("session/prompt") => match mode {
+                    "acting" => {
+                        let asked_text = m["params"]["prompt"].as_array().and_then(|p| p.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_owned();
+                        let (ids, ends) = act(&say, &session, &asked_text);
+                        asked = ids;
+                        if ends {
+                            finish = Some(id.clone());
+                        } else {
+                            pending = Some(id.clone());
+                        }
+                    }
                     "tool" => {
                         chunk(&say, "agent_message_chunk", "Let me look");
                         update(&say, "tool_call", json!({ "toolCallId": "t1", "title": "Read file", "kind": "read", "status": "pending" }));
@@ -774,6 +1038,14 @@ pub mod tests {
                 Some("session/cancel") => cancelled = true,
                 _ => {}
             }
+            if asked.is_empty() {
+                if let Some(p) = finish.take() {
+                    for w in WORDS {
+                        update_in(&say, &session, "agent_message_chunk", json!({ "content": { "type": "text", "text": w } }));
+                    }
+                    say(json!({ "jsonrpc": "2.0", "id": p, "result": { "stopReason": "end_turn" } }));
+                }
+            }
             if cancelled && asked.is_empty() {
                 cancelled = false;
                 if let Some(p) = pending.take() {
@@ -793,7 +1065,7 @@ pub mod tests {
         std::thread::spawn(move || {
             serve(mode, std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone()));
         });
-        (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "Be brief.", earlier, model: None, effort: None }), seen)
+        (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "Be brief.", earlier, model: None, effort: None, computer: None }), seen)
     }
 
     fn wire(mode: &'static str) -> (AcpChat, Seen) {
@@ -890,7 +1162,7 @@ pub mod tests {
             let seen = Seen::default();
             let log = seen.clone();
             std::thread::spawn(move || serve("options", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
-            (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model: Some("flash-1"), effort: Some("high") }), seen)
+            (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model: Some("flash-1"), effort: Some("high"), computer: None }), seen)
         };
         let mut chat = chat.unwrap();
         answer(&mut chat, said("hi"));
@@ -906,7 +1178,7 @@ pub mod tests {
             let seen = Seen::default();
             let log = seen.clone();
             std::thread::spawn(move || serve("options", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
-            let mut chat = AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model, effort }).unwrap();
+            let mut chat = AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model, effort, computer: None }).unwrap();
             answer(&mut chat, said("hi"));
             assert!(sent(&seen, "session/set_config_option").is_empty() && sent(&seen, "session/set_model").is_empty(), "{model:?} {effort:?}");
         }
@@ -917,7 +1189,7 @@ pub mod tests {
         let seen = Seen::default();
         let log = seen.clone();
         std::thread::spawn(move || serve("old-models", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
-        let chat = AcpChat::over(our_in, our_out, None, "Copilot", Path::new(CWD), Start { system: "", earlier: &[], model: Some("fast-1"), effort: Some("high") }).unwrap();
+        let chat = AcpChat::over(our_in, our_out, None, "Copilot", Path::new(CWD), Start { system: "", earlier: &[], model: Some("fast-1"), effort: Some("high"), computer: None }).unwrap();
         assert_eq!(ids(&chat.options.models), [("auto", "Auto", true), ("fast-1", "Fast 1", false)]);
         assert!(chat.options.efforts.is_empty());
         assert_eq!(sent(&seen, "session/set_model").iter().map(|m| m["params"].clone()).collect::<Vec<_>>(), [json!({ "sessionId": SESSION, "modelId": "fast-1" })]);
@@ -1038,5 +1310,151 @@ pub mod tests {
         let leaked: &'static Agent = Box::leak(Box::new(missing));
         assert!(matches!(Acp::new(leaked, scratch("acp-missing")).start("", &[]), Err(Failure::NotInstalled)));
         assert!(Shared::allows("authenticate").is_err() && Shared::allows("session/prompt").is_ok());
+    }
+
+    // Computer use: "Let the AI see and act".
+
+    #[test]
+    fn with_computer_use_off_the_wire_is_byte_for_byte_what_it_was() {
+        let (mut chat, seen) = wire("ok");
+        assert_eq!(answer(&mut chat, said("What is it?")).last(), Some(&Kind::Done));
+        let all = seen.lock().unwrap().clone();
+        let line = |i: usize| {
+            let mut m = all[i].clone();
+            m.as_object_mut().unwrap().remove("id");
+            m.to_string()
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(line(0), format!(r#"{{"jsonrpc":"2.0","method":"initialize","params":{{"clientCapabilities":{{"fs":{{"readTextFile":false,"writeTextFile":false}},"terminal":false}},"clientInfo":{{"name":"pointcast","title":"Pointcast","version":"{version}"}},"protocolVersion":1}}}}"#));
+        assert_eq!(line(1), r#"{"jsonrpc":"2.0","method":"session/new","params":{"cwd":"/pointcast/empty","mcpServers":[]}}"#);
+        assert_eq!(line(2), format!(r#"{{"jsonrpc":"2.0","method":"session/prompt","params":{{"prompt":[{{"text":"{NO_TOOLS}\n\nBe brief.","type":"text"}},{{"text":"What is it?","type":"text"}}],"sessionId":"sess-1"}}}}"#));
+        assert_eq!(all.len(), 3);
+        assert!(Acp::new(agent("gemini-cli").unwrap(), "unused".into()).computer.is_none(), "off unless the setting is on");
+    }
+
+    /// A conversation with the stand-in in `mode` that may act, and its desk.
+    fn acting(mode: &'static str) -> (AcpChat, Seen, &'static crate::computer::Desk) {
+        let (their_in, our_out) = std::io::pipe().unwrap();
+        let (our_in, their_out) = std::io::pipe().unwrap();
+        let seen = Seen::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            serve(mode, std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone()));
+        });
+        let (c, desk) = crate::assist::codex::tests::computer();
+        let start = Start { system: "Be brief.", earlier: &[], model: None, effort: None, computer: Some(c) };
+        (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), start).unwrap(), seen, desk)
+    }
+
+    /// The key each session was given, in order. Never printed.
+    fn keys(seen: &Seen) -> Vec<String> {
+        let auth = |m: &Value| m["params"]["mcpServers"][0]["headers"][0]["value"].as_str().map(|a| a.trim_start_matches("Bearer ").to_owned());
+        sent(seen, "session/new").iter().filter_map(auth).collect()
+    }
+
+    /// What Pointcast answered the request `id` of the stand-in.
+    fn answered(seen: &Seen, id: u64) -> Value {
+        let all = seen.lock().unwrap().clone();
+        all.into_iter().find(|m| m.get("method").is_none() && m["id"] == id).unwrap_or_else(|| panic!("{id} was answered"))["result"].clone()
+    }
+
+    fn picked(option: &str) -> Value {
+        json!({ "outcome": { "outcome": "selected", "optionId": option } })
+    }
+
+    #[test]
+    fn a_turn_that_may_act_gets_a_session_of_its_own_given_pointcast_over_http_and_only_its_tool_permissions_pass() {
+        let (mut chat, seen, desk) = acting("acting");
+        assert_eq!(sent(&seen, "session/new").len(), 0, "no session before the turn");
+        assert!(!desk.granted() && chat.options.http == Some(true));
+        let got = answer(&mut chat, said("open TextEdit"));
+        assert_eq!(got.first(), Some(&Kind::Thinking), "a computer tool reads as working: {got:?}");
+        assert_eq!((words(&got), got.last()), (WORDS.map(String::from).to_vec(), Some(&Kind::Done)), "and is not refused: {got:?}");
+        assert!(!desk.granted(), "the grant goes with the turn");
+        let made = &sent(&seen, "session/new")[0]["params"];
+        let key = keys(&seen)[0].clone();
+        assert!(key.len() == 64 && key.bytes().all(|c| c.is_ascii_hexdigit()), "the grant's secret, 32 bytes as hex");
+        let want = json!({ "cwd": CWD, "mcpServers": [{ "type": "http", "name": "pointcast_turn", "url": "http://127.0.0.1:9/mcp", "headers": [{ "name": "Authorization", "value": format!("Bearer {key}") }] }] });
+        assert_eq!(made, &want);
+        let prompt = sent(&seen, "session/prompt")[0]["params"].clone();
+        assert_eq!(prompt["sessionId"], "sess-1");
+        let fence = prompt["prompt"][0]["text"].as_str().unwrap();
+        assert!(fence.starts_with(crate::assist::claude::ACTING) && fence.ends_with("Be brief.") && !fence.contains("No tools exist"), "{fence}");
+        // Only a call of Pointcast's tool, in the turn's own session, passes, and only once.
+        assert_eq!(answered(&seen, 920), picked("yes"));
+        for id in [921, 922, 923] {
+            assert_eq!(answered(&seen, id), picked("no"), "{id}");
+        }
+
+        // The next turn: a new grant, and a new session given its key and told the conversation so far.
+        assert_eq!(answer(&mut chat, said("and type hello")).last(), Some(&Kind::Done));
+        let both = keys(&seen);
+        assert_eq!(both.len(), 2);
+        assert_ne!(both[0], both[1], "each turn's key is its own");
+        let second = sent(&seen, "session/prompt")[1]["params"].clone();
+        assert_eq!(second["sessionId"], "sess-2");
+        let text: String = second["prompt"].as_array().unwrap().iter().filter_map(|b| b["text"].as_str()).collect();
+        assert!(text.starts_with(crate::assist::claude::ACTING) && text.contains("open TextEdit") && text.contains(&WORDS.concat()) && text.ends_with("and type hello"), "{text}");
+    }
+
+    #[test]
+    fn a_stale_key_opens_nothing_once_a_new_turn_holds_the_tools_and_a_stop_drops_the_grant_at_once() {
+        let (mut chat, seen, desk) = acting("acting");
+        assert_eq!(answer(&mut chat, said("open TextEdit")).last(), Some(&Kind::Done));
+        let (tx, rx) = channel();
+        chat.ask(said("type slowly"), tx).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).map(|e| e.kind), Ok(Kind::Thinking));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).map(|e| e.kind), Ok(Kind::Delta(WORDS[0].into())));
+        let k = keys(&seen);
+        assert!(desk.granted());
+        assert!(desk.grants.by_secret(k[0].as_bytes()).is_none(), "the first turn's key is refused");
+        assert!(desk.grants.by_secret(k[1].as_bytes()).is_some(), "the turn under way holds its own");
+        (chat.stopper())();
+        assert!(!desk.granted() && desk.grants.by_secret(k[1].as_bytes()).is_none(), "a stop drops the grant at once");
+        assert_eq!(collect(&rx), [Kind::Failed(Failure::Stopped)]);
+        assert_eq!(sent(&seen, "session/cancel").last().unwrap()["params"], json!({ "sessionId": "sess-2" }));
+    }
+
+    #[test]
+    fn in_a_turn_that_may_act_any_other_tool_still_ends_it_as_refused() {
+        let (mut chat, _seen, desk) = acting("acting");
+        assert_eq!(answer(&mut chat, said("run bash")), [Kind::Failed(Failure::Refused)]);
+        assert!(!desk.granted());
+    }
+
+    #[test]
+    fn an_agent_that_cannot_take_a_server_over_http_is_asked_as_if_the_setting_were_off() {
+        let (mut chat, seen, desk) = acting("ok");
+        assert_eq!(chat.options.http, Some(false), "the AI page says it can't act yet");
+        assert_eq!(answer(&mut chat, said("open TextEdit")).last(), Some(&Kind::Done));
+        assert!(!desk.granted());
+        assert_eq!(sent(&seen, "session/new")[0]["params"], json!({ "cwd": CWD, "mcpServers": [] }));
+        assert!(sent(&seen, "session/prompt")[0]["params"]["prompt"][0]["text"].as_str().unwrap().starts_with(NO_TOOLS));
+    }
+
+    #[test]
+    fn a_tool_call_is_pointcasts_only_when_an_mcp_name_of_one_of_the_ten_tools_says_so_and_its_kind_is_not_the_agents_own() {
+        for ours in [
+            json!({ "toolCallId": "c1", "title": "pointcast_click", "kind": "other" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_click (pointcast_turn MCP Server)", "kind": "other" }),
+            json!({ "toolCallId": "pointcast_type-1731", "title": "{\"text\":\"hi\"}", "kind": "other" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_turn_pointcast_apps" }),
+            json!({ "toolCallId": "c1", "title": "mcp__pointcast_turn__pointcast_screen" }),
+            json!({ "toolCallId": "c1", "title": "Screen", "_meta": { "claudeCode": { "toolName": "mcp__pointcast_turn__pointcast_screen" } } }),
+        ] {
+            assert!(pointcast_call(&ours), "{ours}");
+        }
+        for theirs in [
+            json!({ "toolCallId": "c1", "title": "pointcast_click", "kind": "execute" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_click (pointcast_turn MCP Server)", "kind": "edit" }),
+            json!({ "toolCallId": "c1", "title": "echo pointcast_click", "kind": "other" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_clicker", "kind": "other" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_click; rm -rf ~", "kind": "other" }),
+            json!({ "toolCallId": "c1", "title": "pointcast_latest", "kind": "other" }),
+            json!({ "toolCallId": "notes_pointcast_click-1", "kind": "other" }),
+            json!({ "toolCallId": "c1" }),
+        ] {
+            assert!(!pointcast_call(&theirs), "{theirs}");
+        }
     }
 }
