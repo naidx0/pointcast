@@ -33,6 +33,21 @@ Local only (owner, 2026-11-12): branch `local/assistant-polish`, never pushed. T
 - **Gate.** `src/lib/live.test.mjs` (`panelWidth`, `panelHeight` with a chosen height, `dragSize`, `parsePanelSize`) and `platform.rs` (`panel_width`).
 - **Not yet seen in the real app.** A drag in the Tauri window is still to be checked on this Mac.
 
+### Glacier look and the icon blue (owner, 2026-11-12)
+
+- **The accent is the app icon's blue.** `#2b55f0` in light mode (white text on it 5.7:1), `#2f5bff` for dark-mode buttons (5.2:1) and `#8ab0ff` for dark-mode links (7:1). The same blue is in the sidebar tiles, the dictation capsule and the markup overlay.
+- **Onboarding.** A framed Glacier band across the top: tall on the welcome step, with the app icon half on it, and a slim ribbon on the steps after.
+  - The content sits on the plain window surface. No frosted card floats on the art (the owner found that unnatural).
+  - On Windows the window is frameless, the band runs to the window's edges, and Minimize and Close sit on it.
+- **Settings.** A soft Glacier wash from the window's top edge down, fading as it goes, under the sidebar and the page alike. There is no bar across the top. On Windows the caption buttons float on it, over a clear strip that drags the window and frosts once the page scrolls.
+- **How it's built** (`src/lib/backdrop.ts`, `src/components/Backdrop.tsx`, `src/components/WinBar.tsx`):
+  - The painting is one SVG image, built once, and moved only by transform.
+  - It drifts slowly, rests while the window is in the background, and holds still under reduced motion. The wash goes away under Reduce Transparency.
+- **Reference study.** `docs/design/reference-study.md` covers Cluely, Clicky, Wispr Flow, Superwhisper, Raycast and xAI. Rules adopted so far:
+  - the dictation capsule breathes too (two layers), which answers the earlier open question;
+  - a widened Ask panel keeps a 680 px text column;
+  - every window is drawn before it is shown (already true: all windows start hidden).
+
 ## Next (the assistant direction)
 
 The owner's vision is a Siri-like, all-in-one assistant on Mac and Windows: you talk and point, and it answers or acts, through whichever AI you already use.
@@ -50,5 +65,4 @@ The owner's vision is a Siri-like, all-in-one assistant on Mac and Windows: you 
 
 ## Open for the owner
 
-- Should the dictation capsule also switch to the breathing wave, or keep the pen trace?
 - On log-on, should the panel resume the last session automatically, or offer it with one click? Suggested: offer it.
