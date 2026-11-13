@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice wave drafts</title>
+<style>
+  :root { --bg: #161617; --panel: rgba(30, 30, 30, 0.92); --line: rgba(255, 255, 255, 0.08); --ink: rgba(255, 255, 255, 0.9); --quiet: rgba(255, 255, 255, 0.55); --accent: #0a84ff; --red: #ff453a; }
+  :root[data-theme="light"] { --bg: #ececee; --panel: rgba(246, 246, 246, 0.95); --line: rgba(0, 0, 0, 0.08); --ink: rgba(0, 0, 0, 0.85); --quiet: rgba(0, 0, 0, 0.5); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 28px 16px 48px; }
+  .wrap { max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .lead { color: var(--quiet); margin: 0 0 18px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .controls button { font: inherit; padding: 5px 12px; border-radius: 999px; border: 0.5px solid var(--line); background: rgba(127,127,127,0.12); color: var(--ink); cursor: pointer; }
+  .controls button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: transparent; }
+  .card { margin: 0 0 14px; }
+  .label { display: flex; justify-content: space-between; align-items: baseline; margin: 0 2px 6px; }
+  .label b { font-weight: 600; }
+  .label span { color: var(--quiet); font-size: 12px; }
+  .panel { position: relative; height: 72px; border-radius: 14px; background: var(--panel); box-shadow: inset 0 0 0 0.5px var(--line), 0 10px 30px rgba(0,0,0,0.25); display: flex; align-items: center; gap: 14px; padding: 0 18px; }
+  .stop { width: 28px; height: 28px; border-radius: 50%; background: rgba(127,127,127,0.18); display: grid; place-items: center; flex: none; }
+  .stop i { width: 9px; height: 9px; border-radius: 2px; background: var(--ink); }
+  canvas { flex: 1; height: 40px; width: 100%; display: block; }
+  .note { color: var(--quiet); margin: 6px 2px 0; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Voice wave drafts for the Ask panel</h1>
+  <p class="lead">Four ways to draw your voice while you speak, in the panel's own size. Each one listens to the same voice, simulated or from your microphone.</p>
+  <div class="controls" role="group" aria-label="Voice source and theme">
+    <button id="sim" aria-pressed="true">Simulated voice</button>
+    <button id="mic" aria-pressed="false">Use my microphone</button>
+    <button id="quiet" aria-pressed="false">Silence</button>
+    <button id="theme" aria-pressed="false">Light</button>
+  </div>
+
+  <div class="card"><div class="label"><b>A · Soft bars</b><span>recommended</span></div>
+    <div class="panel"><div class="stop"><i></i></div><canvas data-style="bars"></canvas></div>
+    <p class="note">Rounded bars that rise from the centre with your voice. A little randomness per bar, eased so it never jitters. When you're silent the bars settle into a quiet dotted rest.</p></div>
+
+  <div class="card"><div class="label"><b>B+ · Breathing wave, livelier</b><span>chosen · what the Ask panel now draws</span></div>
+    <div class="panel"><div class="stop"><i></i></div><canvas data-style="breath"></canvas></div>
+    <p class="note">Each layer travels its own way at its own speed; the frequencies are unrelated and wander, and the swell drifts along the line, so it never settles into one spot or repeats. Faster and taller with your voice, still breathing at silence. Same maths as src/lib/line.ts (breathStep, breathAt).</p></div>
+
+  <div class="card"><div class="label"><b>B · Breathing wave</b><span>first draft</span></div>
+    <div class="panel"><div class="stop"><i></i></div><canvas data-style="wave"></canvas></div>
+    <p class="note">Three soft mirrored waves layered, fading at both ends. No head, no tail. Closest to Siri.</p></div>
+
+  <div class="card"><div class="label"><b>C · Pulse dots</b><span>minimal</span></div>
+    <div class="panel"><div class="stop"><i></i></div><canvas data-style="dots"></canvas></div>
+    <p class="note">Five dots that grow with your voice in a ripple from the centre. The quietest option.</p></div>
+
+  <div class="card"><div class="label"><b>D · Today's line, cleaned up</b><span>for comparison</span></div>
+    <div class="panel"><div class="stop"><i></i></div><canvas data-style="line"></canvas></div>
+    <p class="note">The current single stroke, without the red dot at its tip and with both ends faded, so it no longer reads as something swimming.</p></div>
+</div>
+<script>
+(() => {
+  const canvases = [...document.querySelectorAll("canvas")];
+  let source = "sim", analyser = null, data = null, level = 0, t0 = performance.now();
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const press = (id, on) => document.getElementById(id).setAttribute("aria-pressed", on);
+  // A believable voice: syllables of 120-260 ms, phrases with short pauses.
+  let syl = 0, sylEnd = 0, pauseUntil = 0;
+  function simLevel(now) {
+    if (now < pauseUntil) return 0.03;
+    if (now > sylEnd) {
+      if (Math.random() < 0.12) { pauseUntil = now + 300 + Math.random() * 500; return 0.03; }
+      syl = 0.35 + Math.random() * 0.6; sylEnd = now + 120 + Math.random() * 140;
+    }
+    const k = 1 - Math.abs(((sylEnd - now) / 260) * 2 - 1);
+    return 0.05 + syl * Math.max(0, Math.min(1, k * 1.4));
+  }
+  function micLevel() {
+    analyser.getByteTimeDomainData(data);
+    let s = 0; for (const v of data) { const x = (v - 128) / 128; s += x * x; }
+    return Math.min(1, Math.sqrt(s / data.length) * 4.5);
+  }
+  // Per-bar memory so each bar eases on its own and gets a little of its own randomness.
+  const state = new Map();
+  function fit(c) {
+    const r = c.getBoundingClientRect(), d = devicePixelRatio || 1;
+    if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
+    const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0); return { g, w: r.width, h: r.height };
+  }
+  const ink = () => css("--ink");
+  function bars(c, now) {
+    const { g, w, h } = fit(c); g.clearRect(0, 0, w, h);
+    const n = Math.floor(w / 7), mid = h / 2, gap = w / n;
+    let s = state.get(c); if (!s) { s = Array.from({ length: n }, () => ({ v: 0, j: Math.random() })); state.set(c, s); }
+    g.fillStyle = ink();
+    for (let i = 0; i < n; i++) {
+      const centre = 1 - Math.abs(i - (n - 1) / 2) / (n / 2);                 // taller in the middle
+      const wobble = 0.55 + 0.45 * Math.sin(now / 170 + s[i].j * 6.28);        // a little life of its own
+      const want = Math.max(0.06, Math.min(1, level * 1.7 * (0.35 + 0.65 * centre) * wobble));
+      s[i].v += (want - s[i].v) * (want > s[i].v ? 0.35 : 0.12);                // quick up, slow down
+      const bh = Math.max(3, s[i].v * (h - 6)), x = i * gap + gap / 2 - 1.5;
+      g.globalAlpha = 0.35 + 0.65 * Math.min(1, s[i].v * 2.5);
+      round(g, x, mid - bh / 2, 3, bh, 1.5);
+    }
+    g.globalAlpha = 1;
+  }
+  function round(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.fill(); }
+  function wave(c, now) {
+    const { g, w, h } = fit(c); g.clearRect(0, 0, w, h);
+    let s = state.get(c) ?? { a: 0 }; s.a += (level - s.a) * 0.15; state.set(c, s);
+    const mid = h / 2, amp = Math.max(1.2, Math.min(1, s.a * 1.6) * (h / 2 - 3));
+    const layers = [[1, 0.9, 1.0], [0.6, 0.45, 1.7], [0.35, 0.25, 2.6]];
+    for (const [k, alpha, f] of layers) {
+      g.beginPath();
+      for (let x = 0; x <= w; x += 2) {
+        const u = x / w, env = Math.sin(Math.PI * u) ** 2;                    // fades at both ends
+        const y = mid + Math.sin(u * Math.PI * 2 * f + now / (260 / f)) * amp * k * env;
+        x ? g.lineTo(x, y) : g.moveTo(x, y);
+      }
+      g.strokeStyle = ink(); g.globalAlpha = alpha; g.lineWidth = k === 1 ? 2 : 1.4; g.lineCap = "round"; g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+  function dots(c, now) {
+    const { g, w, h } = fit(c); g.clearRect(0, 0, w, h);
+    let s = state.get(c) ?? { a: 0 }; s.a += (level - s.a) * 0.2; state.set(c, s);
+    const n = 5, mid = h / 2, cx = w / 2, step = 18;
+    g.fillStyle = ink();
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(i - 2), ripple = 0.5 + 0.5 * Math.sin(now / 160 - d * 0.9);
+      const r = 2.5 + s.a * (9 - d * 2) * (0.6 + 0.4 * ripple);
+      g.globalAlpha = 0.45 + 0.55 * Math.min(1, s.a * 2 + (2 - d) * 0.1);
+      g.beginPath(); g.arc(cx + (i - 2) * step, mid, r, 0, 6.283); g.fill();
+    }
+    g.globalAlpha = 1;
+  }
+  function line(c, now) {
+    const { g, w, h } = fit(c); g.clearRect(0, 0, w, h);
+    let s = state.get(c); if (!s) { s = { hist: [] }; state.set(c, s); }
+    s.hist.push(level); const keep = Math.ceil(w / 3); while (s.hist.length > keep) s.hist.shift();
+    const mid = h / 2, grad = g.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, "transparent"); grad.addColorStop(0.18, ink()); grad.addColorStop(0.85, ink()); grad.addColorStop(1, "transparent");
+    g.beginPath();
+    s.hist.forEach((v, i) => { const x = w - (s.hist.length - i) * 3, y = mid + Math.sin(i * 0.9) * v * (h / 2 - 4); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.strokeStyle = grad; g.lineWidth = 1.6; g.lineJoin = g.lineCap = "round"; g.stroke();
+  }
+  // B+: a copy of line.ts breathStep/breathAt.
+  const LAYERS = [{ k: 1, alpha: 0.95, width: 1.8, f: 1, speed: 1 }, { k: 0.72, alpha: 0.5, width: 1.3, f: 1.618, speed: -1.37 }, { k: 0.48, alpha: 0.28, width: 1.1, f: 2.414, speed: 1.83 }];
+  let lastBreath = 0;
+  function breath(c, now) {
+    const { g, w, h } = fit(c); g.clearRect(0, 0, w, h);
+    let b = state.get(c) ?? { phase: 0, drift: 0, amp: 0 };
+    const dt = Math.min(100, lastBreath ? now - lastBreath : 16); lastBreath = now;
+    const want = Math.max(0.06, Math.min(1, level * 1.6)), tau = want > b.amp ? 60 : 260;
+    b.amp += (want - b.amp) * (1 - Math.exp(-dt / tau));
+    b.phase += (dt / 1000) * (1.8 + 4.2 * b.amp); b.drift += dt / 1000; state.set(c, b);
+    const mid = h / 2, half = mid - 3;
+    LAYERS.forEach((L, i) => {
+      const t = b.drift, p = b.phase * L.speed, fm = 1 + 0.22 * Math.sin(t * 0.37 * L.f + i * 2.1);
+      const cc = 0.5 + 0.17 * Math.sin(t * 0.53 + L.f) + 0.07 * Math.sin(t * 1.31 + i), wide = 0.36 + 0.09 * Math.sin(t * 0.29 + i * 1.7);
+      g.beginPath();
+      for (let x = 0; x <= w; x += 2) {
+        const u = x / w;
+        const wave = 0.62 * Math.sin(2 * Math.PI * 1.25 * L.f * fm * u + p) + 0.38 * Math.sin(2 * Math.PI * 2.07 * L.f * u - p * 0.61 + 1.3 * L.f);
+        const y = mid - half * Math.tanh(1.8 * b.amp * L.k * wave * Math.exp(-(((u - cc) / wide) ** 2)) * Math.sin(Math.PI * u));
+        x ? g.lineTo(x, y) : g.moveTo(x, y);
+      }
+      g.strokeStyle = ink(); g.globalAlpha = L.alpha; g.lineWidth = L.width; g.lineCap = g.lineJoin = "round"; g.stroke();
+    });
+    g.globalAlpha = 1;
+  }
+  const draw = { bars, wave, dots, line, breath };
+  function frame(now) {
+    const raw = source === "mic" && analyser ? micLevel() : source === "quiet" ? 0 : simLevel(now);
+    level += (raw - level) * 0.3;
+    for (const c of canvases) draw[c.dataset.style](c, reduce ? 0 : now);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  document.getElementById("sim").onclick = () => { source = "sim"; press("sim", true); press("mic", false); press("quiet", false); };
+  document.getElementById("quiet").onclick = () => { source = "quiet"; press("sim", false); press("mic", false); press("quiet", true); };
+  document.getElementById("mic").onclick = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new AudioContext(); analyser = ctx.createAnalyser(); analyser.fftSize = 1024; data = new Uint8Array(analyser.fftSize);
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      source = "mic"; press("sim", false); press("mic", true); press("quiet", false);
+    } catch { document.getElementById("mic").textContent = "Microphone not allowed"; }
+  };
+  document.getElementById("theme").onclick = (e) => {
+    const light = document.documentElement.dataset.theme !== "light";
+    document.documentElement.dataset.theme = light ? "light" : "dark"; e.target.setAttribute("aria-pressed", light);
+  };
+})();
+</script>
+</body>
+</html>
