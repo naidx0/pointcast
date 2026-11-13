@@ -274,6 +274,7 @@ fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
     };
     let live = live.inner().clone();
     if pressed {
+        speak_stop_now(app);
         if live.listening() {
             *svc.hold_from.lock().unwrap() = None;
             live.release();
@@ -326,17 +327,23 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
                 let s = chooser.settings.lock().unwrap().clone();
                 held.provider(&s)
             }),
-            out: Box::new(move |o| match o {
-                live::Out::State(s) => {
-                    tray::ask(&handle, s.state);
-                    let _ = handle.emit("live://state", &s);
+            out: Box::new(move |o| {
+                // Answers are read aloud from here, whether or not the panel is on screen.
+                if let Some(r) = handle.try_state::<Arc<voice::speak::Reader>>() {
+                    r.hear(&o);
                 }
-                live::Out::Delta { turn, text } => {
-                    let _ = handle.emit("live://delta", json!({ "turn": turn, "text": text }));
+                match o {
+                    live::Out::State(s) => {
+                        tray::ask(&handle, s.state);
+                        let _ = handle.emit("live://state", &s);
+                    }
+                    live::Out::Delta { turn, text } => {
+                        let _ = handle.emit("live://delta", json!({ "turn": turn, "text": text }));
+                    }
+                    live::Out::Show => platform::show_panel(&handle),
+                    live::Out::Hide => hide_window(&handle, platform::PANEL),
+                    live::Out::MarkOver => close_overlay(&handle),
                 }
-                live::Out::Show => platform::show_panel(&handle),
-                live::Out::Hide => hide_window(&handle, platform::PANEL),
-                live::Out::MarkOver => close_overlay(&handle),
             }),
             now: Box::new(now_ms),
             tidy: Box::new(move || tidy.settings.lock().unwrap().tidy),
@@ -360,6 +367,47 @@ fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Hel
         },
         &settings::data_dir(),
     )
+}
+
+/// Answers read aloud with the system's voice, the way the settings say; `speak://state` says when speech starts and
+/// when it has all ended.
+fn reader_for(app: &AppHandle, svc: &Arc<App>) -> Arc<voice::speak::Reader> {
+    let (handle, svc) = (app.clone(), svc.clone());
+    Arc::new(voice::speak::Reader::new(
+        voice::speak::system(),
+        move || {
+            let s = svc.settings.lock().unwrap();
+            s.speak_answers.then(|| voice::speak::How { voice: s.speak_voice.clone(), rate: s.speak_rate })
+        },
+        move |speaking| {
+            let _ = handle.emit("speak://state", json!({ "speaking": speaking }));
+        },
+    ))
+}
+
+/// Stop reading aloud, at once.
+fn speak_stop_now(app: &AppHandle) {
+    if let Some(r) = app.try_state::<Arc<voice::speak::Reader>>() {
+        r.stop();
+    }
+}
+
+/// The voices this computer has, natural ones first. Async: listing them can take a moment.
+#[tauri::command]
+async fn speak_voices(reader: tauri::State<'_, Arc<voice::speak::Reader>>) -> Result<Vec<voice::speak::VoiceInfo>, String> {
+    reader.voices()
+}
+
+/// Say the sample line in `voice` at `rate` (Settings' Hear it), whether or not answers are read aloud.
+#[tauri::command]
+fn speak_sample(reader: tauri::State<'_, Arc<voice::speak::Reader>>, voice: Option<String>, rate: f32) {
+    reader.sample(voice::speak::How { voice, rate });
+}
+
+/// Stop reading aloud (Esc in the panel).
+#[tauri::command]
+fn speak_stop(reader: tauri::State<'_, Arc<voice::speak::Reader>>) {
+    reader.stop();
 }
 
 /// Start a summary of session `id` with the chosen AI; `summary://state` says where it stands.
@@ -1053,6 +1101,9 @@ fn settings_view(svc: &App) -> Value {
     v["voice_boost"] = json!(s.voice_boost);
     v["auto_gpu"] = json!(s.auto_gpu);
     v["free_memory_minutes"] = json!(s.free_memory_minutes);
+    v["speak_answers"] = json!(s.speak_answers);
+    v["speak_voice"] = json!(s.speak_voice);
+    v["speak_rate"] = json!(s.speak_rate);
     v["gpu_upgrade"] = json!(voice::upgrade::status());
     // What Settings › Speech says about this computer and its microphone.
     v["machine"] = json!(voice::machine::this());
@@ -1123,6 +1174,10 @@ fn settings_patch(
     }
     if keys_changed(&cur, &next) {
         rebind(&app, &svc);
+    }
+    // Reading aloud turned off stops what is being read.
+    if cur.speak_answers && !next.speak_answers {
+        speak_stop_now(&app);
     }
     if cur.include_app != next.include_app {
         platform::protect(&app, !next.include_app);
@@ -2317,6 +2372,9 @@ pub fn run() {
             live_take_picture,
             live_sent,
             live_mark,
+            speak_voices,
+            speak_sample,
+            speak_stop,
             sessions_list,
             sessions_open,
             sessions_new,
@@ -2360,6 +2418,7 @@ pub fn run() {
                 survey.refresh(assist::catalog::probes(held.clone(), assist_home()), false, told);
             }
             app.manage(summaries_for(&handle, &svc, held.clone()));
+            app.manage(reader_for(&handle, &svc));
             app.manage(live_for(&handle, &svc, held));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
@@ -2420,7 +2479,14 @@ pub fn run() {
                 let mut told_tray = std::time::Instant::now();
                 loop {
                     let gen = WAKE.gen();
-                    let busy = matches!(svc2.ui().phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
+                    let ui = svc2.ui();
+                    let busy = matches!(ui.phase, Phase::Recording | Phase::Loading | Phase::Transcribing);
+                    // The person talking over an answer being read stops it.
+                    if matches!(ui.phase, Phase::Recording) {
+                        if let Some(r) = handle.try_state::<Arc<voice::speak::Reader>>() {
+                            r.level(ui.level);
+                        }
+                    }
                     if busy {
                         // While an Ask listens the panel's line hears the microphone 30 times a second; the tray and the
                         // menu bar clock still hear of it 10 times a second.

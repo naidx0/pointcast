@@ -216,6 +216,15 @@ pub struct Settings {
     /// route through Claude Code cannot be chosen. Nothing in the app sets it yet.
     #[serde(default)]
     pub assist_claude_code_ok: bool,
+    /// Read Ask's answers aloud as they stream in, with a voice of this computer. Off until the person turns it on.
+    #[serde(default)]
+    pub speak_answers: bool,
+    /// The voice answers are read in, by the system's id for it; none is the system's choice for its language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak_voice: Option<String>,
+    /// How fast answers are read: 1 is normal, from 0.5 to 2.
+    #[serde(default = "default_speak_rate")]
+    pub speak_rate: f32,
 }
 
 /// What was chosen for one AI; none of a field is that AI's own start.
@@ -249,6 +258,9 @@ fn default_zoom_px() -> u32 {
 }
 fn default_free_minutes() -> u32 {
     1
+}
+fn default_speak_rate() -> f32 {
+    1.0
 }
 fn default_mcp() -> String {
     "127.0.0.1:47821".into()
@@ -303,6 +315,9 @@ impl Default for Settings {
             assist_offline_only: false,
             assist_consent: Vec::new(),
             assist_claude_code_ok: false,
+            speak_answers: false,
+            speak_voice: None,
+            speak_rate: default_speak_rate(),
         }
     }
 }
@@ -528,6 +543,23 @@ mod tests {
         mute.save(&path).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains(r#""spoken_anchors": "off""#));
         assert_eq!(Settings::load(&path), mute);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_answers_aloud_is_off_until_turned_on_and_its_voice_and_rate_round_trip() {
+        let dir = std::env::temp_dir().join(format!("pc-speak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let s = Settings::default();
+        assert_eq!((s.speak_answers, s.speak_voice.as_deref(), s.speak_rate), (false, None, 1.0));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"onboarded":true}"#).unwrap();
+        let old = Settings::load(&path);
+        assert_eq!((old.speak_answers, old.speak_voice.as_deref(), old.speak_rate), (false, None, 1.0), "a file from before");
+        let on = Settings { speak_answers: true, speak_voice: Some("com.apple.voice.premium.en-US.Zoe".into()), speak_rate: 1.25, ..s };
+        on.save(&path).unwrap();
+        assert_eq!(Settings::load(&path), on);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
