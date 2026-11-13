@@ -6,7 +6,7 @@
   --ov-line: rgba(255, 255, 255, 0.14);
   --ov-hover: rgba(255, 255, 255, 0.12);
   --ov-on: rgba(255, 255, 255, 0.22);
-  --ov-accent: #0a84ff;
+  --ov-accent: #2f5bff;
   position: fixed;
   inset: 0;
   overflow: hidden;

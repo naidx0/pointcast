@@ -94,6 +94,7 @@ import {
   type Route,
   type RouteView,
 } from "@/lib/assist";
+import { Backdrop } from "@/components/Backdrop";
 
 const PANES = [
   { id: "home", name: "Home", icon: House, tile: "tile-teal" },
@@ -220,6 +221,7 @@ export function Settings() {
   return (
     <div className={`prefs${frameless ? " frameless" : ""}`}>
       <nav className="prefs-side drag" aria-label="Settings" onMouseDown={frameless ? dragWindow : undefined}>
+        <Backdrop kind="wash" className="side-wash" />
         {!mac ? (
           <div className="side-head">
             <img src="/icon-win.png" alt="" />
@@ -247,6 +249,7 @@ export function Settings() {
       </nav>
       {frameless ? <TitleBar /> : null}
       <main ref={main} className="prefs-main" onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 4)}>
+        <Backdrop kind="wash" className="main-wash" />
         <div className={`prefs-bar drag ${scrolled ? "scrolled" : ""}`}>
           <h1 className={mac ? "t-head" : "t-title"} style={mac ? { fontSize: 15 } : undefined}>
             {cur.name}

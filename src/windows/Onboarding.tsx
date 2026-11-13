@@ -3,6 +3,7 @@ import { AudioLines, Check, ChevronRight, ClipboardPaste, MessageCircleQuestion,
 import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
+import { Backdrop } from "@/components/Backdrop";
 import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
 import { askReady, chosenRoute, defaultModel, destination, onboardingChoices, shortName, type Assist, type RouteView } from "@/lib/assist";
 import { BrandTile } from "@/components/Brands";
@@ -82,7 +83,8 @@ export function Onboarding() {
   const getSpeech = () => speech.start(cfg.recommended, cfg, patch);
 
   return (
-    <div className="onb">
+    <div className={`onb at-${models ? "models" : step}`}>
+      <Backdrop kind="band" className="onb-band drag" />
       <div className="onb-body drag">
         {models ? (
           <ModelsStep cfg={cfg} patch={patch} refresh={refresh} speech={speech} />

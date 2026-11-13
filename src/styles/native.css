@@ -18,10 +18,11 @@
   --fs-title: 22px;
   --fs-hero: 28px;
 
-  --accent: #007aff;
-  --accent-press: #0066d6;
+  /* The app icon's blue (owner, 2026-11-12): white on it 5.7:1, it on the light page 5.3:1. */
+  --accent: #2b55f0;
+  --accent-press: #2348d6;
   --on-accent: #ffffff;
-  --accent-wash: rgba(0, 122, 255, 0.12);
+  --accent-wash: rgba(43, 85, 240, 0.12);
   /* Text in the accent colour (links, plain buttons); a separate token so dark skins keep contrast. */
   --link: var(--accent);
   --green: #28cd41;
@@ -66,8 +67,8 @@
   --hud-line: rgba(255, 255, 255, 0.14);
   --hud-ink: rgba(255, 255, 255, 0.92);
   --hud-ink-2: rgba(255, 255, 255, 0.6);
-  /* The HUD is dark in both themes: the accent as each system draws it on dark. */
-  --hud-accent: #0a84ff;
+  /* The HUD is dark in both themes: the icon's blue (white on it 5.2:1). */
+  --hud-accent: #2f5bff;
   --on-hud-accent: #ffffff;
 
   --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
@@ -77,9 +78,11 @@
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --accent: #0a84ff;
-  --accent-press: #0071e3;
-  --accent-wash: rgba(10, 132, 255, 0.2);
+  /* The icon's blue for buttons (white on it 5.2:1); links in its light tint (7:1 on the dark page). */
+  --accent: #2f5bff;
+  --accent-press: #2550e6;
+  --accent-wash: rgba(47, 91, 255, 0.22);
+  --link: #8ab0ff;
   --green: #32d74b;
   --orange: #ff9f0a;
   --red: #ff453a;
@@ -113,9 +116,9 @@ html.win {
   --fs-head: 16px;
   --fs-title: 24px;
   --fs-hero: 28px;
-  --accent: #005fb8;
-  --accent-press: #0067c0;
-  --accent-wash: rgba(0, 95, 184, 0.1);
+  --accent: #2b55f0;
+  --accent-press: #2348d6;
+  --accent-wash: rgba(43, 85, 240, 0.1);
   --label: rgba(0, 0, 0, 0.9);
   --label-2: rgba(0, 0, 0, 0.62);
   --label-3: rgba(0, 0, 0, 0.45);
@@ -137,12 +140,12 @@ html.win {
   --on-hud-accent: #000000;
 }
 html.win[data-theme="dark"] {
-  /* A clear blue for buttons (white text 4.6:1); links keep Windows' light dark-mode accent. */
-  --accent: #0078d4;
-  --accent-press: #106ebe;
+  /* The icon's blue for buttons (white on it 5.2:1); links in its light tint (7:1 on the dark page). */
+  --accent: #2f5bff;
+  --accent-press: #2550e6;
   --on-accent: #ffffff;
-  --link: #60cdff;
-  --accent-wash: rgba(0, 120, 212, 0.22);
+  --link: #8ab0ff;
+  --accent-wash: rgba(47, 91, 255, 0.22);
   --label: #ffffff;
   --label-2: rgba(255, 255, 255, 0.78);
   --label-3: rgba(255, 255, 255, 0.55);
@@ -782,7 +785,7 @@ html.win .row .ico {
   background: linear-gradient(#a1a1a6, #8e8e93);
 }
 .tile-blue {
-  background: linear-gradient(#3d9bff, #007aff);
+  background: linear-gradient(#6f9cff, #2f5bff);
 }
 .tile-orange {
   background: linear-gradient(#ffb340, #ff9500);
@@ -3030,4 +3033,131 @@ html.win .undo-btn {
 .onb-ai-model select {
   flex: none;
   max-width: 260px;
+}
+
+
+/* —— The Glacier backdrop (src/components/Backdrop.tsx): the icon's blues in broad, motion-blurred strokes. One image,
+   turned and drifting by transform only; decorative, never behind text that needs it for contrast. —— */
+.backdrop {
+  position: relative;
+  overflow: hidden;
+  pointer-events: none;
+  isolation: isolate;
+}
+.backdrop-art {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /* A square past the window's diagonal, so the turned painting reaches every corner. */
+  width: 170vmax;
+  height: 170vmax;
+  max-width: none;
+  transform: translate(-50%, -50%) rotate(-62deg);
+  animation: backdrop-drift 48s ease-in-out infinite alternate;
+  will-change: transform;
+  user-select: none;
+}
+@keyframes backdrop-drift {
+  to {
+    transform: translate(-50%, -53%) rotate(-57deg) scale(1.06);
+  }
+}
+.backdrop-grain {
+  position: absolute;
+  inset: 0;
+  background-size: 160px 160px;
+  opacity: 0.13;
+  mix-blend-mode: overlay;
+}
+@media (prefers-reduced-motion: reduce) {
+  .backdrop-art {
+    animation: none;
+  }
+}
+
+/* Onboarding: the art is a framed band at the top, the page is the window's own surface; nothing floats on the art.
+   Tall on the welcome, a slim ribbon on the steps after it. */
+.onb {
+  grid-template-rows: auto 1fr auto;
+}
+.onb-band {
+  margin: 10px 10px 0;
+  height: 64px;
+  border-radius: 12px;
+  transition: height 420ms var(--ease);
+}
+.onb-band::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+}
+html[data-theme="dark"] .onb-band::after {
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+}
+html.win .onb-band {
+  border-radius: 8px;
+}
+.onb.at-welcome .onb-band {
+  height: 196px;
+}
+/* The page paints over the band, so the app icon can sit half on the art, half on the page. */
+.onb-body {
+  position: relative;
+  z-index: 1;
+}
+/* The page scrolls, so it clips what is pulled above its top: the whole page rises over the band's lower edge instead,
+   and only the icon covers the art there. */
+.onb.at-welcome .onb-body,
+html.win .onb.at-welcome .onb-body {
+  margin-top: -56px;
+  padding-top: 0;
+}
+.onb.at-welcome .onb-icon {
+  filter: drop-shadow(0 8px 18px rgba(20, 40, 120, 0.28));
+}
+
+/* Settings: a faint wash at the top of the sidebar and behind the page title, fading out before the first row. */
+.prefs-side,
+.prefs-main {
+  position: relative;
+}
+.prefs-side > :not(.backdrop),
+.prefs-main > :not(.backdrop) {
+  position: relative;
+  z-index: 1;
+}
+.prefs-bar {
+  z-index: 2;
+}
+.side-wash,
+.main-wash {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 260px;
+  z-index: 0;
+  opacity: 0.2;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.5) 45%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.5) 45%, transparent 100%);
+}
+.side-wash .backdrop-art,
+.main-wash .backdrop-art {
+  animation: none;
+  filter: blur(8px);
+}
+.main-wash {
+  height: 200px;
+  opacity: 0.14;
+}
+html[data-theme="dark"] .side-wash {
+  opacity: 0.16;
+}
+html[data-theme="dark"] .main-wash {
+  opacity: 0.1;
+}
+/* At the top of the page the title bar is clear over the wash; once the page scrolls it frosts as before. */
+.prefs-bar:not(.scrolled) {
+  background: transparent;
+  backdrop-filter: none;
 }
