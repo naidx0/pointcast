@@ -36,6 +36,17 @@ Without espeak, words become phonemes in Pointcast from the model's own lexicon 
 Model: `kokoro-multi-lang-v1_0` at full precision, pinned by URL and SHA-256: a 350 MB download (plus the 9 MB runtime if speech has not fetched it), 366 MB kept. Its int8 version (132 MB) made audio slower than it plays on an Apple M5.
 First audio on this Mac (M5, warm voice, speakers awake): 394 ms from a sentence to the device; a sentence plays while the next is made, and a long one starts after its first clause.
 
+**T3 runtime (2026-11-13).** End of turn is Silero VAD v5 (MIT, 2.3 MB, pinned by URL, size and SHA-256) run by the
+same sherpa-onnx 2.0 runtime through its VAD C API, downloaded at the first call; until it is here (or with no runtime)
+a level-only detector stands in. Each 32 ms window is speech or not; `voice/call/turn.rs` makes turns of it: 700 ms of
+silence ends a turn, under 250 ms of speech is none. One microphone stays open for the call (`audio::Feed`, 4 s kept) and
+each turn records from it, so a turn starts 150 ms before its first word. While it speaks, the person barges in after
+160 ms only when 10 dB over its own voice through the speakers (learnt from its first 250 ms of sound, then slowly).
+Hand-run on recorded voices (`say -o`, nothing played): three turns and a barge-in, the barge-in's recording starting
+153 ms before its first sound, its own voice at -24 dB never stopping it.
+Follow-ups: macOS voice processing (echo cancellation) on the call's microphone; an optional Call shortcut needs a
+setting and a Settings field.
+
 ## The stated edge
 
 - Out of scope: cloud voices, voice cloning, phone numbers or real telephony, and singing or sound effects.
