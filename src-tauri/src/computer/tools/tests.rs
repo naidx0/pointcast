@@ -743,3 +743,88 @@ mod plans {
         assert!(ticks.iter().all(|e| e.line().is_none()), "and none is listed under the answer as an action");
     }
 }
+
+/// Mail has the keyboard focus as Accessibility tells it, but Claude is really in front, as when macOS ignored a
+/// request to bring Mail forward. Mail is trusted with keys; Claude is not.
+fn mail_behind(stuck: bool) -> (Desk, Did) {
+    let f = mail();
+    *f.frontmost.lock().unwrap() = Some(crate::computer::fake::app("Claude", 5150));
+    let (d, log) = desk(Fake { stuck, ..f });
+    d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+    (d, log)
+}
+
+#[test]
+fn keys_and_typing_go_nowhere_while_the_cleared_app_is_not_really_in_front() {
+    let (d, log) = mail_behind(true);
+    let _g = d.grants.grant(Duration::from_secs(60));
+    let r = call(&d, "pointcast_key", &json!({ "keys": "cmd+n" }));
+    assert_eq!(status(&r), "refused", "{r}");
+    assert!(first_text(&r).contains("Mail isn't in front, so nothing was typed."), "{r}");
+    let r = call(&d, "pointcast_type", &json!({ "text": "hello" }));
+    assert_eq!(status(&r), "refused", "{r}");
+    assert!(first_text(&r).contains("Mail isn't in front, so nothing was typed."), "{r}");
+    // By id, typed synthetically: refused too, before the click that would focus the field.
+    let mut f = mail();
+    f.tree.nodes[2].actions.clear();
+    *f.frontmost.lock().unwrap() = Some(crate::computer::fake::app("Claude", 5150));
+    let (d2, log2) = desk(f);
+    d2.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+    let _g2 = d2.grants.grant(Duration::from_secs(60));
+    let r = call(&d2, "pointcast_type", &json!({ "id": id_of(&d2, "Subject"), "text": "hi" }));
+    assert_eq!(status(&r), "refused", "{r}");
+    // Setting a value by accessibility lands on that element, wherever the front is.
+    let body = id_of(&d2, "AXTextArea");
+    assert_eq!(status(&call(&d2, "pointcast_type", &json!({ "id": body, "text": "hi" }))), "done");
+    assert_eq!(done(&log), Vec::<String>::new(), "nothing sent");
+    assert_eq!(done(&log2), ["set =hi"], "only the value set");
+    let refused = d.journal.entries().iter().filter(|e| matches!(&e.outcome, Outcome::Refused(w) if w.contains("isn't in front"))).count();
+    assert_eq!(refused, 2, "each refusal is logged");
+}
+
+#[test]
+fn a_save_panel_on_the_front_apps_window_counts_as_that_app() {
+    let mut f = mail();
+    let panel = crate::computer::fake::app("Open and Save Panel Service", 6060);
+    f.focused = Some((panel.clone(), crate::computer::fake::node(&[0], "AXTextField", "text field", "Save As:", &["set value"])));
+    f.panels = vec![(6060, 4242)];
+    let (d, log) = desk(f);
+    d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+    let _g = d.grants.grant(Duration::from_secs(60));
+    assert_eq!(status(&call(&d, "pointcast_type", &json!({ "text": "notes" }))), "done");
+    assert_eq!(status(&call(&d, "pointcast_key", &json!({ "keys": "cmd+a" }))), "done");
+    assert_eq!(done(&log), ["type notes", "key [Cmd]+a"]);
+    // The same panel on another app's window, or no panel known: refused.
+    let mut f = mail();
+    f.focused = Some((panel, crate::computer::fake::node(&[0], "AXTextField", "text field", "Save As:", &["set value"])));
+    f.panels = vec![(6060, 77)];
+    let (d, log) = desk(f);
+    d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+    let _g = d.grants.grant(Duration::from_secs(60));
+    assert_eq!(status(&call(&d, "pointcast_type", &json!({ "text": "notes" }))), "refused");
+    assert_eq!(done(&log), Vec::<String>::new());
+}
+
+#[test]
+fn focus_and_open_say_failed_when_the_app_never_comes_to_the_front() {
+    let (d, log) = mail_behind(true);
+    let _g = d.grants.grant(Duration::from_secs(60));
+    let r = call(&d, "pointcast_focus", &json!({ "app": "Mail" }));
+    assert_eq!(status(&r), "failed", "{r}");
+    assert!(first_text(&r).contains("Mail didn't come to the front."), "{r}");
+    let r = call(&d, "pointcast_open_app", &json!({ "name": "Mail" }));
+    assert_eq!(status(&r), "failed", "{r}");
+    assert!(first_text(&r).contains("Mail didn't come to the front."), "{r}");
+    assert_eq!(done(&log), ["focus Mail None", "open Mail", "focus Mail None"], "asked, never claimed");
+}
+
+#[test]
+fn focus_says_done_when_the_app_really_comes_forward_and_keys_then_go() {
+    let (d, log) = mail_behind(false);
+    let _g = d.grants.grant(Duration::from_secs(60));
+    assert_eq!(status(&call(&d, "pointcast_key", &json!({ "keys": "cmd+n" }))), "refused");
+    let r = call(&d, "pointcast_focus", &json!({ "app": "Mail" }));
+    assert_eq!(status(&r), "done", "{r}");
+    assert_eq!(status(&call(&d, "pointcast_key", &json!({ "keys": "cmd+n" }))), "done");
+    assert_eq!(done(&log), ["focus Mail None", "key [Cmd]+n"]);
+}

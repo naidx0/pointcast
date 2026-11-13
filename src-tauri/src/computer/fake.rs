@@ -8,6 +8,12 @@ pub struct Fake {
     pub apps: Vec<AppInfo>,
     pub focused: Option<(AppRef, Node)>,
     pub at: Option<(AppRef, Node)>,
+    /// The app really in front, where synthetic keys go; `None` while it is the tree's app.
+    pub frontmost: Arc<Mutex<Option<AppRef>>>,
+    /// Asked forward, nothing comes: as macOS 14 does with a request from the background.
+    pub stuck: bool,
+    /// Open and save panels run in their own process: (the panel's pid, the pid of the app whose window it is on).
+    pub panels: Vec<(u32, u32)>,
     /// What was done, in order: "press Send", "set Body=hi", "click 10,20 x1", "type hi", "key cmd+s"...
     pub did: Arc<Mutex<Vec<String>>>,
 }
@@ -16,6 +22,13 @@ impl Fake {
     fn log(&self, s: String) -> Result<(), String> {
         self.did.lock().unwrap().push(s);
         Ok(())
+    }
+
+    /// `app` is now really in front, unless the fake is stuck.
+    fn comes_forward(&self, app: AppRef) {
+        if !self.stuck {
+            *self.frontmost.lock().unwrap() = Some(app);
+        }
     }
 }
 
@@ -67,6 +80,7 @@ pub fn mail() -> Fake {
         focused: Some((mail.clone(), node(&[1], "AXTextField", "text field", "Subject", &["set value"]))),
         at: Some((mail, node(&[], "AXButton", "button", "Bold", &["press"]))),
         did: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -107,10 +121,20 @@ impl Desktop for Fake {
         self.log(format!("scroll {x},{y} by {dx},{dy}"))
     }
     fn open_app(&self, name: &str) -> Result<(), String> {
+        let key = super::guard::app_key(name);
+        let running = self.apps.iter().find(|a| super::guard::app_key(&a.app.name) == key).map(|a| a.app.clone());
+        self.comes_forward(running.unwrap_or_else(|| app(name, 9000)));
         self.log(format!("open {name}"))
     }
     fn focus(&self, app: &AppInfo, window: Option<&str>) -> Result<(), String> {
+        self.comes_forward(app.app.clone());
         self.log(format!("focus {} {window:?}", app.app.name))
+    }
+    fn frontmost(&self) -> Result<AppRef, String> {
+        Ok(self.frontmost.lock().unwrap().clone().unwrap_or_else(|| self.tree.app.clone()))
+    }
+    fn panel_for(&self, panel: &AppRef, host: &AppRef) -> bool {
+        self.panels.contains(&(panel.pid, host.pid))
     }
     fn screen(&self) -> Result<Picture, String> {
         Ok(Picture { bytes: vec![0x89, b'P', b'N', b'G'], mime: "image/png", width: 200, height: 100, area: (0, 0, 100, 50) })

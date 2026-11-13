@@ -2,8 +2,9 @@
 //! `UNTRUSTED`; every call goes into the journal, refused or not.
 use super::confirm::{Approval, Binding, Waited};
 use super::guard::{self, Kind, Target, Tier, Verdict};
-use super::{ids, worth, Combo, Desk, Limits, Modifier, Node, Outcome, Tree, AppRef, DEFAULT_LIMITS, UNTRUSTED};
+use super::{ids, worth, Combo, Desk, Desktop, Limits, Modifier, Node, Outcome, Tree, AppRef, DEFAULT_LIMITS, UNTRUSTED};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 pub const NAMES: [&str; 12] = [
     "pointcast_screen",
@@ -31,6 +32,49 @@ const LIST_MAX: usize = 600;
 const VALUE_KEEP: usize = 200;
 /// The most text one `pointcast_type` call types.
 const TYPE_MAX: usize = 5_000;
+/// How long focus waits for the app to be really in front before it says it isn't.
+const FORWARD_WAIT: Duration = Duration::from_millis(1500);
+/// How long a just-opened app gets to start and come forward.
+const LAUNCH_WAIT: Duration = Duration::from_millis(4000);
+
+/// Whether the app `is` picks becomes the one really in front within `within`.
+fn comes_forward(os: &dyn Desktop, within: Duration, is: &dyn Fn(&AppRef) -> bool) -> bool {
+    let until = Instant::now() + within;
+    loop {
+        if os.frontmost().is_ok_and(|a| is(&a)) {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Synthetic keys and typing go to whatever app the system has in front, whatever Accessibility says has the focus.
+/// So they go only when that is `owner`, the app the guard is asked about, or when `owner` is an open or save panel
+/// on its window (and then it is that app the guard is asked about). Returns the app to clear; called again right
+/// before anything is sent.
+fn keyboard(os: &dyn Desktop, owner: &AppRef) -> Result<AppRef, End> {
+    let not = |also: String| End::Refused(format!("{} isn't in front, so nothing was typed.{also}", owner.name));
+    let front = os.frontmost().map_err(|e| not(format!(" (What is in front can't be told: {e})")))?;
+    if front.pid == owner.pid {
+        return Ok(owner.clone());
+    }
+    if os.panel_for(owner, &front) {
+        return Ok(front);
+    }
+    Err(not(format!(" {} is in front: pointcast_focus the app first.", front.name)))
+}
+
+/// Right before a synthetic key or typing is sent: the app really in front is still `cleared`, the app the guard
+/// cleared, else nothing is sent.
+fn lands_in(os: &dyn Desktop, cleared: &AppRef) -> Result<(), End> {
+    match keyboard(os, cleared)? {
+        a if a.pid == cleared.pid => Ok(()),
+        a => Err(End::Refused(format!("{} isn't in front, so nothing was typed. {} is in front.", cleared.name, a.name))),
+    }
+}
 
 pub fn schemas() -> Value {
     let id = json!({ "type": "string", "description": "An element id from pointcast_elements or pointcast_find." });
@@ -478,7 +522,17 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 return Ok(e);
             }
             os.open_app(name)?;
-            return Ok(End::Done { text: format!("Opened {name}."), how: "opened".into(), data: json!({}) });
+            let key = guard::app_key(name);
+            let named = |a: &AppRef| guard::app_key(&a.name) == key;
+            if !comes_forward(&**os, LAUNCH_WAIT, &named) {
+                // An app that was already open does not always come forward when opened again: ask as focus does.
+                let apps = os.apps().unwrap_or_default();
+                let asked = apps.iter().find(|a| named(&a.app)).is_some_and(|a| os.focus(a, None).is_ok());
+                if !asked || !comes_forward(&**os, FORWARD_WAIT, &named) {
+                    return Err(format!("{name} didn't come to the front."));
+                }
+            }
+            return Ok(End::Done { text: format!("Opened {name}; it is in front."), how: "opened".into(), data: json!({}) });
         }
         "pointcast_focus" => {
             let want = text(args, "app").ok_or("pointcast_focus needs an app's name; pointcast_apps lists them.")?;
@@ -496,6 +550,10 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 return Ok(e);
             }
             os.focus(found, window)?;
+            let pid = found.app.pid;
+            if !comes_forward(&**os, FORWARD_WAIT, &|a| a.pid == pid) {
+                return Err(format!("{} didn't come to the front.", found.app.name));
+            }
             return Ok(End::Done { text: format!("{} is in front.", found.app.name), how: "focused".into(), data: json!({}) });
         }
         _ => {}
@@ -555,11 +613,17 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                     os.set_value(&tree, n, words)?;
                     return Ok(End::Done { text: format!("Set {} to the text.", label(n)), how: "set value (accessibility)".into(), data: json!({ "id": id }) });
                 }
+                if let Err(e) = lands_in(&**os, &tree.app) {
+                    return Ok(e);
+                }
                 if n.can("press") {
                     os.press(&tree, n)?;
                 } else {
                     let (x, y) = n.center();
                     os.click_at(x, y, 1)?;
+                }
+                if let Err(e) = lands_in(&**os, &tree.app) {
+                    return Ok(e);
                 }
                 os.type_text(words)?;
                 return Ok(End::Done { text: format!("Typed into {}.", label(n)), how: "typed (synthetic)".into(), data: json!({ "id": id }) });
@@ -569,7 +633,15 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
             };
             *app = owner.name.clone();
             *target = label(&n);
+            let owner = match keyboard(&**os, &owner) {
+                Ok(a) => a,
+                Err(e) => return Ok(e),
+            };
+            *app = owner.name.clone();
             if let Some(e) = end(ask(desk, cx, Kind::Type, &target_of(&owner, "", Some(&n)), newline, target)) {
+                return Ok(e);
+            }
+            if let Err(e) = lands_in(&**os, &owner) {
                 return Ok(e);
             }
             os.type_text(words)?;
@@ -584,7 +656,15 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 None => (os.front()?, None),
             };
             *app = owner.name.clone();
+            let owner = match keyboard(&**os, &owner) {
+                Ok(a) => a,
+                Err(e) => return Ok(e),
+            };
+            *app = owner.name.clone();
             if let Some(e) = end(ask(desk, cx, Kind::Key, &target_of(&owner, "", n.as_ref()), commits(&combo), target)) {
+                return Ok(e);
+            }
+            if let Err(e) = lands_in(&**os, &owner) {
                 return Ok(e);
             }
             if combo.key == "escape" {

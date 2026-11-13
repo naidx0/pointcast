@@ -8,7 +8,10 @@ use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
-use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
     IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
@@ -17,8 +20,8 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE, SW_SHOWNORMAL,
+    AllowSetForegroundWindow, BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE, SW_SHOWNORMAL,
 };
 
 pub struct Win;
@@ -322,10 +325,28 @@ impl Desktop for Win {
         }
         // UI Automation's focus brings a window forward where SetForegroundWindow alone is often refused.
         let _ = com(|ui| unsafe { ui.ElementFromHandle(h).and_then(|el| el.SetFocus()) }.map_err(|e| e.to_string()));
+        // Windows lets only the foreground thread hand the foreground on: join its input for the call, then let go.
         unsafe {
+            let _ = AllowSetForegroundWindow(app.app.pid);
+            let me = GetCurrentThreadId();
+            let fore = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            let joined = fore != 0 && fore != me && AttachThreadInput(me, fore, BOOL::from(true)).as_bool();
+            let _ = BringWindowToTop(h);
             let _ = SetForegroundWindow(h);
+            if joined {
+                let _ = AttachThreadInput(me, fore, BOOL::from(false));
+            }
         }
         Ok(())
+    }
+
+    fn frontmost(&self) -> Result<AppRef, String> {
+        self.front()
+    }
+
+    fn panel_for(&self, _: &AppRef, _: &AppRef) -> bool {
+        // Open and save dialogs run in the app's own process on Windows.
+        false
     }
 
     fn screen(&self) -> Result<Picture, String> {

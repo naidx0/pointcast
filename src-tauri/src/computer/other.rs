@@ -50,6 +50,12 @@ impl Desktop for Unsupported {
     fn focus(&self, _: &AppInfo, _: Option<&str>) -> Result<(), String> {
         no()
     }
+    fn frontmost(&self) -> Result<AppRef, String> {
+        no()
+    }
+    fn panel_for(&self, _: &AppRef, _: &AppRef) -> bool {
+        false
+    }
     fn screen(&self) -> Result<Picture, String> {
         no()
     }

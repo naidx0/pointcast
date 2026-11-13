@@ -172,8 +172,16 @@ pub trait Desktop: Send + Sync {
     fn key(&self, combo: &Combo) -> Result<(), String>;
     fn scroll(&self, x: i32, y: i32, dx: i32, dy: i32) -> Result<(), String>;
     fn open_app(&self, name: &str) -> Result<(), String>;
-    /// Bring `app` to the front, and the window whose title contains `window` when given.
+    /// Ask for `app` to come to the front, and the window whose title contains `window` when given. Asking is not
+    /// getting: the caller checks `frontmost` before it says the app is in front.
     fn focus(&self, app: &AppInfo, window: Option<&str>) -> Result<(), String>;
+    /// The app the system really has in front, the one synthetic keys and typing go to. Not always the app
+    /// Accessibility says has the focus: an app asked forward from the background can be focused there and still be
+    /// behind (macOS 14 and later ignore such requests).
+    fn frontmost(&self) -> Result<AppRef, String>;
+    /// Whether `panel` is an open or save panel the system runs in its own process (macOS) for a window of `host`,
+    /// and so counts as `host`'s. False when that can't be told.
+    fn panel_for(&self, panel: &AppRef, host: &AppRef) -> bool;
     fn screen(&self) -> Result<Picture, String>;
 }
 

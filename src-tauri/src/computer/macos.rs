@@ -354,28 +354,105 @@ impl Desktop for Mac {
     fn focus(&self, app: &AppInfo, window: Option<&str>) -> Result<(), String> {
         access()?;
         let el = app_element(app.app.pid).ok_or("The app is gone.")?;
+        let win = match window.map(str::to_lowercase) {
+            Some(want) => Some(
+                attr(&el, "AXWindows")
+                    .map(elements)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|w| text(w, "AXTitle").to_lowercase().contains(&want))
+                    .ok_or_else(|| format!("{} has no window titled like \"{want}\".", app.app.name))?,
+            ),
+            None => attr(&el, "AXMainWindow").or_else(|| window_of(&el)),
+        };
+        // Accessibility's frontmost, then the app asked to activate: macOS 14 and later can ignore both from an app
+        // in the background, so the caller checks what is really in front afterwards.
         let yes = CFBoolean::true_value();
-        let err = unsafe { AXUIElementSetAttributeValue(el.as_CFTypeRef(), key("AXFrontmost").as_concrete_TypeRef(), yes.as_CFTypeRef()) };
-        if err != 0 {
-            return Err(ax_error(err, "bringing it forward"));
-        }
-        let Some(want) = window.map(str::to_lowercase) else { return Ok(()) };
-        let win = attr(&el, "AXWindows")
-            .map(elements)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|w| text(w, "AXTitle").to_lowercase().contains(&want))
-            .ok_or_else(|| format!("{} has no window titled like \"{want}\".", app.app.name))?;
-        unsafe {
-            AXUIElementPerformAction(win.as_CFTypeRef(), key("AXRaise").as_concrete_TypeRef());
-            AXUIElementSetAttributeValue(win.as_CFTypeRef(), key("AXMain").as_concrete_TypeRef(), yes.as_CFTypeRef());
+        unsafe { AXUIElementSetAttributeValue(el.as_CFTypeRef(), key("AXFrontmost").as_concrete_TypeRef(), yes.as_CFTypeRef()) };
+        activate(app.app.pid);
+        if let Some(win) = win {
+            unsafe {
+                AXUIElementPerformAction(win.as_CFTypeRef(), key("AXRaise").as_concrete_TypeRef());
+                AXUIElementSetAttributeValue(win.as_CFTypeRef(), key("AXMain").as_concrete_TypeRef(), yes.as_CFTypeRef());
+            }
         }
         Ok(())
+    }
+
+    fn frontmost(&self) -> Result<AppRef, String> {
+        frontmost_pid().map(app_ref).ok_or_else(|| "macOS did not say which app is in front.".into())
+    }
+
+    fn panel_for(&self, panel: &AppRef, host: &AppRef) -> bool {
+        // An AppKit open or save panel service, by its bundle id ("com.apple.appkit.xpc.openAndSavePanelService").
+        let Some(id) = bundle_id(panel.pid) else { return false };
+        if !(id.starts_with("com.apple.appkit.xpc.") && id.to_lowercase().contains("panel")) {
+            return false;
+        }
+        // On the host's window: the panel's focused element lies inside the host's focused window, where the panel
+        // is drawn as a sheet or as the window's whole content.
+        let Some(el) = system().ok().and_then(|w| attr(&w, "AXFocusedUIElement")) else { return false };
+        if pid_of(&el) != Some(panel.pid) {
+            return false;
+        }
+        let Some(win) = app_element(host.pid).and_then(|a| attr(&a, "AXFocusedWindow")) else { return false };
+        let (Some((x, y)), Some((wx, wy)), Some((ww, wh))) =
+            (pair(&el, "AXPosition", POINT_TYPE), pair(&win, "AXPosition", POINT_TYPE), pair(&win, "AXSize", SIZE_TYPE))
+        else {
+            return false;
+        };
+        ww > 0.0 && wh > 0.0 && x >= wx && y >= wy && x <= wx + ww && y <= wy + wh
     }
 
     fn screen(&self) -> Result<Picture, String> {
         input::screen()
     }
+}
+
+/// The pid of the app macOS really has in front (NSWorkspace's frontmost application): where keys go.
+fn frontmost_pid() -> Option<u32> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if ws.is_null() {
+            return None;
+        }
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        (pid > 0).then_some(pid as u32)
+    })
+}
+
+/// The running app's bundle id.
+fn bundle_id(pid: u32) -> Option<String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid as i32];
+        if app.is_null() {
+            return None;
+        }
+        let id: *mut AnyObject = msg_send![app, bundleIdentifier];
+        // An NSString is a CFString.
+        (!id.is_null()).then(|| CFString::wrap_under_get_rule(id as CFStringRef).to_string())
+    })
+}
+
+/// Ask the app to activate with all its windows (NSRunningApplication).
+fn activate(pid: u32) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid as i32];
+        if !app.is_null() {
+            // NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps.
+            let _: bool = msg_send![app, activateWithOptions: 3usize];
+        }
+    })
 }
 
 /// Every app window on screen, front to back: its owner's pid and name, and the window. Normal windows only (layer
