@@ -45,11 +45,19 @@
 - **`pointcast_files`** (S8, first native integration): list/reveal/move/mkdir/trash straight on the filesystem — paths inside ~ only, canonicalized against symlink escapes; credential/config folders, `.git` internals, Pointcast's own data and home itself off limits; the file manager's tier and plan rules apply; trash waits for the person (`trash` crate).
 - **`docs/assistant-landscape.md`:** competitor scan — dictation modes (Superwhisper), system-audio sidecar (Cluely clones), ghost-cursor narration (Clicky), on-demand skill/MCP registry (rea/Raycast), same-stack reference (Handy), background acting without focus steal (axcli).
 
+## Fourth session — live-test batch + install/signing (committed; gates: 832+ Rust, 281 front-end, tsc, vite)
+
+- **Stable signing identity** (the install factor): self-signed `maxnaid` cert (`~/pointcast-signing/`, never in git) imported into a dedicated keychain with a stored password + codesign partition list — a plain login-keychain import leaves the key unpaired. Designated requirement is now `identifier "dev.pointcast.app" and certificate leaf`: macOS keeps Screen Recording + Accessibility across signed updates (ad-hoc reset them every build). Recipe in `docs/SIGNING.md`.
+- **Real update path exercised:** `POINTCAST_DMG=… bash install.sh` quit the old app, installed the cert-signed build, relaunched — it correctly detected the signer change and reset permissions this once; every cert-signed update after stays quiet.
+- **Live-test fixes:** Strands removed (Classic + Aurora; a saved "Strands" reads as Aurora); Aurora speed 0.5→0.8; the capsule clock no longer appears on its own after a minute (hover/focus/mic-warning only — it was covering the wave); the onboarding "Try it" hides once a question has been asked.
+- **Ask header:** speaker switch (toggles `speak_answers`; while speaking, cuts the current sentence), pointer switch (toggles `computer_use` — it defaults OFF, which is why "the computer never acted" in the test), a New-ask button (was only in the Sessions sheet), and a Copy button on the opened question.
+- **TTS proven, not broken:** two tests speak through the real `AVSpeechSynthesizer` — one through `Mac`, one a full streamed answer through `Reader`. Silence in the app was a stale installed build / disabled setting, never the pipeline.
+
 ## Next
 
-1. Rebuild the app (all of the above is in). It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
-2. The owner tries a real call, a computer-use task and Kokoro on this Mac — now also: the bigger Ask panel, the Call key, restored window spots, the pointer ring.
-3. On the owner's yes: push to main.
+1. Owner re-tests in the new install: speaker + act switches on the panel, New button, copy a question, hover-only timer, faster Aurora.
+2. On the owner's yes: push to main. GitHub secrets `MAC_SIGN_P12`/`MAC_SIGN_PASSWORD` needed for CI signing; a published release is what the Updates pane checks against.
+3. Bigger still-open asks: provider expansion (OpenAI-compatible key, Grok, Devin sub — T3-Chat-style aggregation to research); TTS pick in onboarding; remaining S8 integrations; dictation modes / system-audio / ghost-cursor / on-demand MCP registry from `docs/assistant-landscape.md`.
    - The Windows code has never been compiled; CI is the first compile.
    - Then read CI.
 
