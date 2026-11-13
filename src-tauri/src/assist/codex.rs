@@ -1964,4 +1964,51 @@ pub mod tests {
         assert_eq!(answered(&seen, 910)["result"], json!({ "action": "decline" }));
         assert!(keys(&seen).is_empty());
     }
+
+    /// A real Codex turn on this Mac, through the real `codex app-server`, Pointcast's server and this Mac's desk: run by
+    /// hand, once (it spends a little of the plan and drives TextEdit in front of the person).
+    #[test]
+    #[ignore = "a real Codex turn that opens TextEdit and types; run by hand"]
+    #[cfg(target_os = "macos")]
+    fn on_this_mac_a_real_codex_turn_opens_textedit_and_types() {
+        use crate::computer::guard::{Tier, Trust};
+        const TEXT: &str = "hello from Codex";
+        let desk = crate::computer::desk();
+        desk.set_trust(Trust::with([("TextEdit".to_string(), Tier::Full)]));
+        let mut raw = [0u8; 32];
+        getrandom::getrandom(&mut raw).unwrap();
+        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let addr = crate::mcp::spawn_stoppable("127.0.0.1:0", crate::mcp::Latest::default(), token, stop.clone()).unwrap();
+        let url = format!("http://{addr}/mcp");
+        let mut codex = Codex::new(scratch("codex-real-acting"));
+        codex.computer = Some(Computer { desk, serve: Arc::new(move || Ok(url.clone())) });
+        let mut chat = codex.start("", &[]).unwrap();
+        let (tx, rx) = channel();
+        let t = Instant::now();
+        chat.ask(said(&format!("Open TextEdit, make a new document and type: {TEXT}")), tx).unwrap();
+        let mut got = Vec::new();
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(240)) {
+            let end = e.kind.ends();
+            got.push(e.kind);
+            if end {
+                break;
+            }
+        }
+        let answer: String = words(&got).concat();
+        println!("\nTURN ({:.1} s): {:?}", t.elapsed().as_secs_f32(), got.last());
+        println!("ANSWER: {answer}");
+        println!("GRANT LIVE AFTER THE TURN: {}", desk.granted());
+        println!("JOURNAL:");
+        let journal = crate::computer::journal().take();
+        for e in &journal {
+            println!("  {} | {} | {} | {:?}", e.app, e.tool, e.target, e.outcome);
+        }
+        chat.close();
+        std::thread::sleep(Duration::from_millis(800));
+        println!("CLEAN-UP: {:?}", crate::computer::discard_textedit(desk, TEXT));
+        crate::mcp::stop_at(addr, &stop);
+        assert_eq!(got.last(), Some(&Kind::Done));
+        assert!(journal.iter().any(|e| e.tool == "pointcast_type" && matches!(e.outcome, crate::computer::Outcome::Done(_))), "it typed");
+    }
 }
