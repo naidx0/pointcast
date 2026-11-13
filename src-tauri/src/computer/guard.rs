@@ -15,6 +15,16 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// The tier a word names: "view", "click" or "full", any case.
+    pub fn of(word: &str) -> Option<Tier> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "view" => Some(Tier::View),
+            "click" => Some(Tier::Click),
+            "full" => Some(Tier::Full),
+            _ => None,
+        }
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             Tier::View => "view",
@@ -152,7 +162,6 @@ pub struct Trust {
 
 impl Trust {
     /// Tiers the person chose, by app name.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with(overrides: impl IntoIterator<Item = (String, Tier)>) -> Trust {
         Trust { overrides: overrides.into_iter().map(|(a, t)| (app_key(&a), t)).collect() }
     }
@@ -165,6 +174,11 @@ impl Trust {
         } else {
             Tier::Click
         }
+    }
+
+    /// The person's tier for `app` from now on.
+    pub fn set(&mut self, app: &str, tier: Tier) {
+        self.overrides.insert(app_key(app), tier);
     }
 
     pub fn tier(&self, app: &str) -> Tier {
@@ -200,6 +214,25 @@ fn reads_irreversible(t: &Target) -> Option<String> {
     None
 }
 
+/// Why doing `kind` to `t` is never allowed, whatever the tier or the person says: Pointcast itself, an OS password or
+/// consent prompt, an elevated app, a password field.
+pub fn never(kind: Kind, t: &Target) -> Option<String> {
+    if t.own || app_key(&t.app) == "pointcast" {
+        return Some("Pointcast's own windows are off limits.".into());
+    }
+    if password_prompt(&t.app) {
+        return Some(format!("{} is a password or consent prompt: the person answers it themselves.", t.app));
+    }
+    if t.elevated {
+        return Some(format!("{} runs as administrator: Pointcast does not drive it.", t.app));
+    }
+    let secure = t.secure || t.raw_role == "AXSecureTextField" || t.subrole == "AXSecureTextField";
+    if secure && kind != Kind::See && kind != Kind::Focus {
+        return Some("That is a password field: the person types passwords themselves.".into());
+    }
+    None
+}
+
 /// How a target reads in a message: `button "Send"`.
 pub fn describe(t: &Target) -> String {
     let role = if t.role.is_empty() { "element" } else { t.role.as_str() };
@@ -213,18 +246,8 @@ pub fn describe(t: &Target) -> String {
 /// The verdict on doing `kind` to `t` with the person's `trust`. `commits` says the action itself sends or submits
 /// whatever its target (Return, Cmd+Delete).
 pub fn check(trust: &Trust, kind: Kind, t: &Target, commits: bool) -> Verdict {
-    if t.own || app_key(&t.app) == "pointcast" {
-        return Verdict::Refuse("Pointcast's own windows are off limits.".into());
-    }
-    if password_prompt(&t.app) {
-        return Verdict::Refuse(format!("{} is a password or consent prompt: the person answers it themselves.", t.app));
-    }
-    if t.elevated {
-        return Verdict::Refuse(format!("{} runs as administrator: Pointcast does not drive it.", t.app));
-    }
-    let secure = t.secure || t.raw_role == "AXSecureTextField" || t.subrole == "AXSecureTextField";
-    if secure && kind != Kind::See && kind != Kind::Focus {
-        return Verdict::Refuse("That is a password field: the person types passwords themselves.".into());
+    if let Some(why) = never(kind, t) {
+        return Verdict::Refuse(why);
     }
     let tier = trust.tier(&t.app);
     if tier < kind.needs() {

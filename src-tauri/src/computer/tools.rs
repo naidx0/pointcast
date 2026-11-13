@@ -1,6 +1,7 @@
 //! The computer tools as MCP serves them: their schemas, and one call in, one result out. Every result starts with
 //! `UNTRUSTED`; every call goes into the journal, refused or not.
-use super::guard::{self, Kind, Target, Verdict};
+use super::confirm::{Approval, Binding, Waited};
+use super::guard::{self, Kind, Target, Tier, Verdict};
 use super::{ids, worth, Combo, Desk, Limits, Modifier, Node, Outcome, Tree, AppRef, DEFAULT_LIMITS, UNTRUSTED};
 use serde_json::{json, Value};
 
@@ -132,9 +133,23 @@ pub fn schemas() -> Value {
 enum End {
     Done { text: String, how: String, data: Value },
     Refused(String),
+    /// The app's tier does not allow it; the person can raise it to `need`.
+    Short { why: String, need: Tier },
     Confirm(String),
+    /// The person said no on the card.
+    Declined(String),
     Failed(String),
 }
+
+/// One call as `run` sees it: the tool, its arguments, and the person's yes when the call runs again after one.
+struct Cx<'a> {
+    name: &'a str,
+    args: &'a Value,
+    approval: std::cell::Cell<Option<Approval>>,
+}
+
+/// A call waits on a card at most this many times (raised, then asked for a yes).
+const CARDS: usize = 3;
 
 fn result(text: &str, data: Value, error: bool) -> Value {
     json!({
@@ -153,7 +168,48 @@ pub fn call(desk: &Desk, name: &str, args: &Value) -> Value {
     }
     let mut app = String::new();
     let mut target = String::new();
-    let end = run(desk, name, args, &mut app, &mut target).unwrap_or_else(End::Failed);
+    let cx = |approval| Cx { name, args, approval: std::cell::Cell::new(approval) };
+    let mut end = run(desk, &cx(None), &mut app, &mut target).unwrap_or_else(End::Failed);
+    let mut yes = false;
+    // The person can be asked: the call waits on a card in the panel, then runs again or ends as they said.
+    let within = desk.asking();
+    for _ in 0..CARDS {
+        let (what, need) = match &end {
+            End::Confirm(what) if !within.is_zero() => (what.clone(), None),
+            End::Short { why, need } if !within.is_zero() => (why.clone(), Some(*need)),
+            _ => break,
+        };
+        desk.journal.push(&app, name, &target, Outcome::NeedsConfirm(what.clone()));
+        let binding = Binding { app: app.clone(), tool: name.into(), target: target.clone(), args: args.clone() };
+        let id = desk.confirms.open(&what, need, binding);
+        desk.notify();
+        let waited = desk.confirms.wait(id, &|| desk.granted(), within);
+        desk.notify();
+        let approval = match waited {
+            Waited::Approved(a) => Some(a),
+            Waited::Raised(_) => None,
+            Waited::Declined => {
+                end = End::Declined(format!("The person declined: nothing was done. ({what})"));
+                break;
+            }
+            Waited::TimedOut => {
+                end = End::Refused(format!("The person did not answer within {} seconds, so nothing was done. ({what})", within.as_secs()));
+                break;
+            }
+            Waited::Ended => {
+                end = End::Refused("The turn ended before the person answered: nothing was done.".into());
+                break;
+            }
+        };
+        if !desk.granted() {
+            end = End::Refused("The turn ended: nothing was done.".into());
+            break;
+        }
+        yes = approval.is_some();
+        (app, target) = (String::new(), String::new());
+        end = run(desk, &cx(approval), &mut app, &mut target).unwrap_or_else(End::Failed);
+    }
+    desk.acted_in(&app);
     let (outcome, value) = match end {
         End::Done { text, how, mut data } => {
             data["status"] = json!("done");
@@ -163,9 +219,10 @@ pub fn call(desk: &Desk, name: &str, args: &Value) -> Value {
             if let (Some(img), Some(content)) = (image, r["content"].as_array_mut()) {
                 content.push(json!({ "type": "image", "data": img["data"], "mimeType": img["mimeType"] }));
             }
-            (Outcome::Done(how), r)
+            (Outcome::Done(if yes { format!("{how}, after the person's yes") } else { how }), r)
         }
-        End::Refused(why) => {
+        End::Declined(why) => (Outcome::Refused(why.clone()), result(&why, json!({ "status": "declined", "reason": why }), false)),
+        End::Refused(why) | End::Short { why, .. } => {
             let text = format!("Not done. {why}");
             (Outcome::Refused(why.clone()), result(&text, json!({ "status": "refused", "reason": why }), true))
         }
@@ -208,12 +265,19 @@ fn label(n: &Node) -> String {
     if n.name.is_empty() { n.role.clone() } else { format!("{} \"{}\"", n.role, n.name) }
 }
 
-/// The guard's answer as an early return: `Ok(())` to go on.
-fn ask(desk: &Desk, kind: Kind, t: &Target, commits: bool) -> Result<(), End> {
-    match guard::check(&desk.trust(), kind, t, commits) {
+/// The guard's answer as an early return: `Ok(())` to go on. A tier the person could raise is told apart from a
+/// never; the person's yes, when this call carries one, lets exactly the action it was made for through, once.
+fn ask(desk: &Desk, cx: &Cx, kind: Kind, t: &Target, commits: bool, target: &str) -> Result<(), End> {
+    let trust = desk.trust();
+    match guard::check(&trust, kind, t, commits) {
         Verdict::Allow => Ok(()),
+        Verdict::Refuse(why) if guard::never(kind, t).is_none() && trust.tier(&t.app) < kind.needs() => Err(End::Short { why, need: kind.needs() }),
         Verdict::Refuse(why) => Err(End::Refused(why)),
-        Verdict::NeedsConfirm(what) => Err(End::Confirm(what)),
+        Verdict::NeedsConfirm(what) => {
+            let bound = Binding { app: t.app.clone(), tool: cx.name.into(), target: target.into(), args: cx.args.clone() };
+            let yes = cx.approval.take().is_some_and(|a| desk.confirms.spend(a, &bound));
+            if yes { Ok(()) } else { Err(End::Confirm(what)) }
+        }
     }
 }
 
@@ -268,11 +332,12 @@ fn listing(tree: &Tree, keep: impl Fn(&Node) -> bool, limit: usize, indent: bool
     (lines.join("\n"), Value::Array(out), matched)
 }
 
-fn see(desk: &Desk, tree: &Tree) -> Result<(), End> {
-    ask(desk, Kind::See, &target_of(&tree.app, &tree.window, None), false)
+fn see(desk: &Desk, cx: &Cx, tree: &Tree, target: &str) -> Result<(), End> {
+    ask(desk, cx, Kind::See, &target_of(&tree.app, &tree.window, None), false, target)
 }
 
-fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut String) -> Result<End, String> {
+fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<End, String> {
+    let (name, args) = (cx.name, cx.args);
     let os = &desk.os;
     let end = |r: Result<(), End>| r.err();
     match name {
@@ -282,7 +347,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             // Pointcast itself is in front, or when the front app can't be named.
             let front = os.front().map_err(|e| format!("No screenshot: the front app can't be told ({e})."))?;
             *app = front.name.clone();
-            if let Some(e) = end(ask(desk, Kind::See, &target_of(&front, "", None), false)) {
+            if let Some(e) = end(ask(desk, cx, Kind::See, &target_of(&front, "", None), false, target)) {
                 return Ok(e);
             }
             let p = os.screen()?;
@@ -309,7 +374,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             let tree = os.tree(Limits { depth, ..DEFAULT_LIMITS })?;
             *app = tree.app.name.clone();
             *target = format!("window \"{}\"", tree.window);
-            if let Some(e) = end(see(desk, &tree)) {
+            if let Some(e) = end(see(desk, cx, &tree, target)) {
                 return Ok(e);
             }
             let keep = |n: &Node| {
@@ -359,7 +424,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             }
             (*app, *target) = (name.to_string(), name.to_string());
             let t = Target { app: name.into(), ..Default::default() };
-            if let Some(e) = end(ask(desk, Kind::Focus, &t, false)) {
+            if let Some(e) = end(ask(desk, cx, Kind::Focus, &t, false, target)) {
                 return Ok(e);
             }
             os.open_app(name)?;
@@ -377,7 +442,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             *app = found.app.name.clone();
             let window = text(args, "window");
             *target = window.map_or_else(|| found.app.name.clone(), |w| format!("window \"{w}\""));
-            if let Some(e) = end(ask(desk, Kind::Focus, &target_of(&found.app, window.unwrap_or(""), None), false)) {
+            if let Some(e) = end(ask(desk, cx, Kind::Focus, &target_of(&found.app, window.unwrap_or(""), None), false, target)) {
                 return Ok(e);
             }
             os.focus(found, window)?;
@@ -394,7 +459,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
                 let n = by_id(&tree, id)?;
                 *app = tree.app.name.clone();
                 *target = label(n);
-                if let Some(e) = end(ask(desk, Kind::Click, &target_of(&tree.app, &tree.window, Some(n)), false)) {
+                if let Some(e) = end(ask(desk, cx, Kind::Click, &target_of(&tree.app, &tree.window, Some(n)), false, target)) {
                     return Ok(e);
                 }
                 if count == 1 && n.can("press") {
@@ -415,7 +480,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             };
             *app = owner.name.clone();
             *target = format!("{} at {x},{y}", label(&n));
-            if let Some(e) = end(ask(desk, Kind::Click, &target_of(&owner, "", Some(&n)), false)) {
+            if let Some(e) = end(ask(desk, cx, Kind::Click, &target_of(&owner, "", Some(&n)), false, target)) {
                 return Ok(e);
             }
             os.click_at(x, y, count)?;
@@ -433,7 +498,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
                 *app = tree.app.name.clone();
                 *target = label(n);
                 let settable = n.can("set value");
-                if let Some(e) = end(ask(desk, Kind::Type, &target_of(&tree.app, &tree.window, Some(n)), newline && !settable)) {
+                if let Some(e) = end(ask(desk, cx, Kind::Type, &target_of(&tree.app, &tree.window, Some(n)), newline && !settable, target)) {
                     return Ok(e);
                 }
                 if settable {
@@ -454,7 +519,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             };
             *app = owner.name.clone();
             *target = label(&n);
-            if let Some(e) = end(ask(desk, Kind::Type, &target_of(&owner, "", Some(&n)), newline)) {
+            if let Some(e) = end(ask(desk, cx, Kind::Type, &target_of(&owner, "", Some(&n)), newline, target)) {
                 return Ok(e);
             }
             os.type_text(words)?;
@@ -469,8 +534,11 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
                 None => (os.front()?, None),
             };
             *app = owner.name.clone();
-            if let Some(e) = end(ask(desk, Kind::Key, &target_of(&owner, "", n.as_ref()), commits(&combo))) {
+            if let Some(e) = end(ask(desk, cx, Kind::Key, &target_of(&owner, "", n.as_ref()), commits(&combo), target)) {
                 return Ok(e);
+            }
+            if combo.key == "escape" {
+                desk.quiet();
             }
             os.key(&combo)?;
             Ok(End::Done { text: format!("Pressed {keys} in {}.", owner.name), how: "key (synthetic)".into(), data: json!({}) })
@@ -502,7 +570,7 @@ fn run(desk: &Desk, name: &str, args: &Value, app: &mut String, target: &mut Str
             };
             *app = owner.name.clone();
             *target = format!("{} at {x},{y}", label(&n));
-            if let Some(e) = end(ask(desk, Kind::Scroll, &target_of(&owner, &window, Some(&n)), false)) {
+            if let Some(e) = end(ask(desk, cx, Kind::Scroll, &target_of(&owner, &window, Some(&n)), false, target)) {
                 return Ok(e);
             }
             os.scroll(x, y, dx * amount, dy * amount)?;

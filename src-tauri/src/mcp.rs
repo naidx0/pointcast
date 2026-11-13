@@ -406,7 +406,8 @@ fn handle(mut stream: TcpStream, latest: &Latest, token: &str, deadline: Instant
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{challenge}Connection: close\r\n\r\n{body}",
         body.len()
     );
-    write_by(&mut stream, resp.as_bytes(), deadline)
+    // A computer tool call can wait on the person for up to a minute: the answer still gets the time a write takes.
+    write_by(&mut stream, resp.as_bytes(), deadline.max(Instant::now() + DEADLINE))
 }
 
 fn split_http(req: &str) -> (&str, &str) {
@@ -1241,6 +1242,35 @@ mod tests {
         drop(grant);
         assert_eq!(names(&ask("tools/list", json!({}))), coding);
         assert_eq!(ask("tools/call", json!({ "name": "pointcast_click", "arguments": { "id": "x" } }))["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn no_mcp_request_can_say_yes_for_the_person() {
+        use crate::computer::{fake, Desk};
+        use crate::computer::guard::{Tier, Trust};
+        let fake = fake::mail();
+        let did = fake.did.clone();
+        let desk = Desk::new(Box::new(fake));
+        desk.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        desk.ask_for(std::time::Duration::from_millis(150));
+        let latest = Latest::default();
+        let ask = |method: &str, params: Value| -> Value {
+            let body = json!({ "jsonrpc": "2.0", "id": 4, "method": method, "params": params }).to_string();
+            serde_json::from_str(&rpc_on(&body, &latest, &desk).1).unwrap()
+        };
+        let _grant = desk.grants.grant(std::time::Duration::from_secs(60));
+        let els = ask("tools/call", json!({ "name": "pointcast_elements", "arguments": {} }));
+        let send = els["result"]["structuredContent"]["elements"].as_array().unwrap().iter().find(|e| e["name"] == "Send").unwrap()["id"].clone();
+        // No method answers a card, and a yes written into the arguments is only more arguments.
+        for method in ["computer/answer", "computer/approve", "approvals/create", "pointcast/confirm"] {
+            assert_eq!(ask(method, json!({ "id": 1, "answer": "do" }))["error"]["code"], -32601, "{method}");
+        }
+        for args in [json!({ "id": send }), json!({ "id": send, "approval": "1", "approved": true, "answer": "do", "token": "0".repeat(32) })] {
+            let r = ask("tools/call", json!({ "name": "pointcast_click", "arguments": args }));
+            assert_eq!(r["result"]["structuredContent"]["status"], "refused", "{r}");
+            assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("did not answer"), "{r}");
+        }
+        assert!(did.lock().unwrap().is_empty(), "Send was never pressed");
     }
 
     #[test]

@@ -742,6 +742,8 @@ pub struct Picked {
     pub effort: Option<String>,
     /// The speed chosen (Codex's service tier); none is standard.
     pub speed: Option<String>,
+    /// "Let the AI see and act" is on and the route can (Claude through Claude Code, for now).
+    pub computer: bool,
 }
 
 /// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
@@ -763,7 +765,7 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
         model.get_or_insert_with(|| super::claude::MODEL_START.to_owned());
         effort.get_or_insert_with(|| super::claude::EFFORT_START.to_owned());
     }
-    Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s) })
+    Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s), computer: s.computer_use && r.id == CLAUDE_CODE })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -776,7 +778,10 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
             Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)).choosing(p.model.clone(), p.effort.clone()))),
             // Claude through Claude Code. A `Picked` that names it exists only with the owner's OK: `picked` refuses
             // it before, and so nothing is made.
-            None => Ok(Arc::new(super::claude::Claude::new(home.join(CLAUDE_CODE)).choosing(p.model.clone(), p.effort.clone()))),
+            None => {
+                let computer = if p.computer { super::claude::Computer::app() } else { None };
+                Ok(Arc::new(super::claude::Claude::new(home.join(CLAUDE_CODE)).choosing(p.model.clone(), p.effort.clone()).acting(computer)))
+            }
         },
         _ if model.is_empty() => Err(format!("Choose a model for {} in Settings first.", r.name)),
         Way::Key => Ok(Arc::new(keyed(r, p.base.as_deref(), model)?.provider(p.offline_only)?)),
@@ -943,7 +948,7 @@ mod tests {
         // Remembered: the next choice of it needs no new yes, and Codex takes its own default model.
         assert_eq!(choose(&mut s, "openai", Some("gpt-y".into()), false, 9), Ok(()));
         assert_eq!(s.assist_consent.len(), 1);
-        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None, effort: None, speed: None }));
+        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None, effort: None, speed: None, computer: false }));
         assert_eq!(choose(&mut s, "codex", None, true, 10), Ok(()));
         assert_eq!(s.assist_model, None);
         assert_eq!(choose(&mut s, "nope", None, true, 1), Err(UNKNOWN.into()));
@@ -975,7 +980,7 @@ mod tests {
         assert_eq!(choose(&mut s, "ollama", Some("llava".into()), true, 2), Ok(()));
         assert!(held.provider(&s).is_ok());
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None, effort: None, speed: None };
+        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None, effort: None, speed: None, computer: false };
         assert_eq!(build(&remote, Path::new("unused")).err(), Some(OFFLINE_ONLY.into()));
     }
 
@@ -1129,7 +1134,7 @@ mod tests {
         assert_eq!(build(&p, Path::new("unused")).map(|b| b.id()), Ok("gemini-cli"));
         let held = Held::with(Box::new(|_| Err("unused".into())));
         assert_eq!(models_of("opencode", &s, &held, Path::new("unused")), Ok(Vec::new()));
-        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None, effort: None, speed: None };
+        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None, effort: None, speed: None, computer: false };
         assert_eq!(build(&claude_api, Path::new("unused")).map(|b| b.id()), Ok("anthropic"));
         s.assist_offline_only = true;
         assert_eq!(choose(&mut s, "copilot", None, true, 2), Err(OFFLINE_ONLY.into()));

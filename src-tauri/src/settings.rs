@@ -216,6 +216,13 @@ pub struct Settings {
     /// route through Claude Code cannot be chosen. Nothing in the app sets it yet.
     #[serde(default)]
     pub assist_claude_code_ok: bool,
+    /// "Let the AI see and act": during an Ask turn the AI may look at the screen and act in apps, step by step, through
+    /// Pointcast's own tools (Claude only, for now). Off until the person turns it on.
+    #[serde(default)]
+    pub computer_use: bool,
+    /// The person's tier for an app ("view", "click" or "full"), by its name. An app not named keeps its default.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub computer_trust: std::collections::BTreeMap<String, String>,
     /// Read Ask's answers aloud as they stream in, with a voice of this computer. Off until the person turns it on.
     #[serde(default)]
     pub speak_answers: bool,
@@ -315,6 +322,8 @@ impl Default for Settings {
             assist_offline_only: false,
             assist_consent: Vec::new(),
             assist_claude_code_ok: false,
+            computer_use: false,
+            computer_trust: Default::default(),
             speak_answers: false,
             speak_voice: None,
             speak_rate: default_speak_rate(),
@@ -323,6 +332,18 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The trust tiers the person chose, as the computer tools' guard reads them; a word that is not a tier is left out.
+    pub fn trust(&self) -> crate::computer::guard::Trust {
+        use crate::computer::guard::{Tier, Trust};
+        Trust::with(self.computer_trust.iter().filter_map(|(app, w)| Tier::of(w).map(|t| (app.clone(), t))))
+    }
+
+    /// Raise (or set) `app`'s tier, as "Allow in <app>" does: kept by app name, so the next start reads it too.
+    pub fn allow_app(&mut self, app: &str, tier: crate::computer::guard::Tier) {
+        let key = self.computer_trust.keys().find(|k| crate::computer::guard::app_key(k) == crate::computer::guard::app_key(app)).cloned();
+        self.computer_trust.insert(key.unwrap_or_else(|| app.trim().to_string()), tier.word().to_string());
+    }
+
     pub fn load(path: &Path) -> Self {
         let mut s: Self = std::fs::read(path)
             .ok()
@@ -780,5 +801,30 @@ mod tests {
         assert_eq!((never_set.mark_point, never_set.zoom_px), (MarkPoint::Off, 512));
         let chosen: Settings = serde_json::from_str(r#"{"mark_point":"ring","zoom_px":256}"#).unwrap();
         assert_eq!((chosen.mark_point, chosen.zoom_px), (MarkPoint::Ring, 256), "a file that set them keeps them");
+    }
+
+    #[test]
+    fn computer_use_is_off_by_default_and_the_trust_tiers_are_kept_by_app_and_read_by_the_guard() {
+        use crate::computer::guard::Tier;
+        let d = std::env::temp_dir().join(format!("pointcast-computer-settings-{}", std::process::id()));
+        let f = d.join("settings.json");
+        let s = Settings::default();
+        assert!(!s.computer_use && s.computer_trust.is_empty());
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&f, br#"{"model":"auto"}"#).unwrap();
+        let old = Settings::load(&f);
+        assert!(!old.computer_use && old.computer_trust.is_empty(), "a file from before");
+        let mut on = Settings { computer_use: true, ..s };
+        on.computer_trust.insert("Notes".into(), "full".into());
+        on.computer_trust.insert("Safari".into(), "nonsense".into());
+        on.allow_app("notes", Tier::Click);
+        on.allow_app("TextEdit", Tier::Full);
+        assert_eq!(on.computer_trust.get("Notes").map(String::as_str), Some("click"), "the same app, whatever its case");
+        on.save(&f).unwrap();
+        let back = Settings::load(&f);
+        assert_eq!(back, on);
+        let t = back.trust();
+        assert_eq!((t.tier("Notes"), t.tier("TextEdit"), t.tier("Safari"), t.tier("Mail")), (Tier::Click, Tier::Full, Tier::View, Tier::Click), "a word that is no tier keeps the default");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

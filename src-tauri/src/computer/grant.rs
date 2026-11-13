@@ -35,6 +35,11 @@ impl Grants {
         Grant { grants: self.clone(), id }
     }
 
+    /// End the live grant now, whoever holds it: the stop key.
+    pub fn end(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// Whether a grant is held and has not run out.
     pub fn live(&self) -> bool {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|l| Instant::now() < l.until)

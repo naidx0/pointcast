@@ -273,6 +273,11 @@ fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
         return;
     };
     let live = live.inner().clone();
+    // While the AI acts on the computer, the Ask key is its stop key.
+    if pressed && computer::desk().granted() {
+        computer::desk().halt();
+        return;
+    }
     if pressed {
         speak_stop_now(app);
         if live.listening() {
@@ -1114,6 +1119,9 @@ fn settings_view(svc: &App) -> Value {
     // Set apart: one more key in the literal above passes json!'s recursion limit.
     v["update_checked"] = update::checked();
     v["ask_hotkey"] = json!(s.ask_chord().label());
+    // Let the AI see and act: the switch, and each app's tier the person chose.
+    v["computer_use"] = json!(s.computer_use);
+    v["computer_trust"] = json!(s.computer_trust);
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
     v["wave_style"] = json!(s.wave());
@@ -1187,6 +1195,7 @@ fn settings_patch(
     let cur = svc.settings.lock().unwrap().clone();
     let next = merge(&cur, patch)?;
     svc.save_settings(next.clone())?;
+    computer_settings(&cur, &next);
     // A new free_memory_minutes moves the time the model goes.
     if cur.free_memory_minutes != next.free_memory_minutes {
         wake();
@@ -1247,6 +1256,11 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
         }
     }
     let next: Settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    if cur.computer_trust != next.computer_trust {
+        if let Some((app, w)) = next.computer_trust.iter().find(|(_, w)| computer::guard::Tier::of(w).is_none()) {
+            return Err(format!("\"{w}\" is not a level of trust for {app}: view, click or full."));
+        }
+    }
     let chords = [
         ("Start / stop", &cur.session_hotkey, &next.session_hotkey),
         ("Capture screen", &cur.full_hotkey, &next.full_hotkey),
@@ -1609,6 +1623,65 @@ fn mcp_copy_setup(svc: tauri::State<'_, Arc<App>>, agent: String) -> Result<(), 
     let bind = svc.settings.lock().unwrap().mcp_bind.clone();
     let token = mcp::token(&mcp::token_path())?;
     clipboard::copy_secret(&agents::copy_text(agent, &mcp_url(&bind), &token))
+}
+
+/// Let the AI see and act, as the settings say now: the tiers reach the guard at once, and the switch turned off ends
+/// whatever the AI is doing.
+fn computer_settings(cur: &Settings, next: &Settings) {
+    if cur.computer_trust != next.computer_trust {
+        computer::desk().set_trust(next.trust());
+    }
+    if cur.computer_use && !next.computer_use && computer::desk().granted() {
+        computer::desk().halt();
+    }
+}
+
+/// Where the computer tools stand for the Ask panel: acting or not, the app acted in, the card waiting.
+#[tauri::command]
+fn computer_status() -> computer::Status {
+    computer::desk().status()
+}
+
+/// The person's answer on the card: "do", "cancel" or "allow". Allow keeps the app's new tier in the settings.
+#[tauri::command]
+fn computer_answer(svc: tauri::State<'_, Arc<App>>, id: u64, answer: String) -> Result<(), String> {
+    let a = match answer.as_str() {
+        "do" => computer::Answer::Do,
+        "cancel" => computer::Answer::Cancel,
+        "allow" => computer::Answer::Allow,
+        _ => return Err(format!("\"{answer}\" is not an answer: do, cancel or allow.")),
+    };
+    if let Some((app, tier)) = computer::desk().answer(id, a)? {
+        let mut s = svc.settings.lock().unwrap().clone();
+        s.allow_app(&app, tier);
+        svc.save_settings(s)?;
+    }
+    Ok(())
+}
+
+/// What a Claude turn that may act is given to reach Pointcast's server: its address and this install's token. The
+/// server starts if it is not running (loopback only, behind the token).
+fn computer_server(svc: Arc<App>) -> Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync> {
+    Arc::new(move || {
+        let bind = svc.settings.lock().unwrap().mcp_bind.clone();
+        let addr = mcp_start(&svc, &bind).map_err(|e| format!("Pointcast's agent server did not start: {e}."))?;
+        Ok((format!("http://{addr}/mcp"), mcp::token(&mcp::token_path())?))
+    })
+}
+
+/// The Ask panel hears how the computer tools stand, and Esc while acting ends the turn.
+fn computer_hooks(app: &AppHandle) {
+    let (status, stop) = (app.clone(), app.clone());
+    computer::desk().set_hooks(computer::Hooks {
+        status: Box::new(move |s| {
+            let _ = status.emit("computer://status", s);
+        }),
+        stop: Box::new(move || {
+            if let Some(live) = stop.try_state::<Arc<live::Live>>() {
+                live.inner().stop();
+            }
+        }),
+    });
 }
 
 fn mcp_url(bind: &str) -> String {
@@ -2295,6 +2368,7 @@ pub fn run() {
     shell_path::widen();
     let settings_path = settings::settings_path();
     let settings = Settings::load(&settings_path);
+    computer::desk().set_trust(settings.trust());
     let svc = App::new(settings.clone(), settings_path);
     if settings.mcp_enabled {
         // Errors name the problem, never the token.
@@ -2388,6 +2462,8 @@ pub fn run() {
             live_state,
             live_drop_picture,
             live_stop,
+            computer_status,
+            computer_answer,
             live_close,
             live_retry,
             live_ask_typed,
@@ -2443,6 +2519,8 @@ pub fn run() {
             app.manage(summaries_for(&handle, &svc, held.clone()));
             app.manage(reader_for(&handle, &svc));
             app.manage(live_for(&handle, &svc, held));
+            computer_hooks(&handle);
+            assist::claude::serve_with(computer_server(svc.clone()));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);
             if let Some(m) = svc.history.recover() {

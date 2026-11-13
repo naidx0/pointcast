@@ -241,3 +241,148 @@ fn no_screenshot_while_a_password_prompt_or_pointcast_is_in_front() {
         assert_eq!(r["content"].as_array().unwrap().len(), 1, "{front}: no picture goes out: {r}");
     }
 }
+
+mod cards {
+    use super::*;
+    use crate::computer::confirm::{Binding, Confirms, Waited};
+    use crate::computer::{Answer, WITHIN};
+
+    fn leaked(fake: Fake) -> (&'static Desk, Did) {
+        let did = fake.did.clone();
+        (Box::leak(Box::new(Desk::new(Box::new(fake)))), did)
+    }
+
+    /// The card the call is waiting on, once it shows.
+    fn card(d: &Desk) -> crate::computer::Card {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(c) = d.confirms.card() {
+                return c;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "no card showed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn binding(target: &str) -> Binding {
+        Binding { app: "Mail".into(), tool: "pointcast_click".into(), target: target.into(), args: json!({ "id": "abc" }) }
+    }
+
+    #[test]
+    fn an_approval_works_once_only_for_the_same_target_and_expires() {
+        let c = Confirms::default();
+        let yes = |c: &Confirms, b: Binding| {
+            let id = c.open("This would click button \"Send\" in Mail.", None, b);
+            assert_eq!(c.answer(id, Answer::Allow, &|_, _| ()), Err("This asks for a yes: Do it or Cancel.".into()), "no tier to raise on a yes card");
+            assert_eq!(c.answer(id, Answer::Do, &|_, _| ()), Ok(None));
+            assert!(c.answer(id, Answer::Do, &|_, _| ()).is_err(), "answered once");
+            let Waited::Approved(a) = c.wait(id, &|| true, Duration::from_secs(1)) else { panic!("approved") };
+            assert!(c.card().is_none(), "the card goes once answered");
+            a
+        };
+        let a = yes(&c, binding("button \"Send\""));
+        let again = a.replayed();
+        assert!(c.spend(a, &binding("button \"Send\"")), "the action it was made for");
+        assert!(!c.spend(again, &binding("button \"Send\"")), "once only");
+        let a = yes(&c, binding("button \"Send\""));
+        assert!(!c.spend(a.replayed(), &binding("button \"Delete\"")), "another target");
+        assert!(!c.spend(a, &binding("button \"Send\"")), "and spent by the try");
+        let mut other_args = binding("button \"Send\"");
+        other_args.args = json!({ "id": "abc", "count": 2 });
+        let a = yes(&c, binding("button \"Send\""));
+        assert!(!c.spend(a, &other_args), "other arguments");
+        let a = yes(&c, binding("button \"Send\""));
+        c.age(WITHIN);
+        assert!(!c.spend(a, &binding("button \"Send\"")), "expired after a minute");
+        // A card nobody answers, and one whose turn ends.
+        let id = c.open("x", None, binding("button \"Send\""));
+        assert!(matches!(c.wait(id, &|| true, Duration::from_millis(30)), Waited::TimedOut));
+        let id = c.open("x", None, binding("button \"Send\""));
+        assert!(matches!(c.wait(id, &|| false, Duration::from_secs(5)), Waited::Ended));
+        assert!(c.card().is_none());
+    }
+
+    #[test]
+    fn do_it_lets_that_one_call_through_and_the_next_one_asks_again() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let send = id_of(d, "Send");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": send })));
+        let c = card(d);
+        assert_eq!((c.app.as_str(), c.tool.as_str(), c.raise), ("Mail", "pointcast_click", None));
+        assert!(c.what.contains("button \"Send\" in Mail"), "{}", c.what);
+        assert!(done(&log).is_empty(), "nothing happens before the press");
+        d.answer(c.id, Answer::Do).unwrap();
+        let r = waiting.join().unwrap();
+        assert_eq!(status(&r), "done", "{r}");
+        assert_eq!(done(&log), ["press Send"]);
+        assert!(!r.to_string().contains("approval"), "no token ever reaches the AI");
+        let last = d.journal.entries();
+        assert!(matches!(&last[last.len() - 2].outcome, Outcome::NeedsConfirm(_)));
+        assert!(matches!(&last[last.len() - 1].outcome, Outcome::Done(how) if how.ends_with("after the person's yes")), "{last:?}");
+        // The yes was for that call only: the same click again asks again, and unanswered does nothing.
+        d.ask_for(Duration::from_millis(60));
+        let send = id_of(d, "Send");
+        let r = call(d, "pointcast_click", &json!({ "id": send }));
+        assert_eq!(status(&r), "refused", "{r}");
+        assert!(first_text(&r).contains("did not answer"), "{r}");
+        assert_eq!(done(&log), ["press Send"]);
+    }
+
+    #[test]
+    fn cancel_tells_the_ai_the_person_declined_and_a_stop_ends_the_wait() {
+        let (d, log) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::Full)]));
+        d.ask_for(Duration::from_secs(10));
+        let g = d.grants.grant(Duration::from_secs(60));
+        let send = id_of(d, "Send");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": send })));
+        d.answer(card(d).id, Answer::Cancel).unwrap();
+        let r = waiting.join().unwrap();
+        assert_eq!((status(&r), r["isError"].clone()), ("declined".to_string(), json!(false)), "{r}");
+        assert!(first_text(&r).contains("The person declined"), "{r}");
+        let send = id_of(d, "Send");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": send })));
+        let c = card(d);
+        let t = std::time::Instant::now();
+        drop(g);
+        let r = waiting.join().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2) && status(&r) == "refused", "{r}");
+        assert!(d.answer(c.id, Answer::Do).is_err(), "too late");
+        assert!(done(&log).is_empty());
+    }
+
+    #[test]
+    fn allow_in_the_app_raises_its_tier_to_what_the_action_needs_and_the_call_goes_on() {
+        let (d, log) = leaked(mail());
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let body = id_of(d, "AXTextArea");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_type", &json!({ "id": body, "text": "hello" })));
+        let c = card(d);
+        assert_eq!(c.raise, Some("full"), "Mail starts at click; typing needs full");
+        assert!(d.answer(c.id, Answer::Do).is_err(), "a tier card is allowed or cancelled");
+        assert_eq!(d.answer(c.id, Answer::Allow), Ok(Some(("Mail".to_string(), Tier::Full))), "what the settings keep");
+        let r = waiting.join().unwrap();
+        assert_eq!(status(&r), "done", "{r}");
+        assert_eq!(d.trust().tier("Mail"), Tier::Full);
+        assert_eq!(done(&log), ["set =hello"]);
+        // A click-tier refusal raises to click only.
+        let (d, _) = leaked(mail());
+        d.set_trust(Trust::with([("Mail".to_string(), Tier::View)]));
+        d.ask_for(Duration::from_secs(10));
+        let _g = d.grants.grant(Duration::from_secs(60));
+        let bold = id_of(d, "Bold");
+        let waiting = std::thread::spawn(move || call(d, "pointcast_click", &json!({ "id": bold })));
+        let c = card(d);
+        assert_eq!(c.raise, Some("click"));
+        assert_eq!(d.answer(c.id, Answer::Allow), Ok(Some(("Mail".to_string(), Tier::Click))));
+        assert_eq!(status(&waiting.join().unwrap()), "done");
+        // The never-list asks nobody.
+        let r = call(d, "pointcast_open_app", &json!({ "name": "SecurityAgent" }));
+        assert_eq!(status(&r), "refused");
+        assert!(d.confirms.card().is_none());
+    }
+}

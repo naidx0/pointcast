@@ -1555,7 +1555,7 @@ pub mod tests {
             answer(&mut chat, said("anything"));
             assert_eq!(sent(&seen, "turn/start")[0]["effort"], sent_effort, "{asked}");
         }
-        let p = crate::assist::catalog::Picked { id: ID, model: None, offline_only: false, base: None, effort: Some("medium".into()), speed: Some("priority".into()) };
+        let p = crate::assist::catalog::Picked { id: ID, model: None, offline_only: false, base: None, effort: Some("medium".into()), speed: Some("priority".into()), computer: false };
         let c = crate::assist::catalog::codex_for(&p, Path::new("unused"));
         assert_eq!((c.effort.as_deref(), c.speed.as_deref()), (Some("medium"), Some("priority")));
         let none = crate::assist::catalog::Picked { effort: None, ..p };
