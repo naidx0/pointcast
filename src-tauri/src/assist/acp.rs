@@ -187,7 +187,7 @@ fn allow(params: &Value) -> Value {
 /// give that name to the same server (with this install's token, for coding).
 pub const SERVER: &str = super::codex::SERVER;
 
-/// Whether a tool call an agent reports or asks permission for is one of the ten computer tools on Pointcast's own
+/// Whether a tool call an agent reports or asks permission for is one of the computer tools on Pointcast's own
 /// server. ACP has no field for a tool's name, so each agent says it its own way: an agent's own tool (a shell, an edit,
 /// a fetch) is told apart by its `kind`, and Pointcast's tool by a name the agent gives an MCP tool, as its title (whole,
 /// or before " (") or the start of its id (before "-"), or in its `_meta`. UNCONFIRMED, since no agent here has been

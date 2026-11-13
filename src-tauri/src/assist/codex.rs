@@ -81,7 +81,7 @@ struct Tools<'a> {
 
 /// The parameters of `thread/start`: the fence around the conversation. `servers` are the MCP servers the person's
 /// Codex is set up with: each is switched off for this thread by name. A thread that may act (`tools`) also gets
-/// Pointcast's own server with only the ten computer tools, and is told what acting asks of it in place of the fence;
+/// Pointcast's own server with only the computer tools, and is told what acting asks of it in place of the fence;
 /// every other switch stays as it is, so shell and file tools stay off.
 fn thread_start(cwd: &Path, system: &str, model: Option<&str>, servers: &[String], tools: Option<Tools>) -> Value {
     // Checked against Codex 0.164.0: its generated schema takes `config` here as a free table and names
@@ -173,7 +173,7 @@ fn tool_asked(p: &Value) -> Option<&str> {
     })
 }
 
-/// Whether an MCP tool call is one of the ten computer tools, on Pointcast's own server.
+/// Whether an MCP tool call is one of the computer tools, on Pointcast's own server.
 fn pointcast_tool(item: &Value) -> bool {
     item["server"].as_str() == Some(SERVER) && item["tool"].as_str().is_some_and(crate::computer::is_tool)
 }
@@ -423,7 +423,7 @@ impl Shared {
         let _ = self.post_as(self.rpc.reserve(), "turn/interrupt", json!({ "threadId": thread, "turnId": turn }));
     }
 
-    /// Whether an approval Codex asks for passes: only a call of one of the ten computer tools on Pointcast's own
+    /// Whether an approval Codex asks for passes: only a call of one of the computer tools on Pointcast's own
     /// server, asked in the thread of the turn under way, which holds the tools and is not being stopped.
     fn approves(&self, method: &str, p: &Value) -> bool {
         if method != "mcpServer/elicitation/request" || p["serverName"].as_str() != Some(SERVER) {
@@ -1849,7 +1849,7 @@ pub mod tests {
         assert_eq!(
             on["config"]["mcp_servers"],
             json!({ "code.repl 2": { "enabled": false }, "notes": { "enabled": false }, "pointcast_turn": { "enabled": true, "url": "http://127.0.0.1:9/mcp", "http_headers": { "Authorization": "Bearer k3y" }, "enabled_tools": names } }),
-            "the person's servers stay off and Pointcast's carries the turn's key and the ten tools only"
+            "the person's servers stay off and Pointcast's carries the turn's key and the computer tools only"
         );
         let told = on["developerInstructions"].as_str().unwrap();
         assert!(told.starts_with(super::super::claude::ACTING) && told.ends_with("\n\nBe brief.") && !told.contains("No tools exist"), "{told}");
