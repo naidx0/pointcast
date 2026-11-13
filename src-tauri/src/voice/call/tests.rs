@@ -352,3 +352,151 @@ fn call_through_silero_on_recorded_voices() {
     let lead = ((sim.said_at[2].unwrap() + first[2]) as i64 - st.turns[2].0 as i64) / MS as i64;
     assert!(lead >= 100, "the barge-in keeps its first word ({lead} ms of pre-roll)");
 }
+
+/// The Ask side of a call driven through `Calls`: always ready, never speaking; what it was told to hear is kept.
+#[derive(Default)]
+struct Idle {
+    words: Mutex<Vec<bool>>,
+}
+
+impl Asking for Idle {
+    fn listen(&self) -> bool {
+        true
+    }
+    fn ask(&self) {}
+    fn stop_answer(&self) {}
+    fn drop_turn(&self) {}
+    fn stop_speech(&self) {}
+    fn stage(&self) -> Stage {
+        Stage::Listening
+    }
+    fn speaking(&self) -> bool {
+        false
+    }
+    fn played(&self) -> f32 {
+        0.0
+    }
+    fn hear_words(&self, words: Option<crate::live::Words>) {
+        self.words.lock().unwrap().push(words.is_some());
+    }
+}
+
+/// `Calls` with test microphones: the first open waits for `gate` (a slow device), the VAD can be made to panic,
+/// and every lend, view told and microphone opened is kept.
+struct Rig {
+    calls: Arc<Calls>,
+    ask: Arc<Idle>,
+    gate: Arc<AtomicBool>,
+    opens: Arc<std::sync::atomic::AtomicUsize>,
+    takes: Arc<Mutex<Vec<Arc<Take>>>>,
+    lends: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Rig {
+    fn new(slow_first_open: bool, panics: bool) -> Rig {
+        let ask = Arc::new(Idle::default());
+        let gate = Arc::new(AtomicBool::new(!slow_first_open));
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let takes: Arc<Mutex<Vec<Arc<Take>>>> = Arc::default();
+        let lends: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let (g, o, t, l) = (gate.clone(), opens.clone(), takes.clone(), lends.clone());
+        let vads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Calls::new(Deps {
+            ask: ask.clone(),
+            open: Box::new(move |take| {
+                if o.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let t0 = Instant::now();
+                    while !g.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5) {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+                t.lock().unwrap().push(take.clone());
+                Ok(Mic::from_samples(vec![], take))
+            }),
+            lend: Box::new(move |f| l.lock().unwrap().push(f.is_some())),
+            vad: Box::new(move || {
+                if panics && vads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("the VAD would not load (a test's panic)");
+                }
+                Box::new(vad::Energy::default())
+            }),
+            told: Box::new(|_| {}),
+            level: Box::new(|_| {}),
+        });
+        Rig { calls, ask, gate, opens, takes, lends }
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(Ordering::SeqCst)
+    }
+
+    fn live_mics(&self) -> usize {
+        self.takes.lock().unwrap().iter().filter(|t| t.open.load(Ordering::SeqCst)).count()
+    }
+
+    /// Wait up to 3 s for `f`.
+    fn until(&self, f: impl Fn(&Rig) -> bool) -> bool {
+        let t0 = Instant::now();
+        while !f(self) {
+            if t0.elapsed() > Duration::from_secs(3) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+}
+
+#[test]
+fn a_second_click_while_the_microphone_opens_cancels_the_start_and_never_opens_a_second_call() {
+    let rig = Rig::new(true, false);
+    let calls = rig.calls.clone();
+    let first = std::thread::spawn(move || calls.toggle());
+    assert!(rig.until(|r| r.opens() == 1), "the first click opens the microphone");
+    let second = rig.calls.toggle().expect("the second click");
+    rig.gate.store(true, Ordering::SeqCst);
+    let first = first.join().unwrap().expect("the first click");
+    assert_eq!(rig.opens(), 1, "the second click opened a second microphone: two calls");
+    assert!(!second.active && !first.active, "the second click cancels the start: {first:?} {second:?}");
+    assert!(rig.until(|r| r.live_mics() == 0), "the cancelled start's microphone is closed");
+    assert!(!rig.lends.lock().unwrap().iter().any(|l| *l), "a cancelled start lends nothing");
+    assert!(!rig.calls.view().active);
+    // The switch works as before afterwards: a call starts, and the next click ends it.
+    assert!(rig.calls.toggle().unwrap().active);
+    assert_eq!(rig.opens(), 2);
+    rig.calls.toggle().unwrap();
+    assert!(rig.until(|r| !r.calls.view().active && r.live_mics() == 0), "the call ends with its microphone closed");
+    assert_eq!(rig.lends.lock().unwrap().last(), Some(&false));
+}
+
+#[test]
+fn a_call_whose_thread_panics_still_ends_and_lets_the_next_call_start() {
+    let rig = Rig::new(false, true);
+    assert!(rig.calls.toggle().unwrap().active);
+    assert!(rig.until(|r| !r.calls.view().active), "the panicked call still shows as running: {:?}", rig.calls.view());
+    assert_eq!(rig.calls.view().ended, Some(Why::Failed));
+    assert_eq!(rig.lends.lock().unwrap().as_slice(), [true, false], "the feed is taken back");
+    assert_eq!(rig.ask.words.lock().unwrap().as_slice(), [true, false], "the words hook is taken back");
+    assert!(rig.until(|r| r.live_mics() == 0));
+    // The next click starts a new call rather than talking to the dead one.
+    assert!(rig.calls.toggle().unwrap().active);
+    assert_eq!(rig.opens(), 2);
+    rig.calls.toggle().unwrap();
+    assert!(rig.until(|r| !r.calls.view().active && r.live_mics() == 0));
+}
+
+#[test]
+fn an_old_calls_end_never_clears_what_a_newer_call_holds() {
+    let rig = Rig::new(false, false);
+    assert!(rig.calls.toggle().unwrap().active);
+    let view = rig.calls.view();
+    // The end of a call from an earlier generation, arriving late.
+    drop(Own { deps: rig.calls.deps.clone(), view: rig.calls.view.clone(), slot: rig.calls.slot.clone(), gen: 0, mic: None, ended: Some(Why::Toggle) });
+    assert_eq!(rig.calls.view(), view, "the newer call's view stands");
+    assert_eq!(rig.lends.lock().unwrap().as_slice(), [true], "its feed stays lent");
+    assert_eq!(rig.ask.words.lock().unwrap().as_slice(), [true], "its words hook stays");
+    assert!(matches!(*rig.calls.slot.lock().unwrap(), Slot::Running { gen: 1, .. }), "the slot is still the newer call's");
+    rig.calls.toggle().unwrap();
+    assert!(rig.until(|r| !r.calls.view().active && r.live_mics() == 0));
+    assert_eq!(rig.calls.view().ended, Some(Why::Toggle));
+}

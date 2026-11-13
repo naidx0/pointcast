@@ -14,7 +14,7 @@ pub mod vad;
 use crate::voice::audio::{self, Feed, Mic, Take};
 pub use machine::{Call, Do, Event, Side, Stage, Why};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -249,46 +249,106 @@ pub struct Deps {
     pub level: Box<dyn Fn(f32) + Send + Sync>,
 }
 
+/// Where the app's one call slot stands. Each call has a generation of its own, so the end of an old call never
+/// clears what belongs to a newer one.
+enum Slot {
+    Idle,
+    /// The microphone is opening; a click meanwhile cancels the start.
+    Starting { gen: u64, cancel: bool },
+    Running { gen: u64, tx: Sender<Event> },
+}
+
 /// The calls of the app: at most one at a time, on a thread of its own.
 pub struct Calls {
     deps: Arc<Deps>,
     view: Arc<Mutex<View>>,
-    tx: Arc<Mutex<Option<Sender<Event>>>>,
+    slot: Arc<Mutex<Slot>>,
+    gens: AtomicU64,
+}
+
+/// The lock, even after a panic poisoned it: a call's end runs while unwinding, where a second panic would abort.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Calls {
     pub fn new(deps: Deps) -> Arc<Calls> {
-        Arc::new(Calls { deps: Arc::new(deps), view: Arc::default(), tx: Arc::default() })
+        Arc::new(Calls { deps: Arc::new(deps), view: Arc::default(), slot: Arc::new(Mutex::new(Slot::Idle)), gens: AtomicU64::new(0) })
     }
 
     pub fn view(&self) -> View {
-        self.view.lock().unwrap().clone()
+        lock(&self.view).clone()
     }
 
     pub fn active(&self) -> bool {
-        self.view.lock().unwrap().active
+        lock(&self.view).active
     }
 
-    /// The Call switch: start a call, or end the one under way.
+    /// The Call switch: start a call, cancel the one still opening its microphone, or end the one under way.
     pub fn toggle(&self) -> Result<View, String> {
-        if let Some(tx) = self.tx.lock().unwrap().as_ref() {
-            let _ = tx.send(Event::Toggle);
-            return Ok(self.view());
-        }
-        self.start()
+        let gen = {
+            let mut slot = lock(&self.slot);
+            match &mut *slot {
+                Slot::Running { tx, .. } => {
+                    let _ = tx.send(Event::Toggle);
+                    return Ok(self.view());
+                }
+                Slot::Starting { cancel, .. } => {
+                    *cancel = true;
+                    return Ok(self.view());
+                }
+                Slot::Idle => {
+                    // Claimed before the microphone opens: a second click finds the slot taken.
+                    let gen = self.gens.fetch_add(1, Ordering::SeqCst) + 1;
+                    *slot = Slot::Starting { gen, cancel: false };
+                    gen
+                }
+            }
+        };
+        self.start(gen)
     }
 
     /// Esc in the panel during a call: once silences the voice, twice ends the call.
     pub fn esc(&self) {
-        if let Some(tx) = self.tx.lock().unwrap().as_ref() {
+        if let Slot::Running { tx, .. } = &*lock(&self.slot) {
             let _ = tx.send(Event::Esc);
         }
     }
 
-    fn start(&self) -> Result<View, String> {
+    /// Start call `gen`, whose slot is claimed as Starting.
+    fn start(&self, gen: u64) -> Result<View, String> {
         // The microphone opens first: a call that cannot hear never starts.
         let take = Arc::new(Take::default());
-        let mic = (self.deps.open)(take.clone())?;
+        let mic = match (self.deps.open)(take.clone()) {
+            Ok(mic) => mic,
+            Err(e) => {
+                let mut slot = lock(&self.slot);
+                if matches!(*slot, Slot::Starting { gen: g, .. } if g == gen) {
+                    *slot = Slot::Idle;
+                }
+                return Err(e);
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut slot = lock(&self.slot);
+            match *slot {
+                Slot::Starting { gen: g, cancel: false } if g == gen => *slot = Slot::Running { gen, tx },
+                _ => {
+                    // Clicked again while it opened: the call never starts.
+                    if matches!(*slot, Slot::Starting { gen: g, .. } if g == gen) {
+                        *slot = Slot::Idle;
+                    }
+                    drop(slot);
+                    drop(mic);
+                    let view = self.view();
+                    (self.deps.told)(&view);
+                    return Ok(view);
+                }
+            }
+        }
+        // From here the call's end (`Own`) gives back everything below, even if the thread never runs.
+        let own = Own { deps: self.deps.clone(), view: self.view.clone(), slot: self.slot.clone(), gen, mic: Some(mic), ended: None };
         let feed = Feed::new(KEEP_MS, take.device());
         (self.deps.lend)(Some(feed.clone()));
         let hangup = Arc::new(AtomicBool::new(false));
@@ -300,22 +360,52 @@ impl Calls {
             }
             end
         })));
-        let (tx, rx) = mpsc::channel();
-        *self.tx.lock().unwrap() = Some(tx);
         let view = View { active: true, side: Some(Side::Listening), ended: None };
-        *self.view.lock().unwrap() = view.clone();
+        *lock(&self.view) = view.clone();
         (self.deps.told)(&view);
-        let (deps, shared, txs) = (self.deps.clone(), self.view.clone(), self.tx.clone());
         std::thread::Builder::new()
             .name("call".into())
-            .spawn(move || run(deps, shared, txs, rx, mic, take, feed, hangup))
+            .spawn(move || run(own, rx, take, feed, hangup))
             .map_err(|e| e.to_string())?;
         Ok(view)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run(deps: Arc<Deps>, view: Arc<Mutex<View>>, txs: Arc<Mutex<Option<Sender<Event>>>>, rx: Receiver<Event>, mic: Mic, take: Arc<Take>, feed: Arc<Feed>, hangup: Arc<AtomicBool>) {
+/// What a running call holds of the app, given back when it ends however it ends (a panic too): the feed it lent,
+/// the words hook, its microphone, the slot and the view. Only while the slot is still this call's own.
+struct Own {
+    deps: Arc<Deps>,
+    view: Arc<Mutex<View>>,
+    slot: Arc<Mutex<Slot>>,
+    gen: u64,
+    mic: Option<Mic>,
+    /// Why the call ended; a call that ends without saying (a panic) failed.
+    ended: Option<Why>,
+}
+
+impl Drop for Own {
+    fn drop(&mut self) {
+        // Held throughout, so a new call cannot start between the checks and what they clear.
+        let mut slot = lock(&self.slot);
+        let mine = matches!(*slot, Slot::Running { gen, .. } if gen == self.gen);
+        if mine {
+            (self.deps.lend)(None);
+            self.deps.ask.hear_words(None);
+        }
+        drop(self.mic.take());
+        if !mine {
+            return;
+        }
+        *slot = Slot::Idle;
+        let v = View { active: false, side: None, ended: self.ended.or(Some(Why::Failed)) };
+        *lock(&self.view) = v.clone();
+        (self.deps.told)(&v);
+        (self.deps.level)(0.0);
+    }
+}
+
+fn run(mut own: Own, rx: Receiver<Event>, take: Arc<Take>, feed: Arc<Feed>, hangup: Arc<AtomicBool>) {
+    let deps = own.deps.clone();
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64;
     let mut l = Loop::new(deps.ask.clone(), feed, (deps.vad)(), hangup, now());
@@ -331,7 +421,7 @@ fn run(deps: Arc<Deps>, view: Arc<Mutex<View>>, txs: Arc<Mutex<Option<Sender<Eve
         if l.over().is_none() && shown != Some(l.side()) {
             shown = Some(l.side());
             let v = View { active: true, side: shown, ended: None };
-            *view.lock().unwrap() = v.clone();
+            *lock(&own.view) = v.clone();
             (deps.told)(&v);
         }
         let heard = loud.feed(&x);
@@ -347,14 +437,7 @@ fn run(deps: Arc<Deps>, view: Arc<Mutex<View>>, txs: Arc<Mutex<Option<Sender<Eve
     for (at, what) in &l.log {
         eprintln!("[call] {:>6} ms  {what}", at);
     }
-    (deps.lend)(None);
-    deps.ask.hear_words(None);
-    drop(mic);
-    *txs.lock().unwrap() = None;
-    let v = View { active: false, side: None, ended: l.over() };
-    *view.lock().unwrap() = v.clone();
-    (deps.told)(&v);
-    (deps.level)(0.0);
+    own.ended = l.over();
 }
 
 #[cfg(test)]
