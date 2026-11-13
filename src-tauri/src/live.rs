@@ -398,7 +398,12 @@ pub struct Live {
     sessions: Sessions,
     wait: Duration,
     inner: Mutex<Inner>,
+    /// Hears a spoken question's words before they are kept; true keeps and sends nothing (a call's "end call").
+    words: Mutex<Option<Words>>,
 }
+
+/// See `Live::hear_words`.
+pub type Words = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// What the AI did on the computer, one line each, as the panel lists it under the answer.
 fn lines(acts: &[crate::computer::Entry]) -> Vec<String> {
@@ -545,7 +550,13 @@ impl Live {
     }
 
     pub fn with_wait(deps: Deps, data_dir: &std::path::Path, wait: Duration) -> Arc<Live> {
-        Arc::new(Live { deps, sessions: Sessions::new(data_dir), wait, inner: Mutex::default() })
+        Arc::new(Live { deps, sessions: Sessions::new(data_dir), wait, inner: Mutex::default(), words: Mutex::default() })
+    }
+
+    /// `words` hears each spoken question's words as the person finished them, before anything is kept; when it says
+    /// true, the question is neither kept nor sent and the panel shows what it showed before (as for nothing said).
+    pub fn hear_words(&self, words: Option<Words>) {
+        *self.words.lock().unwrap() = words;
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -909,6 +920,25 @@ impl Live {
         }
     }
 
+    /// The question being listened to is dropped unsaid: nothing is kept or sent, and the panel shows what it showed
+    /// before, as when nothing was said (a call that ends while it listens).
+    pub fn drop_listening(&self) {
+        let mut g = self.inner.lock().unwrap();
+        if g.snap.state != State::Listening {
+            return;
+        }
+        g.run += 1;
+        g.picture = None;
+        g.snap.picture = None;
+        g.snap.no_picture = None;
+        g.snap.words.clear();
+        g.snap.next_picture = g.marked.as_ref().and_then(|m| m.small.clone());
+        self.step(&mut g, Step::Settle);
+        self.tell(&g);
+        drop(g);
+        let _ = self.deps.voice.stop(true);
+    }
+
     /// The panel closes: whatever is under way stops. A question asked within `JOIN` of this goes on in the session
     /// the panel was on; a later one starts a new session.
     pub fn close(&self) {
@@ -1219,7 +1249,8 @@ impl Live {
             if g.run != run || g.snap.state != State::Finishing {
                 return;
             }
-            if text.is_empty() {
+            let taken = !text.is_empty() && self.words.lock().unwrap().as_ref().is_some_and(|w| w(&text));
+            if text.is_empty() || taken {
                 // Nothing was said: the frame goes, nothing is kept or sent, and the panel is simply open. A picture
                 // the person marked up waits for the next question.
                 g.picture = None;
@@ -2063,6 +2094,43 @@ mod tests {
         r.end();
         r2.end();
         r3.end();
+    }
+
+    #[test]
+    fn words_taken_by_a_call_are_neither_kept_nor_sent_and_the_panel_settles_as_for_nothing_said() {
+        let (script, provider) = scripted(&[(0, "never")]);
+        let r = rig("taken", provider, FIRST_WAIT);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let h = heard.clone();
+        r.live.hear_words(Some(Arc::new(move |w: &str| {
+            h.lock().unwrap().push(w.to_string());
+            w.contains("end call")
+        })));
+        r.ask("end call", State::Shown);
+        assert_eq!(*heard.lock().unwrap(), ["end call"]);
+        assert_eq!(r.states(), [State::Listening, State::Finishing, State::Shown]);
+        assert!(r.kept().is_empty() && script.asked.lock().unwrap().is_empty());
+        assert!(r.live.snapshot().words.is_empty());
+        // Other words go as always; with no one listening, these would too.
+        r.live.hear_words(None);
+        r.end();
+    }
+
+    #[test]
+    fn a_question_dropped_while_listening_is_neither_kept_nor_sent_and_the_panel_stays_open() {
+        let (script, provider) = scripted(&[(0, "never")]);
+        let r = rig("dropped", provider, FIRST_WAIT);
+        assert!(r.live.press());
+        *r.voice.say.lock().unwrap() = "half a question".into();
+        r.live.drop_listening();
+        assert_eq!(r.states(), [State::Listening, State::Shown]);
+        assert!(!r.outs.lock().unwrap().contains(&Out::Hide), "the panel stays");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(r.kept().is_empty() && script.asked.lock().unwrap().is_empty());
+        assert!(r.live.snapshot().words.is_empty() && r.live.snapshot().picture.is_none());
+        r.live.drop_listening();
+        assert_eq!(r.states(), [State::Listening, State::Shown], "only while listening");
+        r.end();
     }
 
     #[test]

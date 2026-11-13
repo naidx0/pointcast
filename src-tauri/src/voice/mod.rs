@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod call;
 pub mod engine;
 pub mod kokoro;
 pub mod machine;

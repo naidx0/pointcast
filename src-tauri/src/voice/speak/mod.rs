@@ -519,6 +519,11 @@ impl Reader {
         }
     }
 
+    /// Something is being said or waits to be.
+    pub fn speaking(&self) -> bool {
+        self.talk.busy()
+    }
+
     /// Say the sample line the way `how` says, in place of anything being read. A voice that has to be downloaded
     /// first is, and says it once it is (unless something stopped speech meanwhile).
     pub fn sample(&self, how: How) {

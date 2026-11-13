@@ -721,6 +721,74 @@ pub fn devices() -> Vec<String> {
     v
 }
 
+/// One microphone shared through a call: what it hears is kept for a few seconds (so a turn can start from before the
+/// moment it was noticed) and handed on to the recording tapping it, if any (`Mic::from_feed`). Sample positions count
+/// from the first sample pushed.
+pub struct Feed {
+    inner: Mutex<FeedInner>,
+    /// The device it hears through, by name.
+    pub device: Option<String>,
+}
+
+struct FeedInner {
+    kept: std::collections::VecDeque<f32>,
+    /// The position of `kept[0]`.
+    start: u64,
+    keep: usize,
+    /// Where the next recording starts; none: from the next sample.
+    from: Option<u64>,
+    sink: Option<Arc<Take>>,
+}
+
+impl Feed {
+    /// A feed that keeps the last `keep_ms` of audio.
+    pub fn new(keep_ms: u32, device: Option<String>) -> Arc<Feed> {
+        let keep = (RATE as u64 * keep_ms as u64 / 1000) as usize;
+        Arc::new(Feed { inner: Mutex::new(FeedInner { kept: Default::default(), start: 0, keep, from: None, sink: None }), device })
+    }
+
+    /// Hear what the microphone delivered (16 kHz mono): kept, and passed to the recording tapping the feed.
+    pub fn push(&self, x: &[f32]) {
+        let mut f = self.inner.lock().unwrap();
+        if let Some(t) = &f.sink {
+            t.push(x);
+        }
+        f.kept.extend(x.iter().copied());
+        let over = f.kept.len().saturating_sub(f.keep);
+        f.kept.drain(..over);
+        f.start += over as u64;
+    }
+
+    /// The position of the next sample.
+    pub fn end(&self) -> u64 {
+        let f = self.inner.lock().unwrap();
+        f.start + f.kept.len() as u64
+    }
+
+    /// The next recording starts at position `from` (as far back as is kept), or with the next sample.
+    pub fn start_at(&self, from: Option<u64>) {
+        self.inner.lock().unwrap().from = from;
+    }
+
+    /// `take` gets the audio from where the next recording starts, then everything pushed after, until `detach`.
+    fn attach(&self, take: &Arc<Take>) {
+        let mut f = self.inner.lock().unwrap();
+        if let Some(from) = f.from.take() {
+            let skip = from.saturating_sub(f.start) as usize;
+            let lead: Vec<f32> = f.kept.iter().skip(skip).copied().collect();
+            take.push(&lead);
+        }
+        f.sink = Some(take.clone());
+    }
+
+    fn detach(&self, take: &Arc<Take>) {
+        let mut f = self.inner.lock().unwrap();
+        if f.sink.as_ref().is_some_and(|t| Arc::ptr_eq(t, take)) {
+            f.sink = None;
+        }
+    }
+}
+
 pub struct Mic {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -804,6 +872,27 @@ impl Mic {
                 take.push(chunks.next().unwrap_or(&[0.0; 320]));
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            take.open.store(false, Ordering::SeqCst);
+        });
+        Mic {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// A recording that takes its audio from `feed` (a call's microphone, already open): from where the feed says the
+    /// next recording starts, then as it comes, until closed.
+    pub fn from_feed(feed: Arc<Feed>, take: Arc<Take>) -> Mic {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = stop.clone();
+        *take.device.lock().unwrap() = feed.device.clone();
+        take.open.store(true, Ordering::SeqCst);
+        feed.attach(&take);
+        let thread = std::thread::spawn(move || {
+            while !s2.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            feed.detach(&take);
             take.open.store(false, Ordering::SeqCst);
         });
         Mic {

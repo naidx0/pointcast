@@ -217,6 +217,9 @@ pub struct App {
     pub monitor: Mutex<Option<(Mic, Arc<Take>)>>,
     /// When the monitor closes unless asked again (Settings asks every second or so while it shows the meter).
     monitor_until: Mutex<Option<std::time::Instant>>,
+    /// While a call runs, a question records from the call's microphone (already open, with the moment before the turn
+    /// kept) instead of opening its own (`voice::call`).
+    feed: Mutex<Option<Arc<crate::voice::audio::Feed>>>,
 }
 
 impl App {
@@ -286,6 +289,7 @@ impl App {
             hotkey_errors: Mutex::default(),
             monitor: Mutex::default(),
             monitor_until: Mutex::default(),
+            feed: Mutex::default(),
         })
     }
 
@@ -542,7 +546,12 @@ impl App {
     /// starts `audio_at` into the session: from the press to when the first sample was heard. A microphone that opens
     /// after its recording stopped is closed at once.
     fn open_for(&self, no: u64, device: Option<String>, take: Arc<Take>) {
-        match (self.open_mic)(device.clone(), take.clone()) {
+        let feed = self.feed.lock().unwrap().clone().filter(|_| self.purpose() == Purpose::Ask);
+        let opened = match feed {
+            Some(feed) => Ok(Mic::from_feed(feed, take.clone())),
+            None => (self.open_mic)(device.clone(), take.clone()),
+        };
+        match opened {
             Ok(mic) => {
                 // The device opened names itself; one that does not is the one asked for.
                 if take.device().is_none() {
@@ -625,6 +634,11 @@ impl App {
                 false
             }
         }
+    }
+
+    /// A call's microphone for the questions recorded from now on, or none to open their own again.
+    pub fn lend_feed(&self, feed: Option<Arc<crate::voice::audio::Feed>>) {
+        *self.feed.lock().unwrap() = feed;
     }
 
     /// What the recording under way, or the last one, is for.

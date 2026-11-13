@@ -13,6 +13,14 @@ const QUIET: Duration = Duration::from_secs(30);
 /// A stop fades out over this long.
 const FADE: Duration = Duration::from_millis(6);
 
+/// The rms of what the speakers took last (bits of an f32): the natural voice's level, for a call's line.
+static PLAYED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The rms of what the natural voice plays now; 0 when it is quiet (the system voice plays on its own and is not heard here).
+pub fn played() -> f32 {
+    f32::from_bits(PLAYED.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[derive(Default)]
 struct Buf {
     /// Sounds handed over and not yet in `samples`: their samples, rate, and who hears their end.
@@ -46,6 +54,7 @@ impl Buf {
                 self.heard.push((Instant::now(), !sounding));
             }
         }
+        let (mut squares, mut n) = (0f32, 0usize);
         for frame in out.chunks_mut(channels.max(1)) {
             let s = match self.samples.pop_front() {
                 Some(s) => {
@@ -54,8 +63,11 @@ impl Buf {
                 }
                 None => 0.0,
             };
+            squares += s * s;
+            n += 1;
             frame.fill(s);
         }
+        PLAYED.store((squares / n.max(1) as f32).sqrt().to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Queue a sound already at the stream's rate.
