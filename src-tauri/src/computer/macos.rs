@@ -49,6 +49,7 @@ fn ax_error(code: i32, doing: &str) -> String {
         -25204 => format!("The app did not answer while {doing}."),
         -25205 | -25206 => format!("That element can't do that ({doing})."),
         -25202 => format!("That element is gone ({doing}): list the elements again."),
+        -25212 => format!("macOS had no answer while {doing}."),
         _ => format!("macOS refused {doing} (AX error {code})."),
     }
 }
@@ -73,6 +74,13 @@ fn attr(el: &CFType, name: &str) -> Option<CFType> {
     let mut v: CFTypeRef = std::ptr::null();
     let err = unsafe { AXUIElementCopyAttributeValue(el.as_CFTypeRef(), key(name).as_concrete_TypeRef(), &mut v) };
     if err == 0 { owned(v) } else { None }
+}
+
+/// An attribute, or what the AX error means.
+fn attr_or(el: &CFType, name: &str, doing: &str) -> Result<CFType, String> {
+    let mut v: CFTypeRef = std::ptr::null();
+    let err = unsafe { AXUIElementCopyAttributeValue(el.as_CFTypeRef(), key(name).as_concrete_TypeRef(), &mut v) };
+    if err == 0 { owned(v).ok_or_else(|| ax_error(-25212, doing)) } else { Err(ax_error(err, doing)) }
 }
 
 fn text(el: &CFType, name: &str) -> String {
@@ -136,6 +144,8 @@ fn action_word(ax: &str) -> Option<String> {
         "AXPick" => "pick".into(),
         "AXRaise" => "raise".into(),
         "AXScrollToVisible" | "AXShowAlternateUI" | "AXShowDefaultUI" => return None,
+        // An app's own actions come as "name:...\ntarget:...\nselector:..."; Pointcast never performs them.
+        other if other.contains([':', '\n']) => return None,
         other => other.trim_start_matches("AX").to_lowercase(),
     })
 }
@@ -148,7 +158,8 @@ fn value_text(el: &CFType) -> Option<String> {
     if let Some(b) = v.clone().downcast_into::<CFBoolean>() {
         return Some(bool::from(b).to_string());
     }
-    v.downcast_into::<CFNumber>().and_then(|n| n.to_f64()).map(|f| if f.fract() == 0.0 { format!("{}", f as i64) } else { format!("{f}") })
+    // Sliders and scroll bars report long fractions: three places say enough.
+    v.downcast_into::<CFNumber>().and_then(|n| n.to_f64()).map(|f| format!("{f:.3}").trim_end_matches('0').trim_end_matches('.').to_string())
 }
 
 fn read(el: &CFType, path: Vec<usize>) -> Node {
@@ -190,15 +201,24 @@ fn read(el: &CFType, path: Vec<usize>) -> Node {
     }
 }
 
+/// The front app's process: as Accessibility names it, else the owner of the frontmost window in the window list
+/// (the system-wide element does not always answer a process that is not an app, like a test).
+fn front_pid() -> Result<u32, String> {
+    access()?;
+    let asked = attr_or(&system()?, "AXFocusedApplication", "asking which app is in front");
+    if let Some(pid) = asked.as_ref().ok().and_then(pid_of) {
+        return Ok(pid);
+    }
+    windows().into_iter().find(|(_, _, w)| !w.minimized).map(|(pid, _, _)| pid).ok_or_else(|| asked.err().unwrap_or_default())
+}
+
 /// The front app and its focused window (else its main window, else its first).
 fn front_window() -> Result<(AppRef, CFType), String> {
-    access()?;
-    let wide = system()?;
-    let app = attr(&wide, "AXFocusedApplication").ok_or("No app is in front.")?;
-    let pid = pid_of(&app).ok_or("The front app has no process id.")?;
-    unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), TIMEOUT_S) };
-    let win = window_of(&app).ok_or_else(|| format!("{} has no window open.", text(&app, "AXTitle")))?;
-    Ok((AppRef { name: text(&app, "AXTitle"), pid, elevated: false }, win))
+    let pid = front_pid()?;
+    let app = app_element(pid).ok_or("The front app is gone.")?;
+    let name = text(&app, "AXTitle");
+    let win = window_of(&app).ok_or_else(|| format!("{name} has no window open."))?;
+    Ok((AppRef { name, pid, elevated: false }, win))
 }
 
 fn window_of(app: &CFType) -> Option<CFType> {
@@ -224,10 +244,7 @@ fn resolve(tree: &Tree, node: &Node) -> Result<CFType, String> {
 
 impl Desktop for Mac {
     fn front(&self) -> Result<AppRef, String> {
-        access()?;
-        let app = attr(&system()?, "AXFocusedApplication").ok_or("No app is in front.")?;
-        let pid = pid_of(&app).ok_or("The front app has no process id.")?;
-        Ok(AppRef { name: text(&app, "AXTitle"), pid, elevated: false })
+        Ok(app_ref(front_pid()?))
     }
 
     fn apps(&self) -> Result<Vec<AppInfo>, String> {
@@ -281,7 +298,14 @@ impl Desktop for Mac {
 
     fn focused(&self) -> Result<Option<(AppRef, Node)>, String> {
         access()?;
-        let Some(el) = attr(&system()?, "AXFocusedUIElement") else { return Ok(None) };
+        // System-wide first, else the front app's own focused element.
+        let el = match attr(&system()?, "AXFocusedUIElement") {
+            Some(el) => el,
+            None => match app_element(front_pid()?).and_then(|a| attr(&a, "AXFocusedUIElement")) {
+                Some(el) => el,
+                None => return Ok(None),
+            },
+        };
         Ok(pid_of(&el).map(|pid| (app_ref(pid), read(&el, vec![]))))
     }
 
