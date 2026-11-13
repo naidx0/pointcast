@@ -3220,7 +3220,8 @@ html.win .onb.at-welcome .onb-body {
   height: 100%;
   min-height: 100vh;
   z-index: 0;
-  opacity: 0.2;
+  /* Light: the pale ice stops vanish into a white page at a dark-mode strength, so light shows more of the strokes. */
+  opacity: 0.5;
   -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.55) 30%, rgba(0, 0, 0, 0.15) 70%, transparent 100%);
   mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.55) 30%, rgba(0, 0, 0, 0.15) 70%, transparent 100%);
 }
@@ -3236,13 +3237,31 @@ html.win .onb.at-welcome .onb-body {
   display: block;
   height: 100vh;
   margin-bottom: -100vh;
-  opacity: 0.16;
+  opacity: 0.4;
+}
+html:not([data-theme="dark"]) .side-wash .backdrop-art,
+html:not([data-theme="dark"]) .main-wash .backdrop-art {
+  /* Light: deeper and bluer, so the wash reads as the icon's blue rather than a grey film. */
+  filter: blur(10px) saturate(1.35) brightness(0.94);
 }
 html[data-theme="dark"] .side-wash {
   opacity: 0.24;
 }
 html[data-theme="dark"] .main-wash {
   opacity: 0.19;
+}
+/* Settings › General › Appearance: a short live sample of the chosen voice wave beside its choice. */
+.wave-preview {
+  width: 120px;
+  height: 26px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--accent, #2b55f0);
+  --line-ink: var(--accent, #2b55f0);
+}
+.wave-preview > * {
+  width: 100%;
 }
 /* At the top of the page the title bar is clear over the wash; once the page scrolls it frosts as before. */
 .prefs-bar:not(.scrolled) {
