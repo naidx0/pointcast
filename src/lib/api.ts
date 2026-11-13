@@ -1042,6 +1042,8 @@ export const ASSIST = {
   offlineOnly: "assist_offline_only",
   /** command { effort }: the thinking effort for the chosen AI, where it offers one */
   effort: "assist_effort",
+  /** command { speed }: the speed (Codex's service tier) for the chosen AI, where its model offers one; "standard" sends none */
+  speed: "assist_speed",
   /** event → Assist: the whole list again, each time one route's probe answers */
   event: "assist-providers",
 } as const;
@@ -1096,6 +1098,7 @@ export const assistSignIn = (id: string) => (inTauri ? invoke<void>(ASSIST.signI
 export const assistSetup = (id: string, job: "install" | "update" | "sign_in") =>
   inTauri ? invoke<void>(ASSIST.setup, { id, job }) : pvLater(job === "sign_in" ? 600 : 1800, () => pvDo({ cmd: "signed_in", id }));
 export const assistEffort = (effort: string) => (inTauri ? invoke<void>(ASSIST.effort, { effort }) : pvDo({ cmd: "effort", effort }));
+export const assistSpeed = (speed: string) => (inTauri ? invoke<void>(ASSIST.speed, { speed }) : pvDo({ cmd: "speed", speed }));
 export const assistOfflineOnly = (on: boolean) => (inTauri ? invoke<void>(ASSIST.offlineOnly, { on }) : pvDo({ cmd: "offline", on }));
 
 export function stamp(ms: number): string {

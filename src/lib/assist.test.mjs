@@ -15,6 +15,10 @@ import {
   consentText,
   customCheck,
   effortView,
+  effortWord,
+  speedView,
+  pickerView,
+  choices,
   normalizeModels,
   defaultModel,
   goesLine,
@@ -337,7 +341,7 @@ test("a route starts on a model that can see pictures, and one that cannot is ma
 });
 
 test("a reply of any shape reads as a whole one", () => {
-  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, effort: null, offline_only: false, providers: [] });
+  assert.deepEqual(normalizeAssist(null), { chosen: null, model: null, effort: null, speed: null, offline_only: false, providers: [] });
   const a = normalizeAssist({
     chosen: "gone",
     providers: [{ id: "x", kind: "local", state: "weird" }, { id: "", kind: "key" }, { id: "y", kind: "nope" }, { id: "z", kind: "key", models: [{ id: "m" }, null] }],
@@ -436,24 +440,44 @@ test("the effort control shows only for a route that offers one, starting where 
   assert.equal(effortView(a, codex).value, "low");
   a = previewApply(a, { cmd: "effort", effort: "high" });
   assert.equal(effortView(a, codex).value, "high");
+  assert.deepEqual(byId(a, "codex").pick, { effort: "high" }, "the choice is kept with its route");
   assert.equal(typeof previewApply(a, { cmd: "effort", effort: "extreme" }), "string");
   const key = previewAssist("key");
   assert.equal(effortView(key, chosenRoute(key)), null, "a key route offers no effort: no control");
   assert.equal(effortView(a, null), null);
-  assert.deepEqual(normalizeAssist({ effort: "medium", providers: [{ id: "codex", kind: "plan", efforts: ["low", 3, "high"] }] }).providers[0].efforts, ["low", "high"]);
+  const legacy = normalizeAssist({ effort: "medium", providers: [{ id: "codex", kind: "plan", efforts: ["low", 3, "high"] }] }).providers[0];
+  assert.deepEqual(legacy.efforts, [{ id: "low", label: "Low" }, { id: "high", label: "High" }], "bare names from an older engine are options too");
+  assert.deepEqual([legacy.typed, legacy.pick], [false, {}]);
 });
 
-test("the Thinking menu lists what the chosen model offers, in words, and keeps a saved level only where it is offered", () => {
+test("the Thinking menu lists what the chosen model offers, in words, with its recommended level, and keeps a saved level only where it is offered", () => {
   const a = previewAssist();
-  const codex = { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] };
-  const luna = { efforts: ["low", "medium", "high", "xhigh", "max"] };
-  const terra = { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] };
-  assert.deepEqual(effortView(a, codex, luna).options, [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+  const lv = (ids, start) => ids.map((id) => ({ id, label: effortWord(id), ...(id === start ? { default: true } : {}) }));
+  const codex = { efforts: lv(["low", "medium", "high", "xhigh", "max", "ultra"]) };
+  const luna = { efforts: lv(["low", "medium", "high", "xhigh", "max"], "medium") };
+  const terra = { efforts: lv(["low", "medium", "high", "xhigh", "max", "ultra"], "medium") };
+  assert.deepEqual(effortView(a, codex, luna).options, [["low", "Low"], ["medium", "Medium (recommended)"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+  assert.equal(effortView({ effort: null }, codex, luna).value, "medium", "nothing saved: the recommended level");
   assert.deepEqual(effortView({ effort: "ultra" }, codex, terra).value, "ultra");
-  assert.equal(effortView({ effort: "ultra" }, codex, luna).value, "low", "Luna has no Ultra: the menu shows where it starts");
+  assert.equal(effortView({ effort: "ultra" }, codex, luna).value, "medium", "Luna has no Ultra: the menu shows what it recommends");
   assert.deepEqual(effortView({ effort: null }, codex, { efforts: [] }).options.length, 6, "a model that names none: the route's list");
-  assert.deepEqual(normalizeModels([{ id: "m", efforts: ["low", 2, "max"] }])[0].efforts, ["low", "max"]);
+  assert.deepEqual(normalizeModels([{ id: "m", efforts: ["low", 2, { id: "max", label: "Max", default: true }, { label: "no id" }] }])[0].efforts, [{ id: "low", label: "Low" }, { id: "max", label: "Max", default: true }]);
   assert.equal("efforts" in normalizeModels([{ id: "m" }])[0], false);
+});
+
+test("every route draws the same Model, Thinking and Speed pickers from its own options, and shows none where it offers none", () => {
+  const claude = normalizeAssist({ chosen: "claude-code", providers: [previewAssist().providers.find((p) => p.id === "claude-code")] }).providers[0];
+  assert.equal(claude.typed, true);
+  assert.deepEqual(claude.models.filter((m) => m.default).map((m) => m.id), ["sonnet"]);
+  assert.equal(modelLabel(claude.models[1]), "Sonnet (recommended)");
+  assert.deepEqual(effortView({ effort: null }, claude, claude.models[0]).options.map(([, w]) => w), ["Low", "Medium (recommended)", "High", "Extra high", "Max"]);
+  assert.equal(effortView({ effort: "max" }, claude, null).value, "max", "a typed model: the route's own levels");
+  const tiers = normalizeModels([{ id: "m", speeds: [{ id: "standard", label: "Standard", default: true }, { id: "priority", label: "Fast" }] }])[0];
+  assert.deepEqual(speedView({ speed: null }, tiers), { value: "standard", options: [["standard", "Standard (recommended)"], ["priority", "Fast"]] });
+  assert.equal(speedView({ speed: "priority" }, tiers).value, "priority");
+  assert.equal(speedView({ speed: null }, { speeds: [] }), null, "no tiers: no Speed row");
+  assert.equal(pickerView([{ id: "auto", label: "Auto", default: true }], null), null, "one option is no choice");
+  assert.deepEqual(choices([{ id: "x", label: "" }]), [{ id: "x", label: "X" }]);
 });
 
 test("Ready to use lists only what is known to work; an installed agent that cannot say it is signed in waits under subscriptions, still usable", () => {

@@ -18,6 +18,7 @@ import {
   assistForget,
   assistKeySet,
   assistModels,
+  assistSpeed,
   assistOfflineOnly,
   assistProviders,
   assistSignIn,
@@ -81,6 +82,7 @@ import {
   nowView,
   offlineSaid,
   shortName,
+  speedView,
   withOffline,
   type Assist,
   type AssistModel,
@@ -758,6 +760,8 @@ function Ai() {
   const [consent, setConsent] = useState<{ route: Route; model?: string; base?: string } | null>(null);
   const [found, setFound] = useState<{ id: string; list: AssistModel[] } | null>(null);
   const [finding, setFinding] = useState(false);
+  // The model id being typed, for a route that takes one (Claude); null while the list is shown.
+  const [typing, setTyping] = useState<string | null>(null);
   // The routes did not come: one quiet line with Try again, never an empty pane.
   const [failed, setFailed] = useState(false);
   // What the last flip of "Only on this computer" did, in one quiet line.
@@ -835,7 +839,8 @@ function Ai() {
   // A key's or a server's models are not in the quick list: they are asked for before the choice, which needs one.
   const choose = (p: Route, consent: boolean, model?: string, base?: string) =>
     run(p.id, async () => {
-      let m = model ?? defaultModel(p);
+      // The model last chosen for this route comes back; an agent sends none until one is chosen.
+      let m = model ?? p.pick.model ?? (p.kind === "agent" ? null : defaultModel(p));
       if (!m && (p.kind === "key" || p.kind === "local")) m = defaultModel({ models: await assistModels(p.id) });
       return assistChoose(p.id, m, consent, base);
     });
@@ -888,7 +893,11 @@ function Ai() {
   const model = chosen ? (a.model ?? defaultModel(chosen)) : null;
   const named = chosen ? modelName({ model }, { models: list }) : null;
   const models = model && !list.some((m) => m.id === model) ? [{ id: model, name: named ?? model, images: true }, ...list] : list;
-  const effort = effortView(a, chosen, models.find((m) => m.id === model));
+  const current = models.find((m) => m.id === model);
+  const effort = effortView(a, chosen, current);
+  const speed = speedView(a, current);
+  const pickModel = (id: string) => chosen && run(chosen.id, () => assistChoose(chosen.id, id, false));
+  const OTHER = "\u0000other";
   return (
     <>
       <div className="group">
@@ -902,37 +911,61 @@ function Ai() {
             <div className="sub">{now.line}</div>
           </div>
         </div>
-        {chosen && chosen.kind !== "agent" ? (
+        {chosen && (chosen.kind !== "agent" || models.length > 1 || chosen.typed) ? (
           <Row
             label="Model"
             sub={
               chosen.kind === "plan" && chosen.plan
                 ? `The models your ChatGPT ${chosen.plan.charAt(0).toUpperCase() + chosen.plan.slice(1)} plan offers through Codex. Words only means it cannot see your pictures.`
-                : "The models your plan or key offers. Words only means it cannot see your pictures."
+                : chosen.kind === "agent"
+                  ? `The models ${shortName(chosen)} offers${chosen.typed ? ", or type the name of another" : ""}.`
+                  : "The models your plan or key offers. Words only means it cannot see your pictures."
             }
           >
-            <select
-              className="field ai-model"
-              aria-label="Model"
-              value={model ?? ""}
-              disabled={!models.length || busy === chosen.id}
-              onChange={(e) => run(chosen.id, () => assistChoose(chosen.id, e.target.value, false))}
-            >
-              {models.length ? (
-                models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {modelLabel(m)}
-                  </option>
-                ))
-              ) : (
-                <option value="">{finding ? "Finding models…" : "No models found"}</option>
-              )}
-            </select>
+            {typing !== null ? (
+              <input
+                className="field ai-model"
+                aria-label="Model name"
+                placeholder="Model name"
+                autoFocus
+                value={typing}
+                onChange={(e) => setTyping(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setTyping(null);
+                  if (e.key === "Enter" && typing.trim()) pickModel(typing.trim())?.then((ok) => ok && setTyping(null));
+                }}
+                onBlur={() => !typing.trim() && setTyping(null)}
+              />
+            ) : (
+              <select
+                className="field ai-model"
+                aria-label="Model"
+                value={model ?? ""}
+                disabled={!models.length || busy === chosen.id}
+                onChange={(e) => (e.target.value === OTHER ? setTyping("") : pickModel(e.target.value))}
+              >
+                {models.length ? (
+                  models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {modelLabel(m)}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">{finding ? "Finding models…" : "No models found"}</option>
+                )}
+                {chosen.typed ? <option value={OTHER}>Other model…</option> : null}
+              </select>
+            )}
           </Row>
         ) : null}
         {effort ? (
           <Row label="Thinking" sub="Low answers soonest. Higher levels think longer before they answer.">
             <Seg label="Thinking" value={effort.value} options={effort.options} set={(v) => run("effort", () => assistEffort(v))} />
+          </Row>
+        ) : null}
+        {speed ? (
+          <Row label="Speed" sub="Faster answers can use more of your plan.">
+            <Seg label="Speed" value={speed.value} options={speed.options} set={(v) => run("speed", () => assistSpeed(v))} />
           </Row>
         ) : null}
         <Row

@@ -7,8 +7,12 @@
 export type RouteKind = "plan" | "agent" | "key" | "local";
 /** `checking`: its probe has not answered yet; the pane draws at once and the route fills in when it does. */
 export type RouteState = "ready" | "signed_out" | "not_installed" | "too_old" | "no_key" | "not_running" | "unsupported" | "checking";
-/** `default`: the model the route itself starts with. */
-export type AssistModel = { id: string; name: string; images: boolean; default?: boolean; efforts?: string[] };
+/** One option of a picker: the id the AI is sent, the words shown, and whether it is the one the AI recommends. */
+export type Choice = { id: string; label: string; default?: boolean };
+/** `default`: the model the route itself starts with. `efforts` and `speeds`: what this model offers, each its own. */
+export type AssistModel = { id: string; name: string; images: boolean; default?: boolean; efforts?: Choice[]; speeds?: Choice[] };
+/** What was last chosen for one route, kept when another AI is chosen. */
+export type RoutePick = { model?: string; effort?: string; speed?: string };
 
 /** One way to an AI, as `assist_providers` lists it. */
 export type Route = {
@@ -29,8 +33,11 @@ export type Route = {
   /** The person allowed this AI and destination once. */
   consented: boolean;
   models: AssistModel[];
-  /** The thinking efforts it offers, lowest first (Codex: low, medium, high); empty where it offers no choice. */
-  efforts: string[];
+  /** The thinking efforts it offers a model that names none of its own, lowest first; empty where it offers no choice. */
+  efforts: Choice[];
+  /** A model id the person types is taken as it is (Claude Code), besides those listed. */
+  typed: boolean;
+  pick: RoutePick;
   /** The ChatGPT plan Codex is signed in with ("free", "plus"); null when not said. Read from `plan` or `planType`. */
   plan: string | null;
   /** The address Codex's own account/read says the person is signed in with; null when not said. Shown, never kept. */
@@ -42,7 +49,7 @@ export type Route = {
 };
 
 /** The reply of `assist_providers`. */
-export type Assist = { chosen: string | null; model: string | null; effort: string | null; offline_only: boolean; providers: Route[]; checking?: boolean };
+export type Assist = { chosen: string | null; model: string | null; effort: string | null; speed?: string | null; offline_only: boolean; providers: Route[]; checking?: boolean };
 
 /** The one action a route offers in its state. */
 /** `install` and `update` are done by Pointcast itself (the vendor's own package); `get` only shows where to get an app
@@ -123,22 +130,51 @@ export function normalizeAssist(x: unknown): Assist {
       base: str(p.base).trim(),
       consented: p.consented === true,
       models: normalizeModels(p.models),
-      efforts: (Array.isArray(p.efforts) ? p.efforts : []).filter((e) => typeof e === "string" && e),
+      efforts: choices(p.efforts),
+      typed: p.typed === true,
+      pick: pickOf(p.pick),
       plan: str(p.plan) || str((p as { planType?: unknown }).planType) || null,
       email: str(p.email).trim() || null,
       adds: (Array.isArray(p.adds) ? p.adds : []).filter((f) => typeof f === "string" && f.trim()),
       sure: p.sure === true,
     }));
   const chosen = str(v.chosen) && providers.some((p) => p.id === v.chosen) ? (v.chosen as string) : null;
-  return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, offline_only: v.offline_only === true, providers, ...(v.checking === true ? { checking: true } : {}) };
+  return { chosen, model: str(v.model) || null, effort: str(v.effort) || null, speed: str(v.speed) || null, offline_only: v.offline_only === true, providers, ...(v.checking === true ? { checking: true } : {}) };
 }
+
+/** A picker's options, whatever arrived: each with an id, its label (an effort's name when none came) and its mark.
+ * A bare name, as older engines sent efforts, is an option too. */
+export function choices(x: unknown): Choice[] {
+  return (Array.isArray(x) ? x : [])
+    .map((c): Choice | null => {
+      if (typeof c === "string") return c ? { id: c, label: effortWord(c) } : null;
+      if (!c || typeof c !== "object" || !str(c.id)) return null;
+      return { id: c.id, label: str(c.label) || effortWord(c.id), ...(c.default === true ? { default: true } : {}) };
+    })
+    .filter((c): c is Choice => !!c);
+}
+
+const pickOf = (x: unknown): RoutePick => {
+  const v = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+  const out: RoutePick = {};
+  for (const k of ["model", "effort", "speed"] as const) if (str(v[k])) out[k] = v[k] as string;
+  return out;
+};
 
 export function normalizeModels(x: unknown): AssistModel[] {
   return (Array.isArray(x) ? x : [])
     .filter((m) => m && typeof m === "object" && str(m.id))
     .map((m) => {
-      const efforts = (Array.isArray(m.efforts) ? m.efforts : []).filter((e: unknown) => typeof e === "string" && e);
-      return { id: m.id, name: str(m.name) || m.id, images: m.images === true, ...(m.default === true ? { default: true } : {}), ...(efforts.length ? { efforts } : {}) };
+      const efforts = choices(m.efforts);
+      const speeds = choices(m.speeds);
+      return {
+        id: m.id,
+        name: str(m.name) || m.id,
+        images: m.images === true,
+        ...(m.default === true ? { default: true } : {}),
+        ...(efforts.length ? { efforts } : {}),
+        ...(speeds.length ? { speeds } : {}),
+      };
     });
 }
 
@@ -336,27 +372,39 @@ export function defaultModel(p: Pick<Route, "models">): string | null {
   return (p.models.find((m) => m.default) ?? p.models.find((m) => m.images) ?? p.models[0])?.id ?? null;
 }
 
-/** Codex's effort names as the menu says them. */
+/** Effort names as the menu says them, for an engine that sent only the name. */
 const EFFORT_WORDS: Record<string, string> = { xhigh: "Extra high", max: "Max", ultra: "Ultra" };
 export const effortWord = (e: string) => EFFORT_WORDS[e] ?? e.charAt(0).toUpperCase() + e.slice(1);
 
-/** The effort control for the chosen AI: the levels the chosen model offers (the route's own list when the model
- * names none), the one in use (the saved one when this model offers it, else the first); null for a route that
- * offers no choice, which then shows no control. */
+/** One option's words: its label, and "(recommended)" on the one the AI recommends. */
+export const choiceLabel = (c: Choice) => (c.default ? `${c.label} (recommended)` : c.label);
+
+/** A picker drawn from its options alone, for every route alike: the one in use is `now` when offered, else the
+ * recommended one, else the first; null when there is nothing to choose, which then shows no control. */
+export function pickerView(options: Choice[], now: string | null | undefined): { value: string; options: [string, string][] } | null {
+  if (options.length < 2) return null;
+  const value = options.find((c) => c.id === now)?.id ?? options.find((c) => c.default)?.id ?? options[0].id;
+  return { value, options: options.map((c): [string, string] => [c.id, choiceLabel(c)]) };
+}
+
+/** The Thinking control for the chosen AI: the efforts the chosen model offers (the route's own list when the model
+ * names none, as for one typed in) and the one an Ask sends; null for a route that offers no choice. */
 export function effortView(
   a: Pick<Assist, "effort">,
   p: Pick<Route, "efforts"> | null,
   model?: Pick<AssistModel, "efforts"> | null,
 ): { value: string; options: [string, string][] } | null {
-  if (!p || !p.efforts.length) return null;
-  const offered = model?.efforts?.length ? model.efforts.filter((e) => p.efforts.includes(e)) : p.efforts;
-  const levels = offered.length ? offered : p.efforts;
-  const options = levels.map((e): [string, string] => [e, effortWord(e)]);
-  return { value: a.effort && levels.includes(a.effort) ? a.effort : levels[0], options };
+  if (!p) return null;
+  return pickerView(model?.efforts?.length ? model.efforts : p.efforts, a.effort);
 }
 
-/** A model as the select lists it; one that cannot see pictures says so. */
-export const modelLabel = (m: AssistModel) => (m.images ? m.name : `${m.name} (words only)`);
+/** The Speed control: only where the chosen model offers speeds (Codex's service tiers); standard first. */
+export function speedView(a: Pick<Assist, "speed">, model?: Pick<AssistModel, "speeds"> | null): { value: string; options: [string, string][] } | null {
+  return pickerView(model?.speeds ?? [], a.speed);
+}
+
+/** A model as the select lists it: the recommended one says so, and one that cannot see pictures says that. */
+export const modelLabel = (m: AssistModel) => `${m.name}${m.default ? " (recommended)" : ""}${m.images ? "" : " (words only)"}`;
 
 /** Whether a route's choice needs the consent sheet first. */
 export const needsConsent = (p: Pick<Route, "consented">) => !p.consented;
@@ -431,15 +479,26 @@ export const needsConsentAt = (p: Pick<Route, "consented" | "base">, base: strin
 
 // —— Browser preview fixtures (settings.html?preview=1&pane=ai&assist=…): data only; api.ts plays them. ——
 
-export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "key", "local", "offline", "checking"] as const;
+export const PREVIEW_KINDS = ["fresh", "codex-signed-out", "codex-ready", "claude", "key", "local", "offline", "checking"] as const;
+
+const levels = (ids: string[], start?: string): Choice[] => ids.map((id) => ({ id, label: effortWord(id), ...(id === start ? { default: true } : {}) }));
 
 const MODELS: Record<string, AssistModel[]> = {
   // As Codex's model/list answered for a ChatGPT Free plan.
   codex: [
-    { id: "gpt-6-luna", name: "GPT-6-Luna", images: true, default: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
-    { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", images: true, efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
-    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", images: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "gpt-6-luna", name: "GPT-6-Luna", images: true, default: true, efforts: levels(["low", "medium", "high", "xhigh", "max"], "medium") },
+    { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", images: true, efforts: levels(["low", "medium", "high", "xhigh", "max", "ultra"], "medium") },
+    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", images: true, efforts: levels(["low", "medium", "high", "xhigh", "max"], "medium") },
   ],
+  // Claude Code's own list: its aliases, then the full ids; Sonnet and medium recommended.
+  "claude-code": [
+    ["opus", "Opus"],
+    ["sonnet", "Sonnet"],
+    ["haiku", "Haiku"],
+    ["claude-opus-5-5", "Claude Opus 5.5"],
+    ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+    ["claude-haiku-5-5", "Claude Haiku 5.5"],
+  ].map(([id, name]) => ({ id, name, images: true, ...(id === "sonnet" ? { default: true } : {}), efforts: levels(["low", "medium", "high", "xhigh", "max"], "medium") })),
   openai: [
     { id: "gpt-5.5", name: "GPT-5.5", images: true },
     { id: "gpt-5.5-mini", name: "GPT-5.5 mini", images: true },
@@ -475,7 +534,9 @@ export function previewAssist(kind: string): Assist {
     base: "",
     consented: false,
     models: state === "ready" ? MODELS[id] ?? [] : [],
-    efforts: id === "codex" ? ["low", "medium", "high", "xhigh", "max", "ultra"] : [],
+    efforts: id === "codex" ? levels(["low", "medium", "high", "xhigh", "max", "ultra"]) : id === "claude-code" ? levels(["low", "medium", "high", "xhigh", "max"], "medium") : [],
+    typed: id === "claude-code",
+    pick: {},
     plan: null,
     email: null,
     adds: id === "codex" ? ["AGENTS.md"] : [],
@@ -487,6 +548,7 @@ export function previewAssist(kind: string): Assist {
     chosen: null,
     model: null,
     effort: null,
+    speed: null,
     offline_only: false,
     providers: [
       r("codex", "ChatGPT", "plan", "not_installed", "OpenAI, through your ChatGPT plan"),
@@ -520,6 +582,7 @@ export function previewAssist(kind: string): Assist {
     choose("codex");
     set("codex", { plan: "plus", email: "you@example.com" });
   }
+  if (kind === "claude") choose("claude-code");
   if (kind === "key") {
     set("codex", { state: "signed_out" });
     choose("openai");
@@ -539,7 +602,8 @@ export function previewApply(
     | { cmd: "choose"; id: string; model: string | null; consent: boolean; base?: string }
     | { cmd: "forget" | "key_set" | "key_delete" | "signed_in"; id: string }
     | { cmd: "offline"; on: boolean }
-    | { cmd: "effort"; effort: string },
+    | { cmd: "effort"; effort: string }
+    | { cmd: "speed"; speed: string },
 ): Assist | string {
   const find = (id: string) => a.providers.find((p) => p.id === id);
   const map = (id: string, f: (p: Route) => Route) => ({ ...a, providers: a.providers.map((p) => (p.id === id ? f(p) : p)) });
@@ -548,8 +612,14 @@ export function previewApply(
       return { ...a, offline_only: c.on };
     case "effort": {
       const p = a.providers.find((x) => x.id === a.chosen);
-      if (!p || !p.efforts.includes(c.effort)) return `${p?.name ?? "That AI"} offers no "${c.effort}" effort.`;
-      return { ...a, effort: c.effort };
+      const m = p?.models.find((x) => x.id === a.model);
+      if (!p || ![...p.efforts, ...(m?.efforts ?? [])].some((e) => e.id === c.effort)) return `${p?.name ?? "That AI"} offers no "${c.effort}" effort.`;
+      return { ...map(p.id, (x) => ({ ...x, pick: { ...x.pick, effort: c.effort } })), effort: c.effort };
+    }
+    case "speed": {
+      const m = a.providers.find((x) => x.id === a.chosen)?.models.find((x) => x.id === a.model);
+      if (!m?.speeds?.some((t) => t.id === c.speed)) return "That AI offers no speed choice.";
+      return { ...a, speed: c.speed === "standard" ? null : c.speed };
     }
     case "choose": {
       const p = find(c.id);
