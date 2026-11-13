@@ -519,7 +519,8 @@ fn discard_textedit_if(desk: &Desk, more: &dyn Fn(&Tree) -> bool) -> Vec<String>
     let mut said = vec![];
     for _ in 0..3 {
         let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
-        let ours = tree.app.name == "TextEdit" && tree.window.starts_with("Untitled") && more(&tree);
+        let front = desk.os.frontmost().is_ok_and(|a| a.pid == tree.app.pid);
+        let ours = front && tree.app.name == "TextEdit" && tree.window.starts_with("Untitled") && more(&tree);
         if !ours {
             said.push(format!("front: {} {:?}", tree.app.name, tree.window));
             break;
@@ -625,6 +626,7 @@ mod tests {
         for _ in 0..3 {
             let Ok(tree) = desk.os.tree(DEFAULT_LIMITS) else { break };
             let ours = tree.app.name == "TextEdit"
+                && desk.os.frontmost().is_ok_and(|a| a.pid == tree.app.pid)
                 && tree.nodes.iter().any(|n| n.raw_role == "AXTextArea" && n.value.as_deref() == Some("hello from Pointcast"));
             if !ours {
                 break;
