@@ -525,8 +525,8 @@ export function settledSplit(src: string): number {
 }
 
 /** The panel's width in logical pixels: as platform.rs PANEL_WIDTH docks it (owner, 2026-11-12: "it should open up
- * bigger"). */
-export const PANEL_W = 500;
+ * bigger"; 2026-11-13: bigger still). */
+export const PANEL_W = 640;
 /** Once an answer shows, the panel is at least this tall, so a short answer opens as a reading surface, not a strip. */
 export const ANSWER_MIN_H = 400;
 /** The most of the screen's height the panel takes. */

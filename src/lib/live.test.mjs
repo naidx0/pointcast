@@ -383,7 +383,7 @@ test("only the tail is re-read: the settled blocks parse the same alone as in th
 import { ANSWER_MIN_H, PANEL_MAX_SHARE, PANEL_W, panelHeight } from "./live.ts";
 
 test("the panel opens bigger: 500 wide, a reading surface once an answer shows, never past 60 % of the screen", () => {
-  assert.equal(PANEL_W, 500, "as platform.rs PANEL_WIDTH docks it");
+  assert.equal(PANEL_W, 640, "as platform.rs PANEL_WIDTH docks it");
   assert.equal(panelHeight(96, 1040, false), 96, "listening: one row, nothing empty below");
   assert.equal(panelHeight(180, 1040, true), ANSWER_MIN_H, "a short answer still opens tall");
   assert.ok(ANSWER_MIN_H >= 300);

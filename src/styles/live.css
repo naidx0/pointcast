@@ -6,6 +6,12 @@
   /* The panel reads in Geist, as the concepts did; the system font stands in until it loads and wherever it lacks a
      glyph. Settings, Home and the dictation capsule stay in the system font. */
   --font: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  /* The panel reads a size up from the app's body text (owner, 2026-11-13: "bigger in font"); Settings and Home keep
+     the skin's own sizes. */
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --fs-caption: 13px;
+  --fs-head: 17px;
   -webkit-font-smoothing: antialiased;
   --pad: 18px;
   --live-ink: var(--label);
@@ -24,7 +30,7 @@
   height: 100%;
   background: var(--live-bg);
   color: var(--live-ink);
-  font: 400 var(--fs-body) / 20px var(--font);
+  font: 400 var(--fs-body) / 22px var(--font);
   overflow: hidden;
 }
 html.win .live {
@@ -242,7 +248,7 @@ html.win .live-hb:not(.stop) {
   flex: 1;
   min-width: 0;
   padding: 2px 0;
-  font: 500 var(--fs-body) / 20px var(--font);
+  font: 500 var(--fs-body) / 22px var(--font);
   color: var(--live-quiet);
   overflow: hidden;
   white-space: nowrap;
@@ -257,7 +263,7 @@ html.win .live-hb:not(.stop) {
   border: 0;
   background: none;
   color: var(--live-ink);
-  font: 600 var(--fs-body) / 20px var(--font);
+  font: 600 var(--fs-body) / 22px var(--font);
   text-align: left;
   overflow: hidden;
   white-space: nowrap;
@@ -821,7 +827,7 @@ html.win .live-sentv .pic img {
   border-radius: var(--r-control);
   background: transparent;
   color: var(--live-ink);
-  font: 500 var(--fs-body) / 20px var(--font);
+  font: 500 var(--fs-body) / 22px var(--font);
   text-align: left;
   overflow-wrap: anywhere;
 }
@@ -837,7 +843,7 @@ html.win .live-sentv .pic img {
   border-radius: var(--r-control);
   background: var(--fill);
   color: var(--live-ink);
-  font: 500 var(--fs-body) / 20px var(--font);
+  font: 500 var(--fs-body) / 22px var(--font);
   outline: none;
 }
 .live-this-meta {
@@ -1424,7 +1430,7 @@ html.win .live-again-pics img {
 }
 .live-sum-title {
   margin: 0;
-  font: 600 var(--fs-body) / 20px var(--font);
+  font: 600 var(--fs-body) / 22px var(--font);
   color: var(--live-ink);
   overflow-wrap: anywhere;
 }

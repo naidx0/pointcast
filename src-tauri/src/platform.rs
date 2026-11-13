@@ -336,8 +336,8 @@ pub fn show_indicator(app: &AppHandle, st: &crate::session::UiState) {
 }
 
 /// The answer panel's width and the space kept around it, in logical pixels: wide enough to read an answer in (owner,
-/// 2026-11-12: "it should open up bigger"). The page asks for the same width (live.ts PANEL_W).
-pub const PANEL_WIDTH: f64 = 500.0;
+/// 2026-11-12: "it should open up bigger"; 2026-11-13: bigger still). The page asks for the same width (live.ts PANEL_W).
+pub const PANEL_WIDTH: f64 = 640.0;
 pub const PANEL_MARGIN: f64 = 12.0;
 
 /// How tall the panel opens, in logical pixels: its header and the listening row. It grows only as its page asks.
@@ -878,22 +878,22 @@ mod tests {
     #[test]
     fn the_answer_panel_opens_small_at_the_top_right_and_keeps_the_height_its_page_set_while_on_screen() {
         let near = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| [a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3].iter().all(|d| d.abs() < 1e-6);
-        // About 500 x 120 logical: the header and the listening row, nothing empty below.
-        assert_eq!((PANEL_WIDTH, PANEL_START), (500.0, 120.0));
+        // About 640 x 120 logical: the header and the listening row, nothing empty below.
+        assert_eq!((PANEL_WIDTH, PANEL_START), (640.0, 120.0));
         // The person can drag it wider or narrower; it keeps that width within the panel's limits.
-        assert_eq!((panel_width(640.0), panel_width(100.0), panel_width(5000.0), panel_width(0.0), panel_width(f64::NAN)), (640.0, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, PANEL_WIDTH, PANEL_WIDTH));
+        assert_eq!((panel_width(700.0), panel_width(100.0), panel_width(5000.0), panel_width(0.0), panel_width(f64::NAN)), (700.0, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, PANEL_WIDTH, PANEL_WIDTH));
         assert_eq!((opening_height(false, 649.0), opening_height(true, 300.0)), (PANEL_START, 300.0));
         // The owner's 1080p screen under its taskbar: docked 12 px in from the top right, 120 tall, not 649.
         let area = (0, 0, 1920, 1040);
         let spot = panel_spot(area, 1.0, PANEL_WIDTH, PANEL_MARGIN);
-        assert!(near((spot.0, spot.1, spot.2, 0.0), (1408.0, 12.0, 500.0, 0.0)) && spot.3 >= PANEL_START, "{spot:?}");
+        assert!(near((spot.0, spot.1, spot.2, 0.0), (1268.0, 12.0, 640.0, 0.0)) && spot.3 >= PANEL_START, "{spot:?}");
         let at = |area, scale| panel_fit(area, scale, PANEL_WIDTH, PANEL_MARGIN, opening_height(false, 649.0));
-        assert!(near(at(area, 1.0), (1408.0, 12.0, 500.0, 120.0)), "{:?}", at(area, 1.0));
+        assert!(near(at(area, 1.0), (1268.0, 12.0, 640.0, 120.0)), "{:?}", at(area, 1.0));
         // At 150 % and on a Retina screen, in logical pixels of that screen.
-        assert!(near(at((0, 0, 2880, 1560), 1.5), (1920.0 - 512.0, 12.0, 500.0, 120.0)), "{:?}", at((0, 0, 2880, 1560), 1.5));
-        assert!(near(at((0, 50, 3024, 1888), 2.0), (1000.0, 37.0, 500.0, 120.0)));
+        assert!(near(at((0, 0, 2880, 1560), 1.5), (1268.0, 12.0, 640.0, 120.0)), "{:?}", at((0, 0, 2880, 1560), 1.5));
+        assert!(near(at((0, 50, 3024, 1888), 2.0), (860.0, 37.0, 640.0, 120.0)));
         // A screen too short for even that: it stays within the margins.
-        assert!(near(at((0, 0, 1280, 100), 1.0), (768.0, 12.0, 500.0, 76.0)));
+        assert!(near(at((0, 0, 1280, 100), 1.0), (628.0, 12.0, 640.0, 76.0)));
     }
 
     #[test]
@@ -933,13 +933,13 @@ mod tests {
             assert!(near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2) && near(got.3, want.3), "{got:?} != {want:?}");
         };
         // 1920x1040 work area under a 40 px top bar: 12 px in from the right, the top and the bottom.
-        at((0, 40, 1920, 1040), 1.0, (1408.0, 52.0, 500.0, 1016.0));
+        at((0, 40, 1920, 1040), 1.0, (1268.0, 52.0, 640.0, 1016.0));
         // A second screen to the left of the first.
-        at((-1280, 0, 1280, 800), 1.0, (-512.0, 12.0, 500.0, 776.0));
+        at((-1280, 0, 1280, 800), 1.0, (-652.0, 12.0, 640.0, 776.0));
         // A 150 % screen right of a 1920 px one: logical pixels of that screen.
-        at((1920, 0, 2560, 1400), 1.5, (1280.0 + 2560.0 / 1.5 - 512.0, 12.0, 500.0, 1400.0 / 1.5 - 24.0));
+        at((1920, 0, 2560, 1400), 1.5, (1280.0 + 2560.0 / 1.5 - 652.0, 12.0, 640.0, 1400.0 / 1.5 - 24.0));
         // A Retina screen in points.
-        at((0, 50, 3024, 1888), 2.0, (1000.0, 37.0, 500.0, 920.0));
+        at((0, 50, 3024, 1888), 2.0, (860.0, 37.0, 640.0, 920.0));
         // A screen narrower than the panel: it shrinks to fit inside the margins and never leaves the screen.
         at((0, 0, 300, 200), 1.0, (12.0, 12.0, 276.0, 176.0));
     }
@@ -952,14 +952,14 @@ mod tests {
         let screen = 720.0;
         for high in [120.0, 300.0, 0.6 * screen] {
             let got = panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, high);
-            assert!(near(got, (768.0, 52.0, 500.0, high)), "{high}: {got:?}");
+            assert!(near(got, (628.0, 52.0, 640.0, high)), "{high}: {got:?}");
             assert!((got.0 + got.2 - (1280.0 - PANEL_MARGIN)).abs() < 1e-6, "the right edge stays");
         }
         // Taller than the screen allows: it stops at the bottom margin.
-        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 900.0), (768.0, 52.0, 500.0, 656.0)));
+        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 900.0), (628.0, 52.0, 640.0, 656.0)));
         // A Retina screen in points, at 60 % of its 944-point height.
         let got = panel_fit((0, 50, 3024, 1888), 2.0, PANEL_WIDTH, PANEL_MARGIN, 0.6 * 944.0);
-        assert!(near(got, (1000.0, 37.0, 500.0, 566.4)), "{got:?}");
+        assert!(near(got, (860.0, 37.0, 640.0, 566.4)), "{got:?}");
         // A screen narrower and shorter than the panel: inside the margins either way.
         assert!(near(panel_fit((0, 0, 300, 200), 1.0, PANEL_WIDTH, PANEL_MARGIN, 0.6 * 200.0), (12.0, 12.0, 276.0, 120.0)));
         assert!(near(panel_fit((0, 0, 300, 200), 1.0, PANEL_WIDTH, PANEL_MARGIN, -5.0), (12.0, 12.0, 276.0, 0.0)));
@@ -1059,21 +1059,21 @@ mod tests {
         // Put with its top-right corner at (900, 200): taller and taller, the corner stays.
         for high in [120.0, 300.0, 600.0] {
             let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, high, (900.0, 200.0));
-            assert!(near(got, (400.0, 200.0, 500.0, high)), "{got:?}");
+            assert!(near(got, (260.0, 200.0, 640.0, high)), "{got:?}");
         }
         // Wider (the corner grip pulls its left edge): the right edge stays where it was put.
         let got = panel_kept(area, 1.0, 700.0, PANEL_MARGIN, 300.0, (900.0, 200.0));
         assert!(near(got, (200.0, 200.0, 700.0, 300.0)), "{got:?}");
         // Taller than the room below it: it rises only as far as it must to stay whole on the screen.
         let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 1000.0, (900.0, 200.0));
-        assert!(near(got, (400.0, 40.0 + 1040.0 - 1000.0, 500.0, 1000.0)), "{got:?}");
+        assert!(near(got, (260.0, 40.0 + 1040.0 - 1000.0, 640.0, 1000.0)), "{got:?}");
         // Put so its left edge would cross the screen's: pulled just inside.
         let got = panel_kept(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0, (200.0, 200.0));
-        assert!(near(got, (0.0, 200.0, 500.0, 300.0)), "{got:?}");
+        assert!(near(got, (0.0, 200.0, 640.0, 300.0)), "{got:?}");
         // A Retina screen: the corner is in points, the area in physical pixels at scale 2.
         let got = panel_kept((0, 50, 3024, 1888), 2.0, PANEL_WIDTH, PANEL_MARGIN, 300.0, (1000.0, 100.0));
-        assert!(near(got, (500.0, 100.0, 500.0, 300.0)), "{got:?}");
+        assert!(near(got, (360.0, 100.0, 640.0, 300.0)), "{got:?}");
         // Never moved: docked at the top right as before.
-        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0), (1408.0, 52.0, 500.0, 300.0)));
+        assert!(near(panel_fit(area, 1.0, PANEL_WIDTH, PANEL_MARGIN, 300.0), (1268.0, 52.0, 640.0, 300.0)));
     }
 }
