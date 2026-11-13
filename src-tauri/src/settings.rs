@@ -198,6 +198,11 @@ pub struct Settings {
     /// the route's own start, low for Codex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assist_effort: Option<String>,
+    /// The model, thinking effort and speed chosen for each AI, by route id, so that switching AI and back keeps each
+    /// one's choice. The chosen AI's model and effort are also in `assist_model` and `assist_effort`, which files saved
+    /// before this was kept still carry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub assist_picks: std::collections::BTreeMap<String, Pick>,
     /// "Only on this computer": no question goes to another one.
     #[serde(default)]
     pub assist_offline_only: bool,
@@ -208,6 +213,18 @@ pub struct Settings {
     /// route through Claude Code cannot be chosen. Nothing in the app sets it yet.
     #[serde(default)]
     pub assist_claude_code_ok: bool,
+}
+
+/// What was chosen for one AI; none of a field is that AI's own start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pick {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The speed (Codex's service tier); none is the standard one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 /// The person agreed that questions asked through `provider` go to `goes_to`, at `at_ms`. A new destination asks again.
@@ -278,6 +295,7 @@ impl Default for Settings {
             assist_provider: None,
             assist_model: None,
             assist_effort: None,
+            assist_picks: Default::default(),
             assist_offline_only: false,
             assist_consent: Vec::new(),
             assist_claude_code_ok: false,

@@ -128,6 +128,10 @@ pub fn serve(mode: &str, input: impl BufRead, out: impl Write + Send + 'static, 
                 let mut model = json!({ "id": "fake-model", "model": "fake-model", "displayName": "Fake", "description": "", "hidden": false, "isDefault": true, "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{ "reasoningEffort": "low", "description": "" }, { "reasoningEffort": "medium", "description": "" }], "inputModalities": ["text", "image"] });
                 match mode {
                     "text-only" => model["inputModalities"] = json!(["text"]),
+                    "tiers" => {
+                        model["serviceTiers"] = json!(["flex"]);
+                        model["additionalSpeedTiers"] = json!([{ "id": "priority", "name": "Fast" }, "flex"]);
+                    }
                     "no-modalities" => {
                         model.as_object_mut().unwrap().remove("inputModalities");
                     }

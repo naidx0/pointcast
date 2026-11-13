@@ -53,6 +53,45 @@ const FIXED: &[&str] = &[
     "",
 ];
 
+/// The models offered: Claude Code's aliases for the newest of each kind, then the full ids. A model the person types
+/// is taken too (`model_ok`). Sonnet is the recommended start.
+pub const MODELS: &[(&str, &str)] = &[
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("haiku", "Haiku"),
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+];
+pub const MODEL_START: &str = "sonnet";
+
+/// The levels of `--effort`, as the `--help` of Claude Code 2.1.295 lists them, lowest first.
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+pub const EFFORT_START: &str = "medium";
+
+/// Whether `m` can be sent as `--model`: letters, digits and `.-_:[]/@` only, and never a flag of its own.
+pub fn model_ok(m: &str) -> Result<(), String> {
+    let fine = !m.is_empty() && !m.starts_with('-') && m.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:[]/@".contains(c));
+    if fine {
+        Ok(())
+    } else {
+        Err(format!("\"{m}\" is not a Claude model name."))
+    }
+}
+
+/// The flags of what the person chose, each only when chosen: `--model` and `--effort`. A model or effort Claude Code
+/// would not take is never sent.
+fn chosen_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+    let mut all = Vec::new();
+    if let Some(m) = model.filter(|m| model_ok(m).is_ok()) {
+        all.extend(["--model".to_owned(), m.to_owned()]);
+    }
+    if let Some(e) = effort.filter(|e| EFFORTS.contains(e)) {
+        all.extend(["--effort".to_owned(), e.to_owned()]);
+    }
+    all
+}
+
 /// What the conversation is told before anything else: the fence, then the session's own instructions.
 fn instructions(system: &str) -> String {
     if system.trim().is_empty() {
@@ -568,24 +607,34 @@ pub struct Claude {
     /// A folder of Pointcast's own: the empty folder, the empty list of servers and the pid file live in it.
     home: PathBuf,
     launch: Option<Launch>,
+    /// The model and effort the person chose; none leaves Claude Code's own.
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Claude {
     pub fn new(home: PathBuf) -> Claude {
-        Claude { home, launch: None }
+        Claude { home, launch: None, model: None, effort: None }
+    }
+
+    /// The same, with the model and effort the person chose.
+    pub fn choosing(self, model: Option<String>, effort: Option<String>) -> Claude {
+        Claude { model, effort, ..self }
     }
 
     /// Run `launch` in place of the `claude` found on this computer.
     pub fn with(launch: Launch, home: PathBuf) -> Claude {
-        Claude { launch: Some(launch), home }
+        Claude { launch: Some(launch), ..Claude::new(home) }
     }
 
     /// A conversation on a helper of its own, started in Pointcast's empty folder.
     pub fn start(&self, system: &str, earlier: &[Turn]) -> Result<ClaudeChat, Failure> {
-        let launch = match &self.launch {
+        let mut launch = match &self.launch {
             Some(l) => l.clone(),
             None => launch_of(detect::on_path(PROGRAM).ok_or(Failure::NotInstalled)?, system, &no_servers(&self.home)?),
         };
+        // After everything constant, so the fence and the fixed flags stay as they are; a stand-in hears them too.
+        launch.args.extend(chosen_args(self.model.as_deref(), self.effort.as_deref()));
         let cwd = empty_folder(&self.home)?;
         let pidfile = self.home.join("claude.pid");
         child::reap_stale(&pidfile);
@@ -638,7 +687,8 @@ pub mod tests {
         let log = home.join("seen.jsonl");
         let launch = Launch {
             exe: std::env::current_exe().unwrap(),
-            args: ["--exact", "assist::claude::tests::stand_in", "--ignored", "--nocapture"].map(String::from).to_vec(),
+            // What comes after "--" is only more names of tests to run, so the flags of a choice reach the stand-in.
+            args: ["--exact", "assist::claude::tests::stand_in", "--ignored", "--nocapture", "--"].map(String::from).to_vec(),
             env: vec![("POINTCAST_FAKE_CLAUDE".into(), mode.into()), ("POINTCAST_FAKE_CLAUDE_LOG".into(), log.to_string_lossy().into_owned())],
         };
         (Claude::with(launch, home), log)
@@ -682,6 +732,10 @@ pub mod tests {
         // On one test thread the harness leaves "test <name> ... " unfinished on stdout: end that line first.
         println!();
         let log = std::env::var("POINTCAST_FAKE_CLAUDE_LOG").ok();
+        // The command line it was started with, as one line of the log.
+        if let Some(mut f) = log.as_ref().and_then(|f| std::fs::OpenOptions::new().create(true).append(true).open(f).ok()) {
+            let _ = writeln!(f, "{}", json!({ "argv": std::env::args().skip(1).collect::<Vec<_>>() }));
+        }
         say(json!({ "type": "system", "subtype": "init", "tools": [], "mcp_servers": [] }));
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if let Some(mut f) = log.as_ref().and_then(|f| std::fs::OpenOptions::new().create(true).append(true).open(f).ok()) {
@@ -728,6 +782,11 @@ pub mod tests {
 
     /// Every line the stand-in was sent, by all the helpers of one conversation.
     fn seen(log: &Path) -> Vec<Value> {
+        lines(log).into_iter().filter(|v| v.get("argv").is_none()).collect()
+    }
+
+    /// Every line of the log: what was sent, and each helper's command line.
+    fn lines(log: &Path) -> Vec<Value> {
         std::fs::read_to_string(log).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
     }
 
@@ -767,6 +826,40 @@ pub mod tests {
         // Through npm's batch shim the instructions are one line.
         let shim = launch_of("claude.cmd".into(), "Be brief.\nBe kind.", &list);
         assert!(shim.args.last().is_some_and(|t| !t.contains('\n') && t.ends_with("try. Answer only from the words and pictures of the conversation. Be brief. Be kind.")));
+    }
+
+    /// The command line each helper of a conversation was started with.
+    fn argv(log: &Path) -> Vec<Vec<String>> {
+        lines(log).iter().filter_map(|v| serde_json::from_value(v["argv"].clone()).ok()).collect()
+    }
+
+    #[test]
+    fn the_chosen_model_and_effort_reach_the_command_line_after_the_fixed_flags_and_nothing_when_none_is_chosen() {
+        let list = no_servers(&scratch("claude-chosen")).unwrap();
+        let plain = launch_of("claude".into(), "", &list).args;
+        assert_eq!(chosen_args(None, None), Vec::<String>::new());
+        assert_eq!(chosen_args(Some("claude-opus-5-5"), Some("xhigh")), ["--model", "claude-opus-5-5", "--effort", "xhigh"]);
+        assert_eq!(chosen_args(Some("--dangerously-skip-permissions"), Some("ultra")), Vec::<String>::new(), "a flag or an unknown level never rides");
+        assert!(model_ok("claude-sonnet-5-5[1m]").is_ok() && model_ok("-p").is_err() && model_ok("so net").is_err() && model_ok("").is_err());
+
+        let (claude, log) = child("normal", "chosen-wire");
+        let mut chat = claude.choosing(Some("opus".into()), Some("high".into())).start("", &[]).unwrap();
+        assert_eq!(words(&answer(&mut chat, said("What is two plus two?"))), WORDS);
+        let got = argv(&log);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].ends_with(&["--".to_owned(), "--model".into(), "opus".into(), "--effort".into(), "high".into()]), "{:?}", got[0]);
+        // On the real command line they come after every constant argument, which stay exactly as they were.
+        let mut chosen = plain.clone();
+        chosen.extend(chosen_args(Some("opus"), Some("high")));
+        assert_eq!(chosen[..plain.len()], plain[..]);
+        chat.close();
+
+        let (claude, log) = child("normal", "unchosen-wire");
+        let mut chat = claude.start("", &[]).unwrap();
+        assert_eq!(words(&answer(&mut chat, said("What is two plus two?"))), WORDS);
+        let got = argv(&log);
+        assert!(got.len() == 1 && got[0].last().map(String::as_str) == Some("--"), "nothing is added when nothing is chosen: {got:?}");
+        chat.close();
     }
 
     #[test]

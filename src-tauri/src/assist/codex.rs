@@ -10,6 +10,7 @@ use super::jsonl::{CallError, Client, Incoming, RpcError};
 use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Limits, Part, Provider, Turn, TurnId, Usage, Window};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use super::catalog::Choice;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,6 +178,24 @@ fn takes_pictures(model: &Value) -> bool {
 fn chosen<'a>(models: &'a [Value], want: Option<&str>) -> Option<&'a Value> {
     let named = want.and_then(|w| models.iter().find(|m| m["id"].as_str() == Some(w) || m["model"].as_str() == Some(w)));
     named.or_else(|| models.iter().find(|m| m["isDefault"].as_bool() == Some(true))).or(models.first())
+}
+
+/// The speed Codex calls standard: chosen, nothing is sent.
+pub const STANDARD: &str = "standard";
+
+/// The service tiers a model offers besides the standard one: its `serviceTiers` and `additionalSpeedTiers`. Codex
+/// 0.167.2 lists both, empty for every model of a Plus plan (probed 2026-11-12), so the shape of an entry is
+/// UNCONFIRMED: a name, or an object naming it by `id`, `serviceTier` or `name`.
+fn tiers_of(model: &Value) -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = Vec::new();
+    for t in ["serviceTiers", "additionalSpeedTiers"].iter().filter_map(|k| model[*k].as_array()).flatten() {
+        let id = t.as_str().or(t["id"].as_str()).or(t["serviceTier"].as_str()).or(t["name"].as_str()).unwrap_or_default();
+        let label = t["displayName"].as_str().or(t["label"].as_str()).or(t["name"].as_str()).filter(|l| *l != id).map_or_else(|| super::catalog::effort_label(id), str::to_owned);
+        if !id.is_empty() && id != "default" && id != STANDARD && !all.iter().any(|(a, _)| a == id) {
+            all.push((id.to_owned(), label));
+        }
+    }
+    all
 }
 
 fn offers_effort(model: &Value, effort: &str) -> bool {
@@ -611,6 +630,8 @@ pub struct CodexChat {
     models: Vec<Value>,
     model: Option<String>,
     effort: Option<String>,
+    /// The service tier each turn asks for; none is standard.
+    speed: Option<String>,
     pictures: bool,
     /// What a resumed conversation starts from, sent with its first question.
     context: Vec<Part>,
@@ -626,6 +647,8 @@ pub struct Setup<'a> {
     pub earlier: &'a [Turn],
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// A service tier; one the model does not list is not sent.
+    pub speed: Option<&'a str>,
 }
 
 impl CodexChat {
@@ -647,7 +670,7 @@ impl CodexChat {
             Ok((account, models))
         };
         match greet() {
-            Ok((account, models)) => Ok(CodexChat { shared, account, models, model: None, effort: None, pictures: true, context: Vec::new(), adds: Vec::new() }),
+            Ok((account, models)) => Ok(CodexChat { shared, account, models, model: None, effort: None, speed: None, pictures: true, context: Vec::new(), adds: Vec::new() }),
             Err(f) => {
                 shared.shut(Duration::ZERO);
                 Err(f)
@@ -665,6 +688,7 @@ impl CodexChat {
         let id = model["id"].as_str().or(model["model"].as_str()).unwrap_or_default().to_owned();
         self.pictures = takes_pictures(model);
         self.effort = setup.effort.filter(|e| offers_effort(model, e)).map(str::to_owned);
+        self.speed = setup.speed.filter(|t| tiers_of(model).iter().any(|(id, _)| id == t)).map(str::to_owned);
         self.context = replay(setup.earlier, if self.pictures { KEEP_PICTURES } else { 0 });
         // The person's own MCP servers, by name, so that each can be switched off for this thread. Read only: nothing
         // is written, and only the names are kept. A Codex that does not answer starts the thread with none named; a
@@ -720,8 +744,14 @@ impl Chat for CodexChat {
             return Err(Failure::Broken("Codex is not running.".into()));
         }
         let mut params = json!({ "threadId": s.thread, "input": input });
+        if let Some(m) = &self.model {
+            params["model"] = json!(m);
+        }
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
+        }
+        if let Some(t) = &self.speed {
+            params["serviceTier"] = json!(t);
         }
         s.serial += 1;
         let id = TurnId(s.serial);
@@ -831,6 +861,8 @@ pub struct Codex {
     pub model: Option<String>,
     /// How hard the model thinks before it answers; a study answer wants the first words soon.
     pub effort: Option<String>,
+    /// The service tier chosen; none is standard.
+    pub speed: Option<String>,
     launch: Option<Launch>,
     warmed: Mutex<Option<CodexChat>>,
     models: Mutex<Vec<Value>>,
@@ -842,7 +874,7 @@ pub struct Codex {
 
 impl Codex {
     pub fn new(home: PathBuf) -> Codex {
-        Codex { home, model: None, effort: Some("low".into()), launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default(), account: Mutex::default() }
+        Codex { home, model: None, effort: Some("low".into()), speed: None, launch: None, warmed: Mutex::default(), models: Mutex::default(), adds: Mutex::default(), account: Mutex::default() }
     }
 
     /// Run `launch` in place of the `codex` found on this computer.
@@ -904,7 +936,7 @@ impl Codex {
             None => self.connect()?,
         };
         let cwd = empty_folder(&self.home)?;
-        chat.begin(&Setup { cwd: &cwd, system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref() })?;
+        chat.begin(&Setup { cwd: &cwd, system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref(), speed: self.speed.as_deref() })?;
         *self.adds.lock().unwrap() = chat.adds.clone();
         Ok(chat)
     }
@@ -970,12 +1002,22 @@ impl Provider for Codex {
 }
 
 /// One entry of Codex's `model/list` as the AI page shows it: its name, whether it sees pictures, the efforts it
-/// offers and whether Codex starts with it.
+/// offers with the one it recommends (`defaultReasoningEffort`), its speeds, and whether Codex starts with it.
 fn model_of(m: &Value) -> Option<super::catalog::Model> {
     let id = m["id"].as_str().or(m["model"].as_str())?.to_owned();
     let name = m["displayName"].as_str().filter(|n| !n.is_empty()).map_or_else(|| id.clone(), str::to_owned);
-    let efforts = m["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["reasoningEffort"].as_str().map(str::to_owned)).collect();
-    Some(super::catalog::Model { id, name, images: takes_pictures(m), efforts, default: m["isDefault"].as_bool() == Some(true) })
+    let ids = m["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["reasoningEffort"].as_str());
+    let efforts = Choice::efforts(ids, m["defaultReasoningEffort"].as_str());
+    // Standard first, then each tier; the one Codex names as the model's default is recommended.
+    let tiers = tiers_of(m);
+    let start = m["defaultServiceTier"].as_str().filter(|t| tiers.iter().any(|(id, _)| id == t));
+    let speeds = if tiers.is_empty() {
+        Vec::new()
+    } else {
+        let standard = Choice { id: STANDARD.into(), label: "Standard".into(), default: start.is_none() };
+        std::iter::once(standard).chain(tiers.into_iter().map(|(id, label)| Choice { default: start == Some(id.as_str()), id, label })).collect()
+    };
+    Some(super::catalog::Model { id, name, images: takes_pictures(m), efforts, speeds, default: m["isDefault"].as_bool() == Some(true) })
 }
 
 #[cfg(test)]
@@ -1005,7 +1047,7 @@ pub mod tests {
     fn wire_with(mode: &'static str, earlier: &[Turn]) -> (Result<CodexChat, Failure>, Seen) {
         let (chat, seen) = link(mode);
         let chat = chat.and_then(|mut c| {
-            c.begin(&Setup { cwd: Path::new(CWD), system: "Be brief.", earlier, model: None, effort: Some("low") })?;
+            c.begin(&Setup { cwd: Path::new(CWD), system: "Be brief.", earlier, model: None, effort: Some("low"), speed: None })?;
             Ok(c)
         });
         (chat, seen)
@@ -1095,8 +1137,33 @@ pub mod tests {
         }
         assert_eq!(
             all[6]["params"],
-            json!({ "threadId": chat.thread(), "effort": "low", "input": [{ "type": "text", "text": "What is two plus two?" }, { "type": "localImage", "path": "/pointcast/turn/01.png" }] })
+            json!({ "threadId": chat.thread(), "model": "fake-model", "effort": "low", "input": [{ "type": "text", "text": "What is two plus two?" }, { "type": "localImage", "path": "/pointcast/turn/01.png" }] })
         );
+    }
+
+    #[test]
+    fn the_chosen_model_effort_and_speed_reach_turn_start_and_nothing_else_rides_when_none_is_chosen() {
+        let begin = |mode: &'static str, effort: Option<&str>, speed: Option<&str>| {
+            let (chat, seen) = link(mode);
+            let mut chat = chat.unwrap();
+            chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: Some("fake-model"), effort, speed }).unwrap();
+            answer(&mut chat, said("What is two plus two?"));
+            let t = sent(&seen, "turn/start").remove(0);
+            (chat, t)
+        };
+        let (chat, t) = begin("tiers", Some("medium"), Some("priority"));
+        assert_eq!((&t["model"], &t["effort"], &t["serviceTier"]), (&json!("fake-model"), &json!("medium"), &json!("priority")));
+        // The picker's shape: each effort labelled, Codex's default recommended, and standard first among the speeds.
+        let m = model_of(&chat.models[0]).unwrap();
+        let ids = |l: &[Choice]| l.iter().map(|c| (c.id.clone(), c.label.clone(), c.default)).collect::<Vec<_>>();
+        assert_eq!(ids(&m.efforts), [("low".into(), "Low".into(), false), ("medium".into(), "Medium".into(), true)]);
+        assert_eq!(ids(&m.speeds), [("standard".into(), "Standard".into(), true), ("flex".into(), "Flex".into(), false), ("priority".into(), "Fast".into(), false)]);
+
+        let (_, t) = begin("tiers", None, None);
+        assert!(t.get("serviceTier").is_none() && t.get("effort").is_none(), "{t}");
+        let (chat, t) = begin("normal", Some("medium"), Some("priority"));
+        assert!(t.get("serviceTier").is_none(), "a tier the model does not list is not sent: {t}");
+        assert!(model_of(&chat.models[0]).unwrap().speeds.is_empty(), "no tiers listed: no speed picker");
     }
 
     #[test]
@@ -1373,7 +1440,7 @@ pub mod tests {
         // A model this plan does not list: the listed default again.
         let (chat, seen) = link("normal");
         let mut chat = chat.ok().unwrap();
-        chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: Some(fake::CONFIG_MODEL), effort: None }).unwrap();
+        chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: Some(fake::CONFIG_MODEL), effort: None, speed: None }).unwrap();
         assert_eq!(sent(&seen, "thread/start")[0]["model"], "fake-model");
         // No list to choose from: a plain error, and no thread is started for Codex to pick a model for.
         let (chat, seen) = wire_with("no-models", &[]);
@@ -1468,10 +1535,12 @@ pub mod tests {
             "supportedReasoningEfforts": (["low", "medium", "high", "xhigh", "max", "ultra"].map(|e| json!({ "reasoningEffort": e }))) });
         let (l, t) = (model_of(&luna).unwrap(), model_of(&terra).unwrap());
         assert_eq!((l.name.as_str(), l.default, l.efforts.len()), ("GPT-6-Luna", true, 5));
-        assert_eq!((t.default, t.efforts.last().map(String::as_str)), (false, Some("ultra")));
+        assert_eq!((t.default, t.efforts.last().map(|e| e.id.as_str())), (false, Some("ultra")));
         for e in l.efforts.iter().chain(&t.efforts) {
-            assert!(crate::assist::catalog::CODEX_EFFORTS.contains(&e.as_str()), "{e} can be chosen");
+            assert!(crate::assist::catalog::CODEX_EFFORTS.contains(&e.id.as_str()), "{} can be chosen", e.id);
+            assert!(!e.default, "no defaultReasoningEffort listed: none is recommended");
         }
+        assert_eq!(t.efforts[3].label, "Extra high");
         let bare = model_of(&json!({ "id": "m" })).unwrap();
         assert!(bare.efforts.is_empty() && !bare.default);
         assert_eq!(serde_json::to_value(&bare).unwrap(), json!({ "id": "m", "name": "m", "images": true }), "nothing said for what is not known");
@@ -1482,12 +1551,13 @@ pub mod tests {
         for (asked, sent_effort) in [("medium", json!("medium")), ("high", Value::Null)] {
             let (chat, seen) = link("normal");
             let mut chat = chat.ok().unwrap();
-            chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: None, effort: Some(asked) }).unwrap();
+            chat.begin(&Setup { cwd: Path::new(CWD), system: "", earlier: &[], model: None, effort: Some(asked), speed: None }).unwrap();
             answer(&mut chat, said("anything"));
             assert_eq!(sent(&seen, "turn/start")[0]["effort"], sent_effort, "{asked}");
         }
-        let p = crate::assist::catalog::Picked { id: ID, model: None, offline_only: false, base: None, effort: Some("medium".into()) };
-        assert_eq!(crate::assist::catalog::codex_for(&p, Path::new("unused")).effort.as_deref(), Some("medium"));
+        let p = crate::assist::catalog::Picked { id: ID, model: None, offline_only: false, base: None, effort: Some("medium".into()), speed: Some("priority".into()) };
+        let c = crate::assist::catalog::codex_for(&p, Path::new("unused"));
+        assert_eq!((c.effort.as_deref(), c.speed.as_deref()), (Some("medium"), Some("priority")));
         let none = crate::assist::catalog::Picked { effort: None, ..p };
         assert_eq!(crate::assist::catalog::codex_for(&none, Path::new("unused")).effort.as_deref(), Some("low"), "low when none is chosen");
     }

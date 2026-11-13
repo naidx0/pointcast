@@ -506,6 +506,12 @@ fn assist_effort(svc: tauri::State<'_, Arc<App>>, effort: String) -> Result<(), 
     assist_change(&svc, |s| assist::catalog::set_effort(s, &effort))
 }
 
+/// The speed for the chosen AI, where its model offers one (Codex's service tiers); "standard" sends none.
+#[tauri::command]
+fn assist_speed(svc: tauri::State<'_, Arc<App>>, speed: String) -> Result<(), String> {
+    assist_change(&svc, |s| assist::catalog::set_speed(s, &speed))
+}
+
 #[tauri::command]
 fn assist_offline_only(svc: tauri::State<'_, Arc<App>>, on: bool) -> Result<(), String> {
     assist_change(&svc, |s| {
@@ -2322,6 +2328,7 @@ pub fn run() {
             assist_setup,
             assist_offline_only,
             assist_effort,
+            assist_speed,
             platform_info,
         ])
         .setup(move |app| {

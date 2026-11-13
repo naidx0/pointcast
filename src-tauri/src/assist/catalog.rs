@@ -9,8 +9,8 @@ use super::anthropic;
 use super::codex::{self, Codex};
 use super::vault::{self, Secret};
 use super::{openai, Failure, Health, Provider, State};
-use crate::settings::{Consent, Settings};
-use serde::Serialize;
+use crate::settings::{Consent, Pick, Settings};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -87,14 +87,42 @@ pub enum Status {
     Checking,
 }
 
+/// One option of a picker: the id the AI is sent, the words shown, and whether it is the one the AI recommends (its
+/// own default). Every route's model, thinking and speed choices are lists of these, so Settings draws them all alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
+impl Choice {
+    /// The efforts `ids`, lowest first, each with its label; `start` is the recommended one.
+    pub fn efforts<S: AsRef<str>>(ids: impl IntoIterator<Item = S>, start: Option<&str>) -> Vec<Choice> {
+        ids.into_iter().map(|e| Choice { id: e.as_ref().to_owned(), label: effort_label(e.as_ref()), default: start == Some(e.as_ref()) }).collect()
+    }
+}
+
+/// An effort's name as the picker says it: "xhigh" is "Extra high".
+pub fn effort_label(id: &str) -> String {
+    match id {
+        "xhigh" => "Extra high".to_owned(),
+        _ => id.chars().take(1).flat_map(char::to_uppercase).chain(id.chars().skip(1)).collect(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Model {
     pub id: String,
     pub name: String,
     pub images: bool,
-    /// The thinking efforts this model offers, as its vendor lists them, lowest first; empty when it says none.
+    /// The thinking efforts this model offers, lowest first, the one its vendor recommends marked; empty when it says none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub efforts: Vec<String>,
+    pub efforts: Vec<Choice>,
+    /// The speeds it offers, standard first (Codex's service tiers); empty when it offers no choice.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speeds: Vec<Choice>,
     /// The vendor marks it as the one it starts with.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
@@ -103,7 +131,7 @@ pub struct Model {
 impl Model {
     /// A model known only by its id, offering no effort choice.
     pub fn plain(id: String, images: bool) -> Model {
-        Model { name: id.clone(), id, images, efforts: Vec::new(), default: false }
+        Model { name: id.clone(), id, images, efforts: Vec::new(), speeds: Vec::new(), default: false }
     }
 }
 
@@ -122,8 +150,13 @@ pub struct Row {
     pub base: Option<String>,
     pub consented: bool,
     pub models: Vec<Model>,
-    /// The thinking efforts the route offers to choose from, lowest first; none where it offers no choice.
-    pub efforts: Vec<&'static str>,
+    /// The thinking efforts the route offers to a model that names none of its own (one typed in), lowest first; none
+    /// where it offers no choice.
+    pub efforts: Vec<Choice>,
+    /// A model id the person types is taken as it is (Claude Code), besides those listed.
+    pub typed: bool,
+    /// What was last chosen for this route, kept when another AI is chosen.
+    pub pick: Pick,
     /// Files the AI's own app sends along with every question (Codex: the person's own instructions file).
     pub adds: Vec<String>,
     /// The plan Codex says the person is signed in with ("plus"), and the address its `account/read` names: shown
@@ -139,7 +172,10 @@ pub struct Row {
 pub struct List {
     pub chosen: Option<String>,
     pub model: Option<String>,
+    /// The effort an Ask sends now: the one chosen, else the route's own start (low for Codex).
     pub effort: Option<String>,
+    /// The speed chosen, where the chosen model offers one; none is standard.
+    pub speed: Option<String>,
     pub offline_only: bool,
     pub providers: Vec<Row>,
     /// A round of checks is out now: Refresh shows it until the last answer is in.
@@ -164,6 +200,8 @@ pub struct Look {
     pub claude_who: claude::Who,
     /// Who Codex says is signed in, once it was asked.
     pub account: Option<codex::Account>,
+    /// The models and efforts each agent reported the last time a session was started with it.
+    pub agent_options: Vec<(&'static str, acp::Options)>,
     /// The routes whose probe has not answered yet.
     pub pending: Vec<&'static str>,
 }
@@ -187,6 +225,7 @@ pub fn gather(places: &[(&'static str, &str)], codex: impl FnOnce() -> (Health, 
         agents: Vec::new(),
         claude_who: claude::Who::default(),
         account: None,
+        agent_options: Vec::new(),
         pending: Vec::new(),
     }
 }
@@ -297,17 +336,22 @@ impl Survey {
 /// Every probe of this computer, one per thing that can be slow: Codex (its version, its sign-in, and who is signed in
 /// as its own `account/read` says), each agent's `--version`, and each model server's port.
 pub fn probes(held: Arc<Held>, home: PathBuf) -> Vec<Probe> {
-    let mut all = vec![Probe { ids: vec![codex::ID], run: Box::new(move || codex_probe(&held, &home)) }];
+    let codex_home = home.clone();
+    let mut all = vec![Probe { ids: vec![codex::ID], run: Box::new(move || codex_probe(&held, &codex_home)) }];
     for a in acp::AGENTS.iter().chain([&CLAUDE_CLI]) {
         let a: &'static acp::Agent = a;
+        let home = home.clone();
         all.push(Probe {
             ids: vec![a.id],
             run: Box::new(move || {
                 // Claude Code is asked by its own `auth status`, which knows whether anyone is signed in.
                 let (h, who) = if a.id == CLAUDE_CODE { claude::look() } else { (acp::health(a), claude::Who::default()) };
+                let options = acp::cached(&home.join(a.id));
                 Box::new(move |l: &mut Look| {
                     l.agents.retain(|(id, _)| *id != a.id);
                     l.agents.push((a.id, h));
+                    l.agent_options.retain(|(id, _)| *id != a.id);
+                    l.agent_options.push((a.id, options));
                     if a.id == CLAUDE_CODE {
                         l.claude_who = who;
                     }
@@ -440,6 +484,7 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                             if r.id == CLAUDE_CODE {
                                 (plan, email) = (look.claude_who.plan.clone(), look.claude_who.email.clone());
                             }
+                            models = agent_models(r.id, look);
                             (Status::Ready, h.line.clone())
                         }
                         State::NotInstalled => (Status::NotInstalled, h.line.clone()),
@@ -474,38 +519,110 @@ pub fn providers(s: &Settings, look: &Look) -> List {
                     Way::Agent => r.id == CLAUDE_CODE && line.ends_with(claude::SIGNED_IN),
                     Way::Key | Way::Local => true,
                 };
-            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: efforts_of(r.id).to_vec(), adds, plan, email, sure }
+            Row { id: r.id, name: r.name, kind: r.way, state, line, goes_to, offline: stays_here(s, r), available, base, consented: consented(s, r), models, efforts: route_efforts(r.id, look), typed: r.id == CLAUDE_CODE, pick: pick_of(s, r.id), adds, plan, email, sure }
         })
         .collect();
-    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s), offline_only: s.assist_offline_only, providers: rows, checking: false }
+    let start = (s.assist_provider.as_deref() == Some(codex::ID)).then(|| "low".to_owned());
+    List { chosen: s.assist_provider.clone(), model: s.assist_model.clone(), effort: effort_of(s).or(start), speed: speed_of(s), offline_only: s.assist_offline_only, providers: rows, checking: false }
+}
+
+/// An agent's models: Claude Code's own list, or what an ACP agent last reported, each with the efforts it offers.
+fn agent_models(id: &str, look: &Look) -> Vec<Model> {
+    if id == CLAUDE_CODE {
+        let efforts = Choice::efforts(claude::EFFORTS, Some(claude::EFFORT_START));
+        return claude::MODELS
+            .iter()
+            .map(|(m, name)| Model { id: (*m).to_owned(), name: (*name).to_owned(), images: true, efforts: efforts.clone(), speeds: Vec::new(), default: *m == claude::MODEL_START })
+            .collect();
+    }
+    let Some((_, o)) = look.agent_options.iter().find(|(a, _)| *a == id) else { return Vec::new() };
+    o.models.iter().map(|c| Model { id: c.id.clone(), name: c.label.clone(), images: true, efforts: o.efforts.clone(), speeds: Vec::new(), default: c.default }).collect()
+}
+
+/// The efforts route `id` offers a model that names none of its own.
+fn route_efforts(id: &str, look: &Look) -> Vec<Choice> {
+    match look.agent_options.iter().find(|(a, _)| *a == id) {
+        Some((_, o)) => o.efforts.clone(),
+        None => Choice::efforts(efforts_of(id), (id == CLAUDE_CODE).then_some(claude::EFFORT_START)),
+    }
+}
+
+/// What was chosen for route `id`. The chosen route's model and effort are also kept where files saved before choices
+/// were kept per route have them.
+pub fn pick_of(s: &Settings, id: &str) -> Pick {
+    let mut p = s.assist_picks.get(id).cloned().unwrap_or_default();
+    if s.assist_provider.as_deref() == Some(id) {
+        p.model = s.assist_model.clone();
+        p.effort = s.assist_effort.clone();
+    }
+    p
+}
+
+/// Keep the chosen route's model and effort under its id, so choosing another AI and back finds them again.
+fn keep(s: &mut Settings) {
+    if let Some(id) = s.assist_provider.clone() {
+        let speed = s.assist_picks.get(&id).and_then(|p| p.speed.clone());
+        let p = Pick { model: s.assist_model.clone(), effort: s.assist_effort.clone(), speed };
+        if p == Pick::default() {
+            s.assist_picks.remove(&id);
+        } else {
+            s.assist_picks.insert(id, p);
+        }
+    }
 }
 
 /// Every effort Codex names, lowest first; the first is what Pointcast starts with. Each model offers some of them
 /// (its `supportedReasoningEfforts`); one the chosen model does not offer is not sent, and the model's own applies.
 pub const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
-/// The thinking efforts route `id` offers; none for a route that offers no choice.
+/// The thinking efforts route `id` offers whatever the model: every name Codex uses, and Claude Code's levels; none
+/// for a route that offers no choice. An ACP agent's are those it reports, checked when they are sent.
 pub fn efforts_of(id: &str) -> &'static [&'static str] {
-    if id == codex::ID {
-        CODEX_EFFORTS
-    } else {
-        &[]
+    match id {
+        codex::ID => CODEX_EFFORTS,
+        CLAUDE_CODE => claude::EFFORTS,
+        _ => &[],
     }
+}
+
+/// Whether route `id` could offer `effort`: one of its own, or for an ACP agent any value but its "default".
+fn offers(id: &str, effort: &str) -> bool {
+    efforts_of(id).contains(&effort) || (acp::agent(id).is_some() && !effort.is_empty() && effort != acp::DEFAULT)
 }
 
 /// The effort saved for the chosen route, if that route offers it.
 pub fn effort_of(s: &Settings) -> Option<String> {
-    let offered = efforts_of(s.assist_provider.as_deref().unwrap_or_default());
-    s.assist_effort.clone().filter(|e| offered.contains(&e.as_str()))
+    let id = s.assist_provider.as_deref().unwrap_or_default();
+    s.assist_effort.clone().filter(|e| offers(id, e))
 }
 
 /// Save the thinking effort for the chosen route; refused when it offers no such choice.
 pub fn set_effort(s: &mut Settings, effort: &str) -> Result<(), String> {
     let id = s.assist_provider.as_deref().unwrap_or_default();
-    if !efforts_of(id).contains(&effort) {
+    if !offers(id, effort) {
         return Err(format!("{} offers no \"{effort}\" effort.", route(id).map_or("That AI", |r| r.name)));
     }
     s.assist_effort = Some(effort.to_owned());
+    keep(s);
+    Ok(())
+}
+
+/// The speed saved for the chosen route; only Codex offers one, and none is standard.
+pub fn speed_of(s: &Settings) -> Option<String> {
+    let id = s.assist_provider.as_deref().filter(|id| *id == codex::ID)?;
+    s.assist_picks.get(id).and_then(|p| p.speed.clone())
+}
+
+/// Save the speed for the chosen route: a service tier its model lists, or `codex::STANDARD` (none sent).
+pub fn set_speed(s: &mut Settings, speed: &str) -> Result<(), String> {
+    let id = s.assist_provider.clone().unwrap_or_default();
+    if id != codex::ID || speed.trim().is_empty() {
+        return Err(format!("{} offers no speed choice.", route(&id).map_or("That AI", |r| r.name)));
+    }
+    let speed = (speed != codex::STANDARD).then(|| speed.to_owned());
+    keep(s);
+    let p = s.assist_picks.entry(id).or_default();
+    p.speed = speed;
     Ok(())
 }
 
@@ -539,8 +656,18 @@ pub fn choose_at(s: &mut Settings, id: &str, base: Option<&str>, model: Option<S
         s.assist_consent.retain(|c| c.provider != r.id);
         s.assist_consent.push(Consent { provider: r.id.into(), goes_to, at_ms: now_ms });
     }
+    if r.id == CLAUDE_CODE {
+        if let Some(m) = &model {
+            claude::model_ok(m)?;
+        }
+    }
+    // The route left keeps its choice; the one chosen finds its own again, unless a model is named now.
+    keep(s);
+    let saved = s.assist_picks.get(r.id).cloned().unwrap_or_default();
     s.assist_provider = Some(r.id.into());
-    s.assist_model = model;
+    s.assist_model = model.or(saved.model);
+    s.assist_effort = saved.effort;
+    keep(s);
     Ok(())
 }
 
@@ -549,8 +676,9 @@ pub fn choose_at(s: &mut Settings, id: &str, base: Option<&str>, model: Option<S
 pub fn forget(s: &mut Settings, keys: &Keys, id: &str) -> Result<(), String> {
     let r = route(id).ok_or(UNKNOWN)?;
     s.assist_consent.retain(|c| c.provider != r.id);
+    s.assist_picks.remove(r.id);
     if s.assist_provider.as_deref() == Some(r.id) {
-        (s.assist_provider, s.assist_model) = (None, None);
+        (s.assist_provider, s.assist_model, s.assist_effort) = (None, None, None);
     }
     if r.way == Way::Key {
         keys.delete(r.id)?;
@@ -612,6 +740,8 @@ pub struct Picked {
     pub base: Option<String>,
     /// The thinking effort chosen, where the route offers one.
     pub effort: Option<String>,
+    /// The speed chosen (Codex's service tier); none is standard.
+    pub speed: Option<String>,
 }
 
 /// The chosen AI, or the line the panel shows instead: none chosen, not agreed to, or off this computer while only
@@ -627,7 +757,7 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
         return Err(OFFLINE_ONLY.into());
     }
     let base = if r.id == CUSTOM { custom_base(s) } else { None };
-    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base, effort: effort_of(s) })
+    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base, effort: effort_of(s), speed: speed_of(s) })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -637,10 +767,10 @@ pub fn build(p: &Picked, home: &Path) -> Result<Arc<dyn Provider>, String> {
     match r.way {
         Way::Plan => Ok(Arc::new(codex_for(p, home))),
         Way::Agent => match acp::agent(r.id) {
-            Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)))),
+            Some(a) => Ok(Arc::new(acp::Acp::new(a, home.join(a.id)).choosing(p.model.clone(), p.effort.clone()))),
             // Claude through Claude Code. A `Picked` that names it exists only with the owner's OK: `picked` refuses
             // it before, and so nothing is made.
-            None => Ok(Arc::new(super::claude::Claude::new(home.join(CLAUDE_CODE)))),
+            None => Ok(Arc::new(super::claude::Claude::new(home.join(CLAUDE_CODE)).choosing(p.model.clone(), p.effort.clone()))),
         },
         _ if model.is_empty() => Err(format!("Choose a model for {} in Settings first.", r.name)),
         Way::Key => Ok(Arc::new(keyed(r, p.base.as_deref(), model)?.provider(p.offline_only)?)),
@@ -655,6 +785,7 @@ pub fn codex_for(p: &Picked, home: &Path) -> Codex {
     if let Some(e) = &p.effort {
         c.effort = Some(e.clone());
     }
+    c.speed = p.speed.clone();
     c
 }
 
@@ -735,8 +866,11 @@ pub fn models_of(id: &str, s: &Settings, held: &Held, home: &Path) -> Result<Vec
                 None => Codex::new(home.join("codex")).list().map_err(said),
             }
         }
-        // An agent picks its own model, from what the person set up in it.
-        Way::Agent => Ok(Vec::new()),
+        // Claude Code's own list, or what an agent reported when a session last started: never a session now.
+        Way::Agent => {
+            let look = Look { agent_options: acp::agent(r.id).map(|a| vec![(a.id, acp::cached(&home.join(a.id)))]).unwrap_or_default(), ..Look::default() };
+            Ok(agent_models(r.id, &look))
+        }
         Way::Key => keyed(r, custom_base(s).as_deref(), "")?.provider(s.assist_offline_only)?.listed(),
         Way::Local => openai::local(r.id, r.base, "").provider(s.assist_offline_only)?.listed(),
     }
@@ -795,7 +929,7 @@ mod tests {
         // Remembered: the next choice of it needs no new yes, and Codex takes its own default model.
         assert_eq!(choose(&mut s, "openai", Some("gpt-y".into()), false, 9), Ok(()));
         assert_eq!(s.assist_consent.len(), 1);
-        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None, effort: None }));
+        assert_eq!(picked(&s), Ok(Picked { id: "openai", model: Some("gpt-y".into()), offline_only: false, base: None, effort: None, speed: None }));
         assert_eq!(choose(&mut s, "codex", None, true, 10), Ok(()));
         assert_eq!(s.assist_model, None);
         assert_eq!(choose(&mut s, "nope", None, true, 1), Err(UNKNOWN.into()));
@@ -827,7 +961,7 @@ mod tests {
         assert_eq!(choose(&mut s, "ollama", Some("llava".into()), true, 2), Ok(()));
         assert!(held.provider(&s).is_ok());
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None, effort: None };
+        let remote = Picked { id: "openai", model: Some("m".into()), offline_only: true, base: None, effort: None, speed: None };
         assert_eq!(build(&remote, Path::new("unused")).err(), Some(OFFLINE_ONLY.into()));
     }
 
@@ -981,7 +1115,7 @@ mod tests {
         assert_eq!(build(&p, Path::new("unused")).map(|b| b.id()), Ok("gemini-cli"));
         let held = Held::with(Box::new(|_| Err("unused".into())));
         assert_eq!(models_of("opencode", &s, &held, Path::new("unused")), Ok(Vec::new()));
-        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None, effort: None };
+        let claude_api = Picked { id: anthropic::ID, model: Some("claude-x".into()), offline_only: false, base: None, effort: None, speed: None };
         assert_eq!(build(&claude_api, Path::new("unused")).map(|b| b.id()), Ok("anthropic"));
         s.assist_offline_only = true;
         assert_eq!(choose(&mut s, "copilot", None, true, 2), Err(OFFLINE_ONLY.into()));
@@ -1112,20 +1246,77 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_offers_an_effort_and_the_choice_is_kept_for_it_alone() {
+    fn codex_claude_and_an_agent_that_reports_them_offer_efforts_and_a_key_or_local_route_offers_none() {
         let mut s = Settings::default();
         choose(&mut s, "codex", None, true, 1).unwrap();
         assert_eq!(picked(&s).unwrap().effort, None);
+        assert_eq!(providers(&s, &Look::default()).effort.as_deref(), Some("low"), "the list says what an Ask sends: Codex starts low");
         assert_eq!(set_effort(&mut s, "high"), Ok(()));
         assert_eq!((picked(&s).unwrap().effort.as_deref(), providers(&s, &Look::default()).effort.as_deref()), (Some("high"), Some("high")));
         assert!(set_effort(&mut s, "extreme").is_err());
-        let list = providers(&s, &Look::default());
-        for r in &list.providers {
-            assert_eq!(r.efforts.is_empty(), r.id != codex::ID, "{}", r.id);
+        let gemini = acp::Options { efforts: Choice::efforts(["low", "high"], Some("low")), effort_id: Some("thinking".into()), ..Default::default() };
+        let look = Look { agent_options: vec![("gemini-cli", gemini)], ..Look::default() };
+        for r in &providers(&s, &look).providers {
+            assert_eq!(!r.efforts.is_empty(), [codex::ID, CLAUDE_CODE, "gemini-cli"].contains(&r.id), "{}", r.id);
+            assert_eq!(r.typed, r.id == CLAUDE_CODE, "{}", r.id);
         }
         choose(&mut s, "ollama", Some("m".into()), true, 2).unwrap();
         assert_eq!((picked(&s).unwrap().effort, providers(&s, &Look::default()).effort), (None, None), "a route without the choice sends none");
-        assert!(set_effort(&mut s, "low").is_err());
+        assert!(set_effort(&mut s, "low").is_err() && set_speed(&mut s, "priority").is_err());
+        choose(&mut s, "gemini-cli", None, true, 3).unwrap();
+        assert!(set_effort(&mut s, acp::DEFAULT).is_err(), "an agent's \"default\" is never chosen");
+        assert_eq!(set_effort(&mut s, "high"), Ok(()));
+    }
+
+    #[test]
+    fn each_route_keeps_its_own_model_effort_and_speed_across_a_switch_and_an_old_settings_file_still_loads() {
+        let mut s = Settings { assist_claude_code_ok: true, ..Settings::default() };
+        choose(&mut s, CLAUDE_CODE, Some("opus".into()), true, 1).unwrap();
+        set_effort(&mut s, "max").unwrap();
+        assert!(choose(&mut s, CLAUDE_CODE, Some("--dangerously-skip-permissions".into()), true, 1).is_err(), "a typed model is never a flag");
+        choose(&mut s, "codex", Some("gpt-5.6-terra".into()), true, 2).unwrap();
+        set_effort(&mut s, "ultra").unwrap();
+        set_speed(&mut s, "priority").unwrap();
+        assert_eq!(picked(&s).map(|p| (p.model, p.effort, p.speed)), Ok((Some("gpt-5.6-terra".into()), Some("ultra".into()), Some("priority".into()))));
+        choose(&mut s, CLAUDE_CODE, None, false, 3).unwrap();
+        assert_eq!(picked(&s).map(|p| (p.model, p.effort, p.speed)), Ok((Some("opus".into()), Some("max".into()), None)), "Claude's own choice is back");
+        let rows = providers(&s, &Look::default()).providers;
+        let codex_row = rows.iter().find(|r| r.id == codex::ID).unwrap();
+        assert_eq!(codex_row.pick, Pick { model: Some("gpt-5.6-terra".into()), effort: Some("ultra".into()), speed: Some("priority".into()) });
+        choose(&mut s, "codex", None, false, 4).unwrap();
+        assert_eq!(picked(&s).map(|p| (p.model, p.effort, p.speed)), Ok((Some("gpt-5.6-terra".into()), Some("ultra".into()), Some("priority".into()))));
+        set_speed(&mut s, codex::STANDARD).unwrap();
+        assert_eq!(speed_of(&s), None, "standard sends none");
+
+        // A file saved before choices were kept per route: its model and effort are the chosen route's.
+        let f = std::env::temp_dir().join(format!("pointcast-picks-{}.json", std::process::id()));
+        std::fs::write(&f, br#"{"assist_provider":"codex","assist_model":"gpt-6-luna","assist_effort":"high","assist_consent":[{"provider":"codex","goes_to":"OpenAI, through your ChatGPT plan","at_ms":1}]}"#).unwrap();
+        let mut old = Settings::load(&f);
+        let _ = std::fs::remove_file(&f);
+        assert!(old.assist_picks.is_empty());
+        assert_eq!(pick_of(&old, codex::ID), Pick { model: Some("gpt-6-luna".into()), effort: Some("high".into()), speed: None });
+        old.assist_claude_code_ok = true;
+        choose(&mut old, CLAUDE_CODE, None, true, 5).unwrap();
+        assert_eq!((old.assist_model.clone(), old.assist_effort.clone()), (None, None), "Claude starts with its own");
+        assert_eq!(old.assist_picks[codex::ID], Pick { model: Some("gpt-6-luna".into()), effort: Some("high".into()), speed: None });
+    }
+
+    #[test]
+    fn claude_s_row_offers_its_aliases_and_full_ids_with_sonnet_and_medium_recommended_and_an_agent_shows_what_it_last_reported() {
+        let h = Health { state: State::Ready, line: "ready".into(), goes_to: "" };
+        let copilot = acp::Options { models: vec![Choice { id: "auto".into(), label: "Auto".into(), default: true }, Choice { id: "fast-1".into(), label: "Fast 1".into(), default: false }], ..Default::default() };
+        let look = Look { agents: vec![(CLAUDE_CODE, h.clone()), ("copilot", h.clone()), ("gemini-cli", h)], agent_options: vec![("copilot", copilot)], ..Look::default() };
+        let rows = providers(&Settings::default(), &look).providers;
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
+        let claude_row = row(CLAUDE_CODE);
+        let ids: Vec<&str> = claude_row.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus", "sonnet", "haiku", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+        assert_eq!(claude_row.models.iter().filter(|m| m.default).map(|m| m.id.as_str()).collect::<Vec<_>>(), ["sonnet"]);
+        for m in &claude_row.models {
+            assert_eq!(m.efforts.iter().map(|e| (e.id.as_str(), e.default)).collect::<Vec<_>>(), [("low", false), ("medium", true), ("high", false), ("xhigh", false), ("max", false)]);
+        }
+        assert_eq!(row("copilot").models.iter().map(|m| (m.id.as_str(), m.default)).collect::<Vec<_>>(), [("auto", true), ("fast-1", false)]);
+        assert!(row("copilot").efforts.is_empty() && row("gemini-cli").models.is_empty() && row("gemini-cli").efforts.is_empty(), "no options reported: no picker");
     }
 
     #[test]
@@ -1172,6 +1363,40 @@ mod on_this_computer {
         let list = survey.now(&s, |_| false, held.held());
         for r in list.providers.iter().filter(|r| matches!(r.id, "codex" | "claude-code" | "gemini-cli" | "copilot")) {
             println!("{} {:?} plan={:?} email={} models={:?} line={}", r.id, r.state, r.plan, r.email.is_some(), r.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), r.line);
+        }
+    }
+
+    /// Each installed route's models, efforts and speeds, as Settings would offer them. Spends nothing: Codex is greeted
+    /// for its `model/list`, each ACP agent is started for its `session/new` only, and Claude Code's list is its own.
+    /// Prints only, no address; run by hand with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn print_each_route_s_models_and_efforts() {
+        use super::{acp, claude, codex, Choice};
+        crate::shell_path::widen();
+        let home = std::env::temp_dir().join("pointcast-probe-models");
+        let said = |l: &[Choice]| l.iter().map(|c| if c.default { format!("{}*", c.id) } else { c.id.clone() }).collect::<Vec<_>>().join(" ");
+        match codex::Codex::new(home.join("codex")).list() {
+            Ok(models) => models.iter().for_each(|m| println!("codex {}{}: efforts [{}] speeds [{}]", m.id, if m.default { "*" } else { "" }, said(&m.efforts), said(&m.speeds))),
+            Err(f) => println!("codex: {f:?}"),
+        }
+        let look = super::Look { agents: Vec::new(), ..super::Look::default() };
+        for m in super::agent_models(super::CLAUDE_CODE, &look) {
+            println!("claude-code {}{}: efforts [{}] (Claude Code's own list; --help of {})", m.id, if m.default { "*" } else { "" }, said(&m.efforts), claude::health().line);
+        }
+        for a in acp::AGENTS {
+            if acp::launch_of(a).is_none() {
+                println!("{}: not installed", a.id);
+                continue;
+            }
+            match acp::Acp::new(a, home.join(a.id)).start("", &[]) {
+                Ok(mut chat) => {
+                    use super::super::Chat;
+                    println!("{} models [{}] efforts [{}] (set by {:?} / {:?})", a.id, said(&chat.options.models), said(&chat.options.efforts), chat.options.model_id, chat.options.effort_id);
+                    chat.close();
+                }
+                Err(f) => println!("{}: no session ({f:?})", a.id),
+            }
         }
     }
 }

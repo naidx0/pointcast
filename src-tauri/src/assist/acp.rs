@@ -7,8 +7,10 @@
 
 use super::child::{self, Launch, Proc, Tail};
 use super::jsonl::{CallError, Client, Incoming, RpcError};
+use super::catalog::Choice;
 use super::{detect, replay, Caps, Chat, Event, Failure, Health, Kind, Mime, Part, Provider, State, Turn, TurnId};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -44,7 +46,72 @@ pub fn agent(id: &str) -> Option<&'static Agent> {
 
 /// Every method Pointcast sends. The sender refuses anything else, so no later change can reach for a sign-in
 /// (`authenticate`) without a test failing.
-pub const SENDS: &[&str] = &["initialize", "session/new", "session/prompt", "session/cancel"];
+pub const SENDS: &[&str] = &["initialize", "session/new", "session/set_config_option", "session/set_model", "session/prompt", "session/cancel"];
+
+/// The value an agent may list for "its own choice": never sent.
+pub const DEFAULT: &str = "default";
+
+/// The models and thinking efforts an agent offers, as its `session/new` reported them: `configOptions` of category
+/// "model" and "thought_level", else (an older agent) its `models` list. The recommended one of each is the value the
+/// session started with. A list of one is no choice and is left empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Options {
+    pub models: Vec<Choice>,
+    pub efforts: Vec<Choice>,
+    /// The config ids they are set by; a model without one is set by `session/set_model`.
+    pub model_id: Option<String>,
+    pub effort_id: Option<String>,
+}
+
+/// A select's options, groups flattened and each value once, labelled by its name.
+fn choices_of(options: &Value, current: Option<&str>) -> Vec<Choice> {
+    let mut all: Vec<Choice> = Vec::new();
+    for o in options.as_array().into_iter().flatten() {
+        let inner: Vec<&Value> = match o["options"].as_array() {
+            Some(group) => group.iter().collect(),
+            None => vec![o],
+        };
+        for c in inner {
+            let Some(id) = c["value"].as_str().or(c["modelId"].as_str()).filter(|v| !v.is_empty()) else { continue };
+            if !all.iter().any(|a| a.id == id) {
+                all.push(Choice { id: id.to_owned(), label: c["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(id).to_owned(), default: current == Some(id) });
+            }
+        }
+    }
+    all
+}
+
+/// What a `session/new` (or `session/set_config_option`) result offers.
+fn options_of(made: &Value) -> Options {
+    let mut o = Options::default();
+    for c in made["configOptions"].as_array().into_iter().flatten().filter(|c| c["type"].as_str().is_none_or(|t| t == "select")) {
+        let (Some(id), current) = (c["id"].as_str(), c["currentValue"].as_str()) else { continue };
+        match c["category"].as_str() {
+            Some("model") if o.model_id.is_none() => (o.model_id, o.models) = (Some(id.to_owned()), choices_of(&c["options"], current)),
+            Some("thought_level") if o.effort_id.is_none() => (o.effort_id, o.efforts) = (Some(id.to_owned()), choices_of(&c["options"], current)),
+            _ => {}
+        }
+    }
+    if o.model_id.is_none() {
+        o.models = choices_of(&made["models"]["availableModels"], made["models"]["currentModelId"].as_str());
+    }
+    for l in [&mut o.models, &mut o.efforts] {
+        if l.len() < 2 {
+            l.clear();
+        }
+    }
+    o
+}
+
+/// The file the last options an agent reported are kept in, under its folder of Pointcast's own.
+fn options_file(home: &Path) -> PathBuf {
+    home.join("options.json")
+}
+
+/// The options agent `home` last reported, so Settings shows them without starting a session; none before one.
+pub fn cached(home: &Path) -> Options {
+    std::fs::read(options_file(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
 
 /// The version of the protocol Pointcast speaks.
 pub const PROTOCOL: u64 = 1;
@@ -366,11 +433,22 @@ impl Shared {
     }
 }
 
+/// What a session is started with: the instructions, what a resumed conversation said, and the model and effort the
+/// person chose (none leaves the agent's own).
+pub struct Start<'a> {
+    pub system: &'a str,
+    pub earlier: &'a [Turn],
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
 /// A conversation with an ACP agent: greeted, with a session of its own.
 pub struct AcpChat {
     shared: Arc<Shared>,
     /// Whether the agent said it reads pictures.
     pub pictures: bool,
+    /// The models and efforts its `session/new` offered, before anything was set.
+    pub options: Options,
     /// What goes before the first question: the fence, the instructions and what a resumed conversation said.
     preamble: Vec<Part>,
 }
@@ -383,15 +461,15 @@ impl AcpChat {
         proc: Option<Proc>,
         name: &'static str,
         cwd: &Path,
-        system: &str,
-        earlier: &[Turn],
+        start: Start,
     ) -> Result<AcpChat, Failure> {
+        let Start { system, earlier, model, effort } = start;
         let (rpc, incoming) = Client::rpc2(reader, writer);
         let tail = proc.as_ref().map(Proc::tail);
         let shared = Arc::new(Shared { rpc, name, inner: Mutex::default(), proc: Mutex::new(proc), tail });
         let pump = shared.clone();
         std::thread::spawn(move || pump.run(incoming));
-        let greet = || -> Result<(bool, String), Failure> {
+        let greet = || -> Result<(bool, String, Options), Failure> {
             let hello = shared.call("initialize", initialize(), START_WITHIN)?;
             let pictures = hello["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true);
             let made = shared.call("session/new", json!({ "cwd": cwd.to_string_lossy(), "mcpServers": [] }), ANSWER_WITHIN)?;
@@ -399,15 +477,31 @@ impl AcpChat {
             if session.is_empty() {
                 return Err(Failure::Broken(format!("{name} started no conversation.")));
             }
-            Ok((pictures, session))
+            // The model, then the effort, each only when chosen, offered by this session and not what it started with.
+            let offered = options_of(&made);
+            let mut now = offered.clone();
+            if let Some(m) = model.filter(|m| *m != DEFAULT && now.models.iter().any(|c| c.id == *m && !c.default)) {
+                let set = match &now.model_id {
+                    Some(id) => shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": m }), ANSWER_WITHIN)?,
+                    None => shared.call("session/set_model", json!({ "sessionId": session, "modelId": m }), ANSWER_WITHIN)?,
+                };
+                // A model can change which efforts there are: the agent's answer says them all again.
+                if set["configOptions"].is_array() {
+                    now = options_of(&set);
+                }
+            }
+            if let (Some(e), Some(id)) = (effort.filter(|e| *e != DEFAULT && now.efforts.iter().any(|c| c.id == *e && !c.default)), &now.effort_id) {
+                shared.call("session/set_config_option", json!({ "sessionId": session, "configId": id, "value": e }), ANSWER_WITHIN)?;
+            }
+            Ok((pictures, session, offered))
         };
         match greet() {
-            Ok((pictures, session)) => {
+            Ok((pictures, session, options)) => {
                 shared.inner.lock().unwrap().session = session;
                 let fence = if system.trim().is_empty() { NO_TOOLS.to_owned() } else { format!("{NO_TOOLS}\n\n{}", system.trim()) };
                 let mut preamble = vec![Part::Text(fence)];
                 preamble.extend(replay(earlier, if pictures { KEEP_PICTURES } else { 0 }));
-                Ok(AcpChat { shared, pictures, preamble })
+                Ok(AcpChat { shared, pictures, options, preamble })
             }
             Err(f) => {
                 shared.shut(Duration::ZERO);
@@ -514,11 +608,19 @@ pub struct Acp {
     launch: Option<Launch>,
     /// Whether the agent said it reads pictures, once one has been greeted.
     pictures: Mutex<Option<bool>>,
+    /// The model and effort the person chose; none leaves the agent's own.
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Acp {
     pub fn new(agent: &'static Agent, home: PathBuf) -> Acp {
-        Acp { agent, home, launch: None, pictures: Mutex::default() }
+        Acp { agent, home, launch: None, pictures: Mutex::default(), model: None, effort: None }
+    }
+
+    /// The same, with the model and effort the person chose.
+    pub fn choosing(self, model: Option<String>, effort: Option<String>) -> Acp {
+        Acp { model, effort, ..self }
     }
 
     /// Run `launch` in place of the program found on this computer.
@@ -532,8 +634,12 @@ impl Acp {
         let pidfile = self.home.join(format!("{}.pid", self.agent.id));
         child::reap_stale(&pidfile);
         let (proc, stdin, stdout) = Proc::start(&launch, &cwd, Some(&pidfile)).map_err(|e| Failure::Broken(format!("{} did not start: {e}", self.agent.name)))?;
-        let chat = AcpChat::over(stdout, stdin, Some(proc), self.agent.name, &cwd, system, earlier)?;
+        let chat = AcpChat::over(stdout, stdin, Some(proc), self.agent.name, &cwd, Start { system, earlier, model: self.model.as_deref(), effort: self.effort.as_deref() })?;
         *self.pictures.lock().unwrap() = Some(chat.pictures);
+        // Kept for Settings; a cache that cannot be written only means the pane waits for the next session.
+        if let Ok(b) = serde_json::to_vec(&chat.options) {
+            let _ = std::fs::write(options_file(&self.home), b);
+        }
         Ok(chat)
     }
 }
@@ -577,6 +683,16 @@ pub mod tests {
     /// The ids of the requests the stand-in makes of Pointcast.
     const PERMISSION: u64 = 900;
     const READ_FILE: u64 = 901;
+
+    /// What the stand-in offers in "options" mode: a grouped model select, a thinking select with a "default", and a
+    /// mode select that is neither.
+    static OPTIONS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+        json!([
+            { "type": "select", "id": "mode", "name": "Mode", "category": "mode", "currentValue": "agent", "options": [{ "value": "agent", "name": "Agent" }, { "value": "plan", "name": "Plan" }] },
+            { "type": "select", "id": "model", "name": "Model", "category": "model", "currentValue": "pro-1", "options": [{ "group": "g", "name": "Google", "options": [{ "value": "pro-1", "name": "Pro 1" }, { "value": "flash-1", "name": "Flash 1" }] }, { "value": "flash-1", "name": "Flash 1" }] },
+            { "type": "select", "id": "thinking", "name": "Thinking", "category": "thought_level", "currentValue": "default", "options": [{ "value": "default", "name": "Default" }, { "value": "low", "name": "Low" }, { "value": "high", "name": "High" }] },
+        ])
+    });
 
     pub enum Exit {
         Eof,
@@ -622,7 +738,11 @@ pub mod tests {
                     reply(json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": false, "promptCapabilities": { "image": mode != "noimage" } }, "authMethods": [] }))
                 }
                 Some("session/new") if mode == "signedout" => say(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Authentication required" } })),
+                Some("session/new") if mode == "options" => reply(json!({ "sessionId": SESSION, "configOptions": OPTIONS.clone() })),
+                Some("session/new") if mode == "old-models" => reply(json!({ "sessionId": SESSION, "models": { "currentModelId": "auto", "availableModels": [{ "modelId": "auto", "name": "Auto" }, { "modelId": "auto", "name": "Auto" }, { "modelId": "fast-1", "name": "Fast 1" }] } })),
                 Some("session/new") => reply(json!({ "sessionId": SESSION })),
+                Some("session/set_config_option") => reply(json!({ "configOptions": OPTIONS.clone() })),
+                Some("session/set_model") => reply(json!({})),
                 Some("session/prompt") => match mode {
                     "tool" => {
                         chunk(&say, "agent_message_chunk", "Let me look");
@@ -673,7 +793,7 @@ pub mod tests {
         std::thread::spawn(move || {
             serve(mode, std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone()));
         });
-        (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), "Be brief.", earlier), seen)
+        (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "Be brief.", earlier, model: None, effort: None }), seen)
     }
 
     fn wire(mode: &'static str) -> (AcpChat, Seen) {
@@ -744,6 +864,67 @@ pub mod tests {
         // The fence and the instructions go once: the agent keeps the session.
         answer(&mut chat, said("again"));
         assert_eq!(sent(&seen, "session/prompt")[1]["params"]["prompt"], json!([{ "type": "text", "text": "again" }]));
+    }
+
+    #[test]
+    fn the_chosen_model_and_effort_are_set_before_the_first_prompt_and_none_is_sent_when_none_is_chosen() {
+        let agent = |mode: &str, name: &str, model: Option<&str>, effort: Option<&str>| {
+            let a = child(mode, name).choosing(model.map(str::to_owned), effort.map(str::to_owned));
+            let mut chat = a.start("", &[]).unwrap();
+            assert_eq!(words(&answer(&mut chat, said("hi"))), WORDS);
+            chat.close();
+            (chat.options.clone(), cached(&a.home))
+        };
+        // Through the real child, with what it was sent read back from its log.
+        let (options, kept) = agent("options", "acp-options", Some("flash-1"), Some("high"));
+        fn ids(l: &[Choice]) -> Vec<(&str, &str, bool)> {
+            l.iter().map(|c| (c.id.as_str(), c.label.as_str(), c.default)).collect()
+        }
+        assert_eq!(ids(&options.models), [("pro-1", "Pro 1", true), ("flash-1", "Flash 1", false)]);
+        assert_eq!(ids(&options.efforts), [("default", "Default", true), ("low", "Low", false), ("high", "High", false)]);
+        assert_eq!(kept, options, "Settings reads what the agent last offered without a session");
+
+        let (chat, seen) = {
+            let (their_in, our_out) = std::io::pipe().unwrap();
+            let (our_in, their_out) = std::io::pipe().unwrap();
+            let seen = Seen::default();
+            let log = seen.clone();
+            std::thread::spawn(move || serve("options", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
+            (AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model: Some("flash-1"), effort: Some("high") }), seen)
+        };
+        let mut chat = chat.unwrap();
+        answer(&mut chat, said("hi"));
+        let methods: Vec<String> = seen.lock().unwrap().iter().filter_map(|m| m["method"].as_str().map(str::to_owned)).collect();
+        assert_eq!(methods, ["initialize", "session/new", "session/set_config_option", "session/set_config_option", "session/prompt"]);
+        let set: Vec<Value> = sent(&seen, "session/set_config_option").iter().map(|m| m["params"].clone()).collect();
+        assert_eq!(set, [json!({ "sessionId": SESSION, "configId": "model", "value": "flash-1" }), json!({ "sessionId": SESSION, "configId": "thinking", "value": "high" })]);
+
+        // Nothing chosen, "default" chosen, the value it started with, or one it does not offer: nothing is set.
+        for (model, effort) in [(None, None), (Some("pro-1"), Some(DEFAULT)), (Some("gone-1"), Some("ultra"))] {
+            let (their_in, our_out) = std::io::pipe().unwrap();
+            let (our_in, their_out) = std::io::pipe().unwrap();
+            let seen = Seen::default();
+            let log = seen.clone();
+            std::thread::spawn(move || serve("options", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
+            let mut chat = AcpChat::over(our_in, our_out, None, "Gemini", Path::new(CWD), Start { system: "", earlier: &[], model, effort }).unwrap();
+            answer(&mut chat, said("hi"));
+            assert!(sent(&seen, "session/set_config_option").is_empty() && sent(&seen, "session/set_model").is_empty(), "{model:?} {effort:?}");
+        }
+
+        // An older agent lists `models` only: duplicates are one choice, and the model is set by `session/set_model`.
+        let (their_in, our_out) = std::io::pipe().unwrap();
+        let (our_in, their_out) = std::io::pipe().unwrap();
+        let seen = Seen::default();
+        let log = seen.clone();
+        std::thread::spawn(move || serve("old-models", std::io::BufReader::new(their_in), their_out, |m| log.lock().unwrap().push(m.clone())));
+        let chat = AcpChat::over(our_in, our_out, None, "Copilot", Path::new(CWD), Start { system: "", earlier: &[], model: Some("fast-1"), effort: Some("high") }).unwrap();
+        assert_eq!(ids(&chat.options.models), [("auto", "Auto", true), ("fast-1", "Fast 1", false)]);
+        assert!(chat.options.efforts.is_empty());
+        assert_eq!(sent(&seen, "session/set_model").iter().map(|m| m["params"].clone()).collect::<Vec<_>>(), [json!({ "sessionId": SESSION, "modelId": "fast-1" })]);
+        assert!(sent(&seen, "session/set_config_option").is_empty());
+        // An agent that offers nothing has nothing to pick.
+        assert_eq!(options_of(&json!({ "sessionId": "s" })), Options::default());
+        assert_eq!(options_of(&json!({ "configOptions": [{ "type": "select", "id": "model", "category": "model", "currentValue": "auto", "options": [{ "value": "auto", "name": "Auto" }, { "value": "auto", "name": "Auto" }] }] })).models, []);
     }
 
     #[test]
