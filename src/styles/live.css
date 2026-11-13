@@ -1702,6 +1702,60 @@ html.win .live-ask {
 .live-pill.live-ask-yes:hover {
   background: var(--accent-press);
 }
+/* The AI's plan: a hairline box like the card, one quiet head line, a step per row with its mark. */
+.live-plan {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--sep);
+  border-radius: 12px;
+}
+html.win .live-plan {
+  border-width: 1px;
+  border-radius: var(--r-box);
+}
+.live-plan.proposed {
+  background: var(--fill);
+}
+.live-plan-head {
+  margin: 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-plan-steps {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.live-plan-steps li {
+  display: flex;
+  gap: 8px;
+  line-height: 20px;
+  color: var(--live-ink);
+}
+.live-plan-mark {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  color: var(--live-faint);
+}
+.live-plan-text {
+  min-width: 0;
+}
+.live-plan-note {
+  color: var(--live-quiet);
+}
+.live-plan-steps li.now .live-plan-mark,
+.live-plan-steps li.done .live-plan-mark {
+  color: var(--live-accent-text);
+}
+.live-plan-steps li.failed .live-plan-mark {
+  color: var(--live-warn);
+}
+.live-plan-steps li.skipped .live-plan-text,
+.live-plan.cancelled .live-plan-text {
+  color: var(--live-quiet);
+}
 .live-acts {
   list-style: none;
   margin: 8px 0 0;

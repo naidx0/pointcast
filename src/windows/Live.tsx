@@ -5,6 +5,7 @@ import {
   callState,
   callToggle,
   computerAnswer,
+  computerPlan,
   computerStatus,
   inTauri,
   liveAskTyped,
@@ -95,6 +96,7 @@ import { Line, type LevelSource } from "@/components/Line";
 import { Keycaps } from "@/components/Shortcut";
 import { parseMarkdown, renderMarkdown, settleTail, type CodeBlock, type H } from "@/lib/markdown";
 import { PressButton } from "@/components/PressButton";
+import { GLYPH, SAY, asks, head, keep, rows, type Kept } from "@/lib/plan";
 import { MarkUpControl, MarkedBadge } from "@/components/MarkUp";
 import { isMarkKey, markedLabel } from "@/lib/markup";
 import { NO_CALL, callAnnounce, callLine, callTitle, escAction, previewCall, type CallView } from "@/lib/call";
@@ -272,6 +274,9 @@ export function Live() {
       off();
     };
   }, []);
+  // The AI's plan: the live one, then as it ended until the next question.
+  const [plan, setPlan] = useState<Kept | null>(null);
+  useEffect(() => setPlan((k) => keep(k, pc.plan ?? null, m.snap.turn)), [pc.plan, m.snap.turn]);
 
   // An answer being read aloud: the first Esc only silences it.
   const [speaking, setSpeaking] = useState(false);
@@ -529,6 +534,7 @@ export function Live() {
             {pc.app ? `Acting in ${pc.app}` : "Acting on your computer"} · Esc stops
           </p>
         ) : null}
+        {plan ? <PlanList k={plan} /> : null}
         {pc.card ? <AskFirst card={pc.card} /> : null}
         {asked && m.text ? <Answer text={m.text} phase={v.phase} tone={v.tone} /> : null}
         {v.complete && m.snap.acts?.length ? <Acts lines={m.snap.acts} /> : null}
@@ -829,6 +835,43 @@ function AskFirst({ card }: { card: ComputerCard }) {
           Cancel
         </PressButton>
       </div>
+      {why ? <p className="live-note">{why}</p> : null}
+    </div>
+  );
+}
+
+/** The AI's plan: its steps as a checklist with Start and Cancel while it waits, then ticked as the AI goes. */
+function PlanList({ k }: { k: Kept }) {
+  const [why, setWhy] = useState("");
+  const { plan, live } = k;
+  const waits = asks(plan, live);
+  const answer = (a: "start" | "cancel") => computerPlan(plan.id, a).catch((e) => setWhy(plain(e)));
+  return (
+    <div className={`live-plan live-in ${plan.state}`} role={waits ? "alertdialog" : "group"} aria-label="The AI's plan">
+      <p className="live-plan-head">{head(plan, live)}</p>
+      <ol className="live-plan-steps">
+        {rows(plan, live).map((r, i) => (
+          <li key={i} className={r.mark} aria-label={`${r.text}: ${SAY[r.mark]}${r.note ? `, ${r.note}` : ""}`}>
+            <span className="live-plan-mark" aria-hidden="true">
+              {GLYPH[r.mark]}
+            </span>
+            <span className="live-plan-text">
+              {r.text}
+              {r.note ? <span className="live-plan-note"> · {r.note}</span> : null}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {waits ? (
+        <div className="live-ask-row">
+          <PressButton className="live-pill live-ask-yes" act={() => answer("start")}>
+            Start
+          </PressButton>
+          <PressButton className="live-pill" act={() => answer("cancel")}>
+            Cancel
+          </PressButton>
+        </div>
+      ) : null}
       {why ? <p className="live-note">{why}</p> : null}
     </div>
   );
