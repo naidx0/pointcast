@@ -42,7 +42,9 @@ import {
   onSettingsPane,
   onUpdateChecked,
   onUpdateFailed,
+  onKokoroProgress,
   relaunch,
+  speakFetching,
   speakSample,
   speakVoices,
   statsGet,
@@ -61,7 +63,7 @@ import {
 } from "@/lib/api";
 import { useConfig } from "@/lib/useConfig";
 import { computerView, micStatus } from "@/lib/hardware";
-import { RATES, nearestRate, voiceGroups, voiceLabel, type SpeakVoice } from "@/lib/talkback";
+import { RATES, defaultLabel, fetchLine, nearestRate, voiceGroups, voiceLabel, type KokoroProgress, type SpeakVoice } from "@/lib/talkback";
 import { previewHardware, useMicCheck } from "@/lib/mic";
 import { platform, setThemePref, themePref, type ThemePref } from "@/lib/theme";
 import { SAVED_NOTE, readUsage, usageView, weekdayNames, type Range, type Usage as Counts } from "@/lib/usage";
@@ -1076,14 +1078,25 @@ function Ai({ talk }: { talk?: ReactNode }) {
 function TalkBack({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const [voices, setVoices] = useState<SpeakVoice[] | null>(null);
   const [why, setWhy] = useState<string | null>(null);
+  const [fetching, setFetching] = useState<KokoroProgress | null>(null);
   useEffect(() => {
     let live = true;
-    speakVoices().then(
-      (v) => live && setVoices(v),
-      (e) => live && setWhy(plain(e)),
+    const list = () =>
+      speakVoices().then(
+        (v) => live && setVoices(v),
+        (e) => live && setWhy(plain(e)),
+      );
+    list();
+    speakFetching().then((p) => live && setFetching(p));
+    const off = subscribe(
+      onKokoroProgress((p) => {
+        setFetching(p);
+        if (p.state === "ready") list();
+      }),
     );
     return () => {
       live = false;
+      off();
     };
   }, []);
   const on = !!cfg.speak_answers && !why;
@@ -1091,7 +1104,7 @@ function TalkBack({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const rate = nearestRate(cfg.speak_rate);
   const here = navigator.language || "en";
   const missing = !!voice && !!voices && !voices.some((v) => v.id === voice);
-  const more = platform() === "mac" ? "Add natural voices in System Settings › Accessibility." : "Add voices in Settings › Time & language › Speech.";
+  const more = "Natural voices download once, then run on this computer.";
   return (
     <>
       <h2 className="group-title">Talk back</h2>
@@ -1101,10 +1114,10 @@ function TalkBack({ cfg, patch }: { cfg: Config; patch: Patch }) {
         </Row>
         {on ? (
           <>
-            <Row label="Voice" sub={more}>
+            <Row label="Voice" sub={fetchLine(fetching) ?? more}>
               <div className="talk-voice">
                 <select className="field" aria-label="Voice" value={voice} disabled={!voices} onChange={(e) => patch({ speak_voice: e.target.value || null })}>
-                  <option value="">System default</option>
+                  <option value="">{defaultLabel(voices ?? [])}</option>
                   {missing ? <option value={voice}>Saved voice (not on this computer)</option> : null}
                   {voiceGroups(voices ?? [], here).map((g) => (
                     <optgroup key={g.title} label={g.title}>
