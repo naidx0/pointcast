@@ -1,13 +1,13 @@
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
-import { onWinResized, subscribe, winClose, winIsDecorated, winIsMaximized, winMinimize, winStartDragging, winToggleMaximize } from "@/lib/api";
+import { holdWindow, onWinResized, subscribe, winClose, winIsDecorated, winIsMaximized, winMinimize, winToggleMaximize } from "@/lib/api";
 import { platform } from "@/lib/theme";
 
-/** A press on the bar itself (not on a button in it) moves the window; a double press maximizes or restores it, as a
- * Windows title bar does. */
+/** A press on the bar itself (not on a button in it) moves the window by the one rule every window keeps (drag.ts): once
+ * the pointer travels 3 px; a double press maximizes or restores it, as a Windows title bar does. */
 export function dragWindow(e: ReactMouseEvent, maximizable = true) {
   if (e.button !== 0 || e.target !== e.currentTarget) return;
-  e.preventDefault(); // moved here: the window-wide drag (startWindowDrag) leaves this press alone
-  (e.detail === 2 && maximizable ? winToggleMaximize() : winStartDragging()).catch(() => undefined);
+  e.preventDefault(); // taken here: the window-wide listener (startWindowDrag) leaves this press alone
+  holdWindow(e.nativeEvent, e.detail === 2 && maximizable ? "zoom" : "move");
 }
 
 /** Windows: the slim bar across the top of the content, with Minimize, Maximize or Restore, and Close at Windows 11's

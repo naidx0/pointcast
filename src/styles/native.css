@@ -234,14 +234,8 @@ svg.lucide:not([stroke-width="0"]) {
 .faint {
   color: var(--label-3);
 }
-.drag {
-  -webkit-app-region: drag;
-  app-region: drag;
-}
-.drag :is(button, a, input, select, textarea, [role="switch"], [role="radio"], .no-drag) {
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
+/* `.drag` areas move their window by one rule in script (src/lib/drag.ts), on both systems: no CSS `app-region`, which on
+ * Windows hands the press to the system at once (no click, no 3 px threshold) and which the macOS web view ignores. */
 
 /* —— Type —— */
 .t-hero {

@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emptyUsage, previewUsage, type Usage } from "./usage";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import { chainOf, dragAct } from "./drag";
+import { chainOf, dragAct, holdClick, holdDown, holdMove, holdUp, settleStep, type DragAct, type Hold, type Settle } from "./drag";
 import {
   LEVEL_FIELDS,
   PANEL_W,
@@ -958,18 +958,80 @@ export const winToggleMaximize = () => (inTauri ? win().toggleMaximize() : Promi
 export const winClose = () => (inTauri ? win().close() : Promise.resolve());
 export const winStartDragging = () => (inTauri ? win().startDragging() : Promise.resolve());
 export const winIsMaximized = () => (inTauri ? win().isMaximized() : Promise.resolve(false));
-/** Whether the OS draws this window's frame; in the preview, no (so the drawn bar shows). */
-/** Every `.drag` area moves its window (src/lib/drag.ts): a press starts the native drag, a double press zooms, as a
- * title bar does. A handler that already moved the window says so with preventDefault. Call once per window. */
-export function startWindowDrag() {
-  if (!inTauri) return;
+/** Every `.drag` area moves its window by one rule (src/lib/drag.ts): a press moves it once the pointer travels 3 px, a
+ * shorter press is a click, a press that moved never clicks, and a double press zooms a window that can zoom. A handler
+ * that took the press itself says so with preventDefault (WinBar's `dragWindow` hands it back through `holdWindow`).
+ * `remember`: the capsule and the Ask panel tell Pointcast where the person put them, so it keeps them there
+ * (platform.rs). Once per window; a second call does nothing. */
+let dragging: { hold: Hold; remember: boolean } | null = null;
+export function startWindowDrag(opts: { remember?: boolean } = {}) {
+  if (!inTauri || dragging) return;
+  const st = { hold: null as Hold, remember: !!opts.remember };
+  dragging = st;
+  let canZoom = false;
+  Promise.all([win().isResizable(), win().isMaximizable()])
+    .then(([r, m]) => (canZoom = r && m))
+    .catch(() => undefined);
   document.addEventListener("mousedown", (e) => {
     if (e.defaultPrevented) return;
-    const act = dragAct(chainOf(e.target as Element | null), e.button, e.detail);
-    if (act === "move") void win().startDragging().catch(() => undefined);
-    else if (act === "zoom") void win().toggleMaximize().catch(() => undefined);
+    holdWindow(e, dragAct(chainOf(e.target as Element | null), e.button, e.detail, canZoom));
   });
+  window.addEventListener(
+    "mousemove",
+    (e) => {
+      const r = holdMove(st.hold, e.screenX, e.screenY, e.buttons);
+      st.hold = r.hold;
+      if (r.run !== "move") return;
+      window.getSelection()?.removeAllRanges();
+      void win()
+        .startDragging()
+        .then(() => st.remember && watchPut())
+        .catch(() => undefined);
+    },
+    true,
+  );
+  window.addEventListener("mouseup", () => (st.hold = holdUp(st.hold)), true);
+  window.addEventListener(
+    "click",
+    (e) => {
+      const r = holdClick(st.hold, e.detail);
+      st.hold = r.hold;
+      if (!r.swallow) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },
+    true,
+  );
 }
+/** Start press `e` as `act` says: a move waits for the pointer to travel 3 px, a zoom happens now. */
+export function holdWindow(e: MouseEvent, act: DragAct) {
+  if (!dragging) return;
+  const r = holdDown(act, e.screenX, e.screenY);
+  dragging.hold = r.hold;
+  if (r.run === "zoom") void win().toggleMaximize().catch(() => undefined);
+}
+/** After a move: look where the window is every 100 ms for 20 s and, each time it comes to rest, tell Pointcast that is
+ * where the person put it. The look waits while the system moves the window, so it never reads half a move as rest. */
+let putWatch = 0;
+function watchPut() {
+  const id = ++putWatch;
+  let s: Settle | null = null;
+  let n = 0;
+  const look = () => {
+    if (id !== putWatch || ++n > 200) return;
+    win()
+      .outerPosition()
+      .then((p) => {
+        const r = settleStep(s, `${p.x},${p.y}`);
+        s = r.s;
+        if (r.put) void emit("pointcast://put", win().label).catch(() => undefined);
+      })
+      .catch(() => undefined)
+      .finally(() => setTimeout(look, 100));
+  };
+  look();
+}
+/** Whether the OS draws this window's frame; in the preview, no (so the drawn bar shows). */
 export const winIsDecorated = () => (inTauri ? win().isDecorated() : Promise.resolve(false));
 export const onWinResized = (fn: () => void): Promise<UnlistenFn> => (inTauri ? win().onResized(() => fn()) : Promise.resolve(() => undefined));
 

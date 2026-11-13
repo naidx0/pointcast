@@ -19,6 +19,7 @@ import {
   sessionToggle,
   settingsGet,
   stamp,
+  startWindowDrag,
   subscribe,
   type Config,
   type UiState,
@@ -66,6 +67,10 @@ function built(): UiState {
 export function Indicator() {
   const [s, setS] = useState<UiState>(inTauri ? built : idle);
   const [keys, setKeys] = useState<Config["hotkeys"] | null>(null);
+
+  // The whole capsule moves it, by the rule every window keeps (drag.ts): from its wave, its words and its gaps, once the
+  // pointer travels 3 px, never from its buttons; and it stays where it is put (platform.rs).
+  useEffect(() => startWindowDrag({ remember: true }), []);
 
   useEffect(() => {
     if (inTauri) {
@@ -187,10 +192,9 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
   const timed = timeShown({ live, durationMs: s.duration_ms, warned: !!mic, peek });
 
   return (
-    <div className="hud-wrap" data-tauri-drag-region>
+    <div className="hud-wrap drag">
       <div
         className={`hud ${mic ? "warned" : ""}`}
-        data-tauri-drag-region
         role="toolbar"
         aria-label="Pointcast recording"
         onPointerEnter={() => look("enter")}
@@ -198,35 +202,35 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
         onFocus={(e) => e.target instanceof Element && e.target.matches(":focus-visible") && look("key-focus")}
         onBlur={(e) => !(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) && look("blur")}
       >
-        <span className={`rec ${live ? "" : "ready"}`} data-tauri-drag-region />
+        <span className={`rec ${live ? "" : "ready"}`} />
         {problem ? (
           <>
             {live ? (
-              <span className="time" data-tauri-drag-region>
+              <span className="time">
                 {stamp(s.duration_ms)}
               </span>
             ) : null}
-            <span className="note" title={problem} data-tauri-drag-region>
+            <span className="note" title={problem}>
               {problem}
             </span>
           </>
         ) : ready ? (
-          <span className={`note getting ${ready.lines[1] ? "two" : ""}`} role="status" aria-label={ready.full} title={ready.full} data-tauri-drag-region>
-            <b data-tauri-drag-region>{ready.lines[0]}</b>
-            {ready.lines[1] ? <span data-tauri-drag-region>{ready.lines[1]}</span> : null}
+          <span className={`note getting ${ready.lines[1] ? "two" : ""}`} role="status" aria-label={ready.full} title={ready.full}>
+            <b>{ready.lines[0]}</b>
+            {ready.lines[1] ? <span>{ready.lines[1]}</span> : null}
           </span>
         ) : (
-          <span className={`scribe${timed ? " timed" : ""}`} data-tauri-drag-region>
+          <span className={`scribe${timed ? " timed" : ""}`}>
             <Line mode={capsuleLine(s)} look="breath" layers={2} height={LINE_H} dx={LINE_DX} tip="ink" levels={hudLevels} />
             {live ? (
-              <span className="time" data-tauri-drag-region>
+              <span className="time">
                 {stamp(s.duration_ms)}
               </span>
             ) : null}
           </span>
         )}
         {mic && quiet ? (
-          <span className="cap warn" role="status" title={mic.full} aria-label={mic.full} data-tauri-drag-region>
+          <span className="cap warn" role="status" title={mic.full} aria-label={mic.full}>
             {micCaption(quiet)}
           </span>
         ) : null}
@@ -263,7 +267,6 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
             style={{ visibility: n ? "visible" : "hidden" }}
             title={`${n} ${n === 1 ? "picture" : "pictures"} in this prompt`}
             aria-label={`${n} ${n === 1 ? "picture" : "pictures"}`}
-            data-tauri-drag-region
           >
             {n || 0}
           </span>
@@ -306,8 +309,8 @@ function Finishing({ s }: { s: UiState }) {
     if (inTauri) sessionFinishNow().catch(() => setCutting(false));
   };
   return (
-    <div className="hud-wrap" data-tauri-drag-region>
-      <div className="hud finishing" data-tauri-drag-region>
+    <div className="hud-wrap drag">
+      <div className="hud finishing">
         <span
           className="fin-line"
           role="progressbar"
@@ -315,11 +318,10 @@ function Finishing({ s }: { s: UiState }) {
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={pct ?? undefined}
-          data-tauri-drag-region
         >
           <Line mode={capsuleLine(s)} height={LINE_H - 4} tone={stalled ? "warn" : "ink"} loops={3} pitch={13} lead={4} />
         </span>
-        <span className="fin-text" role="status" data-tauri-drag-region>
+        <span className="fin-text" role="status">
           {text}
         </span>
         <PressButton
@@ -374,7 +376,7 @@ function Done({ s }: { s: UiState }) {
     <span>{first}</span>
   );
   return (
-    <div className="hud-wrap" data-tauri-drag-region>
+    <div className="hud-wrap drag">
       <div role="status" aria-live="polite">
         {v.action ? (
           <PressButton
@@ -390,7 +392,7 @@ function Done({ s }: { s: UiState }) {
             {text}
           </PressButton>
         ) : (
-          <div className="hud done" data-tauri-drag-region>
+          <div className="hud done">
             {mark}
             {text}
           </div>

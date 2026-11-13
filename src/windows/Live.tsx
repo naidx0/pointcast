@@ -29,6 +29,7 @@ import {
   sessionsOpen,
   sessionsRename,
   sessionsSearch,
+  startWindowDrag,
   subscribe,
   summaryGet,
   summaryMake,
@@ -109,6 +110,9 @@ const pvAsk = (k: string) => (preview && !inTauri ? new URLSearchParams(location
  * slim field at the foot for a typed follow-up. The line carries listening, thinking and answering; everything around
  * it is the app's native look. */
 export function Live() {
+  // The panel moves from its header, its listening row and its own empty space, by the rule every window keeps (drag.ts),
+  // and stays where it is put (platform.rs).
+  useEffect(() => startWindowDrag({ remember: true }), []);
   const [m, dispatch] = useReducer(liveReduce, undefined, initialLive);
   const [now, setNow] = useState(() => Date.now());
   const [big, setBig] = useState(false);
@@ -388,7 +392,7 @@ export function Live() {
 
   if (v.compact)
     return (
-      <div className={`live compact phase-${v.phase}`} ref={root} aria-label="Prompt with your screen">
+      <div className={`live compact drag phase-${v.phase}`} ref={root} aria-label="Prompt with your screen">
         <div className={`live-row${cap ? " capped" : ""}`}>
           {v.phase === "discarded" ? (
             <p className="live-ended live-in">{v.note}</p>
@@ -447,7 +451,7 @@ export function Live() {
         </ol>
       ) : null}
       {hearing ? null : (
-      <section className="live-now" id={`turn-${turnN}`} ref={now_} aria-label={multi ? `Question ${turnN}` : undefined}>
+      <section className="live-now drag-self" id={`turn-${turnN}`} ref={now_} aria-label={multi ? `Question ${turnN}` : undefined}>
         {multi ? <Question key={m.snap.turn} text={v.question} now /> : null}
         {v.thumb ? (
           <div className="live-pic">
@@ -483,8 +487,8 @@ export function Live() {
     </>
   );
   return (
-    <div className={`live phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Prompt with your screen">
-      <header className="live-head">
+    <div className={`live drag-self phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Prompt with your screen">
+      <header className="live-head drag">
         {sheet ? (
           <PressButton className="live-back" title="Back to this session" aria-label="Back to this session" act={() => setSheet(false)}>
             <ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -515,8 +519,8 @@ export function Live() {
         </PressButton>
         <StopButton stop={v.stop} />
       </header>
-      <div className="live-body" ref={body} onScroll={onScroll}>
-        <div className="live-inner">
+      <div className="live-body drag-self" ref={body} onScroll={onScroll}>
+        <div className="live-inner drag-self">
           {sheet ? (
             <SessionSheet
               current={session}
@@ -538,7 +542,7 @@ export function Live() {
       {showField ? (
         <FollowUp field={field} first={first} pic={fieldPic} setPic={setFieldPic} next={v.next} note={fieldNote} setNote={setFieldNote} />
       ) : hearing && !sheet && !sumOpen ? (
-        <footer className="live-follow live-hearing live-in" aria-label="Your follow-up">
+        <footer className="live-follow live-hearing live-in drag" aria-label="Your follow-up">
           <div className="live-row">
             <div className="live-row-line">
               {v.line === "voice" ? <Line mode="listen" look="breath" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
