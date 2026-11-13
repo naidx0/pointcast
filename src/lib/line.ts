@@ -264,3 +264,60 @@ export function pathPoints(d: string): Pt[] {
   flush();
   return out;
 }
+
+/** The Ask panel's voice (owner, 2026-11-12: the breathing wave, "more waving, more action", never one spot repeating):
+ * three soft waves layered, no head and no tail, quiet at both ends. Each layer travels its own way at its own speed,
+ * the frequencies are unrelated (golden ratio, silver ratio) and wander slowly, and the swell drifts along the line, so
+ * no frame repeats. The voice sets how high it swells and how fast it moves; at silence it still breathes, barely. */
+export type Breath = { phase: number; drift: number; amp: number };
+export const breathStart = (): Breath => ({ phase: 0, drift: 0, amp: 0 });
+/** At silence the waves keep this much of their height: alive, not flat. */
+export const BREATH_IDLE = 0.06;
+/** How fast the waves travel, in radians per second, at silence and added at full voice. */
+export const BREATH_SPEED = 1.8;
+export const BREATH_SPEED_VOICE = 4.2;
+/** The layers: height share, opacity, stroke width, frequency, and speed (its sign is the way it travels). */
+export const BREATH_LAYERS = [
+  { k: 1, alpha: 0.95, width: 1.8, f: 1, speed: 1 },
+  { k: 0.72, alpha: 0.5, width: 1.3, f: 1.618, speed: -1.37 },
+  { k: 0.48, alpha: 0.28, width: 1.1, f: 2.414, speed: 1.83 },
+] as const;
+
+/** The waves after `dt` ms with the drawn level at `level` (0 to 1): the height eases toward the voice (quick up,
+ * gentle down), the travel speeds up with it, and the slow wander keeps its own clock. A bad number reads as silence. */
+export function breathStep(b: Breath, level: number, dt: number): Breath {
+  if (!(dt > 0)) return b;
+  const s = Math.min(dt, 100) / 1000;
+  const want = Math.max(BREATH_IDLE, unit(level));
+  const amp = smoothLevel(b.amp, want, dt, { attack: 60, release: 260 });
+  return { phase: b.phase + s * (BREATH_SPEED + BREATH_SPEED_VOICE * amp), drift: b.drift + s, amp };
+}
+
+/** Where layer `i` stands at `u` (0 to 1 along the line), as a share of the half-height: a sum of two travelling waves
+ * under a swell whose centre and width wander, and zero at both ends. */
+export function breathAt(u: number, b: Breath, i: number): number {
+  const L = BREATH_LAYERS[i] ?? BREATH_LAYERS[0];
+  const t = b.drift;
+  const p = b.phase * L.speed;
+  const fm = 1 + 0.22 * Math.sin(t * 0.37 * L.f + i * 2.1);
+  const wave = 0.62 * Math.sin(2 * Math.PI * 1.25 * L.f * fm * u + p) + 0.38 * Math.sin(2 * Math.PI * 2.07 * L.f * u - p * 0.61 + 1.3 * L.f);
+  const c = 0.5 + 0.17 * Math.sin(t * 0.53 + L.f) + 0.07 * Math.sin(t * 1.31 + i);
+  const wide = 0.36 + 0.09 * Math.sin(t * 0.29 + i * 1.7);
+  const swell = Math.exp(-(((u - c) / wide) ** 2));
+  // A soft gain: a normal voice reads clearly, a loud one rounds off under the edge instead of hitting it.
+  return Math.tanh(1.8 * unit(b.amp) * L.k * wave * swell * Math.sin(Math.PI * clamp(u, 0, 1)));
+}
+
+/** Layer `i` as SVG path data across `box`, about every 2 px, centred on the box's middle with `pad` kept clear. */
+export function breathPath(box: Box, b: Breath, i: number, pad = 3): string {
+  const mid = box.h / 2;
+  const half = Math.max(0, mid - pad);
+  const n = Math.max(2, Math.ceil(box.w / 2));
+  let d = "";
+  for (let j = 0; j <= n; j++) {
+    const x = (box.w * j) / n;
+    const y = mid - half * breathAt(j / n, b, i);
+    d += `${j ? "L" : "M"}${n1(x)} ${n1(y)}`;
+  }
+  return d;
+}

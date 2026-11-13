@@ -396,7 +396,7 @@ export function Live() {
             <>
               <StopButton stop />
               <div className="live-row-line">
-                {v.line === "voice" ? <Line mode="listen" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
+                {v.line === "voice" ? <Line mode="listen" look="breath" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
               </div>
               {/* Without a picture the same width stays empty on the right, so the line keeps its centre. */}
               {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : <span className="live-row-end" aria-hidden="true" />}
@@ -538,7 +538,7 @@ export function Live() {
         <footer className="live-follow live-hearing live-in" aria-label="Your follow-up">
           <div className="live-row">
             <div className="live-row-line">
-              {v.line === "voice" ? <Line mode="listen" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
+              {v.line === "voice" ? <Line mode="listen" look="breath" className="live-voice" height={VOICE_H} levels={liveLevels} /> : <LineRow v={v} />}
             </div>
             {v.thumb ? <Picture pic={v.thumb} label={v.label} big={big} setBig={setBig} canDrop={v.canDrop} under /> : null}
           </div>

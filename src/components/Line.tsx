@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { VOICE_DX, VOICE_STEP_MS, VOICE_STROKE_STEPS, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { BREATH_LAYERS, VOICE_DX, VOICE_STEP_MS, VOICE_STROKE_STEPS, breathPath, breathStart, breathStep, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
 
 /** Where the line hears the voice: called with a setter for the level (0 to 1, `loudness`), returns the unsubscribe. */
 export type LevelSource = (set: (raw: number) => void) => () => void;
@@ -20,6 +20,7 @@ export function Line({
   loops = 6,
   pitch = 19,
   lead,
+  look = "pen",
 }: {
   mode: LineMode;
   height: number;
@@ -34,7 +35,10 @@ export function Line({
   loops?: number;
   pitch?: number;
   lead?: number;
+  /** Listening: the pen's trace (the dictation capsule), or the breathing wave (the Ask panel). */
+  look?: "pen" | "breath";
 }) {
+  if (mode === "listen" && look === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} />;
   if (mode === "think") return <Loops className={className} tone={tone} height={height} n={loops} pitch={pitch} lead={lead} />;
   return <Voice className={className} tone={tone} height={height} levels={levels} dx={dx} tip={tip} still={mode === "rest"} />;
 }
@@ -122,6 +126,75 @@ function Voice({
         <svg className={`ln ${tone}`} width={w} height={height} viewBox={`0 0 ${w} ${height}`}>
           <path ref={path} />
           {still ? null : <circle className={`tip ${tip}`} ref={dot} r={tip === "red" ? 3 : 2} />}
+        </svg>
+      ) : null}
+    </div>
+  );
+}
+
+/** The Ask panel's voice: three soft waves layered (line.ts breathStep, breathPath), faded at both ends, each travelling
+ * its own way. Drawn straight into the SVG every frame; still and flat with reduced motion or without a level. */
+function BreathWave({ className, tone, height, levels }: { className: string; tone: LineTone; height: number; levels?: LevelSource }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const paths = useRef<(SVGPathElement | null)[]>([]);
+  const fade = `breath-fade-${useId().replace(/:/g, "")}`;
+  const [w, setW] = useState(0);
+  const st = useRef({ raw: 0, meter: meterStart(), env: 0, b: breathStart() });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const size = () => setW(Math.max(40, Math.round(el.clientWidth)));
+    size();
+    const ro = new ResizeObserver(size);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!w) return;
+    const box = { w, h: height };
+    const s = st.current;
+    const paint = () => BREATH_LAYERS.forEach((_, i) => paths.current[i]?.setAttribute("d", breathPath(box, s.b, i)));
+    paint();
+    if (!levels || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const off = levels((x) => (s.raw = x));
+    let last = performance.now();
+    let raf = 0;
+    const draw = (t: number) => {
+      raf = requestAnimationFrame(draw);
+      const dt = Math.min(100, Math.max(0, t - last));
+      last = t;
+      if (document.hidden) return;
+      s.meter = meterStep(s.meter, s.raw, dt);
+      s.env = smoothLevel(s.env, meterLevel(s.meter, s.raw), dt);
+      s.b = breathStep(s.b, s.env, dt);
+      paint();
+    };
+    raf = requestAnimationFrame(draw);
+    return () => {
+      off();
+      cancelAnimationFrame(raf);
+    };
+  }, [w, height, levels]);
+  return (
+    <div className={`line-voice line-breath ${className}`} ref={ref} aria-hidden="true">
+      {w ? (
+        <svg className={`ln breath ${tone}`} width={w} height={height} viewBox={`0 0 ${w} ${height}`}>
+          <defs>
+            <linearGradient id={`${fade}-g`} x1="0" x2="1" y1="0" y2="0">
+              <stop offset="0" stopColor="#fff" stopOpacity="0" />
+              <stop offset="0.14" stopColor="#fff" stopOpacity="1" />
+              <stop offset="0.86" stopColor="#fff" stopOpacity="1" />
+              <stop offset="1" stopColor="#fff" stopOpacity="0" />
+            </linearGradient>
+            <mask id={fade} maskUnits="userSpaceOnUse" x="0" y="0" width={w} height={height}>
+              <rect width={w} height={height} fill={`url(#${fade}-g)`} />
+            </mask>
+          </defs>
+          <g mask={`url(#${fade})`}>
+            {BREATH_LAYERS.map((l, i) => (
+              <path key={i} ref={(el) => void (paths.current[i] = el)} style={{ opacity: l.alpha, strokeWidth: l.width }} />
+            ))}
+          </g>
         </svg>
       ) : null}
     </div>

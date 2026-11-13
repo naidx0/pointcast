@@ -255,3 +255,42 @@ test("on a speech-like level the line keeps moving: off the line most of the tim
   assert.ok(longest <= 150, `frozen for ${longest} ms while the voice changed`);
   assert.ok(quietAfter.every((y) => Math.abs(y - base) <= 0.5), "and flat again in the room after");
 });
+
+import { BREATH_IDLE, BREATH_LAYERS, breathAt, breathPath, breathStart, breathStep } from "./line.ts";
+
+test("the breathing wave: quiet at both ends, inside its box, and still breathing at silence", () => {
+  const box = { w: 300, h: 32 };
+  let b = breathStart();
+  for (let k = 0; k < 200; k++) b = breathStep(b, k % 7 < 4 ? 1 : 0.2, 16);
+  for (let i = 0; i < BREATH_LAYERS.length; i++) {
+    const ys = pathPoints(breathPath(box, b, i)).map((p) => p.y);
+    assert.equal(ys[0], 16, "the left end sits on the middle");
+    assert.equal(ys[ys.length - 1], 16, "so does the right end");
+    assert.ok(ys.every((y) => y >= 3 && y <= 29), "never past the padding");
+  }
+  let quiet = breathStart();
+  for (let k = 0; k < 300; k++) quiet = breathStep(quiet, 0, 16);
+  assert.ok(Math.abs(quiet.amp - BREATH_IDLE) < 1e-3, "silence keeps a little height");
+  assert.equal(breathStep(quiet, NaN, 16).amp <= quiet.amp, true, "a bad level reads as silence");
+});
+
+test("the breathing wave moves faster with the voice and its swell wanders along the line", () => {
+  let a = breathStart(), z = breathStart();
+  for (let k = 0; k < 60; k++) (a = breathStep(a, 1, 16)), (z = breathStep(z, 0, 16));
+  assert.ok(a.phase > z.phase * 1.8, "a voice sets it moving faster");
+  // Where the main wave's swell is highest, sampled over 30 s: it travels, it does not sit in one spot.
+  const crest = (b) => {
+    let best = 0, at = 0;
+    for (let u = 0; u <= 1; u += 0.01) {
+      const v = Math.abs(breathAt(u, b, 0));
+      if (v > best) (best = v), (at = u);
+    }
+    return at;
+  };
+  const spots = [];
+  let b = { ...breathStart(), amp: 0.8 };
+  for (let s = 0; s < 30; s += 0.5) spots.push(crest({ ...b, phase: s * 3, drift: s }));
+  assert.ok(Math.max(...spots) - Math.min(...spots) > 0.3, `crest spread ${Math.max(...spots) - Math.min(...spots)}`);
+  // The layers travel different ways at unrelated speeds, so the picture does not repeat.
+  assert.ok(BREATH_LAYERS.some((l) => l.speed < 0) && BREATH_LAYERS.some((l) => l.speed > 0));
+});
