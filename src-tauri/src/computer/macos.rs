@@ -378,8 +378,8 @@ impl Desktop for Mac {
     }
 }
 
-/// Every app window in the window list, front to back: its owner's pid and name, and the window. Normal windows only
-/// (layer 0), minimised ones included.
+/// Every app window on screen, front to back: its owner's pid and name, and the window. Normal windows only (layer
+/// 0). Off-screen ones are left out: the list can't tell a minimised window from one a closed document left behind.
 fn windows() -> Vec<(u32, String, Window)> {
     use core_foundation::dictionary::CFDictionary;
     #[link(name = "CoreGraphics", kind = "framework")]
@@ -392,8 +392,8 @@ fn windows() -> Vec<(u32, String, Window)> {
     }
     let txt = |d: &CFDictionary, k: &str| get(d, k).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string());
     let num = |d: &CFDictionary, k: &str| get(d, k).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_f64());
-    // kCGWindowListOptionAll, excluding desktop elements.
-    let raw = unsafe { CGWindowListCopyWindowInfo(16, 0) };
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements.
+    let raw = unsafe { CGWindowListCopyWindowInfo(1 | 16, 0) };
     if raw.is_null() {
         return vec![];
     }
@@ -408,13 +408,8 @@ fn windows() -> Vec<(u32, String, Window)> {
             let pid = num(&d, "kCGWindowOwnerPID")? as u32;
             let bounds = get(&d, "kCGWindowBounds")?.downcast::<CFDictionary>()?;
             let at = |k: &str| num(&bounds, k).unwrap_or(0.0) as i32;
-            let shown = get(&d, "kCGWindowIsOnscreen").and_then(|v| v.downcast::<CFBoolean>()).map(bool::from).unwrap_or(false);
             let title = txt(&d, "kCGWindowName").unwrap_or_default();
-            // Off-screen windows without a title are an app's hidden helpers, not windows anyone sees.
-            if !shown && title.is_empty() {
-                return None;
-            }
-            Some((pid, owner, Window { title, rect: (at("X"), at("Y"), at("Width"), at("Height")), minimized: !shown }))
+            Some((pid, owner, Window { title, rect: (at("X"), at("Y"), at("Width"), at("Height")), minimized: false }))
         })
         .collect()
 }
