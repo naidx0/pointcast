@@ -22,6 +22,154 @@ pub struct PermissionStatus {
     pub screen_pending: bool,
     /// Whether this OS gates the pane at all, so the UI can hide rows that never apply.
     pub gated: Gated,
+    /// Off now, but granted to an earlier build: macOS likely kept the old version's switch (an ad hoc signature ties
+    /// the grant to that build), so the switch shows on while it does not apply.
+    pub stale: Stale,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Stale {
+    pub screen: bool,
+    pub accessibility: bool,
+}
+
+/// What a permission's row should say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Fine,
+    Off,
+    /// Off, and last seen on under another build: macOS kept the old version's switch.
+    StaleAfterUpdate,
+}
+
+/// The build a permission was seen granted under: the version plus the executable's size and mtime, which an update
+/// changes even when the version stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Build {
+    pub version: String,
+    pub exe: String,
+}
+
+/// The build each permission was last seen granted under, kept in `permissions-seen.json` in the data folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Seen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<Build>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<Build>,
+}
+
+/// Granted reads Fine; off under the build it was last granted in (or never granted) reads Off; off after the build
+/// changed reads StaleAfterUpdate.
+pub fn health(prev: Option<&Build>, now: &Build, granted: bool) -> Health {
+    match prev {
+        _ if granted => Health::Fine,
+        Some(p) if p != now => Health::StaleAfterUpdate,
+        _ => Health::Off,
+    }
+}
+
+impl Seen {
+    /// Note the build for each permission granted now. True when the record changed.
+    fn note(&mut self, now: &Build, screen: bool, accessibility: bool) -> bool {
+        let was = self.clone();
+        if screen {
+            self.screen = Some(now.clone());
+        }
+        if accessibility {
+            self.accessibility = Some(now.clone());
+        }
+        *self != was
+    }
+
+    fn forget(&mut self, kind: &str) {
+        match kind {
+            "screen" => self.screen = None,
+            "accessibility" => self.accessibility = None,
+            _ => {}
+        }
+    }
+}
+
+fn seen_path() -> std::path::PathBuf {
+    crate::settings::data_dir().join("permissions-seen.json")
+}
+
+fn load_seen() -> Seen {
+    std::fs::read_to_string(seen_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_seen(s: &Seen) {
+    if let Ok(t) = serde_json::to_string(s) {
+        let _ = std::fs::create_dir_all(crate::settings::data_dir());
+        let _ = std::fs::write(seen_path(), t);
+    }
+}
+
+/// This process's build, read once: the running code does not change even if an update replaces the file.
+fn this_build() -> Build {
+    static EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let exe = EXE.get_or_init(|| {
+        std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .map(|m| {
+                let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+                format!("{}-{t}", m.len())
+            })
+            .unwrap_or_default()
+    });
+    Build { version: env!("CARGO_PKG_VERSION").to_string(), exe: exe.clone() }
+}
+
+/// Record what is granted now and say which permissions read off only because macOS kept an older build's switch.
+fn stale_now(mac: bool, screen: Access, accessibility: Access) -> Stale {
+    if !mac {
+        return Stale::default();
+    }
+    let now = this_build();
+    let mut seen = load_seen();
+    let (s, a) = (screen == Access::Granted, accessibility == Access::Granted);
+    if seen.note(&now, s, a) {
+        save_seen(&seen);
+    }
+    Stale {
+        screen: health(seen.screen.as_ref(), &now, s) == Health::StaleAfterUpdate,
+        accessibility: health(seen.accessibility.as_ref(), &now, a) == Health::StaleAfterUpdate,
+    }
+}
+
+/// Pointcast's bundle id (tauri.conf.json `identifier`); the only one a reset may name.
+pub const BUNDLE_ID: &str = "dev.pointcast.app";
+
+/// The `tccutil` arguments that forget one permission for Pointcast alone: never `All`, never another app.
+pub fn reset_argv(kind: &str) -> Option<[&'static str; 3]> {
+    let service = match kind {
+        "screen" => "ScreenCapture",
+        "accessibility" => "Accessibility",
+        _ => return None,
+    };
+    Some(["reset", service, BUNDLE_ID])
+}
+
+/// Forget the old build's switch for one permission, then ask again (the prompt, or the switch in System Settings).
+pub fn reset_and_ask(kind: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("only macOS keeps an old version's switch".into());
+    }
+    let argv = reset_argv(kind).ok_or("nothing to reset for this")?;
+    let ok = std::process::Command::new("/usr/bin/tccutil").args(argv).status().map_err(|e| e.to_string())?.success();
+    if !ok {
+        return Err("macOS did not reset it".into());
+    }
+    let mut seen = load_seen();
+    seen.forget(kind);
+    save_seen(&seen);
+    if kind == "screen" {
+        // The reset makes macOS show its prompt again, so asking must not go straight to System Settings.
+        let _ = std::fs::remove_file(crate::settings::data_dir().join("screen-asked"));
+    }
+    request(kind);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,10 +181,12 @@ pub struct Gated {
 
 pub fn probe() -> PermissionStatus {
     let screen = screen();
+    let accessibility = accessibility();
     PermissionStatus {
         microphone: microphone(),
         screen,
-        accessibility: accessibility(),
+        accessibility,
+        stale: stale_now(cfg!(target_os = "macos"), screen, accessibility),
         screen_pending: pending(cfg!(target_os = "macos"), screen, crate::capture::sees_other_titles),
         gated: Gated {
             microphone: true,
@@ -491,6 +641,70 @@ mod tests {
         assert_eq!((cached(&last, long, read), cached(&last, long, read)), (1, 1), "the second ask reads nothing");
         assert_eq!(cached(&last, std::time::Duration::ZERO, read), 2, "once the time is up it reads again");
         assert_eq!(cached(&last, long, read), 2);
+    }
+
+    fn build(version: &str, exe: &str) -> Build {
+        Build { version: version.into(), exe: exe.into() }
+    }
+
+    #[test]
+    fn a_permission_off_after_an_update_reads_as_a_stale_grant() {
+        let now = build("0.5.1", "100-2");
+        assert_eq!(health(None, &now, true), Health::Fine);
+        assert_eq!(health(Some(&build("0.5.0", "90-1")), &now, true), Health::Fine);
+        assert_eq!(health(None, &now, false), Health::Off, "never seen on");
+        assert_eq!(health(Some(&now), &now, false), Health::Off, "turned off under this very build");
+        assert_eq!(health(Some(&build("0.5.0", "90-1")), &now, false), Health::StaleAfterUpdate);
+        assert_eq!(health(Some(&build("0.5.1", "90-1")), &now, false), Health::StaleAfterUpdate, "a rebuild of the same version");
+    }
+
+    #[test]
+    fn the_record_moves_only_with_a_grant_and_a_reset_forgets_it() {
+        let (old, now) = (build("0.5.0", "1"), build("0.5.1", "2"));
+        let mut s = Seen { screen: Some(old.clone()), accessibility: Some(old.clone()) };
+        assert!(!s.note(&now, false, false), "an off permission keeps the build it was on in");
+        assert_eq!(s.screen, Some(old.clone()));
+        assert!(s.note(&now, false, true));
+        assert_eq!((s.screen.as_ref(), s.accessibility.as_ref()), (Some(&old), Some(&now)));
+        assert!(!s.note(&now, false, true), "nothing new to write");
+        s.forget("screen");
+        assert_eq!(health(s.screen.as_ref(), &now, false), Health::Off, "after a reset it reads plainly off");
+        let back: Seen = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(serde_json::from_str::<Seen>("{}").unwrap(), Seen::default());
+    }
+
+    #[test]
+    fn stale_is_never_reported_off_macos() {
+        assert_eq!(stale_now(false, Access::Denied, Access::Unknown), Stale::default());
+    }
+
+    #[test]
+    fn a_reset_names_one_service_and_pointcast_alone() {
+        assert_eq!(reset_argv("screen"), Some(["reset", "ScreenCapture", "dev.pointcast.app"]));
+        assert_eq!(reset_argv("accessibility"), Some(["reset", "Accessibility", "dev.pointcast.app"]));
+        for kind in ["microphone", "All", "all", "", "screen ", "ScreenCapture", "Accessibility", "accessibility;All"] {
+            assert_eq!(reset_argv(kind), None, "{kind:?}");
+        }
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], BUNDLE_ID, "the reset names this app's own bundle id");
+    }
+
+    #[test]
+    fn no_reset_can_reach_another_service_or_app() {
+        // Every string a caller could pass: the argv is one of two, whatever comes in.
+        let allowed = [["reset", "ScreenCapture", BUNDLE_ID], ["reset", "Accessibility", BUNDLE_ID]];
+        let tries = ["screen", "accessibility", "microphone", "All", "camera", "com.apple.Terminal", "-h", "reset"];
+        for t in tries.iter().flat_map(|a| [a.to_string(), a.to_uppercase(), format!("{a} All")]) {
+            if let Some(argv) = reset_argv(&t) {
+                assert!(allowed.contains(&argv), "{t:?} gave {argv:?}");
+                assert!(!argv.contains(&"All"));
+            }
+        }
+        if !cfg!(target_os = "macos") {
+            assert!(reset_and_ask("screen").is_err(), "no reset off macOS");
+        }
+        assert!(reset_and_ask("microphone").is_err(), "nothing runs for a service with no reset");
     }
 
     #[test]

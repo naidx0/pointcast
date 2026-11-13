@@ -1931,6 +1931,13 @@ fn noted(svc: &App, p: permissions::PermissionStatus) -> permissions::Permission
     p
 }
 
+/// A switch macOS kept from an older build: forget it for this one permission (tccutil) and ask again.
+#[tauri::command]
+fn permission_reset(svc: tauri::State<'_, Arc<App>>, kind: String) -> Result<permissions::PermissionStatus, String> {
+    permissions::reset_and_ask(&kind)?;
+    Ok(noted(&svc, permissions::probe()))
+}
+
 #[tauri::command]
 fn permission_open(kind: String) -> Result<(), String> {
     let url = permissions::settings_url(&kind).ok_or("no settings page for this")?;
@@ -2279,6 +2286,7 @@ pub fn run() {
             speech_remove,
             permissions_get,
             permission_request,
+            permission_reset,
             permission_open,
             relaunch,
             detect_tools,
