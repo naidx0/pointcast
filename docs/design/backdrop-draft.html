@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Streak backdrop drafts</title>
+<style>
+  :root { --bg: #141415; --ink: rgba(255,255,255,0.92); --quiet: rgba(255,255,255,0.55); --line: rgba(255,255,255,0.09); --panel: rgba(28,28,30,0.72); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 24px 16px 48px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .lead { color: var(--quiet); margin: 0 0 18px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .controls button { font: inherit; padding: 5px 12px; border-radius: 999px; border: 0.5px solid var(--line); background: rgba(127,127,127,0.12); color: var(--ink); cursor: pointer; }
+  .controls button[aria-pressed="true"] { background: #0a84ff; color: #fff; border-color: transparent; }
+  .label { display: flex; justify-content: space-between; margin: 22px 2px 8px; }
+  .label b { font-weight: 600; } .label span { color: var(--quiet); font-size: 12px; }
+
+  /* The backdrop: a palette gradient pushed sideways by stretched noise (the streaks), then grain on top. */
+  .streaks { position: absolute; inset: 0; overflow: hidden; container-type: size; }
+  /* A square past the box's diagonal on its longer side, so the turned painting always reaches every corner. */
+  .streaks svg { position: absolute; left: 50%; top: 50%; width: 160cqmax; height: 160cqmax; transform: translate(-50%, -50%) rotate(-62deg); }
+  .streaks .drift { animation: drift 40s ease-in-out infinite alternate; transform-origin: center; }
+  @keyframes drift { to { transform: translate(-50%, -52%) rotate(-58deg) scale(1.06); } }
+  .grain { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0.16; mix-blend-mode: overlay; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { .streaks .drift { animation: none; } }
+
+  /* Onboarding mock: full-bleed backdrop, a quiet card on it. */
+  .win { position: relative; height: 520px; border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 0.5px var(--line), 0 20px 50px rgba(0,0,0,0.4); }
+  .onb { position: absolute; inset: 0; display: grid; place-items: center; }
+  .card { width: min(420px, 86%); padding: 28px; border-radius: 16px; background: rgba(20,20,22,0.55); backdrop-filter: blur(28px) saturate(1.2); -webkit-backdrop-filter: blur(28px) saturate(1.2); box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.14); }
+  .light .card { background: rgba(255,255,255,0.6); color: rgba(0,0,0,0.86); box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.08); }
+  .card h2 { font-size: 22px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .card p { margin: 0 0 20px; opacity: 0.7; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 16px; border-radius: 999px; background: #fff; color: #111; font-weight: 600; border: 0; }
+  .light .btn { background: #111; color: #fff; }
+  .skip { margin-left: 12px; opacity: 0.6; }
+
+  /* Settings mock: the backdrop only behind the sidebar and the top of the page, faint. */
+  .set { position: relative; height: 420px; display: grid; grid-template-columns: 200px 1fr; background: #1c1c1e; }
+  .set .side { position: relative; overflow: hidden; border-right: 0.5px solid var(--line); padding: 44px 10px 10px; }
+  .set .side .streaks { opacity: 0.22; filter: blur(6px) saturate(0.9); }
+  .set .side .row { position: relative; height: 30px; border-radius: 8px; padding: 0 10px; display: flex; align-items: center; color: var(--quiet); }
+  .set .side .row.on { background: rgba(255,255,255,0.1); color: var(--ink); }
+  .set .main { position: relative; overflow: hidden; padding: 44px 28px; }
+  .set .main .streaks { opacity: 0.16; filter: blur(10px); -webkit-mask-image: linear-gradient(to bottom, #000, transparent 46%); mask-image: linear-gradient(to bottom, #000, transparent 46%); }
+  .set .main h3 { position: relative; margin: 0 0 18px; font-size: 20px; font-weight: 600; }
+  .set .main .group { position: relative; border-radius: 10px; background: rgba(255,255,255,0.05); box-shadow: inset 0 0 0 0.5px var(--line); }
+  .set .main .group div { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-top: 0.5px solid var(--line); }
+  .set .main .group div:first-child { border-top: 0; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,0.1); }
+  .note { color: var(--quiet); margin: 8px 2px 0; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Streak backdrop for onboarding and Settings</h1>
+  <p class="lead">Drawn in code, with no image file: a colour gradient smeared by stretched noise, plus film grain. It drifts slowly and stays still with reduced motion. Pick a palette.</p>
+  <div class="controls" role="group" aria-label="Palette">
+    <button data-p="ember" aria-pressed="true">Ember (the reference)</button>
+    <button data-p="dusk" aria-pressed="false">Dusk</button>
+    <button data-p="glacier" aria-pressed="false">Glacier</button>
+    <button data-p="mono" aria-pressed="false">Graphite</button>
+    <button id="light" aria-pressed="false">Light card</button>
+  </div>
+
+  <div class="label"><b>Onboarding · full backdrop</b><span>the welcome screen</span></div>
+  <div class="win" id="onb">
+    <div class="streaks"><svg class="drift" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><use href="#paint" /></svg></div>
+    <svg class="grain" aria-hidden="true"><filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" /></filter><rect width="100%" height="100%" filter="url(#g)" /></svg>
+    <div class="onb"><div class="card"><h2>Welcome to Pointcast</h2><p>Talk, point at anything on your screen, and ask. Pick an AI and you're set.</p><button class="btn">Get started</button><span class="skip">Skip</span></div></div>
+  </div>
+  <p class="note">The card is frosted glass over the streaks, so the text always reads.</p>
+
+  <div class="label"><b>Settings · subtle</b><span>a faint wash behind the sidebar and the page title</span></div>
+  <div class="win set">
+    <div class="side">
+      <div class="streaks"><svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><use href="#paint" /></svg></div>
+      <div class="row">Home</div><div class="row on">AI</div><div class="row">Dictation</div><div class="row">Ask</div><div class="row">Permissions</div><div class="row">About</div>
+    </div>
+    <div class="main">
+      <div class="streaks"><svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><use href="#paint" /></svg></div>
+      <h3>AI</h3>
+      <div class="group"><div>ChatGPT <span class="pill">Ready · Free</span></div><div>Claude <span class="pill">Ready · Pro</span></div><div>Gemini <span class="pill">Ready</span></div><div>Copilot <span class="pill">Ready</span></div></div>
+    </div>
+  </div>
+  <p class="note">At 16–22 % with a blur it's a tint, not a picture, so lists and text keep full contrast.</p>
+</div>
+
+<!-- The painting, defined once and reused. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="pal" x1="0.22" x2="0.78" y1="0" y2="0">
+      <stop offset="0" stop-color="#e9e3f3" /><stop offset="0.18" stop-color="#f6d6c6" /><stop offset="0.36" stop-color="#ef8a3c" />
+      <stop offset="0.55" stop-color="#c8361c" /><stop offset="0.7" stop-color="#8e1f14" /><stop offset="0.8" stop-color="#0f4a55" />
+      <stop offset="0.9" stop-color="#7d93a3" /><stop offset="1" stop-color="#a9c4dc" />
+    </linearGradient>
+    <filter id="smear" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0016 0.022" numOctaves="3" seed="7" result="n" />
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="380" xChannelSelector="R" yChannelSelector="G" result="d" />
+      <!-- Motion blur: along the streaks, barely across them. -->
+      <feGaussianBlur in="d" stdDeviation="34 5" />
+    </filter>
+    <g id="paint"><rect x="-100" y="-100" width="1200" height="1200" fill="url(#pal)" filter="url(#smear)" /></g>
+  </defs>
+</svg>
+<script>
+  const P = {
+    ember: ["#e9e3f3", "#f6d6c6", "#ef8a3c", "#c8361c", "#8e1f14", "#0f4a55", "#7d93a3", "#a9c4dc"],
+    dusk: ["#1b1530", "#3b2a63", "#7a4fd1", "#c06bd8", "#f08fb3", "#ffb38a", "#fde3c4", "#f4efe9"],
+    glacier: ["#eaf3fb", "#bfe0f2", "#6fb6e6", "#2f7fd0", "#1c3f8f", "#0f1e45", "#3b6e8a", "#a6d3e0"],
+    mono: ["#f2f2f2", "#cfcfd2", "#9a9aa0", "#5d5d63", "#2b2b2f", "#141416", "#4a4a50", "#b9b9bf"],
+  };
+  const stops = document.querySelectorAll("#pal stop");
+  document.querySelectorAll("[data-p]").forEach((b) => (b.onclick = () => {
+    P[b.dataset.p].forEach((c, i) => stops[i].setAttribute("stop-color", c));
+    document.querySelectorAll("[data-p]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  }));
+  document.getElementById("light").onclick = (e) => {
+    const on = document.getElementById("onb").classList.toggle("light");
+    e.target.setAttribute("aria-pressed", on);
+  };
+</script>
+</body>
+</html>
