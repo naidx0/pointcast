@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Camera, Check, ChevronRight, House, Image, Info, Keyboard, MessageCircleQuestion, ScrollText, Settings2, Share, Volume2 } from "lucide-react";
-import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField, askPress } from "@/components/Shortcut";
+import { ACTIONS, ASK_ACTION, CALL_ACTION, Keycaps, ShortcutField, askPress } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, useSpeechJob } from "@/components/Models";
 import { BrandTile } from "@/components/Brands";
@@ -1562,6 +1562,11 @@ function Shortcuts({ cfg, patch, setCfg }: { cfg: Config; patch: Patch; setCfg: 
             <Row label="Ask" sub={`${ASK_ACTION.sub} ${askPress(cfg.talk_mode)}`}>
               <ShortcutField action={ASK_ACTION.id} cfg={cfg} patch={patch} setCfg={setCfg} />
             </Row>
+            {cfg.hotkeys.call ? (
+              <Row label={CALL_ACTION.name} sub={CALL_ACTION.sub}>
+                <ShortcutField action={CALL_ACTION.id} cfg={cfg} patch={patch} setCfg={setCfg} />
+              </Row>
+            ) : null}
           </div>
         </>
       ) : null}

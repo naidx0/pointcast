@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AudioLines, Check, ChevronRight, ClipboardPaste, MessageCircleQuestion, Mic, MousePointer2, Play, ShieldCheck } from "lucide-react";
-import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField } from "@/components/Shortcut";
+import { ACTIONS, ASK_ACTION, CALL_ACTION, Keycaps, ShortcutField } from "@/components/Shortcut";
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
 import { Backdrop } from "@/components/Backdrop";
@@ -591,6 +591,7 @@ function TryStep({
     full: ACTIONS.find((a) => a.id === "full")!.sub,
     zoom: ACTIONS.find((a) => a.id === "zoom")!.sub,
     ask: ASK_ACTION.sub,
+    call: CALL_ACTION.sub,
   };
   const used = (a: Action) => !!fired[a] || (a === "session" && seen.started);
   const caption = rec

@@ -19,6 +19,13 @@ export const ASK_ACTION: { id: Action; name: string; sub: string } = {
 /** Tap or hold for Ask, which follows "Start or stop by". */
 export const askPress = (mode: string) => (mode === "hold" ? "Hold the keys while you ask; let go to send." : "Press once to start asking, again to send.");
 
+/** Call, in the Ask group: the key that opens a call from anywhere — ask with no hands. */
+export const CALL_ACTION: { id: Action; name: string; sub: string } = {
+  id: "call",
+  name: "Call",
+  sub: "Talk, hear the answer, keep talking. Press again to end.",
+};
+
 export function Keycaps({ label, size }: { label: string; size?: "lg" }) {
   return (
     <span className="keys">

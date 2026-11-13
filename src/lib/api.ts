@@ -107,7 +107,7 @@ export type Permissions = Record<PermissionKind, Access> & {
   screen_pending?: boolean;
 };
 
-export type Action = "session" | "full" | "region" | "zoom" | "ask";
+export type Action = "session" | "full" | "region" | "zoom" | "ask" | "call";
 export type HotkeyView = { label: string; keys: string[]; default: string };
 
 /** A model with a faster version for the graphics card (Whisper Turbo): whether it can be set up here, whether it is,
@@ -157,8 +157,8 @@ export type Config = {
   platform: string;
   materials: boolean;
   version: string;
-  /** `ask` is the Ask key; absent from builds before 0.5. */
-  hotkeys: Record<Action, HotkeyView> & { ask?: HotkeyView };
+  /** `ask` is the Ask key; absent from builds before 0.5. `call` is the Call key; absent before it existed. */
+  hotkeys: Record<Action, HotkeyView> & { ask?: HotkeyView; call?: HotkeyView };
   hotkey_errors: { action: Action; error: string }[];
   talk_mode: TalkMode;
   model: string;
@@ -239,6 +239,7 @@ export const HOTKEY_FIELD: Record<Action, string> = {
   region: "region_hotkey",
   zoom: "zoom_hotkey",
   ask: "ask_hotkey",
+  call: "call_hotkey",
 };
 
 export const settingsGet = () => invoke<Config>("settings_get");

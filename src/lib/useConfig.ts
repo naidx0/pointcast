@@ -62,6 +62,7 @@ function previewConfig(): Config {
       region: hk("Ctrl+Shift+2"),
       zoom: hk("Ctrl+Shift+Z"),
       ask: hk("Ctrl+Shift+/"),
+      call: hk("Ctrl+Shift+C"),
     },
     hotkey_errors: [],
     talk_mode: "tap",

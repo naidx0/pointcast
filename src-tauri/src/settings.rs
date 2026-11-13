@@ -96,6 +96,8 @@ pub struct Settings {
     pub zoom_hotkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_hotkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_hotkey: Option<String>,
     #[serde(default)]
     pub talk_mode: TalkMode,
     #[serde(default = "default_model")]
@@ -289,6 +291,7 @@ impl Default for Settings {
             region_hotkey: None,
             zoom_hotkey: None,
             ask_hotkey: None,
+            call_hotkey: None,
             talk_mode: TalkMode::default(),
             model: default_model(),
             device: None,
@@ -410,6 +413,9 @@ impl Settings {
     }
     pub fn ask_chord(&self) -> Chord {
         Self::parse_ok(&self.ask_hotkey, chord::default_ask)
+    }
+    pub fn call_chord(&self) -> Chord {
+        Self::parse_ok(&self.call_hotkey, chord::default_call)
     }
     /// The voice wave the person picked: "pen", "breath" or "aurora". Not set, or a value this version does not know, is Aurora.
     pub fn wave(&self) -> &'static str {

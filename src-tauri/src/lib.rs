@@ -194,6 +194,7 @@ pub enum Action {
     Region,
     Zoom,
     Ask,
+    Call,
 }
 
 pub fn show_window(app: &AppHandle, label: &str) {
@@ -292,6 +293,23 @@ fn ask_key(app: &AppHandle, svc: &Arc<App>, pressed: bool) {
         if live.listening() && release_stops(mode, from, now_ms()) {
             live.release();
         }
+    }
+}
+
+/// The Call key: a press starts a call, cancels the one still opening its microphone, or ends the one under way — the
+/// panel's Call switch from anywhere. The panel shows while a call runs so its state can be seen. A press while a
+/// recording owns the microphone does nothing.
+fn call_key(app: &AppHandle, rec: bool) {
+    if rec {
+        return;
+    }
+    let Some(calls) = app.try_state::<Arc<voice::call::Calls>>() else {
+        return;
+    };
+    match calls.toggle() {
+        Ok(v) if v.active => platform::show_panel(app),
+        Ok(_) => {}
+        Err(e) => eprintln!("[call] the Call key could not start a call: {e}"),
     }
 }
 
@@ -1114,9 +1132,9 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
         return;
     };
     let svc = svc.inner().clone();
-    // During a call only the Ask key acts (it ends the turn now, or talks over the answer); a dictation would take the
-    // call's microphone and the capsule.
-    if action != Action::Ask && app.try_state::<Arc<voice::call::Calls>>().is_some_and(|c| c.active()) {
+    // During a call only the Ask and Call keys act (Ask ends the turn now or talks over the answer; Call ends the
+    // call); a dictation would take the call's microphone and the capsule.
+    if !matches!(action, Action::Ask | Action::Call) && app.try_state::<Arc<voice::call::Calls>>().is_some_and(|c| c.active()) {
         return;
     }
     let rec = recording(&svc);
@@ -1154,6 +1172,7 @@ pub fn hotkey(app: &AppHandle, action: Action, pressed: bool) {
             }
         }
         (_, false) => {}
+        (Action::Call, true) => call_key(app, rec),
         (action, true) => {
             if !rec && begin(app, &svc).is_err() {
                 return;
@@ -1199,6 +1218,7 @@ fn settings_view(svc: &App) -> Value {
             "region": chord(s.region_chord(), chord::default_region()),
             "zoom": chord(s.zoom_chord(), chord::default_zoom()),
             "ask": chord(s.ask_chord(), chord::default_ask()),
+            "call": chord(s.call_chord(), chord::default_call()),
         },
         "hotkey_errors": errors,
         "talk_mode": s.talk_mode,
@@ -1387,6 +1407,7 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
         ("Capture region", &cur.region_hotkey, &next.region_hotkey),
         ("Capture around pointer", &cur.zoom_hotkey, &next.zoom_hotkey),
         ("Ask about this", &cur.ask_hotkey, &next.ask_hotkey),
+        ("Call", &cur.call_hotkey, &next.call_hotkey),
     ];
     let mut seen: Vec<(&str, chord::Chord)> = vec![];
     for (name, was, raw) in chords {
@@ -1414,8 +1435,8 @@ fn merge(cur: &Settings, patch: serde_json::Map<String, Value>) -> Result<Settin
 }
 
 fn keys_changed(a: &Settings, b: &Settings) -> bool {
-    (a.session_chord(), a.full_chord(), a.region_chord(), a.zoom_chord(), a.ask_chord())
-        != (b.session_chord(), b.full_chord(), b.region_chord(), b.zoom_chord(), b.ask_chord())
+    (a.session_chord(), a.full_chord(), a.region_chord(), a.zoom_chord(), a.ask_chord(), a.call_chord())
+        != (b.session_chord(), b.full_chord(), b.region_chord(), b.zoom_chord(), b.ask_chord(), b.call_chord())
 }
 
 fn rebind(app: &AppHandle, svc: &Arc<App>) {
@@ -2456,6 +2477,7 @@ fn register_shortcuts(app: &AppHandle, s: &Settings) -> Vec<(String, String)> {
         (Action::Region, "region", s.region_chord()),
         (Action::Zoom, "zoom", s.zoom_chord()),
         (Action::Ask, "ask", s.ask_chord()),
+        (Action::Call, "call", s.call_chord()),
     ];
     for (action, name, chord) in chords {
         let res = Shortcut::from_str(&chord.accelerator())
@@ -2483,6 +2505,7 @@ fn refused(s: &Settings) -> Vec<(String, String)> {
         ("region", &s.region_hotkey, s.region_chord()),
         ("zoom", &s.zoom_hotkey, s.zoom_chord()),
         ("ask", &s.ask_hotkey, s.ask_chord()),
+        ("call", &s.call_hotkey, s.call_chord()),
     ];
     saved
         .into_iter()
@@ -3314,13 +3337,13 @@ mod tests {
         use Action::*;
         // Nothing records: the Ask key asks, the others go their usual way.
         assert_eq!(routed(Ask, false, false, false), Some(true));
-        assert_eq!([Session, Full, Region, Zoom].map(|a| routed(a, false, false, false)), [Some(false); 4]);
+        assert_eq!([Session, Full, Region, Zoom, Call].map(|a| routed(a, false, false, false)), [Some(false); 5]);
         // A dictation records: the Ask key does nothing, so a dictation never opens the panel.
         assert_eq!(routed(Ask, true, false, false), None);
         assert_eq!(routed(Session, true, false, false), Some(false));
         // A question is being said: the Ask key ends it, and no other chord stops, pastes or adds a picture to it.
         assert_eq!(routed(Ask, true, true, false), Some(true));
-        assert_eq!([Session, Full, Region, Zoom].map(|a| routed(a, true, true, false)), [None; 4]);
+        assert_eq!([Session, Full, Region, Zoom, Call].map(|a| routed(a, true, true, false)), [None; 5]);
         // Onboarding's key test only hears the Ask key.
         assert_eq!(routed(Ask, false, false, true), None);
     }
@@ -3345,5 +3368,10 @@ mod tests {
         assert!(err.contains("already Capture around pointer"), "{err}");
         assert!(merge(&cur, p(json!({ "ask_hotkey": "Shift" }))).is_err(), "a chord needs a key");
         assert!(keys_changed(&cur, &Settings { ask_hotkey: Some("Ctrl+Shift+F7".into()), ..Settings::default() }));
+        // The Call key rebinds and clashes the same way.
+        assert_eq!(merge(&cur, p(json!({ "call_hotkey": "Ctrl+Shift+F10" }))).unwrap().call_chord().label(), "Ctrl+Shift+F10");
+        let err = merge(&cur, p(json!({ "call_hotkey": "Ctrl+Shift+F7", "ask_hotkey": "Ctrl+Shift+F7" }))).unwrap_err();
+        assert!(err.contains("already Ask about this"), "{err}");
+        assert!(keys_changed(&cur, &Settings { call_hotkey: Some("Ctrl+Shift+F10".into()), ..Settings::default() }));
     }
 }

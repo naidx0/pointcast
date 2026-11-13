@@ -69,6 +69,17 @@ pub fn default_ask() -> Chord {
     }
 }
 
+/// Call: Ctrl+Shift+C on every system, C for call. A call is Ask with no hands: it hears, answers aloud and listens
+/// again until it is ended.
+pub fn default_call() -> Chord {
+    Chord {
+        ctrl: true,
+        shift: true,
+        key: "C".into(),
+        ..Chord::default()
+    }
+}
+
 fn norm_key(k: &str) -> Option<String> {
     let up = k.trim().to_ascii_uppercase();
     match up.as_str() {
@@ -352,5 +363,19 @@ mod tests {
             assert_eq!(Chord::parse(said).unwrap(), d, "{said}");
         }
         assert_ne!(d, default_session());
+    }
+
+    #[test]
+    fn the_call_key_is_ctrl_shift_c_by_default_and_parses_as_any_other() {
+        let d = default_call();
+        assert_eq!((d.ctrl, d.shift, d.alt, d.meta, d.key.as_str()), (true, true, false, false, "C"));
+        assert_eq!(d.label(), "Ctrl+Shift+C");
+        assert_eq!(refusal(&d), None);
+        for said in ["Ctrl+Shift+C", "ctrl + shift + c", "Control+Shift+c"] {
+            assert_eq!(Chord::parse(said).unwrap(), d, "{said}");
+        }
+        for other in [default_session(), default_full(), default_region(), default_zoom(), default_ask()] {
+            assert_ne!(d, other, "a chord of its own");
+        }
     }
 }
