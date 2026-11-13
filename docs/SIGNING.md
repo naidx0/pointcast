@@ -99,3 +99,10 @@ from the requirement check. See it once on a real Mac:
 3. Record a pointer capture. It works without a prompt, both switches are still on in System Settings, and
    `~/Library/Application Support/dev.pointcast.app/update.log` ends on `Updated to <version>.` with no
    `may ask again`.
+
+## This Mac's local setup (done 2026-11-13)
+
+- The certificate lives at `~/pointcast-signing/pointcast-signing.p12` (SHA-1 `E22BD01DC22BB4F1FAD68EFCF4E0C092072DA3C4`), its password beside it in `.password`. Neither is in the repo.
+- It is imported into a dedicated keychain, `~/pointcast-signing/pointcast.keychain-db` (password in `keychain.password`, 0600), which sits in the user keychain search list. The partition list allows `codesign` without prompts. Importing into login.keychain alone left the key unpaired — the dedicated keychain is what works.
+- Sign a built app: `codesign --force --deep -s maxnaid <Pointcast.app>`; package: `hdiutil create -volname Pointcast -srcfolder <app> -ov -format UDZO <out>.dmg`; install: `POINTCAST_DMG=<out>.dmg bash install.sh`.
+- The 2026-11-13 install took the cert-signed 0.5.2 over the old ad-hoc app — the one expected permission reset. Cert-signed updates after it stay quiet.
