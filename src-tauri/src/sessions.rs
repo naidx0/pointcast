@@ -118,6 +118,9 @@ pub struct Answer {
     pub error: Option<String>,
     pub usage: Option<Used>,
     pub sent: Sent,
+    /// What the AI did on the computer during this answer, in order (`computer::journal`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub acts: Vec<crate::computer::Entry>,
 }
 
 /// A picture on its way out: the bytes the provider gets.

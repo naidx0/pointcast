@@ -1,12 +1,12 @@
 //! Every computer tool call, kept in memory so the turn can be read back: when, in which app, which tool, on what,
 //! and how it ended. The Ask turn takes the entries and writes them into its session.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// Past this many entries the oldest go, so a journal nobody takes can't grow without end.
 pub const KEEP: usize = 2_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// Milliseconds since the Unix epoch.
     pub at: u64,
@@ -17,7 +17,7 @@ pub struct Entry {
     pub outcome: Outcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "detail", rename_all = "snake_case")]
 pub enum Outcome {
     /// It happened; how (by accessibility action or synthetic input).
@@ -28,6 +28,31 @@ pub enum Outcome {
     NeedsConfirm(String),
     /// It was tried and the OS said no.
     Failed(String),
+}
+
+impl Entry {
+    /// What it did, as the session lists it under the answer ("Clicked button "Send" in Mail"); none for looking, and
+    /// for a question to the person that a later entry answers.
+    pub fn line(&self) -> Option<String> {
+        let (t, app) = (self.target.as_str(), self.app.as_str());
+        let in_app = if app.is_empty() { String::new() } else { format!(" in {app}") };
+        let (done, todo) = match self.tool.as_str() {
+            "pointcast_click" => (format!("Clicked {t}{in_app}"), format!("click {t}{in_app}")),
+            "pointcast_type" => (format!("Typed into {t}{in_app}"), format!("type into {t}{in_app}")),
+            "pointcast_key" => (format!("Pressed {t}{in_app}"), format!("press {t}{in_app}")),
+            "pointcast_scroll" => (format!("Scrolled {t}{in_app}"), format!("scroll {t}{in_app}")),
+            "pointcast_open_app" => (format!("Opened {app}"), format!("open {app}")),
+            "pointcast_focus" => (format!("Brought {app} to the front"), format!("bring {app} to the front")),
+            _ => return None,
+        };
+        match &self.outcome {
+            Outcome::Done(_) => Some(done),
+            Outcome::Refused(why) if why.starts_with("The person declined") => Some(format!("You declined: {todo}")),
+            Outcome::Refused(_) => Some(format!("Not allowed: {todo}")),
+            Outcome::NeedsConfirm(_) => None,
+            Outcome::Failed(_) => Some(format!("Could not {todo}")),
+        }
+    }
 }
 
 #[derive(Clone, Default)]

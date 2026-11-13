@@ -352,6 +352,7 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             }),
             now: Box::new(now_ms),
             tidy: Box::new(move || tidy.settings.lock().unwrap().tidy),
+            acts: Box::new(|| computer::journal().take()),
         },
         &settings::data_dir(),
     )

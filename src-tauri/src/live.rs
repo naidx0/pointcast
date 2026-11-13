@@ -145,6 +145,9 @@ pub struct Snapshot {
     pub thinking: bool,
     /// The turns of the session before the one in the fields above, oldest first.
     pub turns: Vec<Past>,
+    /// What the AI did on the computer for the turn in the fields above, once it ended, one line each.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub acts: Vec<String>,
 }
 
 /// Why a question went without a picture of the screen.
@@ -179,6 +182,9 @@ pub struct Past {
     pub error: Option<String>,
     /// When it was asked, Unix ms.
     pub at_ms: u64,
+    /// What the AI did on the computer while it answered, one line each.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub acts: Vec<String>,
     #[serde(skip)]
     id: String,
 }
@@ -303,6 +309,8 @@ pub struct Deps {
     /// Unix ms.
     pub now: Box<dyn Fn() -> u64 + Send + Sync>,
     pub tidy: Box<dyn Fn() -> bool + Send + Sync>,
+    /// What the AI did on the computer since this was last asked, taken (`computer::journal().take()`).
+    pub acts: Box<dyn Fn() -> Vec<crate::computer::Entry> + Send + Sync>,
 }
 
 /// A question that is kept and on its way, or that failed and can be asked again: what is sent, and its answer so far.
@@ -390,6 +398,11 @@ pub struct Live {
     sessions: Sessions,
     wait: Duration,
     inner: Mutex<Inner>,
+}
+
+/// What the AI did on the computer, one line each, as the panel lists it under the answer.
+fn lines(acts: &[crate::computer::Entry]) -> Vec<String> {
+    acts.iter().filter_map(crate::computer::Entry::line).collect()
 }
 
 /// The line the panel shows for a failure.
@@ -942,6 +955,7 @@ impl Live {
         g.snap.dropped = false;
         g.snap.no_picture = None;
         g.snap.thinking = false;
+        g.snap.acts.clear();
         g.picture = None;
     }
 
@@ -951,7 +965,7 @@ impl Live {
         let Some(a) = self.sessions.answer(&session, &turn) else { return };
         let n = g.snap.session.turns;
         g.snap.turns.retain(|p| p.id != turn);
-        let past = Past { n, question: g.snap.words.clone(), answer: a.text, picture: g.snap.picture.clone(), stopped: a.stopped, error: a.error, at_ms: a.times.press_ms, id: turn };
+        let past = Past { n, question: g.snap.words.clone(), answer: a.text, picture: g.snap.picture.clone(), stopped: a.stopped, error: a.error, at_ms: a.times.press_ms, acts: lines(&a.acts), id: turn };
         g.snap.turns.push(past);
         g.snap.turns.sort_by_key(|p| p.n);
     }
@@ -990,7 +1004,7 @@ impl Live {
                 small(&bytes, p.w, p.h, p.label.clone(), p.marked)
             });
             let question = sessions::question(&a.sent.text).to_owned();
-            Some(Past { n: i as u32 + 1, question, answer: a.text.clone(), picture, stopped: a.stopped, error: a.error.clone(), at_ms: a.times.press_ms, id: k.meta.id.clone() })
+            Some(Past { n: i as u32 + 1, question, answer: a.text.clone(), picture, stopped: a.stopped, error: a.error.clone(), at_ms: a.times.press_ms, acts: lines(&a.acts), id: k.meta.id.clone() })
         };
         kept.iter().enumerate().filter_map(turn).collect()
     }
@@ -1407,6 +1421,8 @@ impl Live {
         answer.sent.adds = chat.adds();
         let stopper = chat.stopper();
         let (tx, rx) = mpsc::channel::<Event>();
+        // What was done on the computer before this turn is not this turn's.
+        let _ = (self.deps.acts)();
         answer.times.sent_ms = now();
         let id = chat.ask(Turn { role: Role::Person, parts }, tx);
         {
@@ -1490,6 +1506,7 @@ impl Live {
             self.say(run, turn_no, pending);
         }
         answer.times.done_ms = now();
+        answer.acts = (self.deps.acts)();
         // An empty line is the person's own stop: the answer is kept as far as it came, with no error.
         match end {
             None => {}
@@ -1510,6 +1527,7 @@ impl Live {
         }
         g.halt = false;
         g.snap.thinking = false;
+        g.snap.acts = lines(&answer.acts);
         g.used = Some(Instant::now());
         match &answer.error {
             Some(why) => {
@@ -1674,6 +1692,8 @@ mod tests {
         /// The clock the loop reads: a test moves it on to let time pass.
         clock: Arc<AtomicU64>,
         dir: PathBuf,
+        /// What each take of the computer journal gives, in turn (nothing once used up).
+        acts: Arc<Mutex<Vec<Vec<crate::computer::Entry>>>>,
     }
 
     #[derive(Clone)]
@@ -1730,6 +1750,8 @@ mod tests {
         let held = gate.clone();
         let screen = Arc::new(Mutex::new(Screen::default()));
         let (on, looked) = (screen.clone(), screen.clone());
+        let acts: Arc<Mutex<Vec<Vec<crate::computer::Entry>>>> = Arc::default();
+        let taken = acts.clone();
         let deps = Deps {
             voice: voice.clone(),
             grab: Box::new(move || {
@@ -1747,8 +1769,12 @@ mod tests {
             // Every reading is a millisecond after the last, so the order of the stages is the order of their times.
             now: Box::new(move || time.fetch_add(1, Ordering::SeqCst)),
             tidy: Box::new(|| false),
+            acts: Box::new(move || {
+                let mut q = taken.lock().unwrap();
+                if q.is_empty() { Vec::new() } else { q.remove(0) }
+            }),
         };
-        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, clock, dir }
+        Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, clock, dir, acts }
     }
 
     impl Rig {
@@ -1863,6 +1889,37 @@ mod tests {
         r.ask("and this", State::Shown);
         let kept = r.kept();
         assert_eq!((kept.len(), kept[0].1.len(), script.opened.lock().unwrap().len(), r.live.snapshot().turn), (1, 2, 1, 2));
+        r.end();
+    }
+
+    #[test]
+    fn what_the_ai_did_on_the_computer_is_kept_with_the_answer_and_listed_under_it() {
+        use crate::computer::{Entry, Outcome};
+        let e = |tool: &str, app: &str, target: &str, outcome: Outcome| Entry { at: 1, app: app.into(), tool: tool.into(), target: target.into(), outcome };
+        let stale = e("pointcast_click", "Notes", "button \"Old\"", Outcome::Done("press".into()));
+        let turn = vec![
+            e("pointcast_elements", "Mail", "window \"New Message\"", Outcome::Done("40 listed".into())),
+            e("pointcast_click", "Mail", "button \"Send\"", Outcome::NeedsConfirm("asks".into())),
+            e("pointcast_click", "Mail", "button \"Send\"", Outcome::Done("press (accessibility), after the person's yes".into())),
+            e("pointcast_type", "TextEdit", "text area", Outcome::Done("set value".into())),
+            e("pointcast_click", "Mail", "button \"Delete\"", Outcome::Refused("The person declined: nothing was done.".into())),
+            e("pointcast_open_app", "TextEdit", "TextEdit", Outcome::Done("opened".into())),
+        ];
+        let (_script, provider) = scripted(&[(0, "Done.")]);
+        let r = rig("acts", provider, FIRST_WAIT);
+        *r.acts.lock().unwrap() = vec![vec![stale], turn.clone()];
+        r.ask("send it", State::Shown);
+        let want = ["Clicked button \"Send\" in Mail", "Typed into text area in TextEdit", "You declined: click button \"Delete\" in Mail", "Opened TextEdit"];
+        let kept = r.kept();
+        assert_eq!(kept[0].1[0].answer.as_ref().unwrap().acts, turn, "the whole journal of the turn, and nothing from before it");
+        assert_eq!(r.live.snapshot().acts, want, "listed under the answer, looking and asking left out");
+        // Once the next question begins, the turn joins the earlier ones with its list.
+        r.ask("and then", State::Shown);
+        let snap = r.live.snapshot();
+        assert_eq!((snap.turns[0].acts.clone(), snap.acts.len()), (want.map(String::from).to_vec(), 0));
+        // A session read back from disk lists them too.
+        let session = snap.session.id.clone();
+        assert_eq!(r.live.past(&session)[0].acts, want);
         r.end();
     }
 
