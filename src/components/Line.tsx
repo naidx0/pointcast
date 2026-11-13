@@ -1,4 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { auroraStart, auroraStep, drawAurora, isLight, parseInk, type Ink } from "@/lib/aurora";
+import { useWaveStyle } from "@/lib/wave";
 import { BREATH_LAYERS, VOICE_DX, VOICE_STEP_MS, VOICE_STROKE_STEPS, breathPath, breathStart, breathStep, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
 
 /** Where the line hears the voice: called with a setter for the level (0 to 1, `loudness`), returns the unsubscribe. */
@@ -36,14 +38,92 @@ export function Line({
   loops?: number;
   pitch?: number;
   lead?: number;
-  /** Listening: the pen's trace (the dictation capsule), or the breathing wave (the Ask panel). */
-  look?: "pen" | "breath";
+  /** Listening: the pen's trace (Classic), the breathing wave (Strands), Aurora's lenses of light, or "auto": the one the
+   * person picked in Settings (Aurora until they pick). */
+  look?: "pen" | "breath" | "aurora" | "auto";
   /** The breathing wave: how many of its layers (the dictation capsule is small and draws two). */
   layers?: number;
 }) {
-  if (mode === "listen" && look === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} layers={layers} />;
+  const picked = useWaveStyle();
+  const shown = look === "auto" ? picked : look;
+  if (mode === "listen" && shown === "aurora") return <AuroraWave className={className} height={height} levels={levels} />;
+  if (mode === "listen" && shown === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} layers={layers} />;
   if (mode === "think") return <Loops className={className} tone={tone} height={height} n={loops} pitch={pitch} lead={lead} />;
   return <Voice className={className} tone={tone} height={height} levels={levels} dx={dx} tip={tip} still={mode === "rest"} />;
+}
+
+/** The ink of the surface: its `--line-ink`, read from the element (white on the capsule, the theme's ink in Ask). */
+function inkOf(el: HTMLElement, g: CanvasRenderingContext2D): Ink {
+  const css = getComputedStyle(el).getPropertyValue("--line-ink").trim() || getComputedStyle(el).color;
+  const direct = parseInk(css);
+  if (direct) return direct;
+  // A named or computed colour: let the canvas resolve it to #rrggbb.
+  g.fillStyle = "#808080";
+  g.fillStyle = css;
+  return parseInk(String(g.fillStyle)) ?? [128, 128, 128];
+}
+
+/** Aurora: three soft lenses of light (lib/aurora.ts), drawn on a canvas at the screen's pixel ratio (at least 2). The
+ * level is the same one the strands read (the meter, then the ease); with reduced motion, or without a level, one
+ * still frame; nothing is drawn while the page is hidden. */
+function AuroraWave({ className, height, levels }: { className: string; height: number; levels?: LevelSource }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const cv = useRef<HTMLCanvasElement>(null);
+  const [w, setW] = useState(0);
+  const st = useRef({ raw: 0, meter: meterStart(), a: auroraStart() });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const size = () => setW(Math.max(40, Math.round(el.clientWidth)));
+    size();
+    const ro = new ResizeObserver(size);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const el = ref.current;
+    const c = cv.current;
+    if (!w || !el || !c) return;
+    const g = c.getContext("2d");
+    if (!g) return;
+    const dpr = Math.max(2, window.devicePixelRatio || 1);
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(height * dpr);
+    const s = st.current;
+    let ink = inkOf(el, g);
+    const paint = () => {
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, height);
+      drawAurora(g, w, height, s.a, ink, isLight(ink));
+    };
+    paint();
+    if (!levels || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const off = levels((x) => (s.raw = x));
+    let last = performance.now();
+    let frames = 0;
+    let raf = 0;
+    const draw = (t: number) => {
+      raf = requestAnimationFrame(draw);
+      const dt = Math.min(100, Math.max(0, t - last));
+      last = t;
+      if (document.hidden) return;
+      s.meter = meterStep(s.meter, s.raw, dt);
+      s.a = auroraStep(s.a, meterLevel(s.meter, s.raw), dt);
+      // The theme or the surface can change under it: look again twice a second.
+      if (++frames % 30 === 0) ink = inkOf(el, g);
+      paint();
+    };
+    raf = requestAnimationFrame(draw);
+    return () => {
+      off();
+      cancelAnimationFrame(raf);
+    };
+  }, [w, height, levels]);
+  return (
+    <div className={`line-voice line-aurora ${className}`} ref={ref} aria-hidden="true">
+      <canvas ref={cv} style={{ width: w, height, display: "block" }} />
+    </div>
+  );
 }
 
 /** The voice's line. The level is read over the room's floor and eased toward the voice every frame (within a frame to

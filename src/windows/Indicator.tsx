@@ -221,7 +221,7 @@ function Recording({ s, keys }: { s: UiState; keys: Config["hotkeys"] | null }) 
           </span>
         ) : (
           <span className={`scribe${timed ? " timed" : ""}`}>
-            <Line mode={capsuleLine(s)} look="breath" layers={2} height={LINE_H} dx={LINE_DX} tip="ink" levels={hudLevels} />
+            <Line mode={capsuleLine(s)} look="auto" layers={2} height={LINE_H} dx={LINE_DX} tip="ink" levels={hudLevels} />
             {live ? (
               <span className="time">
                 {stamp(s.duration_ms)}

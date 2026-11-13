@@ -178,7 +178,8 @@ html.win .live-hb:not(.stop) {
 }
 /* The breathing wave is centred in its own box and fades at both ends itself (Line.tsx): no baseline offset and no
    second fade on the left, so it sits level with Stop and the picture and reads evenly from end to end. */
-.live-voice.line-breath {
+.live-voice.line-breath,
+.live-voice.line-aurora {
   transform: none;
   -webkit-mask-image: none;
   mask-image: none;

@@ -90,3 +90,8 @@ html .hud .scribe:not(.timed) .line-voice {
   -webkit-mask-position: -40px 0;
   mask-position: -40px 0;
 }
+
+/* Aurora is drawn on a canvas, which carries its own fade at both ends and its ink (--line-ink); the SVG rules above do not apply. */
+.line-aurora {
+  overflow: hidden;
+}

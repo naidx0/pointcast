@@ -151,3 +151,9 @@ export function drawAurora(g: Ctx, w: number, h: number, s: Aurora, ink: Ink, ad
   g.fillRect(0, 0, w, h);
   g.globalCompositeOperation = "source-over";
 }
+
+/** The voice wave the person picked: Classic (the pen), Strands (breath) or Aurora. */
+export type WaveStyle = "pen" | "breath" | "aurora";
+export const WAVE_STYLES: readonly WaveStyle[] = ["pen", "breath", "aurora"];
+/** What a saved or sent value means: Aurora unless it names one of the others exactly. */
+export const waveStyleOf = (x: unknown): WaveStyle => (x === "pen" || x === "breath" ? x : "aurora");
