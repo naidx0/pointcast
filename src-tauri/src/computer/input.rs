@@ -18,6 +18,7 @@ pub fn click_at(x: i32, y: i32, count: u32) -> Result<(), String> {
     for _ in 0..count.clamp(1, 2) {
         ok(e.button(Button::Left, Direction::Click))?;
     }
+    super::ring::clicked();
     Ok(())
 }
 

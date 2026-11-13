@@ -13,6 +13,7 @@ pub mod guard;
 mod grant;
 mod journal;
 pub mod plan;
+pub mod ring;
 pub(crate) mod tools;
 
 #[cfg(any(target_os = "macos", windows))]

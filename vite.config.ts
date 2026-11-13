@@ -28,6 +28,7 @@ export default defineConfig({
         result: resolve(__dirname, "result.html"),
         onboarding: resolve(__dirname, "onboarding.html"),
         live: resolve(__dirname, "live.html"),
+        ring: resolve(__dirname, "ring.html"),
       },
     },
   },

@@ -87,6 +87,25 @@
         "create": false
       },
       {
+        "label": "ring",
+        "title": "Pointcast ring",
+        "url": "ring.html",
+        "width": 44,
+        "height": 44,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "transparent": true,
+        "shadow": false,
+        "focus": false,
+        "focusable": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true,
+        "create": false
+      },
+      {
         "label": "live",
         "title": "Pointcast",
         "url": "live.html",

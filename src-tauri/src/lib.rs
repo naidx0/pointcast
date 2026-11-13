@@ -1822,8 +1822,10 @@ fn computer_server(svc: Arc<App>) -> Arc<dyn Fn() -> Result<String, String> + Se
     })
 }
 
-/// The Ask panel hears how the computer tools stand, and Esc while acting ends the turn.
+/// The Ask panel hears how the computer tools stand, Esc while acting ends the turn, and the pointer ring follows
+/// the pointer for as long as a turn acts.
 fn computer_hooks(app: &AppHandle) {
+    computer::ring::watch(app);
     let (status, stop) = (app.clone(), app.clone());
     computer::desk().set_hooks(computer::Hooks {
         status: Box::new(move |s| {

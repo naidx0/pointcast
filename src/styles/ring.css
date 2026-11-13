@@ -1,0 +1,64 @@
+/* The pointer ring (ring.html): one circle the computer/ring.rs window carries around the pointer while the AI acts.
+   Ink is the AI's accent, as on the Ask panel; nothing else is drawn, so the window is invisible but for the ring. */
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.ring {
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2.5px solid var(--accent);
+  box-shadow:
+    0 0 0 1.5px rgba(255, 255, 255, 0.55),
+    0 0 12px rgba(43, 85, 240, 0.35);
+  opacity: 0.85;
+  animation: ring-breathe 1.6s ease-in-out infinite;
+}
+html[data-theme="dark"] .ring {
+  box-shadow:
+    0 0 0 1.5px rgba(0, 0, 0, 0.5),
+    0 0 12px rgba(43, 85, 240, 0.45);
+}
+
+/* A click the AI made: one sharp pulse, then back to breathing. */
+.ring.clicked {
+  animation: ring-click 0.45s ease-out;
+}
+
+@keyframes ring-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(0.86);
+    opacity: 0.6;
+  }
+}
+
+@keyframes ring-click {
+  0% {
+    transform: scale(0.6);
+    opacity: 1;
+    border-width: 3.5px;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring,
+  .ring.clicked {
+    animation: none;
+  }
+}

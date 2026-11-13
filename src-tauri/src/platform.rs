@@ -42,7 +42,7 @@ fn ensure_with(app: &AppHandle, label: &str, init: Option<String>) -> Option<Web
 }
 
 /// The windows kept out of captures while that is on: the HUD and the overlay, and never the answer panel.
-const PROTECTED: [&str; 2] = ["indicator", "overlay"];
+const PROTECTED: [&str; 3] = ["indicator", "overlay", "ring"];
 
 /// The answer panel's window. It shows in every screen share and recording: nothing ever protects it.
 pub const PANEL: &str = "live";
@@ -902,7 +902,7 @@ mod tests {
     fn the_answer_panel_is_never_protected_from_captures_by_rust_or_by_its_own_page() {
         // `ensure_with` and `protect` apply protection only where `protects` says, and it never says the panel.
         assert!(!protects(PANEL) && !PROTECTED.contains(&PANEL));
-        assert!(protects("indicator") && protects("overlay"));
+        assert!(protects("indicator") && protects("overlay") && protects("ring"));
         assert!(!protects("settings") && !protects("result") && !protects("onboarding"));
         // The panel's page cannot ask for it either: no capability that reaches the panel grants that call.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
