@@ -6,6 +6,10 @@
 //! `pointcast_session` hand out the conversations with the assistant: a list, and one as markdown with its pictures
 //! as file links.
 //!
+//! While an Ask turn holds a computer grant (`computer::grant`), the computer tools (`pointcast_screen`,
+//! `pointcast_click` and the rest, see `computer/`) are listed and answered too; without one they are neither, so
+//! coding agents reading prompts never see them.
+//!
 //! The session holds screenshots, so only a local MCP client may read it: every request must
 //! carry this install's token as `Authorization: Bearer <token>`. Anything a browser sends is
 //! refused before the token is looked at: an `Origin` header (Pointcast's own windows never call
@@ -425,6 +429,11 @@ fn rpc_error(id: Value, code: i64, message: &str) -> String {
 /// error from the JSON-RPC and MCP specs (-32601 unknown method, -32602 bad params or unknown tool). A tool that runs
 /// but cannot do what was asked answers with an `isError` result the model reads.
 fn rpc(body: &str, latest: &Latest) -> (u16, String) {
+    rpc_on(body, latest, crate::computer::desk())
+}
+
+/// `rpc` with the computer tools of `desk`: the app's own, or a test's.
+fn rpc_on(body: &str, latest: &Latest, desk: &crate::computer::Desk) -> (u16, String) {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return (400, rpc_error(Value::Null, -32700, "parse error"));
     };
@@ -459,12 +468,26 @@ fn rpc(body: &str, latest: &Latest) -> (u16, String) {
             "serverInfo": { "name": "pointcast", "version": "0.1.0" }
         }),
         "ping" => json!({}),
-        "tools/list" | "list_tools" => json!({ "tools": tools() }),
+        "tools/list" | "list_tools" => {
+            let mut list = tools();
+            if desk.granted() {
+                if let (Some(all), Value::Array(more)) = (list.as_array_mut(), crate::computer::schemas()) {
+                    all.extend(more);
+                }
+            }
+            json!({ "tools": list })
+        }
         "tools/call" | "call_tool" => {
             let Some(name) = v.pointer("/params/name").and_then(|x| x.as_str()) else {
                 return (200, rpc_error(id, -32602, "invalid params: tools/call needs a tool name"));
             };
-            if !TOOL_NAMES.contains(&name) {
+            let computer = crate::computer::is_tool(name);
+            if computer && !desk.granted() {
+                // Refused as if it did not exist, and noted: only a live Ask turn opens these.
+                desk.journal.push("", name, "", crate::computer::Outcome::Refused("no grant".into()));
+                return (200, rpc_error(id, -32602, &format!("unknown tool: {name} (the computer tools exist only during an Ask turn that allows them)")));
+            }
+            if !computer && !TOOL_NAMES.contains(&name) {
                 return (200, rpc_error(id, -32602, &format!("unknown tool: {}", cut(name, 80))));
             }
             let args = match v.pointer("/params/arguments") {
@@ -472,10 +495,14 @@ fn rpc(body: &str, latest: &Latest) -> (u16, String) {
                 Some(a @ Value::Object(_)) => a.clone(),
                 Some(_) => return (200, rpc_error(id, -32602, "invalid params: arguments must be an object")),
             };
-            // A tool that cannot do what was asked answers with an error result the model reads, never a panic.
-            match call_tool(name, &args, latest) {
-                Ok(r) => r,
-                Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+            if computer {
+                crate::computer::call(desk, name, &args)
+            } else {
+                // A tool that cannot do what was asked answers with an error result the model reads, never a panic.
+                match call_tool(name, &args, latest) {
+                    Ok(r) => r,
+                    Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                }
             }
         }
         _ => return (200, rpc_error(id, -32601, "method not found")),
@@ -1171,6 +1198,49 @@ mod tests {
         assert_eq!(schema("pointcast_list")["properties"]["limit"]["type"], "integer");
         assert_eq!(schema("pointcast_session")["required"], json!(["id"]));
         assert_eq!(schema("pointcast_sessions")["properties"]["limit"]["type"], "integer");
+    }
+
+    #[test]
+    fn computer_tools_are_listed_and_answered_only_while_a_grant_is_live() {
+        use crate::computer::{fake, Desk, Outcome, UNTRUSTED};
+        let desk = Desk::new(Box::new(fake::mail()));
+        let latest = Latest::default();
+        let ask = |method: &str, params: Value| -> Value {
+            let body = json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params }).to_string();
+            serde_json::from_str(&rpc_on(&body, &latest, &desk).1).unwrap()
+        };
+        let names = |r: &Value| -> Vec<String> { r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect() };
+        let coding = names(&ask("tools/list", json!({})));
+        assert_eq!(coding.len(), 7, "{coding:?}");
+        assert!(coding.iter().all(|n| !n.starts_with("pointcast_") || TOOL_NAMES.contains(&n.as_str())));
+
+        // Without a grant: absent, and refused when called anyway.
+        for name in crate::computer::tools::NAMES {
+            assert!(!coding.contains(&name.to_string()), "{name}");
+            let r = ask("tools/call", json!({ "name": name, "arguments": {} }));
+            assert_eq!(r["error"]["code"], -32602, "{r}");
+            assert!(r["error"]["message"].as_str().unwrap().contains("Ask turn"), "{r}");
+        }
+        assert_eq!(desk.journal.entries().len(), 10);
+        assert!(desk.journal.entries().iter().all(|e| matches!(e.outcome, Outcome::Refused(_))));
+
+        // With one: listed after the coding tools, and answered with the untrusted line first.
+        let grant = desk.grants.grant(std::time::Duration::from_secs(60));
+        let both = names(&ask("tools/list", json!({})));
+        assert_eq!(&both[..7], &coding[..]);
+        assert_eq!(&both[7..], crate::computer::tools::NAMES.map(String::from));
+        let r = ask("tools/call", json!({ "name": "pointcast_elements", "arguments": {} }));
+        assert!(r.get("error").is_none(), "{r}");
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with(UNTRUSTED), "{r}");
+        assert_eq!(r["result"]["structuredContent"]["status"], "done");
+        // The coding tools answer as before.
+        let latest_call = ask("tools/call", json!({ "name": "pointcast_latest", "arguments": {} }));
+        assert!(latest_call.get("error").is_none() && latest_call["result"]["isError"] == true, "{latest_call}");
+
+        // The turn ends: gone again.
+        drop(grant);
+        assert_eq!(names(&ask("tools/list", json!({}))), coding);
+        assert_eq!(ask("tools/call", json!({ "name": "pointcast_click", "arguments": { "id": "x" } }))["error"]["code"], -32602);
     }
 
     #[test]

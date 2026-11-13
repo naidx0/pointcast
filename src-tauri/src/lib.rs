@@ -5,6 +5,7 @@ mod assist;
 mod capture;
 mod chord;
 mod clipboard;
+mod computer;
 mod element;
 mod history;
 mod image_ops;
