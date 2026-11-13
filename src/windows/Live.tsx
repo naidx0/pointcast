@@ -1,6 +1,8 @@
 import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from "react";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
 import {
+  computerAnswer,
+  computerStatus,
   inTauri,
   liveAskTyped,
   liveClose,
@@ -16,6 +18,7 @@ import {
   liveTakePicture,
   liveState,
   liveStop,
+  onComputerStatus,
   onListAsk,
   onLiveDelta,
   onLiveLevel,
@@ -37,6 +40,8 @@ import {
   summaryMake,
   summaryStop,
   takeListAsk,
+  type ComputerCard,
+  type ComputerStatus,
 } from "@/lib/api";
 import {
   ENDED_MS,
@@ -248,6 +253,20 @@ export function Live() {
     const id = setTimeout(() => liveClose().catch(noop), ENDED_MS);
     return () => clearTimeout(id);
   }, [v.hide, m.snap.turn]);
+
+  // The AI acting on the computer: an accent border, the app it acts in, and the card it waits on.
+  const [pc, setPc] = useState<ComputerStatus>({ acting: false, app: null, card: null });
+  useEffect(() => {
+    let live = true;
+    computerStatus()
+      .then((s) => live && setPc(s))
+      .catch(noop);
+    const off = subscribe(onComputerStatus(setPc));
+    return () => {
+      live = false;
+      off();
+    };
+  }, []);
 
   // An answer being read aloud: the first Esc only silences it.
   const [speaking, setSpeaking] = useState(false);
@@ -478,7 +497,14 @@ export function Live() {
         ) : null}
         {v.note ? <p className="live-note live-in">{v.note}</p> : null}
         {v.error ? <ErrorLine err={v.error} /> : null}
+        {pc.acting ? (
+          <p className="live-acting live-in" role="status">
+            {pc.app ? `Acting in ${pc.app}` : "Acting on your computer"} · Esc stops
+          </p>
+        ) : null}
+        {pc.card ? <AskFirst card={pc.card} /> : null}
         {asked && m.text ? <Answer text={m.text} phase={v.phase} tone={v.tone} /> : null}
+        {v.complete && m.snap.acts?.length ? <Acts lines={m.snap.acts} /> : null}
         {v.complete && m.text ? <TurnFoot text={m.text} line={sentLine(v)} sent={sentOf === turnN} toggleSent={() => toggleSent(turnN)} /> : null}
         {/* Summarize stays under the answer's foot; what was sent opens below it, so it never reads as a row of that list. */}
         {v.complete && offerSummary ? (
@@ -494,7 +520,7 @@ export function Live() {
     </>
   );
   return (
-    <div className={`live drag-self phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}`} ref={root} aria-label="Prompt with your screen">
+    <div className={`live drag-self phase-${v.phase}${multi ? " multi" : ""}${v.empty ? " empty" : ""}${answered ? " answered" : ""}${pc.acting ? " acting" : ""}`} ref={root} aria-label="Prompt with your screen">
       <header className="live-head drag">
         {sheet ? (
           <PressButton className="live-back" title="Back to this session" aria-label="Back to this session" act={() => setSheet(false)}>
@@ -717,11 +743,52 @@ function EarlierTurn({
       {open ? (
         <div className="live-prev-a">
           {r.answer ? <Answer text={r.answer} phase="shown" tone="quiet" /> : <p className="live-note">{r.error || r.note}</p>}
+          {r.acts?.length ? <Acts lines={r.acts} /> : null}
           <TurnFoot text={r.answer} line={line} sent={sent} toggleSent={toggleSent} />
         </div>
       ) : null}
       {sent ? <SentPanel turn={r.n} close={toggleSent} /> : null}
     </li>
+  );
+}
+
+/** The AI waits on the person: what is about to happen, in which app, and Do it (or Allow in the app) and Cancel. */
+function AskFirst({ card }: { card: ComputerCard }) {
+  const [why, setWhy] = useState("");
+  const answer = (a: "do" | "cancel" | "allow") => computerAnswer(card.id, a).catch((e) => setWhy(plain(e)));
+  return (
+    <div className="live-ask live-in" role="alertdialog" aria-label={`The AI asks first, in ${card.app}`}>
+      <p className="live-ask-what">{card.what}</p>
+      <p className="live-ask-app">
+        {card.raise ? `${card.app} lets the AI ${card.raise === "full" ? "only click" : "only look"} for now.` : `In ${card.app}. Nothing happens until you say so.`}
+      </p>
+      <div className="live-ask-row">
+        {card.raise ? (
+          <PressButton className="live-pill live-ask-yes" act={() => answer("allow")}>
+            Allow in {card.app}
+          </PressButton>
+        ) : (
+          <PressButton className="live-pill live-ask-yes" act={() => answer("do")}>
+            Do it
+          </PressButton>
+        )}
+        <PressButton className="live-pill" act={() => answer("cancel")}>
+          Cancel
+        </PressButton>
+      </div>
+      {why ? <p className="live-note">{why}</p> : null}
+    </div>
+  );
+}
+
+/** Under an answer: what the AI did on the computer, one quiet line each. */
+function Acts({ lines }: { lines: string[] }) {
+  return (
+    <ul className="live-acts live-in" aria-label="What the AI did on your computer">
+      {lines.map((l, i) => (
+        <li key={i}>{l}</li>
+      ))}
+    </ul>
   );
 }
 

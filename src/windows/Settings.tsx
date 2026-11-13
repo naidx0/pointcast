@@ -206,7 +206,7 @@ export function Settings() {
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
-            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} />
+            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={<SeeAndAct cfg={cfg} patch={patch} />} />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -757,7 +757,7 @@ const plain = (e: unknown) => String(e).replace(/^Error: */, "");
 
 /** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
  * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
-function Ai({ talk }: { talk?: ReactNode }) {
+function Ai({ talk, seeAndAct }: { talk?: ReactNode; seeAndAct?: ReactNode }) {
   const [a, setA] = useState<Assist | null>(null);
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -974,6 +974,7 @@ function Ai({ talk }: { talk?: ReactNode }) {
             <Seg label="Speed" value={speed.value} options={speed.options} set={(v) => run("speed", () => assistSpeed(v))} />
           </Row>
         ) : null}
+        {seeAndAct}
         <Row
           label="Only on this computer"
           sub={
@@ -1075,6 +1076,36 @@ function Ai({ talk }: { talk?: ReactNode }) {
 }
 
 /** Talk back: Ask's answers read aloud with a voice of this computer, as they come in. */
+/** Let the AI see and act: off until the person turns it on, one plain sentence of what that means, and the apps they
+ * allowed from the panel's card, which they can forget. */
+function SeeAndAct({ cfg, patch }: { cfg: Config; patch: Patch }) {
+  const on = !!cfg.computer_use;
+  const apps = Object.entries(cfg.computer_trust ?? {});
+  const word = (t: string) => (t === "full" ? "click and type" : t === "click" ? "click" : "look only");
+  return (
+    <Row
+      label="Let the AI see and act"
+      sub={
+        <>
+          When you ask, Claude can look at your screen and click and type in the apps you allow, one step at a time while you watch. It asks before
+          anything that can't be undone, and Esc stops it.
+          {apps.length ? (
+            <>
+              {" "}
+              {apps.map(([app, t]) => `${app}: ${word(t)}`).join(", ")}.{" "}
+              <button type="button" className="link" onClick={() => patch({ computer_trust: null })}>
+                Forget these
+              </button>
+            </>
+          ) : null}
+        </>
+      }
+    >
+      <Toggle label="Let the AI see and act" on={on} set={(v) => patch({ computer_use: v })} />
+    </Row>
+  );
+}
+
 function TalkBack({ cfg, patch }: { cfg: Config; patch: Patch }) {
   const [voices, setVoices] = useState<SpeakVoice[] | null>(null);
   const [why, setWhy] = useState<string | null>(null);

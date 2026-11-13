@@ -3,6 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CLOSED,
+  actsOf,
+  normalizeSnapshot,
   PREVIEW_ANSWER,
   SLOW_MS,
   STALL_MS,
@@ -454,4 +456,14 @@ test("the saved size is read back only when it is a real size", () => {
   assert.deepEqual(parsePanelSize('{"w":640,"h":520}'), { w: 640, h: 520 });
   assert.deepEqual(parsePanelSize('{"w":640}'), { w: 640, h: null });
   for (const bad of [null, "", "nope", "[]", '{"w":"wide"}', '{"w":-3,"h":0}']) assert.equal(parsePanelSize(bad), null, String(bad));
+});
+
+test("what the AI did on the computer rides on a turn and on the snapshot only when there is some", () => {
+  assert.deepEqual(actsOf(["Clicked button \"Send\" in Mail", 3, "", null, "Opened TextEdit"]), ["Clicked button \"Send\" in Mail", "Opened TextEdit"]);
+  assert.deepEqual(actsOf("Opened TextEdit"), []);
+  const s = normalizeSnapshot({ state: "shown", acts: ["Opened TextEdit"], turns: [{ n: 1, question: "q", answer: "a", acts: ["Typed into text area in TextEdit"] }, { n: 2, question: "q2", answer: "a2" }] });
+  assert.deepEqual(s.acts, ["Opened TextEdit"]);
+  assert.deepEqual(s.turns[0].acts, ["Typed into text area in TextEdit"]);
+  assert.equal("acts" in s.turns[1], false, "a turn that did nothing reads as it always did");
+  assert.equal("acts" in normalizeSnapshot({ state: "shown" }), false);
 });

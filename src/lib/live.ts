@@ -21,6 +21,8 @@ export type LiveTurn = {
   /** Why it was not answered, as one line; null when it was. */
   error: string | null;
   at_ms: number;
+  /** What the AI did on the computer while it answered, one plain line each ("Clicked button "Send" in Mail"). */
+  acts?: string[];
 };
 
 /** The payload of `live://state` and the reply of `live_state`. */
@@ -53,6 +55,8 @@ export type LiveSnapshot = {
   thinking?: boolean;
   /** The answer so far, if the engine sends it with the snapshot (a window opened mid-answer). Optional. */
   answer?: string;
+  /** What the AI did on the computer for the turn in the fields above, once it ended. */
+  acts?: string[];
 };
 
 export type NoPicture = "not_allowed" | "failed";
@@ -130,6 +134,7 @@ export function normalizeTurns(raw: unknown): LiveTurn[] {
       stopped: u.stopped === true,
       error: errorLine(u.error),
       at_ms: typeof u.at_ms === "number" && Number.isFinite(u.at_ms) ? u.at_ms : 0,
+      ...withActs(u.acts),
     });
   });
   return [...by.values()].sort((a, b) => a.n - b.n);
@@ -158,7 +163,19 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     error: v.error ?? null,
     thinking: v.thinking === true,
     answer: typeof v.answer === "string" ? v.answer : undefined,
+    ...withActs((v as { acts?: unknown }).acts),
   };
+}
+
+/** `acts` only when the AI did something on the computer, so a turn without any reads as it always did. */
+function withActs(raw: unknown): { acts?: string[] } {
+  const acts = actsOf(raw);
+  return acts.length ? { acts } : {};
+}
+
+/** The lines of what the AI did, whatever arrived: strings only, none when there are none. */
+export function actsOf(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((a): a is string => typeof a === "string" && a.trim() !== "") : [];
 }
 
 export function liveReduce(m: LiveModel, a: LiveAction): LiveModel {

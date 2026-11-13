@@ -21,6 +21,8 @@ export type TurnRow = {
   /** Why it was not answered, when the engine said. */
   error: string;
   at_ms: number;
+  /** What the AI did on the computer while it answered, one line each. */
+  acts?: string[];
 };
 
 export function turnRow(t: LiveTurn): TurnRow {
@@ -28,7 +30,7 @@ export function turnRow(t: LiveTurn): TurnRow {
   const picture = safePicture(t.picture);
   const line = question || (picture ? "A picture, without words" : "No words");
   const note = t.error ? "Not answered" : t.stopped ? "Stopped" : t.answer.trim() ? "" : "No answer";
-  return { n: t.n, line, question, answer: t.answer, picture, note, error: t.error ?? "", at_ms: t.at_ms };
+  return { n: t.n, line, question, answer: t.answer, picture, note, error: t.error ?? "", at_ms: t.at_ms, ...(t.acts?.length ? { acts: t.acts } : {}) };
 }
 
 /** The rows above the open turn, oldest first. */

@@ -185,6 +185,9 @@ export type Config = {
   free_memory_minutes?: number;
   /** Read Ask's answers aloud as they stream in. Off when absent. */
   speak_answers?: boolean;
+  /** Let the AI see and act (off by default), and each app's tier the person chose: view, click or full. */
+  computer_use?: boolean;
+  computer_trust?: Record<string, string>;
   /** The voice answers are read in, by the system's id for it; null is the system's own choice. */
   speak_voice?: string | null;
   /** How fast answers are read, 1 being normal. Treated as 1 when absent. */
@@ -500,6 +503,18 @@ const on =
     inTauri ? listen<T>(name, (e) => fn(e.payload)) : Promise.resolve(() => undefined);
 
 export const onState = on<UiState>("session://state");
+
+/** A card the AI waits on: what is about to happen, in which app, and the tier "Allow in <app>" raises it to (null on a
+ * card that asks for a yes). */
+export type ComputerCard = { id: number; app: string; tool: string; what: string; raise: "click" | "full" | null };
+/** How the computer tools stand: an Ask turn holds them, the app it acted in last, the card waiting for the person. */
+export type ComputerStatus = { acting: boolean; app: string | null; card: ComputerCard | null };
+const NOT_ACTING: ComputerStatus = { acting: false, app: null, card: null };
+export const computerStatus = (): Promise<ComputerStatus> => (inTauri ? invoke<ComputerStatus>("computer_status") : Promise.resolve(NOT_ACTING));
+export const onComputerStatus = on<ComputerStatus>("computer://status");
+/** The person's answer on the card. "allow" also keeps the app's new tier in Settings. */
+export const computerAnswer = (id: number, answer: "do" | "cancel" | "allow") =>
+  inTauri ? invoke<void>("computer_answer", { id, answer }) : Promise.resolve();
 export const onResult = on<SessionExport>("session://result");
 export const onPracticeResult = on<SessionExport>("practice://result");
 /** The session shortcut while the overlay is open: capture what is marked, then finish the recording. */

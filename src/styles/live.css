@@ -1618,3 +1618,59 @@ html.live-preview.vibrant .live {
   justify-content: flex-end;
   padding-top: 8px;
 }
+
+/* The AI acting on the computer: an accent border round the panel, one quiet line, and the card it waits on. */
+.live.acting {
+  box-shadow: inset 0 0 0 2px var(--live-accent);
+}
+.live-acting {
+  margin: 8px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-accent-text);
+}
+.live-ask {
+  margin-top: 12px;
+  padding: 12px;
+  border: 0.5px solid var(--sep);
+  border-radius: 12px;
+  background: var(--fill);
+}
+html.win .live-ask {
+  border-width: 1px;
+  border-radius: var(--r-box);
+}
+.live-ask-what {
+  margin: 0;
+  color: var(--live-ink);
+}
+.live-ask-app {
+  margin: 4px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-ask-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.live-pill.live-ask-yes {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.live-pill.live-ask-yes:hover {
+  background: var(--accent-press);
+}
+.live-acts {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  color: var(--live-quiet);
+}
+.live-acts li + li {
+  margin-top: 2px;
+}
