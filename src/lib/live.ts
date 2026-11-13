@@ -516,11 +516,47 @@ export const ANSWER_MIN_H = 400;
 export const PANEL_MAX_SHARE = 0.6;
 
 /** The height the panel asks for: its content's, at least ANSWER_MIN_H while an answer shows, and never more than
- * PANEL_MAX_SHARE of the screen. */
-export function panelHeight(content: number, screenH: number, answer: boolean): number {
+ * PANEL_MAX_SHARE of the screen. Once the person dragged it, an answer shows at their `chosen` height instead. */
+export function panelHeight(content: number, screenH: number, answer: boolean, chosen?: number | null): number {
+  if (answer && chosen != null && Number.isFinite(chosen) && chosen > 0) return chosenHeight(chosen, screenH);
   const most = Math.round(Math.max(0, screenH) * PANEL_MAX_SHARE);
   const want = Math.max(0, Number.isFinite(content) ? content : 0);
   return Math.min(most, answer ? Math.max(want, ANSWER_MIN_H) : want);
+}
+
+/** The narrowest and widest the person can drag the panel, and the shortest an answer can be made. */
+export const PANEL_MIN_W = 380;
+export const PANEL_MAX_W = 900;
+export const PANEL_MIN_H = 200;
+/** The space kept between the panel and the screen's edges (platform.rs PANEL_MARGIN), on both sides. */
+const EDGES = 24;
+
+/** The panel's width: the one the person chose, readable and on screen; PANEL_W until they choose. */
+export function panelWidth(chosen: number | null | undefined, screenW: number): number {
+  const w = chosen != null && Number.isFinite(chosen) ? Math.round(chosen) : PANEL_W;
+  return Math.max(0, Math.min(Math.max(PANEL_MIN_W, w), PANEL_MAX_W, Math.round(screenW) - EDGES));
+}
+
+/** An answer's height once the person chose one: that height, readable and on screen. Past PANEL_MAX_SHARE is fine. */
+function chosenHeight(chosen: number, screenH: number): number {
+  return Math.max(0, Math.min(Math.max(PANEL_MIN_H, Math.round(chosen)), Math.round(screenH) - EDGES));
+}
+
+/** The size while the corner grip (bottom left) is dragged by (dx, dy): the panel stays docked at the top right, so
+ * dragging left widens it and dragging down makes it taller. */
+export function dragSize(start: { w: number; h: number }, dx: number, dy: number, screen: { w: number; h: number }) {
+  return { w: panelWidth(start.w - dx, screen.w), h: chosenHeight(start.h + dy, screen.h) };
+}
+
+/** The size the person last chose, as saved; null when nothing real was saved. */
+export function parsePanelSize(raw: string | null): { w: number; h: number | null } | null {
+  try {
+    const v = raw ? JSON.parse(raw) : null;
+    if (!v || typeof v !== "object" || Array.isArray(v) || typeof v.w !== "number" || !(v.w > 0)) return null;
+    return { w: v.w, h: typeof v.h === "number" && v.h > 0 ? v.h : null };
+  } catch {
+    return null;
+  }
 }
 
 /** How long "Not sent" stays before the panel hides. */

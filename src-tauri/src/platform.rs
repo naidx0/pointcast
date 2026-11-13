@@ -302,13 +302,27 @@ fn place_panel(w: &tauri::Window, spot: (f64, f64, f64, f64), scale: f64) {
     }
 }
 
+/// The narrowest and widest the person can drag the panel (live.ts PANEL_MIN_W, PANEL_MAX_W).
+pub const PANEL_MIN_WIDTH: f64 = 380.0;
+pub const PANEL_MAX_WIDTH: f64 = 900.0;
+
+/// The width the panel keeps: the one its page last set (the person may have dragged it), within the panel's limits;
+/// `PANEL_WIDTH` when the window has no width yet.
+pub fn panel_width(now: f64) -> f64 {
+    if now.is_finite() && now > 0.0 {
+        now.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH)
+    } else {
+        PANEL_WIDTH
+    }
+}
+
 /// The panel's page set a new height: keep it docked at the top right of its screen. AppKit keeps a window's bottom
 /// edge where it was when it is resized, so on a Mac the panel would otherwise grow upward.
 pub fn redock_panel(w: &tauri::Window) {
     let Ok(Some(m)) = w.current_monitor() else { return };
     let (wa, s) = (m.work_area(), m.scale_factor());
-    let high = w.inner_size().map(|z| z.height as f64 / s).unwrap_or(0.0);
-    place_panel(w, panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN, high), s);
+    let (wide, high) = w.inner_size().map(|z| (z.width as f64 / s, z.height as f64 / s)).unwrap_or((0.0, 0.0));
+    place_panel(w, panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, panel_width(wide), PANEL_MARGIN, high), s);
 }
 
 /// Show the answer panel at the right edge of the pointer's screen, without taking focus from the app being asked about.
@@ -320,9 +334,10 @@ pub fn show_panel(app: &AppHandle) {
     if let Some(m) = pointer_monitor(app) {
         let wa = m.work_area();
         let s = m.scale_factor();
-        let high = w.inner_size().map(|z| z.height as f64 / w.scale_factor().unwrap_or(s)).unwrap_or(0.0);
+        let own = w.scale_factor().unwrap_or(s);
+        let (wide, high) = w.inner_size().map(|z| (z.width as f64 / own, z.height as f64 / own)).unwrap_or((0.0, 0.0));
         let high = opening_height(w.is_visible().unwrap_or(false), high);
-        let spot = panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, PANEL_WIDTH, PANEL_MARGIN, high);
+        let spot = panel_fit((wa.position.x, wa.position.y, wa.size.width, wa.size.height), s, panel_width(wide), PANEL_MARGIN, high);
         place_panel(&w.as_ref().window(), spot, s);
     }
     if !cfg!(target_os = "macos") {
@@ -737,6 +752,8 @@ mod tests {
         let near = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| [a.0 - b.0, a.1 - b.1, a.2 - b.2, a.3 - b.3].iter().all(|d| d.abs() < 1e-6);
         // About 500 x 120 logical: the header and the listening row, nothing empty below.
         assert_eq!((PANEL_WIDTH, PANEL_START), (500.0, 120.0));
+        // The person can drag it wider or narrower; it keeps that width within the panel's limits.
+        assert_eq!((panel_width(640.0), panel_width(100.0), panel_width(5000.0), panel_width(0.0), panel_width(f64::NAN)), (640.0, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, PANEL_WIDTH, PANEL_WIDTH));
         assert_eq!((opening_height(false, 649.0), opening_height(true, 300.0)), (PANEL_START, 300.0));
         // The owner's 1080p screen under its taskbar: docked 12 px in from the top right, 120 tall, not 649.
         let area = (0, 0, 1920, 1040);

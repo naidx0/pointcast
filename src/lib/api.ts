@@ -681,9 +681,27 @@ export function onListAsk(fn: () => void): () => void {
 }
 /** Every error that asks for Settings is about the AI: Settings opens on that pane. */
 export const liveOpenSettings = () => settingsOpenOn("ai");
-/** The panel's height follows its content; the window keeps its width and place (Rust docks it). */
-export const liveFit = (height: number) =>
-  inTauri ? getCurrentWindow().setSize(new LogicalSize(PANEL_W, Math.round(height))) : Promise.resolve();
+/** The panel's height follows its content, at the width the person chose; Rust keeps it docked at the top right. */
+export const liveFit = (height: number, width: number = PANEL_W) =>
+  inTauri ? getCurrentWindow().setSize(new LogicalSize(Math.round(width), Math.round(height))) : Promise.resolve();
+
+/** The Ask panel's size as the person last dragged it; it lives in this computer's page storage. */
+const PANEL_SIZE_KEY = "pointcast.panelSize";
+export function panelSizeRead(): string | null {
+  try {
+    return localStorage.getItem(PANEL_SIZE_KEY);
+  } catch {
+    return null;
+  }
+}
+export function panelSizeSave(size: { w: number; h: number | null } | null) {
+  try {
+    if (size) localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(size));
+    else localStorage.removeItem(PANEL_SIZE_KEY);
+  } catch {
+    /* nothing to keep it in: it lasts until the panel closes */
+  }
+}
 
 function pvCommand(c: "drop" | "stop" | "close" | "retry"): Promise<void> {
   const s = livePv.snap;

@@ -1,4 +1,4 @@
-import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, createElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from "react";
 import { ArrowUp, Check, ChevronRight, Copy, ImagePlus, MessagesSquare, PenLine, Plus, ScrollText, Square, X } from "lucide-react";
 import {
   inTauri,
@@ -6,6 +6,8 @@ import {
   liveClose,
   liveDropPicture,
   liveFit,
+  panelSizeRead,
+  panelSizeSave,
   liveMark,
   liveOpenSettings,
   permissionOpen,
@@ -35,6 +37,9 @@ import {
 } from "@/lib/api";
 import {
   ENDED_MS,
+  dragSize,
+  panelWidth,
+  parsePanelSize,
   initialLive,
   isPinned,
   liveReduce,
@@ -340,20 +345,27 @@ export function Live() {
   // once an answer shows (Tauri only; the preview lays out by CSS). The scrolling body counts at its content's height.
   const answered = !v.compact && (v.phase === "answering" || v.phase === "shown") && !v.empty;
   const root = useRef<HTMLDivElement>(null);
-  const lastFit = useRef(0);
+  const lastFit = useRef("");
+  // The size the person dragged the panel to (the corner grip): its width always, its height once it shows more than
+  // the listening row. Kept across launches.
+  const [size, setSize] = useState(() => parsePanelSize(panelSizeRead()));
+  const dragging = useRef(false);
+  const width = panelWidth(size?.w, screen.availWidth);
   useEffect(() => {
     const r = root.current;
     if (!inTauri || !r) return;
     const fit = () => {
       let want = 0;
+      if (dragging.current) return;
       for (const c of Array.from(r.children) as HTMLElement[]) {
-        if (c.classList.contains("live-sr")) continue;
+        if (c.classList.contains("live-sr") || c.classList.contains("live-grip")) continue;
         want += c.classList.contains("live-body") ? ((c.firstElementChild as HTMLElement | null)?.offsetHeight ?? 0) : c.offsetHeight;
       }
-      want = panelHeight(want, screen.availHeight, answered);
-      if (want > 0 && want !== lastFit.current) {
-        lastFit.current = want;
-        liveFit(want).catch(noop);
+      const chosen = !v.compact && size?.h != null;
+      want = panelHeight(want, screen.availHeight, answered || chosen, size?.h);
+      if (want > 0 && `${width}x${want}` !== lastFit.current) {
+        lastFit.current = `${width}x${want}`;
+        liveFit(want, width).catch(noop);
       }
     };
     const ro = new ResizeObserver(fit);
@@ -361,7 +373,7 @@ export function Live() {
     for (const c of Array.from(r.querySelectorAll(".live > *, .live-inner"))) ro.observe(c);
     fit();
     return () => ro.disconnect();
-  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty, answered]);
+  }, [v.phase, v.compact, big, !!v.thumb, !!v.label, sheet, showField, sumOpen, v.empty, answered, width, size?.h]);
 
   if (v.phase === "closed") return <div className="live closed" ref={root} />;
 
@@ -542,7 +554,68 @@ export function Live() {
         </footer>
       ) : null}
       {sr}
+      <Grip
+        drag={(on) => (dragging.current = on)}
+        resize={(w, h) => liveFit(h, w).catch(noop)}
+        done={(next) => {
+          lastFit.current = "";
+          setSize(next);
+          panelSizeSave(next);
+        }}
+      />
     </div>
+  );
+}
+
+/** The corner grip at the panel's bottom left: drag it to make the panel wider (it stays docked at the right edge) or
+ * taller; the arrow keys do the same in 20 px steps, and a double click goes back to the usual size. */
+function Grip({ drag, resize, done }: { drag: (on: boolean) => void; resize: (w: number, h: number) => void; done: (s: { w: number; h: number | null } | null) => void }) {
+  const from = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const at = useRef({ w: 0, h: 0 });
+  const frame = useRef(0);
+  const scr = () => ({ w: screen.availWidth, h: screen.availHeight });
+  const move = (e: RPointerEvent) => {
+    const f = from.current;
+    if (!f) return;
+    at.current = dragSize(f, e.screenX - f.x, e.screenY - f.y, scr());
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => resize(at.current.w, at.current.h));
+  };
+  const end = (e: RPointerEvent) => {
+    if (!from.current) return;
+    from.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    drag(false);
+    done({ ...at.current });
+  };
+  return (
+    <div
+      className="live-grip"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the panel"
+      title="Drag to resize · double-click for the usual size"
+      tabIndex={0}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        from.current = { x: e.screenX, y: e.screenY, w: window.innerWidth, h: window.innerHeight };
+        at.current = { w: window.innerWidth, h: window.innerHeight };
+        drag(true);
+      }}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onDoubleClick={() => done(null)}
+      onKeyDown={(e) => {
+        const step = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[e.key];
+        if (!step) return;
+        e.preventDefault();
+        e.stopPropagation();
+        done(dragSize({ w: window.innerWidth, h: window.innerHeight }, step[0], step[1], scr()));
+      }}
+    />
   );
 }
 

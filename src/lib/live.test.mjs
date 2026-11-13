@@ -420,3 +420,38 @@ test("a question with no picture of the screen says so, with Allow only when a p
   assert.equal(blind("discarded", "not_allowed").noPicture, null);
   assert.equal(noPictureView(undefined), null);
 });
+
+import { PANEL_MAX_W, PANEL_MIN_H, PANEL_MIN_W, dragSize, panelWidth, parsePanelSize } from "./live.ts";
+
+test("the Ask panel can be resized: its width stays readable and on screen", () => {
+  assert.deepEqual([PANEL_MIN_W, PANEL_MAX_W], [380, 900], "as platform.rs PANEL_MIN_WIDTH and PANEL_MAX_WIDTH");
+  assert.equal(panelWidth(undefined, 1512), PANEL_W, "no choice yet: the default width");
+  assert.equal(panelWidth(NaN, 1512), PANEL_W);
+  assert.equal(panelWidth(640.4, 1512), 640);
+  assert.equal(panelWidth(100, 1512), PANEL_MIN_W, "never too narrow to read");
+  assert.equal(panelWidth(5000, 3000), PANEL_MAX_W, "never wider than a reading column");
+  assert.equal(panelWidth(900, 600), 576, "never past the screen's edge margins");
+});
+
+test("a chosen height is the answer's height; the listening row still fits its one row", () => {
+  assert.equal(panelHeight(96, 1040, false, 700), 96, "listening: still one row");
+  assert.equal(panelHeight(180, 1040, true, 700), 700, "a short answer opens at the chosen height");
+  assert.equal(panelHeight(2000, 1040, true, 700), 700, "a long one scrolls inside the chosen height");
+  assert.equal(panelHeight(2000, 1040, true, 900), 900, "a chosen height may pass 60 % of the screen");
+  assert.equal(panelHeight(500, 1040, true, 50), PANEL_MIN_H, "never too short to read");
+  assert.equal(panelHeight(500, 600, true, 5000), 576, "never past the screen");
+  assert.equal(panelHeight(500, 1040, true, null), 500, "no choice: as before");
+});
+
+test("dragging the corner grip: left widens (the panel stays docked right), down makes it taller", () => {
+  const screen = { w: 1512, h: 945 };
+  assert.deepEqual(dragSize({ w: 500, h: 400 }, -120, 80, screen), { w: 620, h: 480 });
+  assert.deepEqual(dragSize({ w: 500, h: 400 }, 400, -400, screen), { w: PANEL_MIN_W, h: PANEL_MIN_H });
+  assert.deepEqual(dragSize({ w: 500, h: 400 }, -2000, 2000, screen), { w: PANEL_MAX_W, h: Math.round(945 - 24) });
+});
+
+test("the saved size is read back only when it is a real size", () => {
+  assert.deepEqual(parsePanelSize('{"w":640,"h":520}'), { w: 640, h: 520 });
+  assert.deepEqual(parsePanelSize('{"w":640}'), { w: 640, h: null });
+  for (const bad of [null, "", "nope", "[]", '{"w":"wide"}', '{"w":-3,"h":0}']) assert.equal(parsePanelSize(bad), null, String(bad));
+});
