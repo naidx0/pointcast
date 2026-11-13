@@ -182,8 +182,8 @@ function BreathWave({ className, tone, height, levels }: { className: string; to
           <defs>
             <linearGradient id={`${fade}-g`} x1="0" x2="1" y1="0" y2="0">
               <stop offset="0" stopColor="#fff" stopOpacity="0" />
-              <stop offset="0.14" stopColor="#fff" stopOpacity="1" />
-              <stop offset="0.86" stopColor="#fff" stopOpacity="1" />
+              <stop offset="0.08" stopColor="#fff" stopOpacity="1" />
+              <stop offset="0.92" stopColor="#fff" stopOpacity="1" />
               <stop offset="1" stopColor="#fff" stopOpacity="0" />
             </linearGradient>
             <mask id={fade} maskUnits="userSpaceOnUse" x="0" y="0" width={w} height={height}>
