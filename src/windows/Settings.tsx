@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -48,13 +48,6 @@ import {
   takePaneAsk,
   updateCheck,
   updateInstall,
-  winClose,
-  winIsDecorated,
-  winIsMaximized,
-  winMinimize,
-  winStartDragging,
-  winToggleMaximize,
-  onWinResized,
   windowOpen,
   type AgentId,
   type Agents,
@@ -95,6 +88,7 @@ import {
   type RouteView,
 } from "@/lib/assist";
 import { Backdrop } from "@/components/Backdrop";
+import { TitleBar, dragWindow, useFrameless } from "@/components/WinBar";
 
 const PANES = [
   { id: "home", name: "Home", icon: House, tile: "tile-teal" },
@@ -108,67 +102,6 @@ const PANES = [
 ] as const;
 type Pane = (typeof PANES)[number]["id"];
 
-/** A press on the bar itself (not on a button in it) moves the window; a double press maximizes or restores it, as a
- * Windows title bar does. */
-function dragWindow(e: ReactMouseEvent) {
-  if (e.button !== 0 || e.target !== e.currentTarget) return;
-  (e.detail === 2 ? winToggleMaximize() : winStartDragging()).catch(() => undefined);
-}
-
-/** Windows: the slim bar across the top of the content, with Minimize, Maximize or Restore, and Close at Windows 11's
- * sizes and colours. No title and no icon: the sidebar already shows the app. */
-function TitleBar() {
-  const [max, setMax] = useState(false);
-  const [active, setActive] = useState(true);
-  useEffect(() => {
-    const sync = () => {
-      winIsMaximized()
-        .then(setMax)
-        .catch(() => undefined);
-    };
-    sync();
-    const off = subscribe(onWinResized(sync));
-    const focus = () => setActive(document.hasFocus());
-    focus();
-    window.addEventListener("focus", focus);
-    window.addEventListener("blur", focus);
-    return () => {
-      off();
-      window.removeEventListener("focus", focus);
-      window.removeEventListener("blur", focus);
-    };
-  }, []);
-  const run = (f: () => Promise<void>) => () => {
-    f().catch(() => undefined);
-  };
-  return (
-    <div className={`win-bar${active ? "" : " inactive"}`} onMouseDown={dragWindow}>
-      <button type="button" className="win-cap" aria-label="Minimize" title="Minimize" onClick={run(winMinimize)}>
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 5.5H10" />
-        </svg>
-      </button>
-      <button type="button" className="win-cap" aria-label={max ? "Restore" : "Maximize"} title={max ? "Restore" : "Maximize"} onClick={run(winToggleMaximize)}>
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          {max ? (
-            <>
-              <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
-              <path d="M2.5 2.5V1.5C2.5 0.95 2.95 0.5 3.5 0.5H8.5C9.05 0.5 9.5 0.95 9.5 1.5V6.5C9.5 7.05 9.05 7.5 8.5 7.5H7.5" />
-            </>
-          ) : (
-            <rect x="0.5" y="0.5" width="9" height="9" rx="1" />
-          )}
-        </svg>
-      </button>
-      <button type="button" className="win-cap close" aria-label="Close" title="Close" onClick={run(winClose)}>
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0.5 0.5L9.5 9.5M9.5 0.5L0.5 9.5" />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
 /** A pane by its id; "usage" names the pane Home took over, so an old link still lands. */
 const paneOf = (q: string | null): Pane | null => (q === "usage" ? "home" : PANES.some((p) => p.id === q) ? (q as Pane) : null);
 
@@ -181,22 +114,23 @@ export function Settings() {
   const { cfg, setCfg, patch, refresh, error } = useConfig();
   const [pane, setPane] = useState<Pane>(() => paneOf(new URLSearchParams(location.search).get("pane")) ?? askedPane ?? "home");
   const [scrolled, setScrolled] = useState(false);
+  // Once the page scrolls, the Windows buttons get a frosted strip, so the page never runs under bare buttons.
+  const [pastBand, setPastBand] = useState(false);
+  const onScroll = (top: number) => {
+    setScrolled(top > 4);
+    setPastBand(top > 4);
+  };
   const main = useRef<HTMLElement | null>(null);
   const mac = platform() === "mac";
   const cur = PANES.find((p) => p.id === pane)!;
-  // On Windows the window has no frame of its own (the engine makes it so): the page draws a slim bar with the window's
-  // buttons. If the OS still draws the frame, nothing is drawn twice.
-  const [frameless, setFrameless] = useState(false);
-  useEffect(() => {
-    if (mac) return;
-    winIsDecorated()
-      .then((d) => setFrameless(!d))
-      .catch(() => setFrameless(true));
-  }, [mac]);
+  // On Windows the window has no frame of its own (the engine makes it so): the page draws the window's buttons, on the
+  // Glacier band. If the OS still draws the frame, nothing is drawn twice.
+  const frameless = useFrameless();
 
   useEffect(() => {
     main.current?.scrollTo({ top: 0 });
     setScrolled(false);
+    setPastBand(false);
   }, [pane]);
   // The menu's update item brings Settings forward on the pane that has Updates.
   useEffect(
@@ -247,8 +181,8 @@ export function Settings() {
           </button>
         ))}
       </nav>
-      {frameless ? <TitleBar /> : null}
-      <main ref={main} className="prefs-main" onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 4)}>
+      {frameless ? <TitleBar scrolled={pastBand} /> : null}
+      <main ref={main} className="prefs-main" onScroll={(e) => onScroll(e.currentTarget.scrollTop)}>
         <Backdrop kind="wash" className="main-wash" />
         <div className={`prefs-bar drag ${scrolled ? "scrolled" : ""}`}>
           <h1 className={mac ? "t-head" : "t-title"} style={mac ? { fontSize: 15 } : undefined}>

@@ -4,6 +4,7 @@ import { ACTIONS, ASK_ACTION, Keycaps, ShortcutField } from "@/components/Shortc
 import { PermissionRows, usePermissions } from "@/components/Permissions";
 import { ModelPicker, modelSize, speechInstalled, useSpeechJob, type SpeechJob } from "@/components/Models";
 import { Backdrop } from "@/components/Backdrop";
+import { TitleBar, dragWindow, useFrameless } from "@/components/WinBar";
 import { STEPS, downloadOnce, nextButton, percent, speechLine, type SpeechLine, type Step } from "@/lib/setup";
 import { askReady, chosenRoute, defaultModel, destination, onboardingChoices, shortName, type Assist, type RouteView } from "@/lib/assist";
 import { BrandTile } from "@/components/Brands";
@@ -44,6 +45,7 @@ export function Onboarding() {
     return (STEPS as readonly string[]).includes(q ?? "") ? (q as Step) : "welcome";
   });
   // "Change model…" shows the model cards in place of the step, until Done.
+  const frameless = useFrameless();
   const [models, setModels] = useState(() => preview && new URLSearchParams(location.search).get("models") === "1");
   const [practiced, setPracticed] = useState(false);
   // An AI is chosen on the Ask step: Skip has nothing left to skip.
@@ -83,8 +85,9 @@ export function Onboarding() {
   const getSpeech = () => speech.start(cfg.recommended, cfg, patch);
 
   return (
-    <div className={`onb at-${models ? "models" : step}`}>
-      <Backdrop kind="band" className="onb-band drag" />
+    <div className={`onb at-${models ? "models" : step}${frameless ? " frameless" : ""}`}>
+      <Backdrop kind="band" className="onb-band drag" onMouseDown={frameless ? (e) => dragWindow(e, false) : undefined} />
+      {frameless ? <TitleBar maximizable={false} /> : null}
       <div className="onb-body drag">
         {models ? (
           <ModelsStep cfg={cfg} patch={patch} refresh={refresh} speech={speech} />

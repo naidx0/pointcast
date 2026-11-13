@@ -943,23 +943,34 @@ html.win .prefs-pane {
 /* —— Windows: the window has no frame of its own, so a slim bar across the top of the content carries the window's
    buttons at Windows 11's sizes (46 x 32) and colours; Close turns red. The sidebar runs the full height beside it. —— */
 .prefs.frameless {
-  grid-template-rows: 32px minmax(0, 1fr);
+  position: relative;
 }
-.prefs.frameless .prefs-side {
-  grid-row: 1 / -1;
-}
-.prefs.frameless .prefs-main {
-  grid-column: 2;
-  grid-row: 2;
-}
+/* No bar across the top: the window's buttons sit on the page's wash at the top right, flush with the window's corner
+   as Windows puts them, over a clear strip that moves the window. Once the page scrolls the strip frosts. */
 .win-bar {
-  grid-column: 2;
-  grid-row: 1;
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 216px;
+  z-index: 10;
   display: flex;
   justify-content: flex-end;
   height: 32px;
   user-select: none;
   -webkit-user-select: none;
+  transition: background-color 160ms linear;
+}
+.win-bar.scrolled {
+  background: color-mix(in srgb, var(--content) 80%, transparent);
+  backdrop-filter: blur(20px) saturate(160%);
+}
+/* Windows: the page runs to the window's top edge; the title clears the buttons' strip. */
+.prefs.frameless .prefs-main {
+  border-top: 0;
+  border-top-left-radius: 0;
+}
+html.win .prefs.frameless .prefs-bar {
+  padding-top: 40px;
 }
 .win-cap {
   width: 46px;
@@ -3099,6 +3110,22 @@ html[data-theme="dark"] .onb-band::after {
 html.win .onb-band {
   border-radius: 8px;
 }
+/* Windows without its frame: the band runs to the window's edges and its buttons sit on it. */
+.onb.frameless {
+  position: relative;
+}
+.onb.frameless .onb-band {
+  margin: 0;
+  border-radius: 0;
+  height: 72px;
+}
+.onb.frameless.at-welcome .onb-band {
+  height: 206px;
+}
+.onb.frameless .onb-band::after {
+  border-radius: 0;
+  box-shadow: inset 0 -1px 0 var(--box-line);
+}
 .onb.at-welcome .onb-band {
   height: 196px;
 }
@@ -3118,7 +3145,9 @@ html.win .onb.at-welcome .onb-body {
   filter: drop-shadow(0 8px 18px rgba(20, 40, 120, 0.28));
 }
 
-/* Settings: a faint wash at the top of the sidebar and behind the page title, fading out before the first row. */
+/* Settings: a soft Glacier wash over the whole window from its top edge down, under the sidebar and the page alike
+   (owner, 2026-11-12: the sheet's gradient, spread full screen, no bar across the top). It fades as it goes down, so
+   rows keep their contrast; the strong art stays on onboarding. */
 .prefs-side,
 .prefs-main {
   position: relative;
@@ -3135,26 +3164,32 @@ html.win .onb.at-welcome .onb-body {
 .main-wash {
   position: absolute;
   inset: 0 0 auto 0;
-  height: 260px;
+  height: 100%;
+  min-height: 100vh;
   z-index: 0;
   opacity: 0.2;
-  -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.5) 45%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.5) 45%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.55) 30%, rgba(0, 0, 0, 0.15) 70%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.55) 30%, rgba(0, 0, 0, 0.15) 70%, transparent 100%);
 }
 .side-wash .backdrop-art,
 .main-wash .backdrop-art {
   animation: none;
-  filter: blur(8px);
+  filter: blur(10px);
 }
 .main-wash {
-  height: 200px;
-  opacity: 0.14;
-}
-html[data-theme="dark"] .side-wash {
+  /* The page scrolls; its wash stays put behind the top of the window. */
+  position: sticky;
+  top: 0;
+  display: block;
+  height: 100vh;
+  margin-bottom: -100vh;
   opacity: 0.16;
 }
+html[data-theme="dark"] .side-wash {
+  opacity: 0.24;
+}
 html[data-theme="dark"] .main-wash {
-  opacity: 0.1;
+  opacity: 0.19;
 }
 /* At the top of the page the title bar is clear over the wash; once the page scrolls it frosts as before. */
 .prefs-bar:not(.scrolled) {

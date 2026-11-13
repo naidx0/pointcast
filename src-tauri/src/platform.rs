@@ -147,7 +147,7 @@ pub const DESK: [&str; 3] = ["settings", "onboarding", "result"];
 /// "Overlay" with the title hidden, in tauri.conf.json). Its title stays "Pointcast Settings" for the taskbar and
 /// Alt+Tab either way.
 pub fn own_title_bar(label: &str, os: &str) -> bool {
-    label == "settings" && os == "windows"
+    matches!(label, "settings" | "onboarding") && os == "windows"
 }
 
 /// macOS: a menu bar app has no Dock icon, so its windows are out of reach of Cmd+Tab. While
@@ -769,10 +769,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_draws_its_own_title_bar_on_windows_and_keeps_the_traffic_lights_over_its_sidebar_on_macos() {
-        assert!(own_title_bar("settings", "windows"));
-        assert!(!own_title_bar("settings", "macos") && !own_title_bar("settings", "linux"));
-        assert!(DESK.iter().chain([PANEL, "indicator", "overlay"].iter()).filter(|l| **l != "settings").all(|l| !own_title_bar(l, "windows")));
+    fn settings_and_onboarding_draw_their_own_title_bar_on_windows_and_keep_the_traffic_lights_on_macos() {
+        // On Windows their buttons sit on the Glacier band (owner, 2026-11-12), so the OS frame goes.
+        for label in ["settings", "onboarding"] {
+            assert!(own_title_bar(label, "windows"), "{label}");
+            assert!(!own_title_bar(label, "macos") && !own_title_bar(label, "linux"), "{label}");
+        }
+        assert!(DESK.iter().chain([PANEL, "indicator", "overlay"].iter()).filter(|l| !matches!(**l, "settings" | "onboarding")).all(|l| !own_title_bar(l, "windows")));
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let conf: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("tauri.conf.json")).unwrap()).unwrap();
         let w = conf["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == "settings").expect("a settings window");
