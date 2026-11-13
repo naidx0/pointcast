@@ -381,11 +381,14 @@ export const choiceLabel = (c: Choice) => (c.default ? `${c.label} (recommended)
 
 /** A picker drawn from its options alone, for every route alike: the one in use is `now` when offered, else the
  * recommended one, else the first; null when there is nothing to choose, which then shows no control. */
-export function pickerView(options: Choice[], now: string | null | undefined): { value: string; options: [string, string][] } | null {
+export function pickerView(options: Choice[], now: string | null | undefined): Picker | null {
   if (options.length < 2) return null;
   const value = options.find((c) => c.id === now)?.id ?? options.find((c) => c.default)?.id ?? options[0].id;
-  return { value, options: options.map((c): [string, string] => [c.id, choiceLabel(c)]) };
+  // A segmented control keeps its words short: "recommended" is said once, under the row's label.
+  return { value, options: options.map((c): [string, string] => [c.id, c.label]), recommended: options.find((c) => c.default)?.label ?? null };
 }
+
+export type Picker = { value: string; options: [string, string][]; recommended: string | null };
 
 /** The Thinking control for the chosen AI: the efforts the chosen model offers (the route's own list when the model
  * names none, as for one typed in) and the one an Ask sends; null for a route that offers no choice. */
@@ -393,13 +396,13 @@ export function effortView(
   a: Pick<Assist, "effort">,
   p: Pick<Route, "efforts"> | null,
   model?: Pick<AssistModel, "efforts"> | null,
-): { value: string; options: [string, string][] } | null {
+): Picker | null {
   if (!p) return null;
   return pickerView(model?.efforts?.length ? model.efforts : p.efforts, a.effort);
 }
 
 /** The Speed control: only where the chosen model offers speeds (Codex's service tiers); standard first. */
-export function speedView(a: Pick<Assist, "speed">, model?: Pick<AssistModel, "speeds"> | null): { value: string; options: [string, string][] } | null {
+export function speedView(a: Pick<Assist, "speed">, model?: Pick<AssistModel, "speeds"> | null): Picker | null {
   return pickerView(model?.speeds ?? [], a.speed);
 }
 

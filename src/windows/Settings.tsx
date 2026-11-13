@@ -959,12 +959,12 @@ function Ai() {
           </Row>
         ) : null}
         {effort ? (
-          <Row label="Thinking" sub="Low answers soonest. Higher levels think longer before they answer.">
+          <Row label="Thinking" sub={`${effort.recommended ? `${effort.recommended} is recommended. ` : ""}Higher levels think longer.`}>
             <Seg label="Thinking" value={effort.value} options={effort.options} set={(v) => run("effort", () => assistEffort(v))} />
           </Row>
         ) : null}
         {speed ? (
-          <Row label="Speed" sub="Faster answers can use more of your plan.">
+          <Row label="Speed" sub={`${speed.recommended ? `${speed.recommended} is recommended. ` : ""}Faster answers can use more of your plan.`}>
             <Seg label="Speed" value={speed.value} options={speed.options} set={(v) => run("speed", () => assistSpeed(v))} />
           </Row>
         ) : null}

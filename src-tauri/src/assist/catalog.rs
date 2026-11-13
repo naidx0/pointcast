@@ -757,7 +757,13 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
         return Err(OFFLINE_ONLY.into());
     }
     let base = if r.id == CUSTOM { custom_base(s) } else { None };
-    Ok(Picked { id: r.id, model: s.assist_model.clone(), offline_only: s.assist_offline_only, base, effort: effort_of(s), speed: speed_of(s) })
+    let (mut model, mut effort) = (s.assist_model.clone(), effort_of(s));
+    // What the AI page shows as chosen is what is sent: Claude with nothing picked runs the recommended pair.
+    if r.id == CLAUDE_CODE {
+        model.get_or_insert_with(|| super::claude::MODEL_START.to_owned());
+        effort.get_or_insert_with(|| super::claude::EFFORT_START.to_owned());
+    }
+    Ok(Picked { id: r.id, model, offline_only: s.assist_offline_only, base, effort, speed: speed_of(s) })
 }
 
 /// Make the provider for `p`. Codex keeps its empty folder and its pid file under `home`.
@@ -887,6 +893,14 @@ mod tests {
 
     fn ready_codex() -> (Health, Option<bool>) {
         (Health { state: State::Ready, line: "Codex 0.164.0 is installed.".into(), goes_to: super::super::detect::GOES_TO }, Some(true))
+    }
+
+    #[test]
+    fn claude_with_nothing_picked_sends_the_recommended_model_and_thinking_the_page_shows() {
+        let mut s = Settings::default();
+        assert_eq!(choose(&mut s, CLAUDE_CODE, None, true, 1), Ok(()));
+        let p = picked(&s).unwrap();
+        assert_eq!((p.model.as_deref(), p.effort.as_deref()), (Some(super::super::claude::MODEL_START), Some(super::super::claude::EFFORT_START)));
     }
 
     #[test]

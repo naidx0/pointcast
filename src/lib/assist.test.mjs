@@ -456,7 +456,8 @@ test("the Thinking menu lists what the chosen model offers, in words, with its r
   const codex = { efforts: lv(["low", "medium", "high", "xhigh", "max", "ultra"]) };
   const luna = { efforts: lv(["low", "medium", "high", "xhigh", "max"], "medium") };
   const terra = { efforts: lv(["low", "medium", "high", "xhigh", "max", "ultra"], "medium") };
-  assert.deepEqual(effortView(a, codex, luna).options, [["low", "Low"], ["medium", "Medium (recommended)"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+  assert.deepEqual(effortView(a, codex, luna).options, [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]]);
+  assert.equal(effortView(a, codex, luna).recommended, "Medium", "the recommended level is named once, under the label");
   assert.equal(effortView({ effort: null }, codex, luna).value, "medium", "nothing saved: the recommended level");
   assert.deepEqual(effortView({ effort: "ultra" }, codex, terra).value, "ultra");
   assert.equal(effortView({ effort: "ultra" }, codex, luna).value, "medium", "Luna has no Ultra: the menu shows what it recommends");
@@ -470,10 +471,11 @@ test("every route draws the same Model, Thinking and Speed pickers from its own 
   assert.equal(claude.typed, true);
   assert.deepEqual(claude.models.filter((m) => m.default).map((m) => m.id), ["sonnet"]);
   assert.equal(modelLabel(claude.models[1]), "Sonnet (recommended)");
-  assert.deepEqual(effortView({ effort: null }, claude, claude.models[0]).options.map(([, w]) => w), ["Low", "Medium (recommended)", "High", "Extra high", "Max"]);
+  assert.deepEqual(effortView({ effort: null }, claude, claude.models[0]).options.map(([, w]) => w), ["Low", "Medium", "High", "Extra high", "Max"]);
+  assert.equal(effortView({ effort: null }, claude, claude.models[0]).recommended, "Medium");
   assert.equal(effortView({ effort: "max" }, claude, null).value, "max", "a typed model: the route's own levels");
   const tiers = normalizeModels([{ id: "m", speeds: [{ id: "standard", label: "Standard", default: true }, { id: "priority", label: "Fast" }] }])[0];
-  assert.deepEqual(speedView({ speed: null }, tiers), { value: "standard", options: [["standard", "Standard (recommended)"], ["priority", "Fast"]] });
+  assert.deepEqual(speedView({ speed: null }, tiers), { value: "standard", options: [["standard", "Standard"], ["priority", "Fast"]], recommended: "Standard" });
   assert.equal(speedView({ speed: "priority" }, tiers).value, "priority");
   assert.equal(speedView({ speed: null }, { speeds: [] }), null, "no tiers: no Speed row");
   assert.equal(pickerView([{ id: "auto", label: "Auto", default: true }], null), null, "one option is no choice");

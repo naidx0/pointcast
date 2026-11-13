@@ -1417,7 +1417,10 @@ html.win .home-foot .btn {
 /* —— AI: the chosen AI on top, then each way to one as a plain row. Rows keep the pane's grouped look on both skins; what
    a row opens (a key, the install line) sits under its words, inside the same row. —— */
 .ai-model {
-  width: 168px;
+  /* Wide enough for "Claude Sonnet 5.5 (recommended)"; the select never clips its own label. */
+  width: auto;
+  min-width: 168px;
+  max-width: 280px;
   flex: none;
 }
 .ai-route {
