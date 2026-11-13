@@ -1,6 +1,6 @@
 # Handoff — 2026-11-13 (evening)
 
-**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `d939219`, 77 commits ahead of `origin/main` (merge-base `1926a749`).
+**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `dc9dfd4`, 80 commits ahead of `origin/main` (merge-base `1926a749`).
 **Local only:** nothing is pushed. `pushRemote` is set to `no-push-local-only`. Push to main only on the owner's explicit yes.
 
 ## Done on this branch (all gates green at d939219: 820 Rust, 282 front-end, tsc, vite build)
@@ -36,10 +36,14 @@
 - **S1, one history on Home:** "Recent" is now one timeline of dictations and Ask sessions, newest first, each row marked "Dictated" or "Ask · provider" and opening its own store (`src/lib/timeline.ts`). It refreshes on `history://changed`, on live state settling, and on focus. Stats count Ask too — "Questions" and "Answers read" figures, kept per day and in totals; they touch no dictation figure, streak or grid cell.
 - **S3, a cheap summariser:** `catalog::summary_pick` sends summaries through a cheaper pick of the same AI — Claude's Haiku at low effort, Codex's listed model that thinks least (minimal, then low), other routes' own model — through a provider of its own, so the held Ask provider stays warm and the summary can never act.
 
-## Second session (committed, tested, not yet human-verified)
+## Third session (committed, tested, not yet human-verified; gates: 829+ Rust, 282 front-end, tsc, vite)
 
-- **S1, one history on Home:** "Recent" is now one timeline of dictations and Ask sessions, newest first, each row marked "Dictated" or "Ask · provider" and opening its own store (`src/lib/timeline.ts`). It refreshes on `history://changed`, on live state settling, and on focus. Stats count Ask too — "Questions" and "Answers read" figures, kept per day and in totals; they touch no dictation figure, streak or grid cell.
-- **S3, a cheap summariser:** `catalog::summary_pick` sends summaries through a cheaper pick of the same AI — Claude's Haiku at low effort, Codex's listed model that thinks least (minimal, then low), other routes' own model — through a provider of its own, so the held Ask provider stays warm and the summary can never act.
+- **S4, memory you can see** (`memory.rs`, AI page › Memory): `memory.md` in the data folder, ~200 lines, hand-editable. Accepted facts go to every AI as untrusted reference text; "remember…" asks land as proposals until accepted on a click; off switch in settings.
+- **S4, session memory:** reopening a session replays its `summary.json` plus the last 4 turns instead of every turn it ever had (`live.rs::earlier`, `RECENT = 4`); older pictures stay reachable for Again.
+- **"Summarise with" picker** (rest of S3): Automatic or a named model, kept in settings, on the AI page.
+- **"Copy transcript"** in session controls: the session markdown goes on the clipboard so a conversation continues in the AI's own app; a real `claude --resume` handoff still needs the provider session id plumbed up.
+- **`pointcast_files`** (S8, first native integration): list/reveal/move/mkdir/trash straight on the filesystem — paths inside ~ only, canonicalized against symlink escapes; credential/config folders, `.git` internals, Pointcast's own data and home itself off limits; the file manager's tier and plan rules apply; trash waits for the person (`trash` crate).
+- **`docs/assistant-landscape.md`:** competitor scan — dictation modes (Superwhisper), system-audio sidecar (Cluely clones), ghost-cursor narration (Clicky), on-demand skill/MCP registry (rea/Raycast), same-stack reference (Handy), background acting without focus steal (axcli).
 
 ## Next
 
@@ -63,6 +67,6 @@
 ## Follow-ups (not started)
 
 - Echo cancellation through macOS voice processing.
-- `docs/next-layer-plan.md` (now tracked): S4 memory you can see (`memory.md`, accept-proposed facts, AI page view, off switch); S8 native integrations. S1/S2/S3 are built, S5–S7 exist in substance as the computer-use stack above.
-- A "Summarise with" picker on the AI page (S3's Automatic pick is the behaviour now; the setting row is not).
-- A "continue in the AI's own app" handoff (`claude --resume`, Codex thread resume, transcript/picture copy fallback).
+- `docs/next-layer-plan.md`: S1–S4 built, S5–S7 exist in substance, S8 started (`pointcast_files`); mail/calendar/browser-CDP integrations remain — `docs/assistant-landscape.md` has the mechanisms to steal (osascript, Swift sidecar for EventKit, CDP attach, on-demand MCP registry).
+- Provider session ids for a real "continue in the AI's own app" (`claude --resume`, Codex thread resume); Copy transcript is the working fallback.
+- Human verification and a Windows compile, as ever.
