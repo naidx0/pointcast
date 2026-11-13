@@ -339,7 +339,7 @@ function General({ cfg, patch, refresh }: { cfg: Config; patch: Patch; refresh: 
       <h2 className="group-title" style={{ marginTop: 24 }}>
         Permissions
       </h2>
-      {perms ? <PermissionRows perms={perms} setPerms={setPerms} /> : null}
+      {perms ? <PermissionRows perms={perms} setPerms={setPerms} reset /> : null}
       <History />
       <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
         <button type="button" className="btn" onClick={() => windowOpen("onboarding").catch(() => undefined)}>

@@ -1,12 +1,28 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { Access, PermissionKind, Permissions } from "./api";
 
-/** What a permission row offers: Allowed; Allowed but waiting for Pointcast to reopen (macOS applies a Screen Recording
- * grant only to a fresh process); Allow (the OS prompt); its switch in Settings; or both. */
-export type RowAction = "allowed" | "reopen" | "allow" | "open" | "allow-open";
+/** The status with which permissions read off only because macOS kept an older build's switch (macOS only). */
+export type PermissionsSeen = Permissions & { stale?: Partial<Record<PermissionKind, boolean>> };
 
-export function rowAction(o: { kind: PermissionKind; access: Access; asked: boolean; pending: boolean; mac: boolean }): RowAction {
+/** Forget the old build's switch for this one permission (`tccutil reset`), then ask again. */
+export const permissionReset = (kind: PermissionKind) => invoke<PermissionsSeen>("permission_reset", { kind });
+
+/** What a permission row offers: Allowed; Allowed but waiting for Pointcast to reopen (macOS applies a Screen Recording
+ * grant only to a fresh process); Reset and ask again (macOS kept an older build's switch); Allow (the OS prompt); its
+ * switch in Settings; or both. */
+export type RowAction = "allowed" | "reopen" | "reset" | "allow" | "open" | "allow-open";
+
+export function rowAction(o: {
+  kind: PermissionKind;
+  access: Access;
+  asked: boolean;
+  pending: boolean;
+  mac: boolean;
+  stale?: boolean;
+}): RowAction {
   if (o.access === "granted") return "allowed";
   if (o.kind === "screen" && o.pending) return "reopen";
+  if (o.stale && o.mac && o.kind !== "microphone") return "reset";
   if (o.access === "denied" || o.asked) return o.access === "denied" && !o.mac ? "allow-open" : "open";
   return "allow";
 }

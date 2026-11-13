@@ -37,3 +37,13 @@ test("a prompt never answered stops being read, and a failed read is skipped", a
   assert.equal(await untilAnswered(get, () => undefined, "microphone", { every: 10, max: 50, sleep: noWait }), null);
   assert.equal(n, 5);
 });
+
+test("a switch macOS kept from an older build offers Reset and ask again, on macOS only", () => {
+  assert.equal(row({ access: "denied", asked: true, stale: true }), "reset");
+  assert.equal(row({ kind: "accessibility", access: "unknown", stale: true }), "reset");
+  assert.equal(row({ access: "granted", stale: true }), "allowed", "working again: nothing to reset");
+  assert.equal(row({ access: "denied", pending: true, stale: true }), "reopen", "on, and waiting only for a reopen");
+  assert.equal(row({ access: "denied", stale: true, mac: false }), "allow-open", "Windows never keeps an old switch");
+  assert.equal(row({ kind: "microphone", access: "denied", stale: true }), "open", "the microphone has no reset");
+  assert.equal(row({ access: "denied", stale: false }), "open");
+});

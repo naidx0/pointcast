@@ -13,7 +13,7 @@ import {
   type PermissionKind,
   type Permissions,
 } from "@/lib/api";
-import { rowAction, untilAnswered } from "@/lib/permissions";
+import { permissionReset, rowAction, untilAnswered, type PermissionsSeen } from "@/lib/permissions";
 import { platform } from "@/lib/theme";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -73,10 +73,13 @@ export function PermissionRows({
   perms,
   setPerms,
   meter,
+  reset,
 }: {
   perms: Permissions;
   setPerms: (p: Permissions) => void;
   meter?: boolean;
+  /** Offer "Reset and ask again" where macOS kept an older build's switch (the Settings pane). */
+  reset?: boolean;
 }) {
   const kinds = (Object.keys(COPY) as PermissionKind[]).filter((k) => perms.gated[k]);
   const [asked, setAsked] = useState<Partial<Record<PermissionKind, boolean>>>({});
@@ -99,12 +102,19 @@ export function PermissionRows({
     if (kind === "microphone" && !meter) await micMonitor(false).catch(() => undefined);
   }
 
+  async function resetAndAsk(kind: PermissionKind) {
+    setAsked((a) => ({ ...a, [kind]: true }));
+    const next = await permissionReset(kind).catch(() => null);
+    if (next) setPerms(next);
+  }
+
   return (
     <div className="cards">
       {kinds.map((k) => {
         const c = COPY[k];
         const s: Access = perms[k];
-        const act = rowAction({ kind: k, access: s, asked: !!asked[k], pending: !!perms.screen_pending, mac });
+        const stale = !!reset && !!(perms as PermissionsSeen).stale?.[k];
+        const act = rowAction({ kind: k, access: s, asked: !!asked[k], pending: !!perms.screen_pending, mac, stale });
         const Icon = c.icon;
         return (
           <div key={k} className="card">
@@ -115,7 +125,11 @@ export function PermissionRows({
               <div className="ttl">{c.name}</div>
               <div className="sub">{c.why}</div>
               {k === "microphone" && s === "granted" && meter ? <Meter /> : null}
-              {act === "reopen" ? (
+              {act === "reset" ? (
+                <div className="sub" style={{ marginTop: 6 }}>
+                  macOS kept the old version's switch, so it reads off here.
+                </div>
+              ) : act === "reopen" ? (
                 <div className="sub" style={{ marginTop: 6 }}>
                   Allowed. Reopen Pointcast to use it.
                 </div>
@@ -130,6 +144,10 @@ export function PermissionRows({
             </div>
             {act === "allowed" ? (
               <span className="badge ok">Allowed</span>
+            ) : act === "reset" ? (
+              <button type="button" className="btn primary" onClick={() => resetAndAsk(k)}>
+                Reset and ask again
+              </button>
             ) : act === "reopen" ? (
               // macOS applies a Screen Recording grant only to a fresh process.
               <button type="button" className="btn primary" onClick={() => relaunch()}>
