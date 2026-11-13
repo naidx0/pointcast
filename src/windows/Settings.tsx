@@ -1087,8 +1087,7 @@ function SeeAndAct({ cfg, patch }: { cfg: Config; patch: Patch }) {
       label="Let the AI see and act"
       sub={
         <>
-          When you ask, Claude can look at your screen and click and type in the apps you allow, one step at a time while you watch. It asks before
-          anything that can't be undone, and Esc stops it.
+          Claude clicks and types in apps you allow, while you watch. It asks before anything that can't be undone. Esc stops it.
           {apps.length ? (
             <>
               {" "}
