@@ -246,8 +246,13 @@ impl Inner {
                 let epoch = st.epoch;
                 st.making = Some(Making { key: key.clone(), epoch, parts: Vec::new(), rate: 0, live: None });
                 drop(st);
-                let r = self.synth.make(&key.text, &key.voice, f32::from_bits(key.rate), &mut |samples, rate| self.part(samples, rate));
-                st = self.st.lock().unwrap();
+                // A panic in the voice (a bug in its text or model) costs this sentence only: the thread goes on to the
+                // next, rather than leaving every later sentence to wait out `LONGEST`.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.synth.make(&key.text, &key.voice, f32::from_bits(key.rate), &mut |samples, rate| self.part(samples, rate))
+                }))
+                .unwrap_or_else(|_| Err("the natural voice failed on a sentence and skipped it".into()));
+                st = self.st.lock().unwrap_or_else(|e| e.into_inner());
                 st.loaded = true;
                 let Some(m) = st.making.take() else { continue };
                 if let Err(why) = &r {
@@ -297,6 +302,8 @@ pub mod fake {
     pub struct FakeSynth {
         pub make_ms: u64,
         pub pieces: usize,
+        /// Making this sentence panics, as a bug in the voice would.
+        pub panics_on: Option<&'static str>,
         pub installed: Mutex<bool>,
         pub log: Mutex<Vec<(String, &'static str, Instant)>>,
         pub fetches: Mutex<Vec<Fetched>>,
@@ -304,7 +311,7 @@ pub mod fake {
 
     impl FakeSynth {
         pub fn new(make_ms: u64, installed: bool) -> FakeSynth {
-            FakeSynth { make_ms, pieces: 1, installed: Mutex::new(installed), log: Mutex::default(), fetches: Mutex::default() }
+            FakeSynth { make_ms, pieces: 1, panics_on: None, installed: Mutex::new(installed), log: Mutex::default(), fetches: Mutex::default() }
         }
         pub fn events(&self, what: &str) -> Vec<(String, Instant)> {
             self.log.lock().unwrap().iter().filter(|e| e.1 == what).map(|e| (e.0.clone(), e.2)).collect()
@@ -342,6 +349,9 @@ pub mod fake {
         }
         fn make(&self, text: &str, _: &str, _: f32, part: &mut dyn FnMut(Vec<f32>, u32) -> bool) -> Result<(), String> {
             self.log.lock().unwrap().push((text.into(), "make", Instant::now()));
+            if self.panics_on == Some(text) {
+                panic!("a test's bug in the voice, on {text}");
+            }
             for _ in 0..self.pieces {
                 std::thread::sleep(Duration::from_millis(self.make_ms / self.pieces as u64));
                 self.log.lock().unwrap().push((text.into(), "part", Instant::now()));
@@ -548,6 +558,26 @@ mod tests {
         assert_eq!((starts.len(), ends.len()), (3, 3), "each piece played once");
         assert!(starts[0] < made[0].1, "the first piece played while the rest was made");
         assert!(talk.wait_idle(Duration::from_millis(10)) && *ends.last().unwrap() <= Instant::now(), "the sentence ended after its last piece");
+    }
+
+    #[test]
+    fn a_sentence_whose_making_panics_is_skipped_and_the_ones_after_it_are_still_said() {
+        let mut synth = FakeSynth::new(10, true);
+        synth.panics_on = Some("Boom.");
+        let synth = Arc::new(synth);
+        let sink = Arc::new(FakeSink::new(20));
+        let voices = Arc::new(Voices::new(Arc::new(crate::voice::speak::fake::Fake::auto()), Some(Natural::new(synth.clone(), sink.clone()))));
+        let talk = Talk::new(voices, |_| {});
+        for s in ["One.", "Boom.", "Two."] {
+            talk.say(s.into(), kokoro());
+        }
+        assert!(talk.wait_idle(Duration::from_secs(5)), "the voice's thread died with the sentence that panicked");
+        assert_eq!(synth.events("made").iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), ["One.", "Two."]);
+        assert_eq!(sink.events("end").len(), 2, "the sentences either side are heard");
+        // And it speaks after.
+        talk.say("Three.".into(), kokoro());
+        assert!(talk.wait_idle(Duration::from_secs(5)));
+        assert_eq!(sink.events("end").len(), 3);
     }
 
     #[test]
