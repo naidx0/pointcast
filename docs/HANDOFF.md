@@ -1,9 +1,9 @@
 # Handoff — 2026-11-13 (evening)
 
-**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `66fc098`, 74 commits ahead of `origin/main` (merge-base `1926a749`).
+**Branch:** `local/assistant-polish` in `~/dev/pointcast`, head `d939219`, 77 commits ahead of `origin/main` (merge-base `1926a749`).
 **Local only:** nothing is pushed. `pushRemote` is set to `no-push-local-only`. Push to main only on the owner's explicit yes.
 
-## Done on this branch (all gates green at 66fc098: 818 Rust, 278 front-end, tsc, vite build)
+## Done on this branch (all gates green at d939219: 820 Rust, 282 front-end, tsc, vite build)
 
 - **Model and effort on every AI:** Settings › AI. Claude gets `--model`/`--effort`; Codex gets per-model efforts and a speed tier; ACP agents get `configOptions`. The choice is kept per route.
 - **Computer use, slices A–D** (`src-tauri/src/computer/`, docs/cua-plan.md):
@@ -31,6 +31,16 @@
 - **Answered-model warning:** Claude (result `modelUsage`), Codex (completed turn) and ACP (what the session offers) report the model that answered; when it is not the one picked — an alias resolving to its own id doesn't count — the answer carries one quiet line (`Answered by x, not the y you picked.`). Kept turns carry it; Sent names the model asked.
 - **ACP `config_option_update`:** a model changed in the agent's own window updates what the session offers and names what answered.
 
+## Second session (committed, tested, not yet human-verified)
+
+- **S1, one history on Home:** "Recent" is now one timeline of dictations and Ask sessions, newest first, each row marked "Dictated" or "Ask · provider" and opening its own store (`src/lib/timeline.ts`). It refreshes on `history://changed`, on live state settling, and on focus. Stats count Ask too — "Questions" and "Answers read" figures, kept per day and in totals; they touch no dictation figure, streak or grid cell.
+- **S3, a cheap summariser:** `catalog::summary_pick` sends summaries through a cheaper pick of the same AI — Claude's Haiku at low effort, Codex's listed model that thinks least (minimal, then low), other routes' own model — through a provider of its own, so the held Ask provider stays warm and the summary can never act.
+
+## Second session (committed, tested, not yet human-verified)
+
+- **S1, one history on Home:** "Recent" is now one timeline of dictations and Ask sessions, newest first, each row marked "Dictated" or "Ask · provider" and opening its own store (`src/lib/timeline.ts`). It refreshes on `history://changed`, on live state settling, and on focus. Stats count Ask too — "Questions" and "Answers read" figures, kept per day and in totals; they touch no dictation figure, streak or grid cell.
+- **S3, a cheap summariser:** `catalog::summary_pick` sends summaries through a cheaper pick of the same AI — Claude's Haiku at low effort, Codex's listed model that thinks least (minimal, then low), other routes' own model — through a provider of its own, so the held Ask provider stays warm and the summary can never act.
+
 ## Next
 
 1. Rebuild the app (all of the above is in). It is at `src-tauri/target/release/bundle/macos/Pointcast.app`, ad-hoc signed.
@@ -53,5 +63,6 @@
 ## Follow-ups (not started)
 
 - Echo cancellation through macOS voice processing.
-- `docs/next-layer-plan.md` (untracked, scoped): S1 one history timeline on Home + resume-last-session; S3 cheap summariser per AI; S4 memory you can see (`memory.md`, accept-proposed, AI page view, off switch); S8 native integrations.
+- `docs/next-layer-plan.md` (now tracked): S4 memory you can see (`memory.md`, accept-proposed facts, AI page view, off switch); S8 native integrations. S1/S2/S3 are built, S5–S7 exist in substance as the computer-use stack above.
+- A "Summarise with" picker on the AI page (S3's Automatic pick is the behaviour now; the setting row is not).
 - A "continue in the AI's own app" handoff (`claude --resume`, Codex thread resume, transcript/picture copy fallback).
