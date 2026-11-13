@@ -737,6 +737,19 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
         </div>
         <div className="row">
           <div className="grow">
+            <div className="lbl">Read answers aloud</div>
+            <div className="sub">Answers are spoken in your chosen voice. The voice is picked in Settings.</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            className="switch"
+            aria-checked={cfg.speak_answers}
+            onClick={() => patch({ speak_answers: !cfg.speak_answers })}
+          />
+        </div>
+        <div className="row">
+          <div className="grow">
             <div className="lbl">Open at login</div>
             <div className="sub">
               {loginErr ?? (
