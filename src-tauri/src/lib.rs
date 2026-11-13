@@ -1049,6 +1049,7 @@ fn settings_view(svc: &App) -> Value {
     v["ask_hotkey"] = json!(s.ask_chord().label());
     v["keep_audio"] = json!(s.keep_audio);
     v["picture_paths"] = json!(s.picture_paths);
+    v["wave_style"] = json!(s.wave());
     v["voice_boost"] = json!(s.voice_boost);
     v["auto_gpu"] = json!(s.auto_gpu);
     v["free_memory_minutes"] = json!(s.free_memory_minutes);

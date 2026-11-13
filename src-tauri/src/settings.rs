@@ -156,6 +156,9 @@ pub struct Settings {
     /// Soft start and stop sounds.
     #[serde(default = "yes")]
     pub sounds: bool,
+    /// The voice wave: "pen" (Classic), "breath" (Strands) or "aurora" (the default). Anything else reads as Aurora.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_style: Option<String>,
     #[serde(default)]
     pub granted: Granted,
     /// Keep each recording's audio in History (the newest ten), so it can be transcribed again.
@@ -282,6 +285,7 @@ impl Default for Settings {
             onboarded: false,
             ask_intro_seen: false,
             sounds: true,
+            wave_style: None,
             granted: Granted::default(),
             keep_audio: true,
             picture_paths: true,
@@ -361,6 +365,14 @@ impl Settings {
     }
     pub fn ask_chord(&self) -> Chord {
         Self::parse_ok(&self.ask_hotkey, chord::default_ask)
+    }
+    /// The voice wave the person picked: "pen", "breath" or "aurora". Not set, or a value this version does not know, is Aurora.
+    pub fn wave(&self) -> &'static str {
+        match self.wave_style.as_deref() {
+            Some("pen") => "pen",
+            Some("breath") => "breath",
+            _ => "aurora",
+        }
     }
     pub fn hidden_list(&self) -> Vec<String> {
         self.hidden
@@ -546,6 +558,22 @@ mod tests {
         // A choice already saved is kept.
         let off: Settings = serde_json::from_str(r#"{"start_at_login":false,"check_updates":false}"#).unwrap();
         assert!(!off.start_at_login && !off.check_updates);
+    }
+
+    #[test]
+    fn the_voice_wave_defaults_to_aurora_and_old_files_load() {
+        let old: Settings = serde_json::from_str(r#"{"onboarded":true}"#).unwrap();
+        assert_eq!(old.wave_style, None);
+        assert_eq!(old.wave(), "aurora");
+        let pick = |v: &str| -> Settings { serde_json::from_str(&format!(r#"{{"wave_style":"{v}"}}"#)).unwrap() };
+        assert_eq!(pick("pen").wave(), "pen");
+        assert_eq!(pick("breath").wave(), "breath");
+        assert_eq!(pick("aurora").wave(), "aurora");
+        assert_eq!(pick("sparkles").wave(), "aurora", "an unknown value reads as Aurora");
+        let mut s = Settings::default();
+        s.wave_style = Some("pen".into());
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.wave(), "pen");
     }
 
     #[test]
