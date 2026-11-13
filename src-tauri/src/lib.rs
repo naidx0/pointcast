@@ -398,7 +398,7 @@ fn summaries_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Hel
                 // A summary goes through a cheaper pick of the same AI (S3): its own provider, so the one held
                 // for Ask is not touched. Codex's list, when the held AI is Codex and has one, chooses the model.
                 let models = held.held().filter(|p| p.id() == assist::codex::ID).map(|p| p.models()).unwrap_or_default();
-                let pick = assist::catalog::summary_pick(&assist::catalog::picked(&s)?, &models);
+                let pick = assist::catalog::summary_pick(&assist::catalog::picked(&s)?, &models, s.summary_model.as_deref());
                 let model = pick.model.clone();
                 assist::catalog::build(&pick, &assist_home()).map(|p| (p, model))
             }),
@@ -1308,6 +1308,7 @@ fn settings_view(svc: &App) -> Value {
     // Let the AI see and act: the switch, and each app's tier the person chose.
     v["computer_use"] = json!(s.computer_use);
     v["memory"] = json!(s.memory);
+    v["summary_model"] = json!(s.summary_model);
     v["computer_trust"] = json!(s.computer_trust);
     v["keep_audio"] = json!(s.keep_audio);
     v["history_keep"] = json!(s.history_keep);

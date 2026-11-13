@@ -218,7 +218,7 @@ export function Settings() {
           {!cfg ? null : pane === "home" ? (
             <Home cfg={cfg} go={setPane} patch={patch} />
           ) : pane === "ai" ? (
-            <Ai talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={(chosen) => <SeeAndAct cfg={cfg} patch={patch} chosen={chosen} />} memory={<Memory cfg={cfg} patch={patch} />} />
+            <Ai cfg={cfg} patch={patch} talk={<TalkBack cfg={cfg} patch={patch} />} seeAndAct={(chosen) => <SeeAndAct cfg={cfg} patch={patch} chosen={chosen} />} memory={<Memory cfg={cfg} patch={patch} />} />
           ) : pane === "general" ? (
             <General cfg={cfg} patch={patch} refresh={refresh} />
           ) : pane === "shortcuts" ? (
@@ -824,7 +824,7 @@ const plain = (e: unknown) => String(e).replace(/^Error: */, "");
 
 /** Settings › AI: which AI answers Ask and where the words go, then every way to one, grouped, each with the one action
  * its state allows. Asked again on open, on focus and after every action; the engine is the record. */
-function Ai({ talk, seeAndAct, memory }: { talk?: ReactNode; seeAndAct?: (chosen: Route | null) => ReactNode; memory?: ReactNode }) {
+function Ai({ cfg, patch, talk, seeAndAct, memory }: { cfg: Config; patch: Patch; talk?: ReactNode; seeAndAct?: (chosen: Route | null) => ReactNode; memory?: ReactNode }) {
   const [a, setA] = useState<Assist | null>(null);
   const [busy, setBusy] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -1039,6 +1039,23 @@ function Ai({ talk, seeAndAct, memory }: { talk?: ReactNode; seeAndAct?: (chosen
         {speed ? (
           <Row label="Speed" sub={`${speed.recommended ? `${speed.recommended} is recommended. ` : ""}Faster answers can use more of your plan.`}>
             <Seg label="Speed" value={speed.value} options={speed.options} set={(v) => run("speed", () => assistSpeed(v))} />
+          </Row>
+        ) : null}
+        {models.length ? (
+          <Row label="Summarise with" sub="Summaries go through a cheaper model by default, so they cost less. Pick a model to make them with instead.">
+            <select
+              className="field ai-model"
+              aria-label="Summarise with"
+              value={cfg.summary_model ?? ""}
+              onChange={(e) => patch({ summary_model: e.target.value || null })}
+            >
+              <option value="">Automatic (recommended)</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {modelLabel(m)}
+                </option>
+              ))}
+            </select>
           </Row>
         ) : null}
         {seeAndAct?.(chosen)}

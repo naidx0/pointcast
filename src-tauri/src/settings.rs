@@ -211,6 +211,10 @@ pub struct Settings {
     /// "Only on this computer": no question goes to another one.
     #[serde(default)]
     pub assist_offline_only: bool,
+    /// What a summary is made with: none is Automatic — a cheaper pick of the chosen AI (`catalog::summary_pick`);
+    /// a model id uses that model for summaries instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model: Option<String>,
     /// Each AI and destination the person agreed to send questions to.
     #[serde(default)]
     pub assist_consent: Vec<Consent>,
@@ -335,6 +339,7 @@ impl Default for Settings {
             assist_effort: None,
             assist_picks: Default::default(),
             assist_offline_only: false,
+            summary_model: None,
             assist_consent: Vec::new(),
             assist_claude_code_ok: false,
             computer_use: false,

@@ -192,6 +192,8 @@ export type Config = {
   computer_trust?: Record<string, string>;
   /** Keep the facts the person asked to remember in memory.md and give them to every AI. On when absent. */
   memory?: boolean;
+  /** What a summary is made with: absent is Automatic (a cheaper pick of the chosen AI), a model id that model. */
+  summary_model?: string | null;
   /** The voice answers are read in, by the system's id for it; null is the system's own choice. */
   speak_voice?: string | null;
   /** How fast answers are read, 1 being normal. Treated as 1 when absent. */

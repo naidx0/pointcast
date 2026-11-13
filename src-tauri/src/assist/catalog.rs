@@ -784,28 +784,38 @@ pub fn picked(s: &Settings) -> Result<Picked, String> {
 }
 
 /// The `Picked` a summary goes through, cheaper than an Ask's: Claude's Haiku thinking little, Codex's model that
-/// thinks least, every other AI's own model unchanged. It never acts on the computer — a summary only reads.
+/// thinks least, every other AI's own model unchanged. `over` is the person's own "Summarise with" choice; named,
+/// it wins and its thinking is the lowest that model offers. It never acts on the computer — a summary only reads.
 /// `models` is what the route lists now; with none known yet, only the effort comes down.
-pub fn summary_pick(p: &Picked, models: &[Model]) -> Picked {
+pub fn summary_pick(p: &Picked, models: &[Model], over: Option<&str>) -> Picked {
     let mut s = Picked { computer: false, speed: None, ..p.clone() };
+    let lowest = |m: &str| models.iter().find(|x| x.id == m).and_then(|m| m.efforts.first()).map(|e| e.id.clone());
     match route(p.id).map(|r| r.way) {
         Some(Way::Agent) if p.id == CLAUDE_CODE => {
-            s.model = Some("haiku".into());
+            s.model = Some(over.unwrap_or("haiku").into());
             s.effort = Some("low".into());
         }
         Some(Way::Plan) => {
-            // The cheapest is the last listed that thinks at "minimal", else at "low": Codex lists its smaller
-            // models after the flagships. With none, the effort alone comes down on the chosen model.
+            // Automatic's cheapest is the last listed that thinks at "minimal", else at "low": Codex lists its
+            // smaller models after the flagships. With none, the effort alone comes down on the chosen model.
             let cheap = models.iter().rfind(|m| m.efforts.iter().any(|e| e.id == "minimal")).or_else(|| models.iter().rfind(|m| m.efforts.iter().any(|e| e.id == "low")));
-            match cheap {
-                Some(m) => {
+            match (over, cheap) {
+                (Some(m), _) => {
+                    s.effort = lowest(m);
+                    s.model = Some(m.into());
+                }
+                (None, Some(m)) => {
                     s.effort = m.efforts.first().map(|e| e.id.clone());
                     s.model = Some(m.id.clone());
                 }
-                None => s.effort = Some("low".into()),
+                (None, None) => s.effort = Some("low".into()),
             }
         }
-        _ => {}
+        _ => {
+            if let Some(m) = over {
+                s.model = Some(m.into());
+            }
+        }
     }
     s
 }
@@ -964,7 +974,7 @@ mod tests {
         s.computer_use = true;
         let p = picked(&s).unwrap();
         assert!(p.computer, "the Ask pick can act");
-        let sum = summary_pick(&p, &[]);
+        let sum = summary_pick(&p, &[], None);
         assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("haiku"), Some("low")));
         assert!(!sum.computer && sum.speed.is_none());
         // Codex's is the last listed that thinks at "minimal", then at "low"; the thinking is the model's lowest.
@@ -975,18 +985,23 @@ mod tests {
             offering("gpt-7-luna", &["minimal", "low", "medium"]),
             offering("gpt-7-mini", &["low", "medium"]),
         ];
-        let sum = summary_pick(&codex, &models);
+        let sum = summary_pick(&codex, &models, None);
         assert_eq!((sum.model.as_deref(), sum.effort.as_deref(), sum.speed.as_deref()), (Some("gpt-7-luna"), Some("minimal"), None));
         assert!(!sum.computer);
         codex.effort = None;
-        let sum = summary_pick(&codex, &models[..1]);
+        let sum = summary_pick(&codex, &models[..1], None);
         assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("gpt-7"), Some("low")));
-        let sum = summary_pick(&codex, &[]);
+        let sum = summary_pick(&codex, &[], None);
         assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("gpt-7"), Some("low")), "with no list the effort alone comes down");
         // A key route keeps the model in use: the same service's cheapest is not Pointcast's to pick.
         let key = Picked { id: "openai", model: Some("gpt-x".into()), offline_only: false, base: None, effort: None, speed: None, computer: false };
-        let sum = summary_pick(&key, &[]);
+        let sum = summary_pick(&key, &[], None);
         assert_eq!(sum.model.as_deref(), Some("gpt-x"));
+        // The person's own "Summarise with" choice wins everywhere it can be used, thinking the model's lowest.
+        assert_eq!(summary_pick(&p, &[], Some("opus")).model.as_deref(), Some("opus"));
+        let sum = summary_pick(&codex, &models, Some("gpt-7"));
+        assert_eq!((sum.model.as_deref(), sum.effort.as_deref()), (Some("gpt-7"), Some("low")));
+        assert_eq!(summary_pick(&key, &[], Some("gpt-y")).model.as_deref(), Some("gpt-y"));
     }
 
     #[test]

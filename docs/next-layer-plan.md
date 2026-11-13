@@ -79,13 +79,13 @@ Each slice ships on its own and has its own gate.
 - **Uses:** session summaries now, and memory (S4) next.
 - **Gate:** a test that the summary call uses the summariser's model and effort, not Ask's. A hand-run on this Mac.
 
-### S4. Memory you can see
+### S4. Memory you can see — **mostly built**
 
-- **Session memory:** each finished session leaves a summary (S3), and the next Ask in that session starts from it plus the last turns.
-- **Long-term memory:** one local file, `memory.md` in Pointcast's data folder.
-  - About 200 lines at most: facts you said to remember and facts the summariser proposed. Proposed facts are kept only once you accept them, with one click.
+- **Session memory:** each finished session leaves a summary (S3), and the next Ask in that session starts from it plus the last turns. *(Summaries exist but are started by hand; starting a new Ask from a session's summary is not yet.)*
+- **Long-term memory:** one local file, `memory.md` in Pointcast's data folder. **Built** (`memory.rs`):
+  - About 200 lines at most: facts you said to remember and facts the AI was asked to remember (marked `remember:`), which wait as proposals. Proposed facts are kept only once you accept them, with one click. *(Summariser-proposed facts are not yet — proposals come only from "remember…".)*
   - Given to every AI the same way, as untrusted reference text inside the system prompt.
-  - "Memory" view on the AI page: read, edit, forget one line, or forget all.
+  - "Memory" view on the AI page: read, add, forget one line, or forget all.
   - Off switch.
   - Vendor memories (Claude's, Codex's) are left as they are and never read.
 - **Gate:** tests for the cap, for forgetting, for delivery to every route, and for "a proposed fact is not kept until accepted". A screenshot of the Memory view.
