@@ -2521,6 +2521,8 @@ pub fn run() {
             app.manage(reader_for(&handle, &svc));
             app.manage(live_for(&handle, &svc, held));
             computer_hooks(&handle);
+            // Server files of turns a crash or a kill cut short: each holds a key of a turn that is over.
+            assist::claude::sweep(&assist_home().join(assist::catalog::CLAUDE_CODE));
             assist::claude::serve_with(computer_server(svc.clone()));
             *svc.hotkey_errors.lock().unwrap() = register_shortcuts(&handle, &settings);
             platform::protect(&handle, !settings.include_app);

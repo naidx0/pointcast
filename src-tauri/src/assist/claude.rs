@@ -67,18 +67,27 @@ impl Computer {
     /// Hold the tools for one turn: a grant of its own, then the file at `file` that tells its helper where they are,
     /// with that grant's secret as the key.
     fn hold(&self, file: &Path) -> Result<Hold, Failure> {
-        let acting = self.desk.begin(crate::computer::MAX_GRANT);
-        let key = acting.secret().ok_or_else(|| Failure::Broken("Pointcast could not make a key for its tools: this computer gave it no randomness.".into()))?;
+        self.hold_with(file, &|f, bytes| f.write_all(bytes))
+    }
+
+    /// `hold`, with `write` putting the bytes in the file. The hold that deletes the file exists before a byte is
+    /// written, so a write that fails part-way leaves no file behind.
+    fn hold_with(&self, file: &Path, write: &Writer) -> Result<Hold, Failure> {
+        let hold = Hold { acting: self.desk.begin(crate::computer::MAX_GRANT), file: file.to_owned() };
+        let key = hold.acting.secret().ok_or_else(|| Failure::Broken("Pointcast could not make a key for its tools: this computer gave it no randomness.".into()))?;
         let url = (self.serve)().map_err(Failure::Broken)?;
-        write_servers(file, &url, &key).map_err(|e| Failure::Broken(format!("Pointcast could not write where its tools are for Claude Code: {e}")))?;
-        Ok(Hold { acting, file: file.to_owned() })
+        write_servers(file, &url, &key, write).map_err(|e| Failure::Broken(format!("Pointcast could not write where its tools are for Claude Code: {e}")))?;
+        Ok(hold)
     }
 }
+
+/// How the bytes of a server file are written: `write_all`, or a test's write that fails.
+type Writer = dyn Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>;
 
 /// The file `--mcp-config` names for a turn that may act: Pointcast's server, with its address and the turn's grant
 /// secret as its key (never this install's token). Only this user can read it, it is written when a turn starts and
 /// deleted when it ends, and it is never logged.
-fn write_servers(f: &Path, url: &str, key: &str) -> std::io::Result<()> {
+fn write_servers(f: &Path, url: &str, key: &str, write: &Writer) -> std::io::Result<()> {
     let body = json!({ "mcpServers": { SERVER: { "type": "http", "url": url, "headers": { "Authorization": format!("Bearer {key}") } } } });
     if let Some(d) = f.parent() {
         std::fs::create_dir_all(d)?;
@@ -88,7 +97,28 @@ fn write_servers(f: &Path, url: &str, key: &str) -> std::io::Result<()> {
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(f)?.write_all(body.to_string().as_bytes())
+    write(&mut opts.open(f)?, body.to_string().as_bytes())
+}
+
+/// The name of a turn's server file in Claude's folder, for the process `pid`.
+fn servers_name(pid: u32, serial: u64) -> String {
+    format!("tools-{pid}-{serial}.json")
+}
+
+/// Delete the server files a Pointcast that crashed or was killed left in `home` (each holds a key of a turn that is
+/// over). This process's own are left alone. What was deleted, by name.
+pub fn sweep(home: &Path) -> Vec<String> {
+    let own = format!("tools-{}-", std::process::id());
+    let Ok(dir) = std::fs::read_dir(home) else { return Vec::new() };
+    let mut gone = Vec::new();
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let ours = name.starts_with("tools-") && name.ends_with(".json") && !name.starts_with(&own);
+        if ours && e.file_type().is_ok_and(|t| t.is_file()) && std::fs::remove_file(e.path()).is_ok() {
+            gone.push(name);
+        }
+    }
+    gone
 }
 
 /// A turn's hold on the computer: its grant and its server file, both gone when it is dropped.
@@ -771,7 +801,7 @@ impl Claude {
         // A conversation that may act names a file of its own, written when each turn starts.
         static SERIAL: AtomicU64 = AtomicU64::new(1);
         let acting = self.computer.is_some();
-        let servers = if acting { self.home.join(format!("tools-{}-{}.json", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed))) } else { PathBuf::new() };
+        let servers = if acting { self.home.join(servers_name(std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed))) } else { PathBuf::new() };
         let mut launch = match &self.launch {
             Some(l) => {
                 let mut l = l.clone();
@@ -1340,6 +1370,48 @@ pub mod tests {
         let r = crate::computer::call(desk, desk.grants.live_id().unwrap_or(0), "pointcast_apps", &json!({}));
         assert_eq!((r["isError"].clone(), r["structuredContent"]["status"].clone()), (json!(true), json!("refused")), "{r}");
         assert_eq!(collect(&rx), [Kind::Failed(Failure::Stopped)]);
+    }
+
+    #[test]
+    fn a_server_file_whose_write_fails_part_way_is_deleted_and_the_grant_let_go() {
+        let (claude, _log, desk) = acting("acting", "acting-write-fails");
+        let home = claude.home.clone();
+        let (c, file) = (claude.computer.clone().unwrap(), home.join(servers_name(std::process::id(), 999_001)));
+        let half = |f: &mut std::fs::File, bytes: &[u8]| -> std::io::Result<()> {
+            f.write_all(&bytes[..bytes.len() / 2])?;
+            Err(std::io::Error::other("the disk filled up"))
+        };
+        let Err(e) = c.hold_with(&file, &half) else { panic!("the write failed, so the turn cannot hold the tools") };
+        assert!(matches!(&e, Failure::Broken(why) if why.contains("the disk filled up")), "{e:?}");
+        assert!(!file.exists(), "no partial file is left behind");
+        assert!(!desk.granted(), "and the grant goes with it");
+        // The same file, written whole, is there while held and gone after.
+        let hold = c.hold(&file).unwrap();
+        assert!(file.exists() && desk.granted());
+        drop(hold);
+        assert!(!file.exists() && !desk.granted());
+    }
+
+    #[test]
+    fn server_files_left_by_a_pointcast_that_crashed_are_swept_and_nothing_else() {
+        let home = scratch("claude-sweep");
+        std::fs::create_dir_all(home.join("empty")).unwrap();
+        let mine = servers_name(std::process::id(), 7);
+        let stale = [servers_name(1, 1), servers_name(4_000_000, 12)];
+        let kept = ["no-servers.json", "claude.pid", "tools-notes.txt", "seen.jsonl", mine.as_str()];
+        for f in stale.iter().map(String::as_str).chain(kept) {
+            std::fs::write(home.join(f), b"{}").unwrap();
+        }
+        std::fs::create_dir_all(home.join("tools-dir.json")).unwrap();
+        let mut gone = sweep(&home);
+        gone.sort();
+        let mut want = stale.to_vec();
+        want.sort();
+        assert_eq!(gone, want);
+        assert!(stale.iter().all(|f| !home.join(f).exists()));
+        assert!(kept.iter().all(|f| home.join(f).exists()), "this process's own file and every other file stay");
+        assert!(home.join("empty").is_dir() && home.join("tools-dir.json").is_dir());
+        assert!(sweep(&home.join("missing")).is_empty(), "no folder, nothing to do");
     }
 
     #[test]
