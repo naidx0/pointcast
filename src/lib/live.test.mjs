@@ -467,3 +467,12 @@ test("what the AI did on the computer rides on a turn and on the snapshot only w
   assert.equal("acts" in s.turns[1], false, "a turn that did nothing reads as it always did");
   assert.equal("acts" in normalizeSnapshot({ state: "shown" }), false);
 });
+
+test("the answered-model line the engine puts on the snapshot reaches the panel, and a snapshot without one shows none", () => {
+  const line = "Answered by gpt-5.1-mini, not the gpt-5.1 you picked.";
+  assert.equal(normalizeSnapshot(snap({ state: "shown", answer: "Four.", note: line })).note, line);
+  const v = liveView(at(snap({ state: "shown", answer: "Four.", note: line })), 0);
+  assert.equal(v.note, line);
+  assert.equal(liveView(at(snap({ state: "shown", answer: "Four." })), 0).note, null);
+  assert.equal(normalizeSnapshot(snap({ state: "shown", answer: "Four.", note: 7 })).note, null, "only a string is a line");
+});

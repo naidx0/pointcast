@@ -167,6 +167,7 @@ export function normalizeSnapshot(s: Partial<LiveSnapshot> | null | undefined): 
     error: v.error ?? null,
     thinking: v.thinking === true,
     answer: typeof v.answer === "string" ? v.answer : undefined,
+    note: typeof v.note === "string" && v.note ? v.note : null,
     ...withActs((v as { acts?: unknown }).acts),
   };
 }
@@ -672,7 +673,7 @@ export function previewTurns(now = Date.now()): LiveTurn[] {
  * `opened` is that session opened from the list (every turn kept, the fields empty, no AI named yet); `empty` is a new
  * session; `follow` is a spoken follow-up being heard in that session. `marked`: the picture was marked up. `next`: a picture marked with no question under way waits for the
  * next one. */
-export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean; blind?: boolean } = {}): LiveSnapshot {
+export function previewSnapshot(kind: string, o: { error?: string | null; provider?: string; marked?: boolean; next?: boolean; blind?: boolean; note?: string | null } = {}): LiveSnapshot {
   const provider = o.provider ?? "ChatGPT";
   const session = { id: "preview", title: "Why do we divide by P(B)", turns: 1 };
   const picture = o.blind ? null : o.marked ? { ...previewPicture(), marked: true } : previewPicture();
@@ -697,7 +698,8 @@ export function previewSnapshot(kind: string, o: { error?: string | null; provid
     case "answering":
       return { ...common, state: "answering" };
     case "shown":
-      return { ...common, state: "shown", answer: PREVIEW_ANSWER };
+      // `note=model` is the answered-model line (a mismatch between the model picked and the one that answered).
+      return { ...common, state: "shown", answer: PREVIEW_ANSWER, note: o.note === "model" ? "Answered by gpt-5.1-mini, not the gpt-5.1 you picked." : (o.note ?? null) };
     case "discarded":
       return { ...common, state: "discarded", words: "" };
     case "error":
