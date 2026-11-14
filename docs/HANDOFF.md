@@ -70,6 +70,12 @@
    - The Windows code has never been compiled; CI is the first compile.
    - Then read CI.
 
+## Lane 4 (2026-11-14 night) — decisions, base `19e3aa7`, `cargo test --lib` 835 passed, 0 failed
+
+- **S4:** already built and gated (memory, session memory, summariser picker). Nothing left.
+- **Echo cancellation:** not built, on purpose. Call mode already has an adaptive echo gate (`voice/call/turn.rs::Echo`). A reference-signal canceller cannot work for system voices (`AVSpeechSynthesizer` gives no samples). The only real fix is macOS voice-processing IO (AUVoiceIO) replacing the cpal mic path, which can only be judged on a live call (speaker volume, Bluetooth). It waits for the owner's real call: if the gate lets Pointcast's own voice through, that is the signal to build it.
+- **"Continue in the AI app":** not buildable as a resume. Claude runs with `--no-session-persistence` and Codex threads live in Pointcast's fenced config, so no provider session id exists to `--resume`. Persisting sessions would break the isolation fence. "Copy transcript" stays the supported path.
+
 ## Not verified
 
 - Windows: none of it has been compiled.
