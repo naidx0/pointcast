@@ -53,11 +53,18 @@
 - **Ask header:** speaker switch (toggles `speak_answers`; while speaking, cuts the current sentence), pointer switch (toggles `computer_use` — it defaults OFF, which is why "the computer never acted" in the test), a New-ask button (was only in the Sessions sheet), and a Copy button on the opened question.
 - **TTS proven, not broken:** two tests speak through the real `AVSpeechSynthesizer` — one through `Mac`, one a full streamed answer through `Reader`. Silence in the app was a stale installed build / disabled setting, never the pipeline.
 
+## Fifth session — providers audit, onboarding TTS, browser tool
+
+- **Providers verified complete** (the T3-Chat aggregation the owner asked for exists): plan routes ChatGPT (Codex), Claude (Code), Gemini CLI, Copilot, OpenCode; key routes OpenAI API, Claude API, **Grok (xAI)**, Gemini API, Groq, Mistral, DeepSeek, OpenRouter, plus "Other OpenAI-compatible" (any base URL) and local Ollama/LM Studio. Keys go to the vault via `assist_key_set`; consent sheet before any new host. The owner simply hadn't opened Settings › AI far enough.
+- **Devin doesn't fit Ask**: its API dispatches async agent sessions (minutes, no streaming deltas) — a "send this task to Devin" action surface maybe later, not an Ask route. Noted, not built.
+- **Onboarding**: "Read answers aloud" switch on the Done step (`speak_answers`; the voice itself stays in Settings).
+- **`pointcast_browser`** (S8): the front browser's front tab or every tab, via JXA — Safari + Chrome family; other apps told they can't be read; See-tier, grant-gated, journaled; app name injected as a JSON string (no code carries).
+
 ## Next
 
-1. Owner re-tests in the new install: speaker + act switches on the panel, New button, copy a question, hover-only timer, faster Aurora.
+1. Owner re-tests in the new install: speaker + act switches on the panel, New button, copy a question, hover-only timer, faster Aurora; then Settings › AI — pick Grok/OpenRouter/etc. with a key.
 2. On the owner's yes: push to main. GitHub secrets `MAC_SIGN_P12`/`MAC_SIGN_PASSWORD` needed for CI signing; a published release is what the Updates pane checks against.
-3. Bigger still-open asks: provider expansion (OpenAI-compatible key, Grok, Devin sub — T3-Chat-style aggregation to research); TTS pick in onboarding; remaining S8 integrations; dictation modes / system-audio / ghost-cursor / on-demand MCP registry from `docs/assistant-landscape.md`.
+3. Bigger still-open asks: remaining S8 integrations (mail/calendar via osascript next); dictation modes / system-audio / ghost-cursor / on-demand MCP registry from `docs/assistant-landscape.md`; echo cancellation; Windows compile; Developer ID for other machines.
    - The Windows code has never been compiled; CI is the first compile.
    - Then read CI.
 
