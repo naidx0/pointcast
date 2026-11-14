@@ -112,6 +112,9 @@ pub const ECHO_START_DB: f32 = -36.0;
 /// voice, loudest first: a voice louder than last time is learnt before it could stop itself. Silence before the
 /// sound starts (a natural voice takes a moment) does not count.
 pub const ECHO_GRACE_MS: u32 = 250;
+/// After it stops speaking, its voice is still coming back through the speakers (latency, a room's reverb) for about
+/// this long; in that time only what is over its learnt level by the margin counts as the person.
+pub const ECHO_TAIL_MS: u32 = 300;
 
 /// What counts as the person talking while Pointcast speaks: louder than its own voice coming back through the speakers
 /// (the level heard while it spoke and the person did not, learnt rising over `ECHO_RISE_MS` and falling slowly) by
@@ -123,11 +126,13 @@ pub struct Echo {
     db: f32,
     /// Sound still taken as its own voice since it started speaking (`ECHO_GRACE_MS`).
     grace_ms: u32,
+    /// Time left of the tail after it stopped speaking (`ECHO_TAIL_MS`).
+    tail_ms: u32,
 }
 
 impl Default for Echo {
     fn default() -> Self {
-        Echo { db: ECHO_START_DB, grace_ms: 0 }
+        Echo { db: ECHO_START_DB, grace_ms: 0, tail_ms: 0 }
     }
 }
 
@@ -140,6 +145,23 @@ impl Echo {
     /// Pointcast starts speaking.
     pub fn begin(&mut self) {
         self.grace_ms = ECHO_GRACE_MS;
+    }
+
+    /// Pointcast has stopped speaking: its voice still arrives for `ECHO_TAIL_MS`.
+    pub fn end(&mut self) {
+        self.tail_ms = ECHO_TAIL_MS;
+    }
+
+    /// Whether the tail of its voice is still arriving.
+    pub fn tailing(&self) -> bool {
+        self.tail_ms > 0
+    }
+
+    /// Hear one window at `rms` lasting `ms` in the tail: true when it is over its learnt level by the margin. Nothing is
+    /// learnt here (the tail is quieter and ends soon).
+    pub fn hear_tail(&mut self, rms: f32, ms: u32) -> bool {
+        self.tail_ms = self.tail_ms.saturating_sub(ms);
+        db_of(rms) >= self.threshold_db()
     }
 
     /// The level, in dBFS, the person must be over.
@@ -291,5 +313,28 @@ mod tests {
             e.hear(rms(-30.0), 32);
         }
         assert!(!e.hear(rms(-23.0), 32));
+    }
+
+    #[test]
+    fn its_tail_after_it_stops_is_not_the_person_but_a_clearly_louder_voice_is_and_the_tail_ends() {
+        let mut e = Echo::default();
+        e.begin();
+        // It spoke at about -24 dBFS.
+        for _ in 0..30 {
+            e.hear(db_to_rms(-24.0), 32);
+        }
+        assert!(!e.tailing());
+        e.end();
+        assert!(e.tailing());
+        assert!(!e.hear_tail(db_to_rms(-24.0), 32), "its own tail");
+        assert!(e.hear_tail(db_to_rms(-8.0), 32), "a clearly louder voice");
+        for _ in 0..ECHO_TAIL_MS / 32 + 1 {
+            e.hear_tail(db_to_rms(-24.0), 32);
+        }
+        assert!(!e.tailing(), "the tail ends after ECHO_TAIL_MS");
+    }
+
+    fn db_to_rms(db: f32) -> f32 {
+        10f32.powf(db / 20.0)
     }
 }

@@ -150,6 +150,11 @@ struct Sim {
 /// A call with the person saying `says` and Pointcast's voice coming back through the speakers as `echo` (looped)
 /// while it reads, every 20 ms until the call ends or `end_ms`, where the switch ends it.
 fn simulate(vad: Box<dyn Vad>, says: Vec<(When, Vec<f32>)>, echo: &[f32], speak_ms: u64, end_ms: u64) -> Sim {
+    simulate_with_tail(vad, says, echo, 0, speak_ms, end_ms)
+}
+
+/// `simulate`, with the echo still arriving for `tail_ms` after Pointcast stops speaking (speaker latency, a room's reverb).
+fn simulate_with_tail(vad: Box<dyn Vad>, says: Vec<(When, Vec<f32>)>, echo: &[f32], tail_ms: u64, speak_ms: u64, end_ms: u64) -> Sim {
     let clock = Arc::new(AtomicU64::new(0));
     let feed = Feed::new(KEEP_MS, None);
     let script = Arc::new(Script { clock: clock.clone(), feed: feed.clone(), think_ms: 900, speak_ms, st: Mutex::default() });
@@ -164,6 +169,7 @@ fn simulate(vad: Box<dyn Vad>, says: Vec<(When, Vec<f32>)>, echo: &[f32], speak_
         (seed >> 8) as f32 / (1u32 << 24) as f32 * 0.002 - 0.001
     };
     let (mut pos, mut echo_at) = (0u64, 0usize);
+    let mut spoke_until = 0u64;
     let mut now = 0u64;
     while l.over().is_none() && now < end_ms {
         now += 20;
@@ -187,7 +193,10 @@ fn simulate(vad: Box<dyn Vad>, says: Vec<(When, Vec<f32>)>, echo: &[f32], speak_
                 }
             }
         }
-        if speaking && !echo.is_empty() {
+        if speaking {
+            spoke_until = now + tail_ms;
+        }
+        if (speaking || now <= spoke_until) && !echo.is_empty() {
             for c in chunk.iter_mut() {
                 *c += echo[echo_at % echo.len()];
                 echo_at += 1;
@@ -266,6 +275,39 @@ fn its_voice_through_the_speakers_at_the_test_level_never_stops_it() {
     assert!(st.cut.is_empty(), "{:#?}", sim.l.log);
     assert_eq!(st.turns.len(), 1);
     assert_eq!(sim.l.side(), Side::Listening, "it listened again once it had said all of it");
+}
+
+#[test]
+fn echo_at_every_level_from_minus_36_to_minus_16_dbfs_never_stops_it() {
+    let rms = |db: f32| 10f32.powf(db / 20.0);
+    for db in [-36.0, -32.0, -28.0, -24.0, -20.0, -16.0] {
+        let says = vec![(When::At(500), voice(rms(-20.0), 1000))];
+        let sim = simulate(Box::new(vad::Energy::default()), says, &voice(rms(db), 2600), 8000, 13_000);
+        let st = sim.script.st.lock().unwrap();
+        assert!(st.cut.is_empty(), "echo at {db} dBFS stopped it: {:#?}", sim.l.log);
+        assert_eq!(st.turns.len(), 1, "echo at {db} dBFS made a turn: {:#?}", sim.l.log);
+    }
+}
+
+#[test]
+fn its_echo_tail_after_it_stops_speaking_is_not_a_turn() {
+    let rms = |db: f32| 10f32.powf(db / 20.0);
+    let says = vec![(When::At(500), voice(rms(-20.0), 1000))];
+    // Its voice keeps coming back for 300 ms after it has said the last word.
+    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 300, 3000, 12_000);
+    let st = sim.script.st.lock().unwrap();
+    assert_eq!(st.turns.len(), 1, "the tail was taken for a turn: {:#?}", sim.l.log);
+    assert_eq!(sim.l.side(), Side::Listening);
+}
+
+#[test]
+fn a_person_much_louder_than_its_tail_is_still_heard_as_it_stops() {
+    let rms = |db: f32| 10f32.powf(db / 20.0);
+    // The question, then the person answers loudly (-8 dBFS) 100 ms after the answer's last word, in the tail.
+    let says = vec![(When::At(500), voice(rms(-20.0), 1000)), (When::Speaking(1, 3100), voice(rms(-8.0), 1500))];
+    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 300, 3000, 12_000);
+    let st = sim.script.st.lock().unwrap();
+    assert_eq!(st.turns.len(), 2, "the loud reply in the tail is a turn: {:#?}", sim.l.log);
 }
 
 #[test]

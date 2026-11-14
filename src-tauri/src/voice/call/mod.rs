@@ -103,6 +103,9 @@ impl Ear {
         if speaking && self.side != Side::Speaking {
             self.echo.begin();
         }
+        if !speaking && self.side == Side::Speaking {
+            self.echo.end();
+        }
         self.side = side;
         self.turn.need(if speaking { turn::BARGE_MS } else { turn::MIN_SPEECH_MS });
         self.rest.extend_from_slice(x);
@@ -113,6 +116,9 @@ impl Ear {
             if speaking {
                 // Its own voice teaches the bar even where the VAD hears speech in it (it is speech).
                 speech &= self.echo.hear(audio::rms(w), (WINDOW * 1000 / audio::RATE as usize) as u32);
+            } else if self.echo.tailing() {
+                // Its voice is still arriving just after it stopped: only what is louder than that is the person.
+                speech &= self.echo.hear_tail(audio::rms(w), (WINDOW * 1000 / audio::RATE as usize) as u32);
             }
             match self.turn.hear(speech, w.len()) {
                 Heard::Nothing => {}
