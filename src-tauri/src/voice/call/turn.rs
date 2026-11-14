@@ -114,7 +114,10 @@ pub const ECHO_START_DB: f32 = -36.0;
 pub const ECHO_GRACE_MS: u32 = 250;
 /// After it stops speaking, its voice is still coming back through the speakers (latency, a room's reverb) for about
 /// this long; in that time only what is over its learnt level by the margin counts as the person.
-pub const ECHO_TAIL_MS: u32 = 300;
+pub const ECHO_TAIL_MS: u32 = 250;
+/// A reply that starts inside the tail is held to a lower bar than a barge-in: its learnt level plus only this much
+/// (the tail is quieter than the voice was, and a person answering at once is common).
+pub const ECHO_TAIL_MARGIN_DB: f32 = 6.0;
 
 /// What counts as the person talking while Pointcast speaks: louder than its own voice coming back through the speakers
 /// (the level heard while it spoke and the person did not, learnt rising over `ECHO_RISE_MS` and falling slowly) by
@@ -157,11 +160,11 @@ impl Echo {
         self.tail_ms > 0
     }
 
-    /// Hear one window at `rms` lasting `ms` in the tail: true when it is over its learnt level by the margin. Nothing is
+    /// Hear one window at `rms` lasting `ms` in the tail: true when it is over its learnt level by `ECHO_TAIL_MARGIN_DB`. Nothing is
     /// learnt here (the tail is quieter and ends soon).
     pub fn hear_tail(&mut self, rms: f32, ms: u32) -> bool {
         self.tail_ms = self.tail_ms.saturating_sub(ms);
-        db_of(rms) >= self.threshold_db()
+        db_of(rms) >= (self.db + ECHO_TAIL_MARGIN_DB).max(db_of(crate::voice::speak::BARGE_RMS))
     }
 
     /// The level, in dBFS, the person must be over.

@@ -294,7 +294,7 @@ fn its_echo_tail_after_it_stops_speaking_is_not_a_turn() {
     let rms = |db: f32| 10f32.powf(db / 20.0);
     let says = vec![(When::At(500), voice(rms(-20.0), 1000))];
     // Its voice keeps coming back for 300 ms after it has said the last word.
-    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 300, 3000, 12_000);
+    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 250, 3000, 12_000);
     let st = sim.script.st.lock().unwrap();
     assert_eq!(st.turns.len(), 1, "the tail was taken for a turn: {:#?}", sim.l.log);
     assert_eq!(sim.l.side(), Side::Listening);
@@ -308,6 +308,34 @@ fn a_person_much_louder_than_its_tail_is_still_heard_as_it_stops() {
     let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 300, 3000, 12_000);
     let st = sim.script.st.lock().unwrap();
     assert_eq!(st.turns.len(), 2, "the loud reply in the tail is a turn: {:#?}", sim.l.log);
+}
+
+#[test]
+fn a_normal_reply_over_a_quiet_tail_is_heard_from_its_first_word() {
+    let rms = |db: f32| 10f32.powf(db / 20.0);
+    // Its voice comes back at -30 dBFS; the person answers at a normal -20 dBFS, starting 100 ms after it stops.
+    let says = vec![(When::At(500), voice(rms(-20.0), 1000)), (When::Speaking(1, 3100), voice(rms(-20.0), 1500))];
+    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-30.0), 2600), 250, 3000, 12_000);
+    let st = sim.script.st.lock().unwrap();
+    assert_eq!(st.turns.len(), 2, "{:#?}", sim.l.log);
+    // The recording holds the whole reply: it began before the first sound.
+    let (began, held) = &st.turns[1];
+    let from = sim.said_at[1].unwrap();
+    assert!(*began <= from && held.len() as u64 >= from - began + 1000 * MS as u64, "began {began}, said at {from}, held {}", held.len());
+}
+
+#[test]
+fn a_reply_no_louder_than_its_echo_plus_six_db_in_the_tail_starts_late_but_is_never_lost_whole() {
+    let rms = |db: f32| 10f32.powf(db / 20.0);
+    // The pinned cost of the tail: echo -24, a -20 dBFS reply starting 50 ms after it stops. Heard once the tail ends.
+    let says = vec![(When::At(500), voice(rms(-20.0), 1000)), (When::Speaking(1, 3050), voice(rms(-20.0), 1500))];
+    let sim = simulate_with_tail(Box::new(vad::Energy::default()), says, &voice(rms(-24.0), 2600), 250, 3000, 12_000);
+    let st = sim.script.st.lock().unwrap();
+    assert_eq!(st.turns.len(), 2, "a reply inside the tail still becomes a turn: {:#?}", sim.l.log);
+    let (began, _) = st.turns[1];
+    let from = sim.said_at[1].unwrap();
+    let lost_ms = (began as i64 - from as i64) / MS as i64;
+    assert!(lost_ms <= 250, "the start of the first word is lost for at most the tail ({lost_ms} ms)");
 }
 
 #[test]
