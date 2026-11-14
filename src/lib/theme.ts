@@ -1,3 +1,4 @@
+import { startTips } from "./tips";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { inTauri, platformInfo } from "./api";
 
@@ -66,6 +67,7 @@ export function startPlatform(opts: { surface?: boolean } = {}) {
   const os = platform();
   html.classList.add(os);
   if (opts.surface) document.body.classList.add("surface");
+  startTips();
   if (!inTauri) return;
   if (os === "mac") html.classList.add("vibrant");
   else
