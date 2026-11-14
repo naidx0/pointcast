@@ -23,6 +23,7 @@ import {
   onState,
   practice,
   preview,
+  speakVoices,
   statsGet,
   subscribe,
   type Action,
@@ -33,6 +34,7 @@ import {
 import { useConfig } from "@/lib/useConfig";
 import { chordText } from "@/lib/keys";
 import { micNotice } from "@/lib/mic";
+import { voiceLabel, type SpeakVoice } from "@/lib/talkback";
 import { platform } from "@/lib/theme";
 import { PromptDoc } from "./Result";
 
@@ -748,6 +750,7 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
             onClick={() => patch({ speak_answers: !cfg.speak_answers })}
           />
         </div>
+        {cfg.speak_answers ? <VoicePick cfg={cfg} patch={patch} /> : null}
         <div className="row">
           <div className="grow">
             <div className="lbl">Open at login</div>
@@ -779,6 +782,35 @@ function DoneStep({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unkno
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The voice read-aloud uses, picked on the Done step while the setting is on — the same list Settings offers. */
+function VoicePick({ cfg, patch }: { cfg: Config; patch: (p: Record<string, unknown>) => Promise<string | null> }) {
+  const [voices, setVoices] = useState<SpeakVoice[] | null>(null);
+  useEffect(() => {
+    speakVoices().then(setVoices).catch(() => undefined);
+  }, []);
+  if (!voices) return null;
+  return (
+    <div className="row">
+      <div className="grow">
+        <div className="lbl">Voice</div>
+      </div>
+      <select
+        className="field"
+        aria-label="Voice"
+        value={cfg.speak_voice ?? ""}
+        onChange={(e) => patch({ speak_voice: e.target.value || null })}
+      >
+        <option value="">Automatic</option>
+        {voices.map((v) => (
+          <option key={v.id} value={v.id}>
+            {voiceLabel(v)}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
