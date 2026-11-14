@@ -944,3 +944,13 @@ fn the_mail_script_reads_only_and_caps_before_it_builds() {
         assert!(!s.contains(verb), "{verb} in {s}");
     }
 }
+
+#[test]
+fn the_calendar_script_reads_only_and_sorts_soonest_first() {
+    use super::calendar_script;
+    let s = calendar_script(7, 40);
+    assert!(s.contains("Application(\"Calendar\")") && s.contains("7 * 86400000") && s.contains("out.sort()") && s.contains("slice(0, 40)"), "{s}");
+    for verb in ["make(", "delete(", "set ", "move("] {
+        assert!(!s.contains(verb), "{verb} in {s}");
+    }
+}

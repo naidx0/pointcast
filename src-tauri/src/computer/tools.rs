@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const NAMES: [&str; 15] = [
+pub const NAMES: [&str; 16] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -21,6 +21,7 @@ pub const NAMES: [&str; 15] = [
     "pointcast_files",
     "pointcast_browser",
     "pointcast_mail",
+    "pointcast_calendar",
     "pointcast_plan",
     "pointcast_plan_step",
 ];
@@ -129,6 +130,14 @@ fn browser_script(app: &str, chrome: bool, tabs: bool) -> String {
 fn mail_script(limit: usize) -> String {
     format!(
         "(() => {{\n  const m = Application(\"Mail\");\n  if (!m.running()) return \"not running\";\n  const msgs = m.inbox.messages();\n  const out = [];\n  msgs.slice(-{limit}).forEach(x => {{\n    let s = \"\", f = \"\", u = \" \";\n    try {{ s = x.subject() }} catch (e) {{}}\n    try {{ f = x.sender() }} catch (e) {{}}\n    try {{ u = x.readStatus() ? \" \" : \"\\u2022\" }} catch (e) {{}}\n    out.push(u + \" \" + f + \"\\t\" + s);\n  }});\n  return out.join(\"\\n\") || \"no messages\";\n}})()"
+    )
+}
+
+/// The JXA asking Calendar for events between now and `days` ahead, ISO time first so a plain sort puts the
+/// soonest first. Every field is probed on its own; calendars that won't enumerate are skipped.
+fn calendar_script(days: usize, limit: usize) -> String {
+    format!(
+        "(() => {{\n  const c = Application(\"Calendar\");\n  if (!c.running()) return \"not running\";\n  const now = Date.now(), until = now + {days} * 86400000;\n  const out = [];\n  c.calendars().forEach(cal => {{\n    try {{\n      cal.events().forEach(e => {{\n        try {{\n          const d = e.startDate();\n          if (d.getTime() >= now - 3600000 && d.getTime() <= until) out.push(d.toISOString() + \"\\t\" + cal.name() + \"\\t\" + e.summary());\n        }} catch (_) {{}}\n      }});\n    }} catch (_) {{}}\n  }});\n  out.sort();\n  return out.slice(0, {limit}).join(\"\\n\") || \"no events\";\n}})()"
     )
 }
 
@@ -422,6 +431,17 @@ pub fn schemas() -> Value {
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+                }
+            }
+        },
+        {
+            "name": "pointcast_calendar",
+            "description": format!("Calendar natively instead of from a picture: events from now through the next few days, with when, which calendar and the title. Reading only — this never makes, moves or removes an event. The first read can take a moment on big calendars. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": { "type": "integer", "minimum": 1, "maximum": 30, "default": 7 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 }
                 }
             }
         },
@@ -888,6 +908,23 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 format!("The newest messages in Mail, newest last (unread marked •):\n{out}")
             };
             return Ok(End::Done { text, how: "applescript".into(), data: json!({ "messages": out }) });
+        }
+        "pointcast_calendar" => {
+            let days = int(args, "days").map_or(7, |d| d.clamp(1, 30) as usize);
+            let limit = int(args, "limit").map_or(40, |l| l.clamp(1, 100) as usize);
+            *app = "Calendar".into();
+            *target = "upcoming events".into();
+            let t = Target { app: "Calendar".into(), role: "calendar".into(), name: format!("the next {days} days' events"), ..Default::default() };
+            if let Some(e) = end(ask(desk, cx, Kind::See, &t, false, target)) {
+                return Ok(e);
+            }
+            let out = osascript(&calendar_script(days, limit)).map_err(|e| format!("Calendar didn't answer ({e})."))?;
+            let text = if out == "not running" {
+                "Calendar isn't running — opened it is not, so nothing is read.".to_string()
+            } else {
+                format!("Events in the next {days} day(s), soonest first:\n{out}")
+            };
+            return Ok(End::Done { text, how: "applescript".into(), data: json!({ "events": out }) });
         }
         _ => {}
     }
