@@ -79,6 +79,17 @@
 - **Echo tail fixed (found by a new simulation, `its_echo_tail_after_it_stops_speaking_is_not_a_turn`):** when Pointcast stopped speaking, the echo gate switched off at once, so 300 ms of its voice still arriving (speaker latency, reverb) became a 288 ms "turn" and was sent to the AI. Now for `ECHO_TAIL_MS` (250) after it stops, only sound over its learnt level by `ECHO_TAIL_MARGIN_DB` (6) counts as the person (`Echo::end/hear_tail`, `Ear::hear`). A sweep pins no false stop or turn at echo levels -36…-16 dBFS, and a clearly louder reply (-8 dBFS) in the tail is still heard, and a normal reply over a quiet tail (echo -30, reply -20) is heard from its first word. Cost (Devin review, finding 1, pinned by a test): a reply no more than 6 dB over a loud echo that starts inside the 250 ms tail starts up to 250 ms late; `ECHO_TAIL_MS` is the knob. Hand-verify on a real call: answer right after it finishes; if your first word is clipped, lower `ECHO_TAIL_MS` (now 250). gates: 839 Rust. Release bundle rebuilt at 2bba354 and ad-hoc signed: `~/Desktop/pointcast-build/Pointcast.app` (ad-hoc, so macOS asks for Screen Recording and Accessibility again).
 - **Answered-model line was never shown (fixed):** the engine put the note on the live snapshot (`live.rs`, `g.snap.note`) but the front end's `normalizeSnapshot` dropped it, so "Answered by x, not the y you picked." never reached the panel. Test `the answered-model line the engine puts on the snapshot reaches the panel…` failed before the fix; now 283 front-end tests pass. Looked at in the browser preview (`live.html?preview=1&state=shown&note=model`), dark and light. The bundle at `~/Desktop/pointcast-build/Pointcast.app` is rebuilt at 3e0b1dd (ad-hoc signed) and has it.
 
+## Windows from this local branch (nothing published)
+
+The one-line `irm .../install.ps1 | iex` installs the latest *published* release (0.5.2), which has none of this branch. A Windows build of the local work needs the Windows PC (the MSVC toolchain; a Mac cannot check it: `cargo check --target x86_64-pc-windows-msvc` stops in `ring`'s build script). Same process as a release, minus the upload:
+
+1. Carry `~/Desktop/pointcast-local.bundle` (all commits since `origin/main`, made at `3e0b1dd`) to the PC. On the PC: `git clone https://github.com/naidx0/pointcast` (or use the old clone), then `git pull <path>\pointcast-local.bundle local/assistant-polish` and `git switch local/assistant-polish`.
+2. `powershell -ExecutionPolicy Bypass -File scripts\release-windows.ps1 -NoUpload` builds `Pointcast_<version>_x64-setup.exe` and prints its SHA-256.
+3. Install it the way the one-liner does, from the file: `$env:POINTCAST_SETUP = "C:\path\Pointcast_x64-setup.exe"; irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex` (or double-click the `.exe`).
+4. This is the first time the Windows code compiles; expect to read the build errors. Send them back and they get fixed here.
+
+Publishing (a public push, a tagged release, CI signing) is still the owner's call.
+
 ## Not verified
 
 - Windows: none of it has been compiled.
