@@ -59,6 +59,7 @@
 - **Devin doesn't fit Ask**: its API dispatches async agent sessions (minutes, no streaming deltas) — a "send this task to Devin" action surface maybe later, not an Ask route. Noted, not built.
 - **Onboarding**: "Read answers aloud" switch on the Done step (`speak_answers`; the voice itself stays in Settings).
 - **`pointcast_browser`** (S8): the front browser's front tab or every tab, via JXA — Safari + Chrome family; other apps told they can't be read; See-tier, grant-gated, journaled; app name injected as a JSON string (no code carries).
+- **`pointcast_mail`** (S8): newest inbox messages — sender, subject, unread dot — via JXA; reads only, never sends/moves/marks; Mail needn't have a window open.
 
 ## Next
 
