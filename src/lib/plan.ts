@@ -7,6 +7,9 @@ export type PlanState = "proposed" | "started" | "cancelled";
 /** What the engine sends in `computer://status` (`computer::plan::Plan`). */
 export type ComputerPlan = { id: number; steps: PlanStep[]; apps: string[]; state: PlanState };
 
+/** The card that waits for the person's yes before an irreversible step (`computer://status`). */
+export type ComputerCard = { id: number; app: string; tool: string; what: string; raise: "click" | "full" | null };
+
 /** How a row reads: still to do, under way now, or how it ended. */
 export type Mark = "todo" | "now" | "done" | "skipped" | "failed";
 export type Row = { mark: Mark; text: string; note: string };
@@ -65,4 +68,12 @@ export function keep(prev: Kept | null, live: ComputerPlan | null, turn: number)
   if (live) return { turn, plan: live, live: true };
   if (prev && prev.turn === turn) return prev.live ? { ...prev, live: false } : prev;
   return null;
+}
+
+/** The browser preview's confirm card (`card=plain|click|full` on live.html?preview=1): `click` and `full` also offer to
+ * raise the app's tier, as a card for an app that is only seen or only clicked does. */
+export function previewCard(k: string | null): ComputerCard | null {
+  const raise = { plain: null, click: "click", full: "full" } as const;
+  if (!k || !(k in raise)) return null;
+  return { id: 7, app: "Mail", tool: "pointcast_act", what: "Press Send on the message “Quarterly numbers” to ana@example.com", raise: raise[k as keyof typeof raise] };
 }

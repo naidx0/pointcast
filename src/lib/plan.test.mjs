@@ -1,7 +1,7 @@
 // Run: node --experimental-strip-types --test src/lib/plan.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GLYPH, SAY, asks, head, keep, previewPlan, rows } from "./plan.ts";
+import { GLYPH, SAY, asks, head, keep, previewCard, previewPlan, rows } from "./plan.ts";
 
 const plan = (state, statuses, notes = []) => ({
   id: 7,
@@ -78,4 +78,13 @@ test("the browser preview has a plan for each look, and none unless asked", () =
   assert.deepEqual(marks(previewPlan("started")), ["done", "now", "todo"]);
   assert.deepEqual(marks(previewPlan("failed")), ["done", "failed", "todo"]);
   assert.equal(rows(previewPlan("failed"), true)[1].note, "the text area did not take the text");
+});
+
+test("the browser preview's confirm card is made only for a known kind, and the raised ones offer a tier", () => {
+  assert.equal(previewCard(null), null);
+  assert.equal(previewCard("nonsense"), null);
+  assert.equal(previewCard("plain").raise, null);
+  assert.equal(previewCard("click").raise, "click");
+  assert.equal(previewCard("full").raise, "full");
+  assert.match(previewCard("plain").what, /Send/);
 });

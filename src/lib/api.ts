@@ -23,7 +23,7 @@ import {
   type LiveTurn,
 } from "./live";
 import { previewSent } from "./conversation";
-import { previewPlan, type ComputerPlan } from "./plan";
+import { previewCard, previewPlan, type ComputerCard, type ComputerPlan } from "./plan";
 import { normalizeSessions, previewSearch, previewSessions, type SessionMeta } from "./sessions";
 import { countsLine, normalizeSummary, previewSummary, previewSummaryOf, type Summary } from "./summary";
 import { previewVoices, type KokoroProgress, type SpeakVoice } from "./talkback";
@@ -513,15 +513,17 @@ export const onState = on<UiState>("session://state");
 
 /** A card the AI waits on: what is about to happen, in which app, and the tier "Allow in <app>" raises it to (null on a
  * card that asks for a yes). */
-export type ComputerCard = { id: number; app: string; tool: string; what: string; raise: "click" | "full" | null };
+export type { ComputerCard };
 /** How the computer tools stand: an Ask turn holds them, the app it acted in last, the card waiting for the person, and
  * the turn's plan. */
 export type ComputerStatus = { acting: boolean; app: string | null; card: ComputerCard | null; plan?: ComputerPlan | null };
 const NOT_ACTING: ComputerStatus = { acting: false, app: null, card: null, plan: null };
-/** The browser preview acts in TextEdit with a plan when asked (`plan=proposed|started|failed`). */
+/** The browser preview acts in TextEdit with a plan (`plan=proposed|started|failed`) or a confirm card (`card=plain|click|full`) when asked. */
 const previewStatus = (): ComputerStatus => {
-  const plan = preview ? previewPlan(new URLSearchParams(location.search).get("plan")) : null;
-  return plan ? { acting: true, app: "TextEdit", card: null, plan } : NOT_ACTING;
+  const q = preview ? new URLSearchParams(location.search) : null;
+  const plan = q ? previewPlan(q.get("plan")) : null;
+  const card = q ? previewCard(q.get("card")) : null;
+  return plan || card ? { acting: true, app: card?.app ?? "TextEdit", card, plan } : NOT_ACTING;
 };
 export const computerStatus = (): Promise<ComputerStatus> => (inTauri ? invoke<ComputerStatus>("computer_status") : Promise.resolve(previewStatus()));
 export const onComputerStatus = on<ComputerStatus>("computer://status");
