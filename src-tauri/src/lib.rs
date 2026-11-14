@@ -376,7 +376,13 @@ fn live_for(app: &AppHandle, svc: &Arc<App>, held: Arc<assist::catalog::Held>) -
             // Usage counts Ask too: the question, and the words of the answer kept for it.
             asked: Box::new(move |w| counter.stats.ask(w, now_ms())),
             // What the person asked to remember goes to every AI as plain reference; off sends nothing.
-            memory: Box::new(move || if keeper.settings.lock().unwrap().memory { memory::block(&memory::read(&settings::data_dir())) } else { String::new() }),
+            memory: Box::new(move |current| {
+                if keeper.settings.lock().unwrap().memory {
+                    memory::context(&memory::read(&settings::data_dir()), &sessions::Sessions::new(&settings::data_dir()), current)
+                } else {
+                    String::new()
+                }
+            }),
             // A fact the AI was asked to remember waits for a yes in Settings › AI › Memory.
             remember: Box::new(move |fact| {
                 if memory::propose(&settings::data_dir(), &fact).is_ok() {

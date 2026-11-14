@@ -325,7 +325,7 @@ pub struct Deps {
     /// Usage counts a turn's question and the words of its answer (`stats::Stats::ask`).
     pub asked: Box<dyn Fn(u64) + Send + Sync>,
     /// What the person asked to remember, as instructions' last lines (`memory::block`); empty is nothing added.
-    pub memory: Box<dyn Fn() -> String + Send + Sync>,
+    pub memory: Box<dyn Fn(&str) -> String + Send + Sync>,
     /// A fact the AI was asked to remember, to propose (`memory::propose`).
     pub remember: Box<dyn Fn(String) + Send + Sync>,
 }
@@ -1465,7 +1465,7 @@ impl Live {
         let opened = match chat {
             Some(c) => Ok(c),
             // What is remembered goes to every AI the same way, as instructions' last lines.
-            None => provider.open(&format!("{SYSTEM}{}", (self.deps.memory)()), &before.turns),
+            None => provider.open(&format!("{SYSTEM}{}", (self.deps.memory)(&sid)), &before.turns),
         };
         let mut chat = match opened {
             Ok(c) => c,
@@ -1884,7 +1884,7 @@ mod tests {
                 if q.is_empty() { Vec::new() } else { q.remove(0) }
             }),
             asked: Box::new(|_| {}),
-            memory: Box::new(String::new),
+            memory: Box::new(|_| String::new()),
             remember: Box::new(|_| {}),
         };
         Rig { live: Live::with_wait(deps, &dir, wait), voice, outs, grabs, gate, screen, clock, dir, acts }
