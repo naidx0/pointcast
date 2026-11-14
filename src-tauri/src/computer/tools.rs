@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const NAMES: [&str; 16] = [
+pub const NAMES: [&str; 17] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -22,6 +22,7 @@ pub const NAMES: [&str; 16] = [
     "pointcast_browser",
     "pointcast_mail",
     "pointcast_calendar",
+    "pointcast_memory",
     "pointcast_plan",
     "pointcast_plan_step",
 ];
@@ -443,6 +444,14 @@ pub fn schemas() -> Value {
                     "days": { "type": "integer", "minimum": 1, "maximum": 30, "default": 7 },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 }
                 }
+            }
+        },
+        {
+            "name": "pointcast_memory",
+            "description": format!("The person's remembered facts in Pointcast: list them all, or find the ones holding a word. Reading only — facts change on the person's Memory page, never here. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": { "find": { "type": "string", "description": "A word to match; empty lists everything." } }
             }
         },
         {
@@ -926,6 +935,28 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 format!("Events in the next {days} day(s), soonest first:\n{out}")
             };
             return Ok(End::Done { text, how: "applescript".into(), data: json!({ "events": out }) });
+        }
+        "pointcast_memory" => {
+            *app = "Memory".into();
+            *target = "remembered facts".into();
+            let t = Target { app: "Memory".into(), role: "memory".into(), name: "the person's remembered facts".into(), ..Default::default() };
+            if let Some(e) = end(ask(desk, cx, Kind::See, &t, false, target)) {
+                return Ok(e);
+            }
+            let v = crate::memory::read(&crate::settings::data_dir());
+            let want = text(args, "find").map(str::to_lowercase);
+            let lines: Vec<String> = v
+                .facts
+                .iter()
+                .filter(|f| want.as_ref().is_none_or(|w| f.to_lowercase().contains(w)))
+                .cloned()
+                .collect();
+            let text = match (lines.is_empty(), &want) {
+                (true, Some(w)) => format!("Nothing remembered holds \"{w}\"."),
+                (true, None) => "Nothing is remembered yet.".to_string(),
+                (false, _) => format!("Remembered ({}):\n{}", lines.len(), lines.join("\n")),
+            };
+            return Ok(End::Done { text, how: "memory".into(), data: json!({ "facts": lines }) });
         }
         _ => {}
     }
