@@ -83,7 +83,7 @@
 
 The one-line `irm .../install.ps1 | iex` installs the latest *published* release (0.5.2), which has none of this branch. A Windows build of the local work needs the Windows PC (the MSVC toolchain; a Mac cannot check it: `cargo check --target x86_64-pc-windows-msvc` stops in `ring`'s build script). Same process as a release, minus the upload:
 
-1. Carry `~/Desktop/pointcast-local.bundle` (all commits since `origin/main`, made at `3e0b1dd`) to the PC. On the PC: `git clone https://github.com/naidx0/pointcast` (or use the old clone), then `git pull <path>\pointcast-local.bundle local/assistant-polish` and `git switch local/assistant-polish`.
+1. Carry `~/Desktop/pointcast-local.bundle` (all commits since `origin/main`, made at the branch head, see `git log -1` in it) to the PC. On the PC: `git clone https://github.com/naidx0/pointcast` (or use the old clone), then `git pull <path>\pointcast-local.bundle local/assistant-polish` and `git switch local/assistant-polish`.
 2. `powershell -ExecutionPolicy Bypass -File scripts\release-windows.ps1 -NoUpload` builds `Pointcast_<version>_x64-setup.exe` and prints its SHA-256.
 3. Install it the way the one-liner does, from the file: `$env:POINTCAST_SETUP = "C:\path\Pointcast_x64-setup.exe"; irm https://raw.githubusercontent.com/naidx0/pointcast/main/install.ps1 | iex` (or double-click the `.exe`).
 4. This is the first time the Windows code compiles; expect to read the build errors. Send them back and they get fixed here.
