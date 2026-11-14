@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const NAMES: [&str; 14] = [
+pub const NAMES: [&str; 15] = [
     "pointcast_screen",
     "pointcast_elements",
     "pointcast_apps",
@@ -20,6 +20,7 @@ pub const NAMES: [&str; 14] = [
     "pointcast_focus",
     "pointcast_files",
     "pointcast_browser",
+    "pointcast_mail",
     "pointcast_plan",
     "pointcast_plan_step",
 ];
@@ -121,6 +122,14 @@ fn browser_script(app: &str, chrome: bool, tabs: bool) -> String {
             "(() => {{\n  const a = Application({app});\n  if (!a.running()) return \"not running\";\n  const w = a.windows();\n  if (!w.length) return \"no windows\";\n  const t = w[0].{tab}();\n  return t.{title}() + \"\\t\" + t.url();\n}})()"
         )
     }
+}
+
+/// The JXA asking Mail for its newest inbox messages, sender first then subject, a • for unread. Each field is
+/// probed on its own so a message missing one still lists; the answer is capped before it is built.
+fn mail_script(limit: usize) -> String {
+    format!(
+        "(() => {{\n  const m = Application(\"Mail\");\n  if (!m.running()) return \"not running\";\n  const msgs = m.inbox.messages();\n  const out = [];\n  msgs.slice(-{limit}).forEach(x => {{\n    let s = \"\", f = \"\", u = \" \";\n    try {{ s = x.subject() }} catch (e) {{}}\n    try {{ f = x.sender() }} catch (e) {{}}\n    try {{ u = x.readStatus() ? \" \" : \"\\u2022\" }} catch (e) {{}}\n    out.push(u + \" \" + f + \"\\t\" + s);\n  }});\n  return out.join(\"\\n\") || \"no messages\";\n}})()"
+    )
 }
 
 /// Runs `osascript -l JavaScript`; the script's last expression is the answer. Off macOS there is none.
@@ -403,6 +412,16 @@ pub fn schemas() -> Value {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["front", "tabs"], "default": "front" }
+                }
+            }
+        },
+        {
+            "name": "pointcast_mail",
+            "description": format!("Mail natively instead of from a picture: the newest messages of the unified inbox, sender and subject and whether read, without opening a window. Reading only — this never sends, moves or marks anything. {note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
                 }
             }
         },
@@ -853,6 +872,22 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
                 how: "applescript".into(),
                 data: json!({ "browser": front.name, "tabs": out }),
             });
+        }
+        "pointcast_mail" => {
+            let limit = int(args, "limit").map_or(20, |l| l.clamp(1, 50) as usize);
+            *app = "Mail".into();
+            *target = "the inbox".into();
+            let t = Target { app: "Mail".into(), role: "mail".into(), name: "the newest messages of the inbox".into(), ..Default::default() };
+            if let Some(e) = end(ask(desk, cx, Kind::See, &t, false, target)) {
+                return Ok(e);
+            }
+            let out = osascript(&mail_script(limit)).map_err(|e| format!("Mail didn't answer ({e})."))?;
+            let text = if out == "not running" {
+                "Mail isn't running — opened it is not, so nothing is read.".to_string()
+            } else {
+                format!("The newest messages in Mail, newest last (unread marked •):\n{out}")
+            };
+            return Ok(End::Done { text, how: "applescript".into(), data: json!({ "messages": out }) });
         }
         _ => {}
     }

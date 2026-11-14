@@ -931,3 +931,16 @@ fn a_browser_is_known_or_refused_and_the_script_carries_no_code() {
     let s = browser_script("\"; evil()", false, false);
     assert!(s.contains("Application(\"\\\"; evil()\")"), "{s}");
 }
+
+#[test]
+fn the_mail_script_reads_only_and_caps_before_it_builds() {
+    use super::mail_script;
+    let s = mail_script(20);
+    // It opens Mail's unified inbox, takes the newest few, and every field is probed on its own.
+    assert!(s.contains("Application(\"Mail\")") && s.contains("m.inbox.messages()") && s.contains("slice(-20)"), "{s}");
+    assert!(s.contains("catch (e)"), "{s}");
+    // Nothing in it writes: no send, move, delete or mark.
+    for verb in ["send(", "move(", "delete(", "mark(", "compose(", "set "] {
+        assert!(!s.contains(verb), "{verb} in {s}");
+    }
+}
