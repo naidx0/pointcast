@@ -345,10 +345,27 @@ impl Desktop for Mac {
     fn open_app(&self, name: &str) -> Result<(), String> {
         let out = std::process::Command::new("/usr/bin/open").arg("-a").arg(name).output().map_err(|e| e.to_string())?;
         if out.status.success() {
-            Ok(())
-        } else {
-            Err(format!("macOS could not open {name}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+            return Ok(());
         }
+        // `open -a` wants the registered name ("Google Chrome", not "chrome"): an app whose own name holds what was
+        // asked for opens by its path instead.
+        let want = name.to_lowercase();
+        for dir in ["/Applications", "/System/Applications", &format!("{}/Applications", dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default())] {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    if let Some(app) = n.strip_suffix(".app") {
+                        if app.to_lowercase().contains(&want) {
+                            let by_path = std::process::Command::new("/usr/bin/open").arg(e.path()).output().map_err(|e| e.to_string())?;
+                            if by_path.status.success() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(format!("macOS could not open {name}: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
 
     fn focus(&self, app: &AppInfo, window: Option<&str>) -> Result<(), String> {

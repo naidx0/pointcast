@@ -562,7 +562,7 @@ export function Live() {
             <ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />
             Sessions
           </PressButton>
-        ) : multi || sumOpen ? (
+        ) : multi || sumOpen || (v.complete && v.title) ? (
           <span className="live-title" title={v.title}>
             {v.title}
           </span>

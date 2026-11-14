@@ -19,7 +19,7 @@ export const AURORA_FLOOR = 0.14;
 export const AURORA_ATTACK_MS = 60;
 export const AURORA_RELEASE_MS = 260;
 /** The reference was chosen at its "Slow" setting: every dt is scaled by this. */
-export const AURORA_SPEED = 0.8;
+export const AURORA_SPEED = 1.1;
 /** A lens and its centre never leave this share of the half-height. */
 export const AURORA_EDGE = 0.96;
 

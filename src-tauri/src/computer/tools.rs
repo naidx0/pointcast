@@ -796,7 +796,8 @@ fn run(desk: &Desk, cx: &Cx, app: &mut String, target: &mut String) -> Result<En
             }
             os.open_app(name)?;
             let key = guard::app_key(name);
-            let named = |a: &AppRef| guard::app_key(&a.name) == key;
+            // "chrome" comes forward as "Google Chrome": a running app whose name holds what was asked counts.
+            let named = |a: &AppRef| { let k = guard::app_key(&a.name); k == key || k.contains(&key) };
             if !comes_forward(&**os, LAUNCH_WAIT, &named) {
                 // An app that was already open does not always come forward when opened again: ask as focus does.
                 let apps = os.apps().unwrap_or_default();
