@@ -897,7 +897,7 @@ fn file_ops_list_move_and_mkdir_work_on_the_real_filesystem() {
 fn file_acts_go_through_the_guard_and_trashing_waits_for_the_person() {
     let (d, _log) = desk(mail());
     let _g = d.grants.grant(Duration::from_secs(60));
-    d.set_trust(Trust::with([("Finder".to_string(), Tier::Full)]));
+    d.set_trust(Trust::with([(files_app().to_string(), Tier::Full)]));
     // Outside home is refused before the OS is asked, whatever the tier.
     let r = call(&d, "pointcast_files", &json!({ "action": "list", "path": "/etc" }));
     assert_eq!(status(&r), "refused");
@@ -908,7 +908,7 @@ fn file_acts_go_through_the_guard_and_trashing_waits_for_the_person() {
     let r = call(&d, "pointcast_files", &json!({ "action": "trash", "path": "~/pointcast-test-missing-file" }));
     assert_eq!(status(&r), "needs_confirm", "{r}");
     // A view-tier Finder may be listed but not moved in.
-    d.set_trust(Trust::with([("Finder".to_string(), Tier::View)]));
+    d.set_trust(Trust::with([(files_app().to_string(), Tier::View)]));
     assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "move", "path": "~/x", "to": "~/y" }))), "refused");
     assert_eq!(status(&call(&d, "pointcast_files", &json!({ "action": "list", "path": "~" }))), "done");
 }

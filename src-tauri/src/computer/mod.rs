@@ -432,7 +432,7 @@ fn escape_down() -> bool {
 }
 #[cfg(windows)]
 fn escape_down() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
     unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000 != 0 }
 }
 #[cfg(not(any(target_os = "macos", windows)))]
