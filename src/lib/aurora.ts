@@ -154,7 +154,7 @@ export function drawAurora(g: Ctx, w: number, h: number, s: Aurora, ink: Ink, ad
 
 /** The voice wave the person picked: Classic (the pen) or Aurora. Strands ("breath") was retired 2026-11-13 on the
  * owner's word; a kept "breath" setting reads as Aurora now. */
-export type WaveStyle = "pen" | "aurora";
-export const WAVE_STYLES: readonly WaveStyle[] = ["pen", "aurora"];
-/** What a saved or sent value means: Aurora unless it names the pen exactly. */
-export const waveStyleOf = (x: unknown): WaveStyle => (x === "pen" ? "pen" : "aurora");
+export type WaveStyle = "pen" | "aurora" | "bars";
+export const WAVE_STYLES: readonly WaveStyle[] = ["pen", "aurora", "bars"];
+/** What a saved or sent value means: Aurora unless it names the pen or the bars exactly. */
+export const waveStyleOf = (x: unknown): WaveStyle => (x === "pen" ? "pen" : x === "bars" ? "bars" : "aurora");

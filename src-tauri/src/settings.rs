@@ -158,7 +158,7 @@ pub struct Settings {
     /// Soft start and stop sounds.
     #[serde(default = "yes")]
     pub sounds: bool,
-    /// The voice wave: "pen" (Classic), "breath" (Strands) or "aurora" (the default). Anything else reads as Aurora.
+    /// The voice wave: "pen" (Classic), "breath" (Strands), "bars" (a row of bars) or "aurora" (the default). Anything else reads as Aurora.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wave_style: Option<String>,
     #[serde(default)]
@@ -427,11 +427,12 @@ impl Settings {
     pub fn call_chord(&self) -> Chord {
         Self::parse_ok(&self.call_hotkey, chord::default_call)
     }
-    /// The voice wave the person picked: "pen", "breath" or "aurora". Not set, or a value this version does not know, is Aurora.
+    /// The voice wave the person picked: "pen", "breath", "bars" or "aurora". Not set, or a value this version does not know, is Aurora.
     pub fn wave(&self) -> &'static str {
         match self.wave_style.as_deref() {
             Some("pen") => "pen",
             Some("breath") => "breath",
+            Some("bars") => "bars",
             _ => "aurora",
         }
     }
@@ -663,6 +664,7 @@ mod tests {
         let pick = |v: &str| -> Settings { serde_json::from_str(&format!(r#"{{"wave_style":"{v}"}}"#)).unwrap() };
         assert_eq!(pick("pen").wave(), "pen");
         assert_eq!(pick("breath").wave(), "breath");
+        assert_eq!(pick("bars").wave(), "bars");
         assert_eq!(pick("aurora").wave(), "aurora");
         assert_eq!(pick("sparkles").wave(), "aurora", "an unknown value reads as Aurora");
         let mut s = Settings::default();

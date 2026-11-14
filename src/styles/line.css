@@ -92,6 +92,7 @@ html .hud .scribe:not(.timed) .line-voice {
 }
 
 /* Aurora is drawn on a canvas, which carries its own fade at both ends and its ink (--line-ink); the SVG rules above do not apply. */
-.line-aurora {
+.line-aurora,
+.line-bars {
   overflow: hidden;
 }

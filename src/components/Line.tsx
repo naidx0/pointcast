@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { barsStart, barsStep, drawBars } from "@/lib/bars";
 import { auroraStart, auroraStep, drawAurora, isLight, parseInk, type Ink } from "@/lib/aurora";
 import { useWaveStyle } from "@/lib/wave";
 import { BREATH_LAYERS, VOICE_DX, VOICE_STEP_MS, VOICE_STROKE_STEPS, breathPath, breathStart, breathStep, loopsPath, meterLevel, meterStart, meterStep, smoothLevel, voicePath, type LineMode } from "@/lib/line";
@@ -40,12 +41,13 @@ export function Line({
   lead?: number;
   /** Listening: the pen's trace (Classic), the breathing wave (Strands), Aurora's lenses of light, or "auto": the one the
    * person picked in Settings (Aurora until they pick). */
-  look?: "pen" | "breath" | "aurora" | "auto";
+  look?: "pen" | "breath" | "aurora" | "bars" | "auto";
   /** The breathing wave: how many of its layers (the dictation capsule is small and draws two). */
   layers?: number;
 }) {
   const picked = useWaveStyle();
   const shown = look === "auto" ? picked : look;
+  if (mode === "listen" && shown === "bars") return <BarsWave className={className} height={height} levels={levels} />;
   if (mode === "listen" && shown === "aurora") return <AuroraWave className={className} height={height} levels={levels} />;
   if (mode === "listen" && shown === "breath") return <BreathWave className={className} tone={tone} height={height} levels={levels} layers={layers} />;
   if (mode === "think") return <Loops className={className} tone={tone} height={height} n={loops} pitch={pitch} lead={lead} />;
@@ -121,6 +123,68 @@ function AuroraWave({ className, height, levels }: { className: string; height: 
   }, [w, height, levels]);
   return (
     <div className={`line-voice line-aurora ${className}`} ref={ref} aria-hidden="true">
+      <canvas ref={cv} style={{ width: w, height, display: "block" }} />
+    </div>
+  );
+}
+
+/** Bars (lib/bars.ts): a row of small rounded bars the voice lifts, newest in the middle, drawn on a canvas like Aurora
+ * (same level, same meter, same still frame with reduced motion, nothing drawn while the page is hidden). */
+function BarsWave({ className, height, levels }: { className: string; height: number; levels?: LevelSource }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const cv = useRef<HTMLCanvasElement>(null);
+  const [w, setW] = useState(0);
+  const st = useRef({ raw: 0, meter: meterStart(), b: barsStart() });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const size = () => setW(Math.max(40, Math.round(el.clientWidth)));
+    size();
+    const ro = new ResizeObserver(size);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const el = ref.current;
+    const c = cv.current;
+    if (!w || !el || !c) return;
+    const g = c.getContext("2d");
+    if (!g) return;
+    const dpr = Math.max(2, window.devicePixelRatio || 1);
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(height * dpr);
+    const s = st.current;
+    let ink = inkOf(el, g);
+    const slots = Math.ceil(w / 6) + 2;
+    const paint = () => {
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, height);
+      drawBars(g, w, height, s.b, ink);
+    };
+    paint();
+    if (!levels || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const off = levels((x) => (s.raw = x));
+    let last = performance.now();
+    let frames = 0;
+    let raf = 0;
+    const draw = (t: number) => {
+      raf = requestAnimationFrame(draw);
+      const dt = Math.min(100, Math.max(0, t - last));
+      last = t;
+      if (document.hidden) return;
+      s.meter = meterStep(s.meter, s.raw, dt);
+      s.b = barsStep(s.b, meterLevel(s.meter, s.raw), dt, slots);
+      if (++frames % 30 === 0) ink = inkOf(el, g);
+      paint();
+    };
+    raf = requestAnimationFrame(draw);
+    return () => {
+      off();
+      cancelAnimationFrame(raf);
+    };
+  }, [w, height, levels]);
+  return (
+    <div className={`line-voice line-bars ${className}`} ref={ref} aria-hidden="true">
       <canvas ref={cv} style={{ width: w, height, display: "block" }} />
     </div>
   );

@@ -5,7 +5,7 @@ import { waveStyleOf, type WaveStyle } from "./aurora";
 export { WAVE_STYLES, waveStyleOf, type WaveStyle } from "./aurora";
 
 /** The label each choice carries in Settings. */
-export const WAVE_LABELS: Record<WaveStyle, string> = { pen: "Classic", aurora: "Aurora" };
+export const WAVE_LABELS: Record<WaveStyle, string> = { pen: "Classic", aurora: "Aurora", bars: "Bars" };
 
 const CHANNEL = "pointcast-wave-style";
 let known: WaveStyle = "aurora";
